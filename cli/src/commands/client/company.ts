@@ -5,6 +5,7 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import type {
   Company,
+  FeedbackTrace,
   CompanyPortabilityFileEntry,
   CompanyPortabilityExportResult,
   CompanyPortabilityInclude,
@@ -42,6 +43,20 @@ interface CompanyExportOptions extends BaseClientOptions {
   issues?: string;
   projectIssues?: string;
   expandReferencedSkills?: boolean;
+}
+
+interface CompanyFeedbackOptions extends BaseClientOptions {
+  targetType?: string;
+  vote?: string;
+  status?: string;
+  projectId?: string;
+  issueId?: string;
+  from?: string;
+  to?: string;
+  sharedOnly?: boolean;
+  includePayload?: boolean;
+  out?: string;
+  format?: string;
 }
 
 interface CompanyImportOptions extends BaseClientOptions {
@@ -163,6 +178,34 @@ function parseAgents(input: string | undefined): "all" | string[] {
 function parseCsvValues(input: string | undefined): string[] {
   if (!input || !input.trim()) return [];
   return Array.from(new Set(input.split(",").map((part) => part.trim()).filter(Boolean)));
+}
+
+function buildFeedbackTraceQuery(opts: CompanyFeedbackOptions): string {
+  const params = new URLSearchParams();
+  if (opts.targetType) params.set("targetType", opts.targetType);
+  if (opts.vote) params.set("vote", opts.vote);
+  if (opts.status) params.set("status", opts.status);
+  if (opts.projectId) params.set("projectId", opts.projectId);
+  if (opts.issueId) params.set("issueId", opts.issueId);
+  if (opts.from) params.set("from", opts.from);
+  if (opts.to) params.set("to", opts.to);
+  if (opts.sharedOnly) params.set("sharedOnly", "true");
+  if (opts.includePayload) params.set("includePayload", "true");
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function normalizeFeedbackExportFormat(value: string | undefined): "json" | "ndjson" {
+  if (!value || value === "ndjson") return "ndjson";
+  if (value === "json") return "json";
+  throw new Error(`Unsupported export format: ${value}`);
+}
+
+function serializeFeedbackTraces(traces: FeedbackTrace[], format: string | undefined): string {
+  if (normalizeFeedbackExportFormat(format) === "json") {
+    return JSON.stringify(traces, null, 2);
+  }
+  return traces.map((trace) => JSON.stringify(trace)).join("\n");
 }
 
 function isInteractiveTerminal(): boolean {
@@ -1101,6 +1144,94 @@ export function registerCompanyCommands(program: Command): void {
           handleCommandError(err);
         }
       }),
+  );
+
+  addCommonClientOptions(
+    company
+      .command("feedback:list")
+      .description("List feedback traces for a company")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .option("--target-type <type>", "Filter by target type")
+      .option("--vote <vote>", "Filter by vote value")
+      .option("--status <status>", "Filter by trace status")
+      .option("--project-id <id>", "Filter by project ID")
+      .option("--issue-id <id>", "Filter by issue ID")
+      .option("--from <iso8601>", "Only include traces created at or after this timestamp")
+      .option("--to <iso8601>", "Only include traces created at or before this timestamp")
+      .option("--shared-only", "Only include traces eligible for sharing/export")
+      .option("--include-payload", "Include stored payload snapshots in the response")
+      .action(async (opts: CompanyFeedbackOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const traces = (await ctx.api.get<FeedbackTrace[]>(
+            `/api/companies/${ctx.companyId}/feedback-traces${buildFeedbackTraceQuery(opts)}`,
+          )) ?? [];
+          if (ctx.json) {
+            printOutput(traces, { json: true });
+            return;
+          }
+          printOutput(
+            traces.map((trace) => ({
+              id: trace.id,
+              issue: trace.issueIdentifier ?? trace.issueId,
+              vote: trace.vote,
+              status: trace.status,
+              targetType: trace.targetType,
+              target: trace.targetSummary.label,
+            })),
+            { json: false },
+          );
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
+  );
+
+  addCommonClientOptions(
+    company
+      .command("feedback:export")
+      .description("Export feedback traces for a company")
+      .requiredOption("-C, --company-id <id>", "Company ID")
+      .option("--target-type <type>", "Filter by target type")
+      .option("--vote <vote>", "Filter by vote value")
+      .option("--status <status>", "Filter by trace status")
+      .option("--project-id <id>", "Filter by project ID")
+      .option("--issue-id <id>", "Filter by issue ID")
+      .option("--from <iso8601>", "Only include traces created at or after this timestamp")
+      .option("--to <iso8601>", "Only include traces created at or before this timestamp")
+      .option("--shared-only", "Only include traces eligible for sharing/export")
+      .option("--include-payload", "Include stored payload snapshots in the export")
+      .option("--out <path>", "Write export to a file path instead of stdout")
+      .option("--format <format>", "Export format: json or ndjson", "ndjson")
+      .action(async (opts: CompanyFeedbackOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts, { requireCompany: true });
+          const traces = (await ctx.api.get<FeedbackTrace[]>(
+            `/api/companies/${ctx.companyId}/feedback-traces${buildFeedbackTraceQuery({
+              ...opts,
+              includePayload: opts.includePayload ?? true,
+            })}`,
+          )) ?? [];
+          const serialized = serializeFeedbackTraces(traces, opts.format);
+          if (opts.out?.trim()) {
+            await writeFile(opts.out, serialized, "utf8");
+            if (ctx.json) {
+              printOutput(
+                { out: opts.out, count: traces.length, format: normalizeFeedbackExportFormat(opts.format) },
+                { json: true },
+              );
+              return;
+            }
+            console.log(`Wrote ${traces.length} feedback trace(s) to ${opts.out}`);
+            return;
+          }
+          process.stdout.write(`${serialized}${serialized.endsWith("\n") ? "" : "\n"}`);
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+    { includeCompany: false },
   );
 
   addCommonClientOptions(
