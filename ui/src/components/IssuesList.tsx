@@ -119,6 +119,7 @@ interface Agent {
 }
 
 type ProjectOption = Pick<Project, "id" | "name"> & Partial<Pick<Project, "color" | "workspaces" | "executionWorkspacePolicy" | "primaryWorkspace">>;
+type IssueListRequestFilters = NonNullable<Parameters<typeof issuesApi.list>[1]>;
 
 interface IssuesListProps {
   issues: Issue[];
@@ -132,9 +133,9 @@ interface IssuesListProps {
   issueLinkState?: unknown;
   initialAssignees?: string[];
   initialSearch?: string;
-  searchFilters?: {
-    participantAgentId?: string;
-  };
+  searchFilters?: Omit<IssueListRequestFilters, "q" | "projectId" | "limit" | "includeRoutineExecutions">;
+  baseCreateIssueDefaults?: Record<string, unknown>;
+  createIssueLabel?: string;
   enableRoutineVisibilityFilter?: boolean;
   onSearchChange?: (search: string) => void;
   onUpdateIssue: (id: string, data: Record<string, unknown>) => void;
@@ -215,6 +216,8 @@ export function IssuesList({
   initialAssignees,
   initialSearch,
   searchFilters,
+  baseCreateIssueDefaults,
+  createIssueLabel,
   enableRoutineVisibilityFilter = false,
   onSearchChange,
   onUpdateIssue,
@@ -485,8 +488,8 @@ export function IssuesList({
   }, [filtered, viewState.groupBy, agents, agentName, currentUserId, workspaceNameMap, issueTitleMap]);
 
   const newIssueDefaults = useCallback((groupKey?: string) => {
-    const defaults: Record<string, string> = {};
-    if (projectId) defaults.projectId = projectId;
+    const defaults: Record<string, unknown> = { ...(baseCreateIssueDefaults ?? {}) };
+    if (projectId && defaults.projectId === undefined) defaults.projectId = projectId;
     if (groupKey) {
       if (viewState.groupBy === "status") defaults.status = groupKey;
       else if (viewState.groupBy === "priority") defaults.priority = groupKey;
@@ -501,7 +504,13 @@ export function IssuesList({
       }
     }
     return defaults;
-  }, [currentUserId, issueById, projectId, viewState.groupBy]);
+  }, [baseCreateIssueDefaults, currentUserId, issueById, projectId, viewState.groupBy]);
+
+  const createActionLabel = createIssueLabel ? `Create ${createIssueLabel}` : "Create Issue";
+  const createButtonLabel = createIssueLabel ? `New ${createIssueLabel}` : "New Issue";
+  const openCreateIssueDialog = useCallback((groupKey?: string) => {
+    openNewIssue(newIssueDefaults(groupKey));
+  }, [newIssueDefaults, openNewIssue]);
 
   const filterToWorkspace = useCallback((workspaceId: string) => {
     updateView({ workspaces: [workspaceId] });
@@ -533,9 +542,9 @@ export function IssuesList({
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-2 sm:gap-3">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-          <Button size="sm" variant="outline" onClick={() => openNewIssue(newIssueDefaults())}>
+          <Button size="sm" variant="outline" onClick={() => openCreateIssueDialog()}>
             <Plus className="h-4 w-4 sm:mr-1" />
-            <span className="hidden sm:inline">New Issue</span>
+            <span className="hidden sm:inline">{createButtonLabel}</span>
           </Button>
           <IssueSearchInput
             value={issueSearch}
@@ -673,8 +682,8 @@ export function IssuesList({
         <EmptyState
           icon={CircleDot}
           message="No issues match the current filters or search."
-          action="Create Issue"
-          onAction={() => openNewIssue(newIssueDefaults())}
+          action={createActionLabel}
+          onAction={() => openCreateIssueDialog()}
         />
       )}
 
@@ -710,7 +719,7 @@ export function IssuesList({
                   variant="ghost"
                   size="icon-xs"
                   className="ml-auto text-muted-foreground"
-                  onClick={() => openNewIssue(newIssueDefaults(group.key))}
+                  onClick={() => openCreateIssueDialog(group.key)}
                 >
                   <Plus className="h-3 w-3" />
                 </Button>

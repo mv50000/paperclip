@@ -58,6 +58,7 @@ import { InlineEditor } from "../components/InlineEditor";
 import { IssueChatThread, type IssueChatComposerHandle } from "../components/IssueChatThread";
 import { useLiveRunTranscripts } from "../components/transcript/useLiveRunTranscripts";
 import { IssueDocumentsSection } from "../components/IssueDocumentsSection";
+import { IssuesList } from "../components/IssuesList";
 import { IssueProperties } from "../components/IssueProperties";
 import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import type { MentionOption } from "../components/MarkdownEditor";
@@ -88,7 +89,6 @@ import {
   Copy,
   EyeOff,
   Hexagon,
-  ListTree,
   MessageSquare,
   MoreHorizontal,
   MoreVertical,
@@ -1011,6 +1011,26 @@ export function IssueDetail() {
   const handleIssuePropertiesUpdate = useCallback((data: Record<string, unknown>) => {
     updateIssue.mutate(data);
   }, [updateIssue.mutate]);
+
+  const updateChildIssue = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) => issuesApi.update(id, data),
+    onSuccess: () => {
+      if (resolvedCompanyId) {
+        queryClient.invalidateQueries({ queryKey: ["issues", resolvedCompanyId] });
+        queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(resolvedCompanyId) });
+      }
+    },
+    onError: (err) => {
+      pushToast({
+        title: "Issue update failed",
+        body: err instanceof Error ? err.message : "Unable to save sub-issue changes",
+        tone: "error",
+      });
+    },
+  });
+  const handleChildIssueUpdate = useCallback((id: string, data: Record<string, unknown>) => {
+    updateChildIssue.mutate({ id, data });
+  }, [updateChildIssue]);
 
   const approvalDecision = useMutation({
     mutationFn: async ({ approvalId, action }: { approvalId: string; action: "approve" | "reject" }) => {
@@ -2097,54 +2117,25 @@ export function IssueDetail() {
         missingBehavior="placeholder"
       />
 
-      {(childIssuesLoading || childIssues.length > 0) && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-medium text-muted-foreground">Sub-issues</h3>
-            <Button variant="outline" size="sm" onClick={openNewSubIssue} className="shadow-none">
-              <ListTree className="h-3.5 w-3.5 mr-1.5" />
-              <span className="hidden sm:inline">Add sub-issue</span>
-              <span className="sm:hidden">Sub-issue</span>
-            </Button>
-          </div>
-          {childIssuesLoading ? (
-            <IssueSectionSkeleton titleWidth="w-24" rows={2} />
-          ) : (
-            <div className="border border-border rounded-lg divide-y divide-border">
-              {childIssues.map((child) => (
-                <Link
-                  key={child.id}
-                  to={createIssueDetailPath(child.identifier ?? child.id)}
-                  state={resolvedIssueDetailState ?? location.state}
-                  issuePrefetch={child}
-                  onClickCapture={() =>
-                    rememberIssueDetailLocationState(
-                      child.identifier ?? child.id,
-                      resolvedIssueDetailState ?? location.state,
-                      location.search,
-                    )}
-                  className="flex items-center justify-between px-3 py-2 text-sm hover:bg-accent/20 transition-colors"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <StatusIcon status={child.status} />
-                    <PriorityIcon priority={child.priority} />
-                    <span className="font-mono text-muted-foreground shrink-0">
-                      {child.identifier ?? child.id.slice(0, 8)}
-                    </span>
-                    <span className="truncate">{child.title}</span>
-                  </div>
-                  {child.assigneeAgentId && (() => {
-                    const name = agentMap.get(child.assigneeAgentId)?.name;
-                    return name
-                      ? <Identity name={name} size="sm" />
-                      : <span className="text-muted-foreground font-mono">{child.assigneeAgentId.slice(0, 8)}</span>;
-                  })()}
-                </Link>
-              ))}
-            </div>
-          )}
+<<<<<<< HEAD
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-medium text-muted-foreground">Sub-issues</h3>
         </div>
-      )}
+        <IssuesList
+          issues={childIssues}
+          isLoading={childIssuesLoading}
+          agents={agents}
+          projects={projects}
+          projectId={issue.projectId ?? undefined}
+          viewStateKey={`paperclip:issue-detail:${issue.id}:subissues-view`}
+          issueLinkState={resolvedIssueDetailState ?? location.state}
+          searchFilters={{ parentId: issue.id }}
+          baseCreateIssueDefaults={buildSubIssueDefaultsForViewer(issue, currentUserId)}
+          createIssueLabel="Sub-issue"
+          onUpdateIssue={handleChildIssueUpdate}
+        />
+      </div>
 
       <IssueDocumentsSection
         issue={issue}
@@ -2167,18 +2158,7 @@ export function IssueDetail() {
             sharingPreferenceAtSubmit: feedbackDataSharingPreference,
           });
         }}
-        extraActions={
-          <>
-            {!hasAttachments && attachmentUploadButton}
-            {childIssues.length === 0 && (
-              <Button variant="outline" size="sm" onClick={openNewSubIssue} className="shadow-none">
-                <ListTree className="h-3.5 w-3.5 mr-1.5" />
-                <span className="hidden sm:inline">Add sub-issue</span>
-                <span className="sm:hidden">Sub-issue</span>
-              </Button>
-            )}
-          </>
-        }
+        extraActions={!hasAttachments ? attachmentUploadButton : null}
       />
 
       {attachmentsInitialLoading ? (
