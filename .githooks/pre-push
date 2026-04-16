@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-push hook: run typecheck and tests before pushing
+# Mirrors the CI checks in .github/workflows/pr.yml
+
+set -euo pipefail
+
+echo "pre-push: running typecheck..."
+pnpm -r typecheck
+echo "pre-push: typecheck passed."
+
+echo ""
+echo "pre-push: running tests..."
+pnpm test:run
+echo "pre-push: tests passed."

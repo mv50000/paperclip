@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-commit hook: prevent pnpm-lock.yaml from being committed
+# Exception: the dedicated lockfile refresh branch
+
+set -euo pipefail
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
+# Allow lockfile changes on the dedicated refresh branch
+if [[ "$branch" == chore/refresh-lockfile* ]]; then
+  exit 0
+fi
+
+# Check if pnpm-lock.yaml is staged
+if git diff --cached --name-only | grep -qx 'pnpm-lock.yaml'; then
+  echo "ERROR: pnpm-lock.yaml is staged for commit."
+  echo ""
+  echo "  Lockfile changes are only allowed on 'chore/refresh-lockfile' branches."
+  echo "  To unstage:  git reset HEAD pnpm-lock.yaml"
+  echo "  To restore:  git checkout -- pnpm-lock.yaml"
+  echo ""
+  exit 1
+fi
