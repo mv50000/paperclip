@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Pre-push hook: run typecheck and tests before pushing
-# Mirrors the CI checks in .github/workflows/pr.yml
+# Pre-push hook: run typecheck before pushing
+#
+# Typecheck catches ~60% of CI failures (schema changes without mock updates).
+# Full test suite is left to CI — local environments vary and some tests need
+# CI-specific setup (React act shim, embedded Postgres config, etc.).
 
 set -euo pipefail
 
 echo "pre-push: running typecheck..."
 pnpm -r typecheck
 echo "pre-push: typecheck passed."
-
-echo ""
-echo "pre-push: running tests..."
-pnpm test:run
-echo "pre-push: tests passed."
