@@ -219,6 +219,213 @@ describe("budgetService", () => {
     });
   });
 
+  describe("budget boundary at exact 100% threshold", () => {
+    const basePolicy = {
+      id: "policy-1",
+      companyId: "company-1",
+      scopeType: "agent",
+      scopeId: "agent-1",
+      metric: "billed_cents",
+      windowKind: "calendar_month_utc",
+      amount: 100,
+      warnPercent: 80,
+      hardStopEnabled: true,
+      notifyEnabled: false,
+      isActive: true,
+    };
+
+    it("triggers pause when spend is exactly 100% of budget", async () => {
+      const dbStub = createDbStub([
+        [basePolicy],
+        [{ total: 100 }], // exactly 100% of budget
+        [], // no existing incident
+        [{
+          companyId: "company-1",
+          name: "Budget Agent",
+          status: "running",
+          pauseReason: null,
+        }],
+      ]);
+
+      dbStub.queueInsert([{
+        id: "approval-1",
+        companyId: "company-1",
+        status: "pending",
+      }]);
+      dbStub.queueInsert([{
+        id: "incident-1",
+        companyId: "company-1",
+        policyId: "policy-1",
+        approvalId: "approval-1",
+      }]);
+      dbStub.queueUpdate([]);
+      const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+
+      const service = budgetService(dbStub.db as any, { cancelWorkForScope });
+      await service.evaluateCostEvent({
+        companyId: "company-1",
+        agentId: "agent-1",
+        projectId: null,
+      } as any);
+
+      expect(dbStub.insertValues).toHaveBeenCalledWith(
+        expect.objectContaining({
+          companyId: "company-1",
+          type: "budget_override_required",
+          status: "pending",
+        }),
+      );
+      expect(dbStub.insertValues).toHaveBeenCalledWith(
+        expect.objectContaining({
+          policyId: "policy-1",
+          thresholdType: "hard",
+          amountLimit: 100,
+          amountObserved: 100,
+        }),
+      );
+      expect(dbStub.updateSet).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "paused",
+          pauseReason: "budget",
+        }),
+      );
+      expect(cancelWorkForScope).toHaveBeenCalledWith({
+        companyId: "company-1",
+        scopeType: "agent",
+        scopeId: "agent-1",
+      });
+    });
+
+    it("does NOT trigger pause when spend is 99.99% of budget", async () => {
+      const dbStub = createDbStub([
+        [basePolicy],
+        [{ total: 99.99 }], // just under 100%
+      ]);
+
+      const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+      const service = budgetService(dbStub.db as any, { cancelWorkForScope });
+      await service.evaluateCostEvent({
+        companyId: "company-1",
+        agentId: "agent-1",
+        projectId: null,
+      } as any);
+
+      // No hard incident or pause should be created
+      expect(dbStub.insertValues).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          thresholdType: "hard",
+        }),
+      );
+      expect(dbStub.updateSet).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "paused",
+          pauseReason: "budget",
+        }),
+      );
+      expect(cancelWorkForScope).not.toHaveBeenCalled();
+    });
+
+    it("triggers pause when spend is 100.01% of budget (just over)", async () => {
+      const dbStub = createDbStub([
+        [basePolicy],
+        [{ total: 100.01 }], // just over 100%
+        [], // no existing incident
+        [{
+          companyId: "company-1",
+          name: "Budget Agent",
+          status: "running",
+          pauseReason: null,
+        }],
+      ]);
+
+      dbStub.queueInsert([{
+        id: "approval-1",
+        companyId: "company-1",
+        status: "pending",
+      }]);
+      dbStub.queueInsert([{
+        id: "incident-1",
+        companyId: "company-1",
+        policyId: "policy-1",
+        approvalId: "approval-1",
+      }]);
+      dbStub.queueUpdate([]);
+      const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+
+      const service = budgetService(dbStub.db as any, { cancelWorkForScope });
+      await service.evaluateCostEvent({
+        companyId: "company-1",
+        agentId: "agent-1",
+        projectId: null,
+      } as any);
+
+      expect(dbStub.insertValues).toHaveBeenCalledWith(
+        expect.objectContaining({
+          thresholdType: "hard",
+          amountLimit: 100,
+          amountObserved: 100.01,
+        }),
+      );
+      expect(dbStub.updateSet).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "paused",
+          pauseReason: "budget",
+        }),
+      );
+    });
+
+    it("blocks invocation at exactly 100% spend via getInvocationBlock", async () => {
+      const dbStub = createDbStub([
+        [{
+          status: "running",
+          pauseReason: null,
+          companyId: "company-1",
+          name: "Budget Agent",
+        }],
+        [{
+          status: "active",
+          name: "Paperclip",
+        }],
+        [], // no company policy
+        [basePolicy],
+        [{ total: 100 }], // exactly at budget
+      ]);
+
+      const service = budgetService(dbStub.db as any);
+      const block = await service.getInvocationBlock("company-1", "agent-1");
+
+      expect(block).toEqual({
+        scopeType: "agent",
+        scopeId: "agent-1",
+        scopeName: "Budget Agent",
+        reason: "Agent cannot start because its budget hard-stop is still exceeded.",
+      });
+    });
+
+    it("does NOT block invocation at 99.99% spend via getInvocationBlock", async () => {
+      const dbStub = createDbStub([
+        [{
+          status: "running",
+          pauseReason: null,
+          companyId: "company-1",
+          name: "Budget Agent",
+        }],
+        [{
+          status: "active",
+          name: "Paperclip",
+        }],
+        [], // no company policy
+        [basePolicy],
+        [{ total: 99.99 }], // just under budget
+      ]);
+
+      const service = budgetService(dbStub.db as any);
+      const block = await service.getInvocationBlock("company-1", "agent-1");
+
+      expect(block).toBeNull();
+    });
+  });
+
   it("uses live observed spend when raising a budget incident", async () => {
     const dbStub = createDbStub([
       [{
