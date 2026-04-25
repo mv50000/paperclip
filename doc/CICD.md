@@ -3,7 +3,6 @@
 Yhtenäinen, Docker-pohjainen, multi-host CI/CD-putki kaikille Paperclip-yrityksille. Korvaa per-yritys räätälöidyt deploy-tavat (Makefile+systemd, cargo+systemd, mixed Docker/SSH) yhdellä mv50000/cicd-reusable-workflowilla.
 
 > **Pipeline-repo:** https://github.com/mv50000/cicd (julkinen, v1 tag)
-> **Plan-dokumentti:** `/home/rk9admin/.claude/plans/suunnittele-k-yt-nn-llinen-tehokas-mahdo-pure-stream.md`
 
 ## Tavoite
 
@@ -64,7 +63,7 @@ jobs:
 | Ympäristö | DB-malli |
 |-----------|----------|
 | **Dev** | Compose-sisäinen `postgres:17-alpine`-service samassa stack:ssä kuin app. Eristetty, ei riippuvuutta ulkoiseen DB-isäntään, ei pg_hba.conf-rumbaa. Data named-volumessa `db-data`. |
-| **Prod** | Keskitetty PostgreSQL (nykyinen 192.168.1.13). Yksi backup-strategia, yksi monitorointi, replikaatio-mahdollisuus. pg_hba.conf-päivitys per uusi deploy-host (kerran). |
+| **Prod** | Keskitetty PostgreSQL-host (yksi instance per deployment). Yksi backup-strategia, yksi monitorointi, replikaatio-mahdollisuus. pg_hba.conf-päivitys per uusi deploy-host (kerran). |
 
 **Miksi Postgres aina:**
 - JSONB → semi-strukturoidut payloadit (LLM-output, agent state)
@@ -106,17 +105,17 @@ Uusi yritys 5 askeleessa: https://github.com/mv50000/cicd/blob/main/docs/onboard
 
 Migraatio vanhasta systemd-mallista: https://github.com/mv50000/cicd/blob/main/docs/migration-from-systemd.md
 
-Migraatio-helper:
+Migraatio-helper (suorita Paperclip-kloonin juuressa):
 
 ```bash
-bash /home/rk9admin/paperclip/scripts/migrate-company.sh <company> [rust|node]
+bash scripts/migrate-company.sh <company> [rust|node]
 ```
 
 ## Operointi
 
 | Tarve | Komento |
 |-------|---------|
-| Tarkista runner-orvot | `bash /home/rk9admin/paperclip/scripts/audit-runners.sh` |
+| Tarkista runner-orvot | `bash scripts/audit-runners.sh` (Paperclip-kloonin juuressa) |
 | Bootstrap deploy host | `sudo bash <(curl -L https://raw.githubusercontent.com/mv50000/cicd/v1/scripts/server-bootstrap.sh) <co> <env>` |
 | Manuaalinen rollback | `gh workflow run deploy.yml --repo mv50000/<co> -f action=rollback -f environment=<env>` |
 | Health-check (host-puoli) | `bash /srv/<co>/<env>/healthcheck.sh <url>` |
