@@ -42,7 +42,12 @@ if [[ "$STACK" != "rust" && "$STACK" != "node" ]]; then
   exit 1
 fi
 
-CICD_BASE="https://raw.githubusercontent.com/mv50000/cicd/v1"
+# Pin to a specific commit SHA, not the mutable `v1` tag, so a force-push
+# or compromise of the upstream tag cannot silently inject altered templates
+# (Dockerfile, compose, workflow) into migrated company repos. To uplift,
+# bump CICD_REF to a newer SHA after auditing changes upstream.
+CICD_REF="${CICD_REF:-fec95b4553396b9acdb29c25da1c09ac1df76ea0}"  # mv50000/cicd v1 @ 2026-04-25
+CICD_BASE="https://raw.githubusercontent.com/mv50000/cicd/${CICD_REF}"
 
 echo "==> Migrating ${COMPANY} (${STACK}) at ${REPO_DIR}"
 cd "$REPO_DIR"
@@ -116,4 +121,4 @@ echo "    4. Set DEPLOY_SSH_KEY secret on the repo (gh secret set DEPLOY_SSH_KEY
 echo "    5. Bootstrap deploy host: ssh <host> 'sudo bash <(curl -L $CICD_BASE/scripts/server-bootstrap.sh) ${COMPANY} prod'"
 echo "    6. Commit, push, watch: gh run watch"
 echo ""
-echo "Plan reference: /home/rk9admin/.claude/plans/suunnittele-k-yt-nn-llinen-tehokas-mahdo-pure-stream.md"
+echo "Pinned to mv50000/cicd@${CICD_REF}. Override with CICD_REF env var to test newer commits."
