@@ -57,6 +57,29 @@ jobs:
       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
 ```
 
+## Data-stack: PostgreSQL kaikkialla
+
+**Paperclip-standardi: kaikki yritykset käyttävät PostgreSQL:ää.** SQLite-yritykset migroidaan Postgresiin faasi 4:n yhteydessä (ei kiireellistä, mutta linja on selvä).
+
+| Ympäristö | DB-malli |
+|-----------|----------|
+| **Dev** | Compose-sisäinen `postgres:17-alpine`-service samassa stack:ssä kuin app. Eristetty, ei riippuvuutta ulkoiseen DB-isäntään, ei pg_hba.conf-rumbaa. Data named-volumessa `db-data`. |
+| **Prod** | Keskitetty PostgreSQL (nykyinen 192.168.1.13). Yksi backup-strategia, yksi monitorointi, replikaatio-mahdollisuus. pg_hba.conf-päivitys per uusi deploy-host (kerran). |
+
+**Miksi Postgres aina:**
+- JSONB → semi-strukturoidut payloadit (LLM-output, agent state)
+- pg_trgm/tsvector → FTS ilman erillistä Elasticsearchia
+- LISTEN/NOTIFY → real-time eventit ilman Redistä
+- pgvector → embeddingit ML-sovelluksille
+- Reliable transactions ja replikaatio kun skaala kasvaa
+
+**Cookie-cutter compose:** mv50000/cicd:n `templates/compose/docker-compose.yml` sisältää oletuksena `db`-servicen. Yritys, jolla ei vielä ole PostgreSQL-tarvetta, voi poistaa `db`-blokin ja `app.depends_on`-rivin.
+
+**Migration-status:**
+- saatavilla — SQLite (`/app/data/saatavilla.db`), migration faasi 4
+- quantimodo — PostgreSQL (dev: compose-sisäinen, prod: keskitetty)
+- alli-audit, bk, optimi — selvitetään kun migration tulee, sama linja
+
 ## Sopimukset
 
 | Asia | Konventio |
