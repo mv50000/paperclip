@@ -48,6 +48,17 @@ jobs:
               return;
             }
 
+            // CONTRIBUTING.md requires a 5/5 Greptile score with all comments addressed
+            // before merge. Auto-merge must not bypass that gate; require an explicit
+            // human-applied label so this workflow can never silently merge a PR that
+            // hasn't been reviewed (or worse, where Greptile flagged P1/P2 findings).
+            const REQUIRED_LABEL = 'ai-auto-merge';
+            const labels = (pr.labels || []).map(l => l.name);
+            if (!labels.includes(REQUIRED_LABEL)) {
+              core.info(`PR #${prNumber} missing '${REQUIRED_LABEL}' label -> skip auto-merge. Apply the label after Greptile 5/5 + review to opt this PR in.`);
+              return;
+            }
+
             const headBranch = pr.head.ref;
             const runsResp = await github.rest.actions.listWorkflowRunsForRepo({
               owner, repo, branch: headBranch, event: 'pull_request', per_page: 50,
