@@ -509,19 +509,16 @@ describe("prioritizeProjectWorkspaceCandidatesForRun", () => {
 });
 
 describe("parseSessionCompactionPolicy", () => {
-  it("applies proactive rotation thresholds by default for codex and claude local", () => {
-    expect(parseSessionCompactionPolicy(buildAgent("codex_local"))).toEqual({
+  it("applies proactive rotation thresholds by default for adapters with confirmed native compaction (claude_local, codex_local, hermes_local)", () => {
+    const expected = {
       enabled: true,
       maxSessionRuns: 8,
       maxRawInputTokens: 400_000,
       maxSessionAgeHours: 24,
-    });
-    expect(parseSessionCompactionPolicy(buildAgent("claude_local"))).toEqual({
-      enabled: true,
-      maxSessionRuns: 8,
-      maxRawInputTokens: 400_000,
-      maxSessionAgeHours: 24,
-    });
+    };
+    expect(parseSessionCompactionPolicy(buildAgent("codex_local"))).toEqual(expected);
+    expect(parseSessionCompactionPolicy(buildAgent("claude_local"))).toEqual(expected);
+    expect(parseSessionCompactionPolicy(buildAgent("hermes_local"))).toEqual(expected);
   });
 
   it("keeps conservative defaults for adapters without confirmed native compaction", () => {
