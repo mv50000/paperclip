@@ -167,7 +167,25 @@ Database connection failed: no pg_hba.conf entry for host "192.168.1.58", user "
 
 Vasta sen jälkeen quantimodo-pilotti voidaan promote:ta cutover-vaiheeseen (main-branch).
 
-## 8. Yhteyshenkilöt ja hätä-rollback
+## 8. Porttikartta `docker.rk9.fi`:lle
+
+Yritykset jakavat saman dev-hostin → tarvitaan yhteinen porttiavaruus. Bind `127.0.0.1`-loopback:iin (julkinen pääsy reverse proxin kautta, kohta 4 yllä).
+
+| Yritys | Komponentti | Host-portti | Konttiportti |
+|--------|-------------|-------------|--------------|
+| saatavilla | web | 3000 | 3000 |
+| alli-audit | server (API) | 3010 | 3000 |
+| alli-audit | web (Leptos) | 3011 | 3001 |
+| (varattu) bk | backend | 3020 | 3000 |
+| (varattu) bk | frontend | 3021 | 3001 |
+| (varattu) optimi | app | 3030 | 3000 |
+| quantimodo | app | 5000 | 5000 |
+
+**Sääntö:** uusi yritys saa oman 10-portin lohkon (`30N0–30N9`) jossa server = 30N0, web = 30N1, jne. Jos rinnakkais-prod-host kuitenkin tehdään, samat numerot voivat toistua siellä eri hostissa.
+
+**Saatavilla edelleen 3000:ssa** retroaktiivisesti ok, koska se oli ensimmäinen. Sopiva siirto 3001:een (jotta sarja on yhtenäinen) tehdään kun reverse proxy tulee käyttöön — silloin host-port voi olla mikä tahansa, koska julkinen pääsy menee Caddy:n kautta sub-domainilla.
+
+## 9. Yhteyshenkilöt ja hätä-rollback
 
 **Hätä-rollback** (jos cutover rikkoo dev:n):
 ```bash
