@@ -9,6 +9,8 @@ import {
   issues,
   issueRelations,
   riskEntries,
+  routines,
+  routineTriggers,
 } from "@paperclipai/db";
 import type { RiskCategoryCode, RiskIncidentSeverity, RiskLikelihood, RiskSeverity } from "@paperclipai/shared";
 import { riskRegistryService, computeRiskScore } from "./risk-registry.js";
@@ -79,9 +81,8 @@ export function riskMonitorService(db: Db) {
     const incidentSev = await shouldCheckIncident(companyId, categoryCode, severity, likelihood);
     if (!incidentSev) return false;
 
-    const existing = await incidents.listOpenIncidents(companyId);
-    const alreadyExists = existing.some((i) => i.riskEntryId === riskEntryId);
-    if (alreadyExists) return false;
+    const [existing] = await incidents.findOpenByRiskEntryId(companyId, riskEntryId);
+    if (existing) return false;
 
     await incidents.createIncident(companyId, {
       riskEntryId,
@@ -111,8 +112,24 @@ export function riskMonitorService(db: Db) {
         .from(agents)
         .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
 
+      const agentsWithRoutines = await db
+        .select({ agentId: routines.assigneeAgentId })
+        .from(routines)
+        .innerJoin(routineTriggers, eq(routineTriggers.routineId, routines.id))
+        .where(and(
+          eq(routines.companyId, companyId),
+          eq(routines.status, "active"),
+          eq(routineTriggers.enabled, true),
+        ))
+        .then((rows) => new Set(rows.map((r) => r.agentId)));
+
       for (const agent of activeAgents) {
         if (agent.status === "paused") continue;
+
+        if (!agentsWithRoutines.has(agent.id)) {
+          await registry.resolveMonitorRisk(companyId, "AGENT_SILENT", "agent", agent.id);
+          continue;
+        }
 
         const intervalSec = (agent.runtimeConfig as Record<string, unknown>)?.heartbeatIntervalSec as number ?? 3600;
         const lastRun = agent.lastHeartbeatAt;
