@@ -54,6 +54,7 @@ vi.mock("@paperclipai/db", () => ({
   runDatabaseBackup: vi.fn(),
   authUsers: {},
   companies: {},
+  companyLogos: {},
   companyMemberships: {},
   instanceUserRoles: {},
 }));
@@ -145,6 +146,16 @@ vi.mock("../services/index.js", () => ({
   routineService: vi.fn(() => ({
     tickScheduledTriggers: vi.fn(async () => ({ triggered: 0 })),
   })),
+  riskMonitorService: vi.fn(() => ({
+    runAllMonitors: vi.fn(async () => undefined),
+    runCrossCompanyCorrelator: vi.fn(async () => undefined),
+  })),
+  riskRegistryService: vi.fn(() => ({
+    takeSnapshot: vi.fn(async () => undefined),
+  })),
+  startSlackEventForwarder: vi.fn(() => ({ stop: vi.fn() })),
+  createSlackClientService: vi.fn(),
+  createChannelResolver: vi.fn(),
 }));
 
 vi.mock("../storage/index.js", () => ({
