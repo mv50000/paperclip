@@ -31,6 +31,7 @@ export function publishLiveEvent(input: {
 }) {
   const event = toLiveEvent(input);
   emitter.emit(input.companyId, event);
+  emitter.emit("__all__", event);
   return event;
 }
 
@@ -51,4 +52,9 @@ export function subscribeCompanyLiveEvents(companyId: string, listener: LiveEven
 export function subscribeGlobalLiveEvents(listener: LiveEventListener) {
   emitter.on("*", listener);
   return () => emitter.off("*", listener);
+}
+
+export function subscribeAllLiveEvents(listener: LiveEventListener) {
+  emitter.on("__all__", listener);
+  return () => emitter.off("__all__", listener);
 }
