@@ -435,6 +435,10 @@ export const LIVE_EVENT_TYPES = [
   "plugin.ui.updated",
   "plugin.worker.crashed",
   "plugin.worker.restarted",
+  "risk.entry.created",
+  "risk.entry.updated",
+  "risk.incident.created",
+  "risk.incident.updated",
 ] as const;
 export type LiveEventType = (typeof LIVE_EVENT_TYPES)[number];
 
@@ -898,3 +902,69 @@ export const PLUGIN_BRIDGE_ERROR_CODES = [
   "UNKNOWN",
 ] as const;
 export type PluginBridgeErrorCode = (typeof PLUGIN_BRIDGE_ERROR_CODES)[number];
+
+// ---------------------------------------------------------------------------
+// Risk Management
+// ---------------------------------------------------------------------------
+
+export const RISK_DOMAINS = ["operational", "financial", "governance", "compliance"] as const;
+export type RiskDomain = (typeof RISK_DOMAINS)[number];
+
+export const RISK_SEVERITIES = ["low", "medium", "high", "critical"] as const;
+export type RiskSeverity = (typeof RISK_SEVERITIES)[number];
+
+export const RISK_LIKELIHOODS = ["rare", "unlikely", "possible", "likely", "certain"] as const;
+export type RiskLikelihood = (typeof RISK_LIKELIHOODS)[number];
+
+export const RISK_ENTRY_STATUSES = ["open", "mitigated", "accepted", "closed", "escalated"] as const;
+export type RiskEntryStatus = (typeof RISK_ENTRY_STATUSES)[number];
+
+export const RISK_INCIDENT_STATUSES = [
+  "detected",
+  "acknowledged",
+  "investigating",
+  "mitigating",
+  "resolved",
+  "post_mortem",
+] as const;
+export type RiskIncidentStatus = (typeof RISK_INCIDENT_STATUSES)[number];
+
+export const RISK_INCIDENT_SEVERITIES = ["sev1", "sev2", "sev3", "sev4"] as const;
+export type RiskIncidentSeverity = (typeof RISK_INCIDENT_SEVERITIES)[number];
+
+export const RISK_APPETITES = ["low", "medium", "high"] as const;
+export type RiskAppetite = (typeof RISK_APPETITES)[number];
+
+export const RISK_SCOPE_TYPES = ["company", "agent", "project", "issue", "approval"] as const;
+export type RiskScopeType = (typeof RISK_SCOPE_TYPES)[number];
+
+export const RISK_SOURCES = ["monitor", "manual", "meta_agent", "blueprint"] as const;
+export type RiskSource = (typeof RISK_SOURCES)[number];
+
+export const RISK_CATEGORY_CODES = [
+  "AGENT_SILENT",
+  "AGENT_CRASH_LOOP",
+  "AGENT_DEGRADED",
+  "COST_ANOMALY",
+  "COST_RUNAWAY",
+  "BUDGET_FORECAST_BREACH",
+  "TASK_ORPHANED",
+  "TASK_UNASSIGNED",
+  "BLOCKER_STALE",
+  "BLOCKER_CHAIN",
+  "APPROVAL_STALE",
+  "COMPLIANCE_DRIFT",
+  "MODEL_NONCOMPLIANT",
+  "SKILL_MISSING",
+  "ORG_ORPHAN",
+  "CROSS_COMPANY_PATTERN",
+] as const;
+export type RiskCategoryCode = (typeof RISK_CATEGORY_CODES)[number];
+
+export const RISK_AUTO_ACTIONS = [
+  "pause_agent",
+  "reassign_tasks",
+  "lock_budget",
+  "create_approval",
+] as const;
+export type RiskAutoAction = (typeof RISK_AUTO_ACTIONS)[number];

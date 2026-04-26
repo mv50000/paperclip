@@ -55,3 +55,6 @@ export {
   createSlackClientService,
   createChannelResolver,
 } from "./slack/index.js";
+export { riskRegistryService } from "./risk-registry.js";
+export { riskIncidentService } from "./risk-incidents.js";
+export { riskMonitorService } from "./risk-monitors.js";

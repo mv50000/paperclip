@@ -75,6 +75,27 @@ export const statusBadge: Record<string, string> = {
   blocked: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
   done: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
   cancelled: "bg-muted text-muted-foreground",
+
+  // Risk entry statuses
+  open: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+  mitigated: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
+  accepted: "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
+  closed: "bg-muted text-muted-foreground",
+  escalated: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+
+  // Risk incident statuses
+  detected: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+  acknowledged: "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
+  investigating: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300",
+  mitigating: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
+  resolved: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
+  post_mortem: "bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-300",
+
+  // Risk severity badges
+  sev1: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+  sev2: "bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300",
+  sev3: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300",
+  sev4: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
 };
 
 export const statusBadgeDefault = "bg-muted text-muted-foreground";

@@ -173,4 +173,14 @@ export const queryKeys = {
   adapters: {
     all: ["adapters"] as const,
   },
+  risks: {
+    list: (companyId: string, status?: string) => ["risks", companyId, status] as const,
+    detail: (companyId: string, riskId: string) => ["risks", "detail", companyId, riskId] as const,
+    summary: (companyId: string) => ["risks", "summary", companyId] as const,
+    incidents: (companyId: string, status?: string) => ["risks", "incidents", companyId, status] as const,
+    incidentDetail: (companyId: string, incidentId: string) =>
+      ["risks", "incidents", "detail", companyId, incidentId] as const,
+    policies: (companyId: string) => ["risks", "policies", companyId] as const,
+    boardSummary: ["risks", "board-summary"] as const,
+  },
 };

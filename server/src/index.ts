@@ -33,8 +33,12 @@ import {
   heartbeatService,
   instanceSettingsService,
   reconcilePersistedRuntimeServicesOnStartup,
+  riskMonitorService,
+  riskRegistryService,
   routineService,
 } from "./services/index.js";
+import { companyService } from "./services/companies.js";
+import { startRiskEventListeners } from "./services/risk-event-listeners.js";
 import { startSlackEventForwarder } from "./services/slack/index.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
@@ -657,6 +661,46 @@ export async function startServer(): Promise<StartedServer> {
   });
 
   startSlackEventForwarder(db as any);
+
+  {
+    const RISK_MONITOR_INTERVAL_MS = 60 * 60 * 1000;
+    const riskMonitors = riskMonitorService(db as any);
+    const riskRegistry = riskRegistryService(db as any);
+    const companiesSvc = companyService(db as any);
+    let riskMonitorInFlight = false;
+
+    setInterval(() => {
+      if (riskMonitorInFlight) return;
+      riskMonitorInFlight = true;
+      void (async () => {
+        try {
+          const allCompanies = await companiesSvc.list();
+          for (const company of allCompanies) {
+            try {
+              await riskMonitors.runAllMonitors(company.id);
+              await riskRegistry.takeSnapshot(company.id);
+            } catch (err) {
+              logger.error({ err, companyId: company.id }, "risk monitor tick failed for company");
+            }
+          }
+          if (allCompanies.length >= 2) {
+            try {
+              await riskMonitors.runCrossCompanyCorrelator();
+            } catch (err) {
+              logger.error({ err }, "cross-company risk correlator failed");
+            }
+          }
+        } catch (err) {
+          logger.error({ err }, "risk monitor tick failed");
+        } finally {
+          riskMonitorInFlight = false;
+        }
+      })();
+    }, RISK_MONITOR_INTERVAL_MS);
+    logger.info({ intervalMinutes: 60 }, "risk monitor scheduler enabled");
+  }
+
+  startRiskEventListeners(db as any);
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)
     .then((result) => {
