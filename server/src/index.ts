@@ -622,6 +622,7 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler,
     resolveSession,
     pluginWorkerManager,
+    slackSigningSecret: config.slackSigningSecret,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 

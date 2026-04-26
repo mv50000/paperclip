@@ -135,4 +135,39 @@ describe("slack event classifier", () => {
       classifyEvent(makeEvent("plugin.ui.updated", {}), COMPANY_NAME),
     ).toEqual([]);
   });
+
+  it("forwards approval.created to company channel only", () => {
+    const targets = classifyEvent(
+      makeEvent("approval.created", {
+        id: "ap-1",
+        type: "hire_agent",
+        title: "Hire DataAnalyst-3",
+      }),
+      COMPANY_NAME,
+    );
+    expect(targets.map((t) => t.target)).toEqual(["company"]);
+    expect(JSON.stringify(targets[0].message.blocks)).toContain("ap-1");
+  });
+
+  it("debounces duplicate approval.created within 30s", () => {
+    const a = makeEvent("approval.created", { id: "ap-2", type: "hire_agent", title: "X" });
+    const b = makeEvent("approval.created", { id: "ap-2", type: "hire_agent", title: "X" });
+    expect(classifyEvent(a, COMPANY_NAME)).not.toEqual([]);
+    expect(classifyEvent(b, COMPANY_NAME)).toEqual([]);
+  });
+
+  it("ignores approval.created without id", () => {
+    expect(
+      classifyEvent(makeEvent("approval.created", { type: "hire_agent" }), COMPANY_NAME),
+    ).toEqual([]);
+  });
+
+  it("does not produce a new channel post for approval.decided", () => {
+    expect(
+      classifyEvent(
+        makeEvent("approval.decided", { id: "ap-3", decision: "approved" }),
+        COMPANY_NAME,
+      ),
+    ).toEqual([]);
+  });
 });

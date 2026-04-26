@@ -4,6 +4,8 @@ import {
   formatBudgetExceeded,
   formatAgentStatus,
   formatHeartbeatFailureBurst,
+  formatApprovalCreated,
+  formatApprovalDecided,
 } from "../services/slack/formatters.js";
 
 const COMPANY_ID = "00000000-0000-0000-0000-000000000001";
@@ -79,5 +81,38 @@ describe("slack formatters", () => {
     });
     const msg = formatBudgetExceeded(event, "X");
     expect(JSON.stringify(msg.blocks)).toContain("http://localhost:3100/companies/");
+  });
+
+  it("formats approval.created with three action buttons referencing approval id", () => {
+    const event = makeEvent("approval.created", {
+      id: "ap-42",
+      type: "hire_agent",
+      title: "Hire DataAnalyst-3",
+      requestedByAgentId: "ceo-1",
+    });
+    const msg = formatApprovalCreated(event, "Alli-Audit");
+    const blocksJson = JSON.stringify(msg.blocks);
+    expect(msg.text).toContain("Approval needed");
+    expect(blocksJson).toContain("Hire DataAnalyst-3");
+    expect(blocksJson).toContain("approval_approve");
+    expect(blocksJson).toContain("approval_reject");
+    expect(blocksJson).toContain("approval_request_revision");
+    expect(blocksJson).toContain("ap-42");
+    expect(blocksJson).toContain("approval-actions");
+  });
+
+  it("formats approval.decided with verdict and decision note", () => {
+    const event = makeEvent("approval.decided", {
+      id: "ap-42",
+      type: "hire_agent",
+      decision: "rejected",
+      decidedByName: "Mauri",
+      decisionNote: "Cost too high — try cheaper model",
+    });
+    const msg = formatApprovalDecided(event, "Alli-Audit");
+    expect(msg.text).toContain("Rejected");
+    const blocksJson = JSON.stringify(msg.blocks);
+    expect(blocksJson).toContain("Mauri");
+    expect(blocksJson).toContain("Cost too high");
   });
 });

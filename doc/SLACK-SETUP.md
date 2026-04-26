@@ -2,7 +2,7 @@
 
 Paperclip-yritykset voidaan kytkeä yhteen Slack-workspaceen niin, että jokainen yritys saa oman kanavansa ja `#rk9-board`-kanava saa cross-company-tason yhteenvedot (kuten budjettiylitykset). Tässä dokumentissa on Vaihe 0:n manuaalinen setup, joka tehdään ennen kuin Paperclip-puolen koodi alkaa lähettää viestejä.
 
-> **Status:** Vaihe 1 (outbound notifications) on toteutettu. Vaihe 2 (interaktiiviset napit) ja Vaihe 3 (slash-komennot) tulossa myöhemmin.
+> **Status:** Vaihe 1 (outbound notifications) ja Vaihe 2 (interaktiiviset approval-napit) on toteutettu. Vaihe 3 (slash-komennot) tulossa myöhemmin.
 
 ## 1. Luo Slack App
 
@@ -25,6 +25,7 @@ oauth_config:
       - chat:write
       - chat:write.customize
       - users:read
+      - users:read.email
       - channels:read
       - im:write
       - reactions:write
@@ -32,9 +33,12 @@ settings:
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
+  interactivity:
+    is_enabled: true
+    request_url: https://paperclip.rk9.fi/api/slack/interactions
 ```
 
-> Vaiheissa 2-3 lisätään `commands`-scope ja interactivity-/slash-URL:t. Pidä app käytettävissä, lisäykset onnistuvat samaan App ID:hen.
+> Vaiheessa 3 lisätään `commands`-scope ja slash-URL:t samaan App ID:hen. Vaihe 2:n interactivity vaatii sekä yllä olevan manifest-toggle että `users:read.email`-scopen, jotta voimme matchaa Slack-käyttäjän Paperclip-käyttäjään sähköpostin avulla.
 
 4. Vahvista (`Create`) → **Install to Workspace**
 5. Kopioi **Bot User OAuth Token** (`xoxb-...`). Tätä käytetään `slack.bot_token`-secretinä.
@@ -151,8 +155,27 @@ Slack-integraatio voidaan disabloida yritykseltä yksinkertaisesti **poistamalla
 - ✅ Heartbeat-failure threshold (3 peräkkäistä failureä ennen ilmoitusta)
 - ✅ Debounce 30s sama event ei tuplaviestiä
 
-## Mikä Vaihe 2-4 lisää (myöhemmin)
+## Mikä Vaihe 2 toteuttaa
 
-- **Vaihe 2**: Approval-eventit (`approval.created` → Slack) + Approve/Reject-napit Slackissä
+- ✅ `approval.created` → company-kanavaan 3 napilla (Approve / Reject / Request revision) + "Open in Paperclip" -linkki
+- ✅ Approve klikkaus toimii suoraan; Reject ja Request revision avaavat modaalin pakollisella perustelulla
+- ✅ `approval.decided` päivittää alkuperäisen viestin (`chat.update`) napit "Approved by Mauri 14:32 — _decision note here_" -tekstiksi
+- ✅ Slack user → Paperclip user matchataan sähköpostilla (`users.info` → `authUsers.email`)
+- ✅ HMAC-SHA256-signature-verify Slackin standardin mukaan (`SLACK_SIGNING_SECRET`)
+- ✅ Idempotency: `X-Slack-Retry-Num` -retry palauttaa 200 OK ilman duplikaattikäsittelyä
+
+### Käyttöönotto Vaiheessa 2
+
+1. **Manifest-päivitys**: Slack App-asetuksissa → **App Manifest** → lisää yllä oleva `interactivity`-blokki ja `users:read.email`-scope (vaatii reinstallin jos uusi scope)
+2. **`SLACK_SIGNING_SECRET` env-var**: kopioi App Credentials-välilehdeltä **Signing Secret** ja lisää server-prosessin env-muuttujiin. Tuotannossa env-varit asetetaan `/usr/local/bin/paperclip-start.sh`-tiedostossa:
+   ```bash
+   export SLACK_SIGNING_SECRET=abcdef0123456789abcdef0123456789
+   ```
+   Restart paperclip.service jälkeen route `/api/slack/interactions` aktivoituu. Ilman tätä endpoint vastaa 503.
+3. **Sama Signing Secret** on hyvä tallentaa myös company-secrettinä `slack.signing_secret`-nimellä Vaihe 1:n yhteydessä — env-var on Vaiheessa 2 ensisijainen, mutta secret pidetään yhteensopivuuden vuoksi.
+4. **Endpoint**: route on `POST /api/slack/interactions` kaikissa deployment-tiloissa. Tuotannossa Slack hittaa `https://paperclip.rk9.fi/api/slack/interactions` → server-prosessi.
+
+## Mikä Vaihe 3-4 lisää (myöhemmin)
+
 - **Vaihe 3**: `/paperclip <command>` slash-komennot (status, assign, pause-agent, ...)
 - **Vaihe 4**: Daily digest `#rk9-board`-kanavalla aamuisin (cross-company KPI:t)

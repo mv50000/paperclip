@@ -5,5 +5,17 @@ export {
   formatBudgetExceeded,
   formatAgentStatus,
   formatHeartbeatFailureBurst,
+  formatApprovalCreated,
+  formatApprovalDecided,
   type FormattedMessage,
 } from "./formatters.js";
+export {
+  verifySlackSignature,
+  readSlackSignatureHeaders,
+  type SlackSignatureResult,
+  type SlackSignatureHeaders,
+} from "./signature-verify.js";
+export {
+  createSlackInteractionsService,
+  type SlackInteractionsService,
+} from "./interactions.js";

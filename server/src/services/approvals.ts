@@ -7,6 +7,7 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { publishLiveEvent } from "./live-events.js";
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -16,6 +17,46 @@ export function approvalService(db: Db) {
   const resolvableStatuses = Array.from(canResolveStatuses);
   type ApprovalRecord = typeof approvals.$inferSelect;
   type ResolutionResult = { approval: ApprovalRecord; applied: boolean };
+
+  function approvalPayloadAsRecord(approval: ApprovalRecord): Record<string, unknown> {
+    return typeof approval.payload === "object" && approval.payload !== null
+      ? (approval.payload as Record<string, unknown>)
+      : {};
+  }
+
+  function emitApprovalCreated(approval: ApprovalRecord) {
+    const payload = approvalPayloadAsRecord(approval);
+    publishLiveEvent({
+      companyId: approval.companyId,
+      type: "approval.created",
+      payload: {
+        id: approval.id,
+        type: approval.type,
+        status: approval.status,
+        requestedByAgentId: approval.requestedByAgentId,
+        requestedByUserId: approval.requestedByUserId,
+        title: typeof payload.title === "string" ? payload.title : null,
+        subject: typeof payload.subject === "string" ? payload.subject : null,
+      },
+    });
+  }
+
+  function emitApprovalDecided(
+    approval: ApprovalRecord,
+    decision: "approved" | "rejected" | "revision_requested",
+  ) {
+    publishLiveEvent({
+      companyId: approval.companyId,
+      type: "approval.decided",
+      payload: {
+        id: approval.id,
+        type: approval.type,
+        decision,
+        decidedByUserId: approval.decidedByUserId,
+        decisionNote: approval.decisionNote,
+      },
+    });
+  }
 
   function redactApprovalComment<T extends { body: string }>(comment: T, censorUsernameInLogs: boolean): T {
     return {
@@ -92,12 +133,15 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .then((rows) => rows[0] ?? null),
 
-    create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
-      db
+    create: async (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) => {
+      const created = await db
         .insert(approvals)
         .values({ ...data, companyId })
         .returning()
-        .then((rows) => rows[0]),
+        .then((rows) => rows[0]);
+      emitApprovalCreated(created);
+      return created;
+    },
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
       const { approval: updated, applied } = await resolveApproval(
@@ -165,6 +209,7 @@ export function approvalService(db: Db) {
         }
       }
 
+      if (applied) emitApprovalDecided(updated, "approved");
       return { approval: updated, applied };
     },
 
@@ -184,6 +229,7 @@ export function approvalService(db: Db) {
         }
       }
 
+      if (applied) emitApprovalDecided(updated, "rejected");
       return { approval: updated, applied };
     },
 
@@ -194,7 +240,7 @@ export function approvalService(db: Db) {
       }
 
       const now = new Date();
-      return db
+      const updated = await db
         .update(approvals)
         .set({
           status: "revision_requested",
@@ -206,6 +252,8 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .returning()
         .then((rows) => rows[0]);
+      emitApprovalDecided(updated, "revision_requested");
+      return updated;
     },
 
     resubmit: async (id: string, payload?: Record<string, unknown>) => {
@@ -215,7 +263,7 @@ export function approvalService(db: Db) {
       }
 
       const now = new Date();
-      return db
+      const updated = await db
         .update(approvals)
         .set({
           status: "pending",
@@ -228,6 +276,17 @@ export function approvalService(db: Db) {
         .where(eq(approvals.id, id))
         .returning()
         .then((rows) => rows[0]);
+      emitApprovalCreated(updated);
+      return updated;
+    },
+
+    setSlackMessageRef: async (id: string, ref: { channel: string; ts: string }) => {
+      const existing = await getExistingApproval(id);
+      const merged = { ...approvalPayloadAsRecord(existing), slackMessageRef: ref };
+      await db
+        .update(approvals)
+        .set({ payload: merged, updatedAt: new Date() })
+        .where(eq(approvals.id, id));
     },
 
     listComments: async (approvalId: string) => {
