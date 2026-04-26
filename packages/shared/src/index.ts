@@ -947,3 +947,28 @@ export type {
   EnvironmentProviderCapability,
   EnvironmentSupportStatus,
 } from "./environment-support.js";
+
+export {
+  RISK_DOMAINS,
+  RISK_SEVERITIES,
+  RISK_LIKELIHOODS,
+  RISK_ENTRY_STATUSES,
+  RISK_INCIDENT_STATUSES,
+  RISK_INCIDENT_SEVERITIES,
+  RISK_APPETITES,
+  RISK_SCOPE_TYPES,
+  RISK_SOURCES,
+  RISK_CATEGORY_CODES,
+  RISK_AUTO_ACTIONS,
+  type RiskDomain,
+  type RiskSeverity,
+  type RiskLikelihood,
+  type RiskEntryStatus,
+  type RiskIncidentStatus,
+  type RiskIncidentSeverity,
+  type RiskAppetite,
+  type RiskScopeType,
+  type RiskSource,
+  type RiskCategoryCode,
+  type RiskAutoAction,
+} from "./constants.js";
