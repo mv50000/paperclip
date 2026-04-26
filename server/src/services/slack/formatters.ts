@@ -104,3 +104,122 @@ export function formatHeartbeatFailureBurst(
   };
 }
 
+const APPROVAL_TYPE_EMOJI: Record<string, string> = {
+  hire_agent: ":bust_in_silhouette:",
+  approve_ceo_strategy: ":compass:",
+  budget_override_required: ":money_with_wings:",
+  request_board_approval: ":ballot_box_with_ballot:",
+  risk_incident_acknowledgment: ":rotating_light:",
+};
+
+const APPROVAL_TYPE_LABEL: Record<string, string> = {
+  hire_agent: "Hire agent",
+  approve_ceo_strategy: "CEO strategy",
+  budget_override_required: "Budget override",
+  request_board_approval: "Board approval",
+  risk_incident_acknowledgment: "Risk incident",
+};
+
+function approvalEmoji(type: string): string {
+  return APPROVAL_TYPE_EMOJI[type] ?? ":pushpin:";
+}
+
+function approvalLabel(type: string): string {
+  return APPROVAL_TYPE_LABEL[type] ?? type;
+}
+
+function actionsBlock(approvalId: string, companyId: string): Block {
+  const blockId = JSON.stringify({ kind: "approval-actions", approvalId });
+  return {
+    type: "actions",
+    block_id: blockId,
+    elements: [
+      {
+        type: "button",
+        action_id: "approval_approve",
+        style: "primary",
+        text: { type: "plain_text", text: "Approve", emoji: true },
+        value: approvalId,
+      },
+      {
+        type: "button",
+        action_id: "approval_reject",
+        style: "danger",
+        text: { type: "plain_text", text: "Reject", emoji: true },
+        value: approvalId,
+      },
+      {
+        type: "button",
+        action_id: "approval_request_revision",
+        text: { type: "plain_text", text: "Request revision", emoji: true },
+        value: approvalId,
+      },
+      {
+        type: "button",
+        action_id: "approval_open_in_ui",
+        text: { type: "plain_text", text: "Open in Paperclip", emoji: true },
+        url: `${publicUrl()}/companies/${companyId}/approvals/${approvalId}`,
+      },
+    ],
+  };
+}
+
+export function formatApprovalCreated(event: LiveEvent, companyName: string): FormattedMessage {
+  const payload = event.payload as Record<string, unknown>;
+  const approvalId = asString(payload.id, "");
+  const type = asString(payload.type, "approval");
+  const title = asString(
+    payload.title ?? payload.subject,
+    approvalLabel(type),
+  );
+  const emoji = approvalEmoji(type);
+  const requestedByAgentId =
+    typeof payload.requestedByAgentId === "string" ? payload.requestedByAgentId : null;
+  const text = `${emoji} Approval needed — ${approvalLabel(type)} — ${companyName}`;
+  const contextElements: Array<Record<string, unknown>> = [
+    { type: "mrkdwn", text: `*${approvalLabel(type)}*` },
+  ];
+  if (requestedByAgentId) {
+    contextElements.push({ type: "mrkdwn", text: `Requested by \`${requestedByAgentId}\`` });
+  }
+  return {
+    text,
+    blocks: [
+      header(`${emoji} Approval needed`),
+      section(`*${title}*\n_${companyName}_`),
+      { type: "context", elements: contextElements },
+      actionsBlock(approvalId, event.companyId),
+    ],
+  };
+}
+
+export function formatApprovalDecided(event: LiveEvent, companyName: string): FormattedMessage {
+  const payload = event.payload as Record<string, unknown>;
+  const approvalId = asString(payload.id, "");
+  const type = asString(payload.type, "approval");
+  const decision = asString(payload.decision, "decided");
+  const decidedBy = asString(payload.decidedByName ?? payload.decidedByUserId, "board");
+  const note = typeof payload.decisionNote === "string" ? payload.decisionNote : null;
+  const verb =
+    decision === "approved"
+      ? ":white_check_mark: Approved"
+      : decision === "rejected"
+        ? ":x: Rejected"
+        : decision === "revision_requested"
+          ? ":memo: Revision requested"
+          : decision;
+  const text = `${verb} — ${approvalLabel(type)} — ${companyName}`;
+  const blocks: Block[] = [
+    section(`${verb} — *${approvalLabel(type)}* in *${companyName}*`),
+    {
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: `By *${decidedBy}*` },
+        ...(note ? [{ type: "mrkdwn", text: `_${note}_` }] : []),
+        { type: "mrkdwn", text: `<${publicUrl()}/companies/${event.companyId}/approvals/${approvalId}|Open in Paperclip>` },
+      ],
+    },
+  ];
+  return { text, blocks };
+}
+

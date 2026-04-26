@@ -439,6 +439,8 @@ export const LIVE_EVENT_TYPES = [
   "risk.entry.updated",
   "risk.incident.created",
   "risk.incident.updated",
+  "approval.created",
+  "approval.decided",
 ] as const;
 export type LiveEventType = (typeof LIVE_EVENT_TYPES)[number];
 

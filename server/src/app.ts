@@ -41,6 +41,7 @@ import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { riskRoutes } from "./routes/risk.js";
+import { slackInteractionsRoutes } from "./routes/slack-interactions.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
@@ -134,6 +135,7 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    slackSigningSecret?: string;
   },
 ) {
   const app = express();
@@ -284,6 +286,7 @@ export async function createApp(
   );
   api.use(adapterRoutes());
   api.use(riskRoutes(db));
+  api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,

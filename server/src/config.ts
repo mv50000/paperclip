@@ -87,6 +87,7 @@ export interface Config {
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
+  slackSigningSecret: string | undefined;
 }
 
 function detectTailnetBindHost(): string | undefined {
@@ -333,5 +334,6 @@ export function loadConfig(): Config {
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
+    slackSigningSecret: process.env.SLACK_SIGNING_SECRET?.trim() || undefined,
   };
 }
