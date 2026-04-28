@@ -502,19 +502,33 @@
     {
       "idx": 71,
       "version": "7",
+      "when": 1777131234000,
+      "tag": "0071_default_hire_approval_off",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1777305216238,
+      "tag": "0072_large_sandman",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
       "when": 1777196451045,
       "tag": "9001_rk9_risk_management",
       "breakpoints": true
     },
     {
-      "idx": 72,
+      "idx": 74,
       "version": "7",
       "when": 1777325153203,
       "tag": "9002_rk9_resend_email",
       "breakpoints": true
     },
     {
-      "idx": 73,
+      "idx": 75,
       "version": "7",
       "when": 1777351911226,
       "tag": "9003_rk9_email_escalation",
