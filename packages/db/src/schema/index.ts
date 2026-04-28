@@ -76,3 +76,12 @@ export { riskEntries } from "./risk_entries.js";
 export { riskIncidents } from "./risk_incidents.js";
 export { riskPolicies } from "./risk_policies.js";
 export { riskSnapshots } from "./risk_snapshots.js";
+export {
+  companyEmailConfig,
+  emailTemplates,
+  emailRoutes,
+  emailMessages,
+  emailOutboundAudit,
+  emailSuppressionList,
+  emailRateLimits,
+} from "./email.js";

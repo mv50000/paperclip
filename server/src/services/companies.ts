@@ -31,6 +31,7 @@ import {
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { environmentService } from "./environments.js";
+import { seedDefaultTemplates } from "./email/template-seed.js";
 
 export function companyService(db: Db) {
   const ISSUE_PREFIX_FALLBACK = "CMP";
@@ -174,6 +175,17 @@ export function companyService(db: Db) {
     create: async (data: typeof companies.$inferInsert) => {
       const created = await createCompanyWithUniquePrefix(data);
       await environmentsSvc.ensureLocalEnvironment(created.id);
+      // Seed default email auto-reply templates (FI/SV/EN). Idempotent — uses
+      // ON CONFLICT DO NOTHING — so re-running this is safe. Templates only
+      // become active once `email_routes.auto_reply_template_id` is set.
+      try {
+        await seedDefaultTemplates(db, created.id);
+      } catch (err) {
+        // Non-fatal: company can still be created. Log and continue.
+        // (The install-resend-skill.ts script seeds again on Resend setup.)
+        // eslint-disable-next-line no-console
+        console.warn("[companies.create] failed to seed default email templates", err);
+      }
       const row = await getCompanyQuery(db)
         .where(eq(companies.id, created.id))
         .then((rows) => rows[0] ?? null);

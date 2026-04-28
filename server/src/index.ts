@@ -40,6 +40,9 @@ import {
 import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
 import { startSlackEventForwarder } from "./services/slack/index.js";
+import { startEmailEscalationCron } from "./services/email/escalation.js";
+import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
+import { createEmailService } from "./services/email/index.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
@@ -702,6 +705,11 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   startRiskEventListeners(db as any);
+  {
+    const emailSvc = createEmailService(db as any);
+    startEmailEscalationCron(db as any, emailSvc);
+    startDeliverabilityMonitor(db as any, emailSvc);
+  }
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)
     .then((result) => {

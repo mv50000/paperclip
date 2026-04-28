@@ -505,6 +505,20 @@
       "when": 1777196451045,
       "tag": "0071_mean_alex_power",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1777325153203,
+      "tag": "0072_resend_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1777351911226,
+      "tag": "0073_email_escalation_columns",
+      "breakpoints": true
     }
   ]
 }
