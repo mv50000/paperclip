@@ -105,6 +105,7 @@ export interface IssueFilters {
   parentId?: string;
   descendantOf?: string;
   labelId?: string;
+  goalId?: string;
   originKind?: string;
   originId?: string;
   includeRoutineExecutions?: boolean;
@@ -2164,6 +2165,7 @@ export function issueService(db: Db) {
         conditions.push(eq(issues.executionWorkspaceId, filters.executionWorkspaceId));
       }
       if (filters?.parentId) conditions.push(eq(issues.parentId, filters.parentId));
+      if (filters?.goalId) conditions.push(eq(issues.goalId, filters.goalId));
       if (filters?.originKind) conditions.push(eq(issues.originKind, filters.originKind));
       if (filters?.originId) conditions.push(eq(issues.originId, filters.originId));
       if (filters?.labelId) {

@@ -966,6 +966,7 @@ export function issueRoutes(
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
       parentId: req.query.parentId as string | undefined,
       descendantOf: req.query.descendantOf as string | undefined,
+      goalId: req.query.goalId as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
       originId: req.query.originId as string | undefined,
