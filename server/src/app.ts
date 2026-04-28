@@ -40,6 +40,7 @@ import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
+// --- RK9 Custom ---
 import { riskRoutes } from "./routes/risk.js";
 import { emailRoutes } from "./routes/email.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
@@ -287,6 +288,7 @@ export async function createApp(
     ),
   );
   api.use(adapterRoutes());
+  // --- RK9 Custom ---
   api.use(riskRoutes(db));
   api.use(emailRoutes(db));
   api.use(resendInboundRoutes(db));

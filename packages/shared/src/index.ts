@@ -948,6 +948,7 @@ export type {
   EnvironmentSupportStatus,
 } from "./environment-support.js";
 
+// --- RK9 Custom ---
 export {
   RISK_DOMAINS,
   RISK_SEVERITIES,

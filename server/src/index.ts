@@ -664,6 +664,7 @@ export async function startServer(): Promise<StartedServer> {
     resolveSessionFromHeaders,
   });
 
+  // --- RK9 Custom: Slack, Risk, Email startup ---
   startSlackEventForwarder(db as any);
 
   {

@@ -905,9 +905,7 @@ export const PLUGIN_BRIDGE_ERROR_CODES = [
 ] as const;
 export type PluginBridgeErrorCode = (typeof PLUGIN_BRIDGE_ERROR_CODES)[number];
 
-// ---------------------------------------------------------------------------
-// Risk Management
-// ---------------------------------------------------------------------------
+// --- RK9 Custom: Risk Management ---
 
 export const RISK_DOMAINS = ["operational", "financial", "governance", "compliance"] as const;
 export type RiskDomain = (typeof RISK_DOMAINS)[number];
