@@ -656,6 +656,57 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(projectResult.map((issue) => issue.id).sort()).toEqual([executionLinkedIssueId, projectLinkedIssueId].sort());
   });
 
+  it("filters issues by goalId", async () => {
+    const companyId = randomUUID();
+    const goalId = randomUUID();
+    const otherGoalId = randomUUID();
+    const matchingIssueId = randomUUID();
+    const otherGoalIssueId = randomUUID();
+    const noGoalIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(goals).values([
+      { id: goalId, companyId, title: "Target goal", level: "task", status: "active" },
+      { id: otherGoalId, companyId, title: "Other goal", level: "task", status: "active" },
+    ]);
+
+    await db.insert(issues).values([
+      {
+        id: matchingIssueId,
+        companyId,
+        goalId,
+        title: "Matching issue",
+        status: "todo",
+        priority: "medium",
+      },
+      {
+        id: otherGoalIssueId,
+        companyId,
+        goalId: otherGoalId,
+        title: "Other goal issue",
+        status: "todo",
+        priority: "medium",
+      },
+      {
+        id: noGoalIssueId,
+        companyId,
+        title: "No goal issue",
+        status: "todo",
+        priority: "medium",
+      },
+    ]);
+
+    const result = await svc.list(companyId, { goalId });
+
+    expect(result.map((issue) => issue.id)).toEqual([matchingIssueId]);
+  });
+
   it("hides archived inbox issues until new external activity arrives", async () => {
     const companyId = randomUUID();
     const userId = "user-1";
