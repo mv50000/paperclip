@@ -119,25 +119,39 @@ export function riskIncidentService(db: Db) {
         }
 
         if (action.type === "create_approval") {
-          const [approval] = await db
-            .insert(approvals)
-            .values({
-              companyId,
-              type: "risk_incident_acknowledgment",
-              status: "pending",
-              payload: {
-                incidentId: incident.id,
-                incidentTitle: incident.title,
-                severity: incident.severity,
-                playbookCode: incident.playbookCode,
-              },
-            })
-            .returning();
-          await db
-            .update(riskIncidents)
-            .set({ approvalId: approval.id, updatedAt: new Date() })
-            .where(eq(riskIncidents.id, incident.id));
-          executedActions.push({ type: "create_approval", approvalId: approval.id, success: true });
+          const [existingApproval] = await db
+            .select({ id: approvals.id })
+            .from(approvals)
+            .where(and(
+              eq(approvals.companyId, companyId),
+              eq(approvals.type, "risk_incident_acknowledgment"),
+              eq(approvals.status, "pending"),
+              sql`${approvals.payload}->>'incidentId' = ${incident.id}`,
+            ))
+            .limit(1);
+          if (existingApproval) {
+            executedActions.push({ type: "create_approval", approvalId: existingApproval.id, success: true, skipped: true });
+          } else {
+            const [approval] = await db
+              .insert(approvals)
+              .values({
+                companyId,
+                type: "risk_incident_acknowledgment",
+                status: "pending",
+                payload: {
+                  incidentId: incident.id,
+                  incidentTitle: incident.title,
+                  severity: incident.severity,
+                  playbookCode: incident.playbookCode,
+                },
+              })
+              .returning();
+            await db
+              .update(riskIncidents)
+              .set({ approvalId: approval.id, updatedAt: new Date() })
+              .where(eq(riskIncidents.id, incident.id));
+            executedActions.push({ type: "create_approval", approvalId: approval.id, success: true });
+          }
         }
       } catch {
         executedActions.push({ type: action.type, success: false });
@@ -262,6 +276,20 @@ export function riskIncidentService(db: Db) {
       .orderBy(desc(riskIncidents.detectedAt));
   }
 
+  async function findOpenByRiskEntryId(companyId: string, riskEntryId: string) {
+    return db
+      .select()
+      .from(riskIncidents)
+      .where(
+        and(
+          eq(riskIncidents.companyId, companyId),
+          eq(riskIncidents.riskEntryId, riskEntryId),
+          inArray(riskIncidents.status, ["detected", "acknowledged", "investigating", "mitigating"]),
+        ),
+      )
+      .limit(1);
+  }
+
   async function addTimelineEntry(
     companyId: string,
     incidentId: string,
@@ -291,6 +319,7 @@ export function riskIncidentService(db: Db) {
     getIncident,
     listIncidents,
     listOpenIncidents,
+    findOpenByRiskEntryId,
     addTimelineEntry,
   };
 }
