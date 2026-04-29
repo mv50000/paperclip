@@ -1,0 +1,12 @@
+[Unit]
+Description=Aja Paperclip E2E-smoke yrityksille viikoittain (ma 05:00)
+Documentation=https://github.com/anthropics/claude-code (paperclip/tests/e2e-companies/README.md)
+
+[Timer]
+OnCalendar=Mon *-*-* 05:00:00 Europe/Helsinki
+Persistent=true
+RandomizedDelaySec=10min
+Unit=paperclip-e2e-companies.service
+
+[Install]
+WantedBy=timers.target

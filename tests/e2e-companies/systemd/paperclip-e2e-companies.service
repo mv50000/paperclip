@@ -1,0 +1,23 @@
+[Unit]
+Description=Paperclip — viikoittainen E2E-smoke yritysten dev-instansseille
+Documentation=https://github.com/anthropics/claude-code (paperclip/tests/e2e-companies/README.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=rk9admin
+Group=rk9admin
+WorkingDirectory=/home/rk9admin/paperclip
+EnvironmentFile=-/etc/default/paperclip-e2e-companies
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/rk9admin/paperclip/scripts/e2e-companies-run.sh
+TimeoutStartSec=30min
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+# Sandboxing
+PrivateTmp=true
+NoNewPrivileges=true

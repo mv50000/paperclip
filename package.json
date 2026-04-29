@@ -41,6 +41,9 @@
     "evals:smoke": "cd evals/promptfoo && npx promptfoo@0.103.3 eval",
     "test:release-smoke": "npx playwright test --config tests/release-smoke/playwright.config.ts",
     "test:release-smoke:headed": "npx playwright test --config tests/release-smoke/playwright.config.ts --headed",
+    "test:e2e:companies": "npx playwright test --config tests/e2e-companies/playwright.config.ts",
+    "test:e2e:companies:headed": "npx playwright test --config tests/e2e-companies/playwright.config.ts --headed",
+    "e2e:companies:report": "tsx scripts/e2e-companies-report.ts",
     "metrics:paperclip-commits": "tsx scripts/paperclip-commit-metrics.ts",
     "prepare": "git config core.hooksPath .githooks || true"
   },
@@ -48,6 +51,7 @@
     "@playwright/test": "^1.58.2",
     "cross-env": "^10.1.0",
     "esbuild": "^0.27.3",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   },

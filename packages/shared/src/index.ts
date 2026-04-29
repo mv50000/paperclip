@@ -613,6 +613,7 @@ export {
   testAdapterEnvironmentSchema,
   agentPermissionsSchema,
   updateAgentPermissionsSchema,
+  recordExternalRunSchema, // RK9 Custom
   type CreateAgent,
   type CreateAgentHire,
   type UpdateAgent,
@@ -625,6 +626,7 @@ export {
   type ResetAgentSession,
   type TestAdapterEnvironment,
   type UpdateAgentPermissions,
+  type RecordExternalRun, // RK9 Custom
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
