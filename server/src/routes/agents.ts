@@ -13,6 +13,7 @@ import {
   createAgentSchema,
   deriveAgentUrlKey,
   isUuidLike,
+  recordExternalRunSchema, // RK9 Custom
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   type AgentSkillSnapshot,
@@ -2352,6 +2353,36 @@ export function agentRoutes(
 
     res.status(201).json(key);
   });
+
+  // --- RK9 Custom ---
+  // External-run reporting endpoint for non-LLM agents that drive themselves
+  // (e.g. systemd-timer running Playwright smoke). The agent self-authenticates
+  // with its own API key; only the agent itself can post a run for itself.
+  router.post("/agents/:id/external-runs", validate(recordExternalRunSchema), async (req, res) => {
+    const id = req.params.id as string;
+    if (req.actor.type !== "agent" || req.actor.agentId !== id) {
+      res.status(403).json({ error: "Agent self-authentication required" });
+      return;
+    }
+    const result = await svc.recordExternalRun(id, req.body);
+    await logActivity(db, {
+      companyId: result.companyId,
+      actorType: "agent",
+      actorId: id,
+      agentId: id,
+      runId: req.actor.runId,
+      action: "agent.external_run_recorded",
+      entityType: "heartbeat_run",
+      entityId: result.id,
+      details: {
+        status: result.status,
+        summary: req.body.summary ?? null,
+        externalRunId: req.body.externalRunId ?? null,
+      },
+    });
+    res.status(201).json(result);
+  });
+  // --- /RK9 Custom ---
 
   router.delete("/agents/:id/keys/:keyId", async (req, res) => {
     assertBoard(req);

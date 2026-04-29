@@ -669,6 +669,59 @@ export function agentService(db: Db) {
       return rows[0] ?? null;
     },
 
+    // --- RK9 Custom ---
+    recordExternalRun: async (
+      agentId: string,
+      input: {
+        status: "succeeded" | "failed" | "cancelled";
+        summary?: string;
+        durationMs?: number;
+        contextSnapshot?: Record<string, unknown>;
+        externalRunId?: string;
+        exitCode?: number;
+        errorMessage?: string;
+      },
+    ) => {
+      const agent = await getById(agentId);
+      if (!agent) throw notFound("Agent not found");
+      if (agent.status === "terminated" || agent.status === "pending_approval") {
+        throw conflict(`Agent is ${agent.status}`);
+      }
+      const finishedAt = new Date();
+      const startedAt = input.durationMs
+        ? new Date(finishedAt.getTime() - input.durationMs)
+        : finishedAt;
+      const [created] = await db
+        .insert(heartbeatRuns)
+        .values({
+          companyId: agent.companyId,
+          agentId,
+          invocationSource: "automation",
+          triggerDetail: "system",
+          status: input.status,
+          startedAt,
+          finishedAt,
+          exitCode: input.exitCode ?? null,
+          error: input.errorMessage ?? null,
+          resultJson: input.summary ? { summary: input.summary } : null,
+          contextSnapshot: input.contextSnapshot ?? { external: true },
+          externalRunId: input.externalRunId ?? null,
+        })
+        .returning();
+      await db
+        .update(agents)
+        .set({ lastHeartbeatAt: finishedAt, updatedAt: finishedAt })
+        .where(eq(agents.id, agentId));
+      return {
+        id: created.id,
+        status: created.status,
+        startedAt: created.startedAt,
+        finishedAt: created.finishedAt,
+        companyId: agent.companyId,
+      };
+    },
+    // --- /RK9 Custom ---
+
     orgForCompany: async (companyId: string) => {
       const rows = await db
         .select()

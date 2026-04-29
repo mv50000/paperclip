@@ -95,6 +95,24 @@ export const createAgentKeySchema = z.object({
 
 export type CreateAgentKey = z.infer<typeof createAgentKeySchema>;
 
+// --- RK9 Custom ---
+// External run reporting for non-LLM agents (e.g. systemd-driven smoke). The
+// agent self-authenticates with its own API key and posts a completed run so
+// it shows up in heartbeat_runs + activity_log + lastHeartbeatAt without going
+// through the issue/wakeup pipeline.
+export const recordExternalRunSchema = z.object({
+  status: z.enum(["succeeded", "failed", "cancelled"]),
+  summary: z.string().trim().max(500).optional(),
+  durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
+  contextSnapshot: z.record(z.unknown()).optional(),
+  externalRunId: z.string().trim().min(1).max(200).optional(),
+  exitCode: z.number().int().optional(),
+  errorMessage: z.string().trim().max(2000).optional(),
+});
+
+export type RecordExternalRun = z.infer<typeof recordExternalRunSchema>;
+// --- /RK9 Custom ---
+
 export const agentMineInboxQuerySchema = z.object({
   userId: z.string().trim().min(1),
   status: z.string().trim().min(1).optional().default(INBOX_MINE_ISSUE_STATUS_FILTER),
