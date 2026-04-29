@@ -54,5 +54,8 @@ tests/e2e/test-results/
 tests/e2e/playwright-report/
 tests/release-smoke/test-results/
 tests/release-smoke/playwright-report/
+tests/e2e-companies/test-results/
+tests/e2e-companies/playwright-report/
+tests/e2e-companies/.last-run.json
 .superset/
 .claude/worktrees/
