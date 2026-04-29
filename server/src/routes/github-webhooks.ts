@@ -5,6 +5,7 @@ import type { Db } from "@paperclipai/db";
 import { issues, issueWorkProducts } from "@paperclipai/db";
 import { issueService, logActivity } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
+import { createGithubRouter } from "../services/slack/github-router.js";
 
 const ISSUE_IDENTIFIER_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
 
@@ -35,6 +36,7 @@ interface PullRequestPayload {
 
 export function githubWebhookRoutes(db: Db) {
   const router = Router();
+  const githubRouter = createGithubRouter(db);
 
   router.post("/github/webhooks", async (req: Request, res: Response) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
@@ -56,17 +58,35 @@ export function githubWebhookRoutes(db: Db) {
       return;
     }
 
-    const event = req.headers["x-github-event"];
-    if (event !== "pull_request") {
-      res.status(200).json({ ignored: true, reason: "not a pull_request event" });
+    const event = typeof req.headers["x-github-event"] === "string" ? (req.headers["x-github-event"] as string) : "";
+    const deliveryId =
+      typeof req.headers["x-github-delivery"] === "string" ? (req.headers["x-github-delivery"] as string) : "";
+    const payloadAny = (req.body ?? {}) as Record<string, unknown>;
+    const action = typeof payloadAny.action === "string" ? payloadAny.action : "";
+    logger.info({ delivery: deliveryId, event, action }, "github webhook received");
+
+    let routerResult: Awaited<ReturnType<typeof githubRouter.handle>> = { companyId: null, dispatched: 0 };
+    try {
+      routerResult = await githubRouter.handle({ event, payload: payloadAny, deliveryId });
+    } catch (err) {
+      logger.warn({ err, delivery: deliveryId, event, action }, "github router handle failed");
+    }
+
+    const isMergedPr =
+      event === "pull_request" &&
+      action === "closed" &&
+      (payloadAny.pull_request as { merged?: boolean } | undefined)?.merged === true;
+
+    if (!isMergedPr) {
+      res.status(200).json({
+        processed: true,
+        slackDispatched: routerResult.dispatched,
+        companyId: routerResult.companyId,
+      });
       return;
     }
 
     const payload = req.body as PullRequestPayload;
-    if (payload.action !== "closed" || !payload.pull_request?.merged) {
-      res.status(200).json({ ignored: true, reason: "PR not merged" });
-      return;
-    }
 
     const pr = payload.pull_request;
     const prUrl = pr.html_url;
@@ -175,6 +195,8 @@ export function githubWebhookRoutes(db: Db) {
       processed: true,
       closedIssueCount: closedIssueIds.length,
       closedIssueIds,
+      slackDispatched: routerResult.dispatched,
+      companyId: routerResult.companyId,
     });
   });
 

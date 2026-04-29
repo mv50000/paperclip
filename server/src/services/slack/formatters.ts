@@ -7,11 +7,11 @@ export interface FormattedMessage {
   blocks: Block[];
 }
 
-function publicUrl(): string {
+export function publicUrl(): string {
   return (process.env.PAPERCLIP_PUBLIC_URL ?? "http://localhost:3100").replace(/\/$/, "");
 }
 
-function dashboardLink(companyId: string, label = "Open in Paperclip"): Block {
+export function dashboardLink(companyId: string, label = "Open in Paperclip"): Block {
   return {
     type: "context",
     elements: [
@@ -23,19 +23,23 @@ function dashboardLink(companyId: string, label = "Open in Paperclip"): Block {
   };
 }
 
-function header(text: string): Block {
+export function header(text: string): Block {
   return { type: "header", text: { type: "plain_text", text, emoji: true } };
 }
 
-function section(text: string): Block {
+export function section(text: string): Block {
   return { type: "section", text: { type: "mrkdwn", text } };
 }
 
-function fields(pairs: Array<[string, string]>): Block {
+export function fields(pairs: Array<[string, string]>): Block {
   return {
     type: "section",
     fields: pairs.map(([label, value]) => ({ type: "mrkdwn", text: `*${label}*\n${value}` })),
   };
+}
+
+export function contextLine(text: string): Block {
+  return { type: "context", elements: [{ type: "mrkdwn", text }] };
 }
 
 function asString(value: unknown, fallback = "(unknown)"): string {

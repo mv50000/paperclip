@@ -119,7 +119,7 @@ describe("github webhook routes", () => {
   });
 
   describe("event filtering", () => {
-    it("ignores non-pull_request events", async () => {
+    it("processes non-pull_request events without auto-close (router only)", async () => {
       const app = await createApp();
       const body = JSON.stringify({ action: "completed" });
       await request(app)
@@ -130,11 +130,14 @@ describe("github webhook routes", () => {
         .send(body)
         .expect(200)
         .expect((res) => {
-          expect(res.body.ignored).toBe(true);
+          expect(res.body.processed).toBe(true);
+          expect(res.body.companyId).toBeNull();
+          expect(res.body.slackDispatched).toBe(0);
         });
+      expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
-    it("ignores closed but not merged PRs", async () => {
+    it("processes closed but not merged PRs without running auto-close", async () => {
       const app = await createApp();
       const payload = makePrPayload({ merged: false });
       const body = JSON.stringify(payload);
@@ -146,12 +149,13 @@ describe("github webhook routes", () => {
         .send(body)
         .expect(200)
         .expect((res) => {
-          expect(res.body.ignored).toBe(true);
-          expect(res.body.reason).toBe("PR not merged");
+          expect(res.body.processed).toBe(true);
+          expect(res.body.slackDispatched).toBe(0);
         });
+      expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
-    it("ignores opened PRs", async () => {
+    it("processes opened PRs without running auto-close", async () => {
       const app = await createApp();
       const payload = makePrPayload({ action: "opened" });
       const body = JSON.stringify(payload);
@@ -163,8 +167,10 @@ describe("github webhook routes", () => {
         .send(body)
         .expect(200)
         .expect((res) => {
-          expect(res.body.ignored).toBe(true);
+          expect(res.body.processed).toBe(true);
+          expect(res.body.slackDispatched).toBe(0);
         });
+      expect(mockIssueService.update).not.toHaveBeenCalled();
     });
   });
 
