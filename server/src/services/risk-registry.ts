@@ -207,11 +207,11 @@ export function riskRegistryService(db: Db) {
     categoryCode: RiskCategoryCode,
     scopeType: RiskScopeType,
     scopeId: string,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const category = await getCategoryByCode(companyId, categoryCode);
-    if (!category) return;
+    if (!category) return [];
 
-    await db
+    const closed = await db
       .update(riskEntries)
       .set({
         status: "closed" as RiskEntryStatus,
@@ -226,7 +226,10 @@ export function riskRegistryService(db: Db) {
           eq(riskEntries.scopeId, scopeId),
           inArray(riskEntries.status, ["open", "escalated"]),
         ),
-      );
+      )
+      .returning({ id: riskEntries.id });
+
+    return closed.map((r) => r.id);
   }
 
   async function updateEntryStatus(

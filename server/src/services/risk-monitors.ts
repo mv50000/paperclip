@@ -93,6 +93,18 @@ export function riskMonitorService(db: Db) {
     return true;
   }
 
+  async function resolveAndCleanup(
+    companyId: string,
+    categoryCode: RiskCategoryCode,
+    scopeType: "agent" | "issue" | "company",
+    scopeId: string,
+  ): Promise<void> {
+    const closedIds = await registry.resolveMonitorRisk(companyId, categoryCode, scopeType, scopeId);
+    if (closedIds.length > 0) {
+      await incidents.autoResolveByRiskEntryIds(companyId, closedIds);
+    }
+  }
+
   async function runAgentHealthMonitor(companyId: string): Promise<MonitorResult> {
     const result: MonitorResult = { monitor: "agent_health", risksCreated: 0, risksResolved: 0, incidentsCreated: 0, errors: [] };
     const policy = await registry.getPolicy(companyId, "AGENT_SILENT");
@@ -127,7 +139,7 @@ export function riskMonitorService(db: Db) {
         if (agent.status === "paused") continue;
 
         if (!agentsWithRoutines.has(agent.id)) {
-          await registry.resolveMonitorRisk(companyId, "AGENT_SILENT", "agent", agent.id);
+          await resolveAndCleanup(companyId, "AGENT_SILENT", "agent", agent.id);
           continue;
         }
 
@@ -153,7 +165,7 @@ export function riskMonitorService(db: Db) {
             result.incidentsCreated++;
           }
         } else {
-          await registry.resolveMonitorRisk(companyId, "AGENT_SILENT", "agent", agent.id);
+          await resolveAndCleanup(companyId, "AGENT_SILENT", "agent", agent.id);
           result.risksResolved++;
         }
       }
@@ -214,7 +226,7 @@ export function riskMonitorService(db: Db) {
             result.incidentsCreated++;
           }
         } else {
-          await registry.resolveMonitorRisk(companyId, "AGENT_CRASH_LOOP", "agent", agent.id);
+          await resolveAndCleanup(companyId, "AGENT_CRASH_LOOP", "agent", agent.id);
 
           const failureCount = recentRuns.filter((r) => r.status === "failed" || r.status === "timed_out").length;
           const failureRate = failureCount / recentRuns.length;
@@ -227,7 +239,7 @@ export function riskMonitorService(db: Db) {
             );
             result.risksCreated++;
           } else {
-            await registry.resolveMonitorRisk(companyId, "AGENT_DEGRADED", "agent", agent.id);
+            await resolveAndCleanup(companyId, "AGENT_DEGRADED", "agent", agent.id);
             result.risksResolved++;
           }
         }
@@ -295,7 +307,7 @@ export function riskMonitorService(db: Db) {
             result.incidentsCreated++;
           }
         } else {
-          await registry.resolveMonitorRisk(companyId, "COST_ANOMALY", "agent", agentCost.agentId);
+          await resolveAndCleanup(companyId, "COST_ANOMALY", "agent", agentCost.agentId);
           result.risksResolved++;
         }
       }
@@ -442,7 +454,7 @@ export function riskMonitorService(db: Db) {
           );
           result.risksCreated++;
         } else {
-          await registry.resolveMonitorRisk(companyId, "MODEL_NONCOMPLIANT", "agent", agent.id);
+          await resolveAndCleanup(companyId, "MODEL_NONCOMPLIANT", "agent", agent.id);
           result.risksResolved++;
         }
 
@@ -454,7 +466,7 @@ export function riskMonitorService(db: Db) {
           );
           result.risksCreated++;
         } else {
-          await registry.resolveMonitorRisk(companyId, "ORG_ORPHAN", "agent", agent.id);
+          await resolveAndCleanup(companyId, "ORG_ORPHAN", "agent", agent.id);
           result.risksResolved++;
         }
       }

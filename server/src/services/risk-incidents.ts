@@ -312,6 +312,48 @@ export function riskIncidentService(db: Db) {
     return updated;
   }
 
+  async function autoResolveByRiskEntryIds(companyId: string, riskEntryIds: string[]): Promise<number> {
+    if (riskEntryIds.length === 0) return 0;
+
+    const openIncidents = await db
+      .select()
+      .from(riskIncidents)
+      .where(
+        and(
+          eq(riskIncidents.companyId, companyId),
+          inArray(riskIncidents.riskEntryId, riskEntryIds),
+          inArray(riskIncidents.status, ["detected", "acknowledged", "investigating", "mitigating"]),
+        ),
+      );
+
+    const now = new Date();
+    const note = "Auto-resolved: risk condition cleared";
+
+    for (const incident of openIncidents) {
+      const timeline = (incident.timelineJson as unknown as TimelineEntry[]) ?? [];
+      timeline.push({ timestamp: now.toISOString(), actor: "risk-monitor", action: "resolved", detail: note });
+
+      await db
+        .update(riskIncidents)
+        .set({
+          status: "resolved" as RiskIncidentStatus,
+          resolvedAt: now,
+          resolutionNote: note,
+          timelineJson: timeline as unknown as Record<string, unknown>[],
+          updatedAt: now,
+        })
+        .where(eq(riskIncidents.id, incident.id));
+
+      publishLiveEvent({
+        companyId,
+        type: "risk.incident.updated",
+        payload: { incidentId: incident.id, status: "resolved" },
+      });
+    }
+
+    return openIncidents.length;
+  }
+
   return {
     createIncident,
     acknowledgeIncident,
@@ -321,5 +363,6 @@ export function riskIncidentService(db: Db) {
     listOpenIncidents,
     findOpenByRiskEntryId,
     addTimelineEntry,
+    autoResolveByRiskEntryIds,
   };
 }
