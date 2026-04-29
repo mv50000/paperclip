@@ -123,6 +123,18 @@ gh pr create --repo paperclipai/paperclip --head <fork-owner>:<branch-name> ...
 
 `gh pr create` usually figures out the head ref automatically when run from a branch tracking the fork; the explicit `--head <owner>:<branch>` form is the reliable fallback when it does not.
 
+### RK9-internal changes → fork-only PR
+
+If the issue being worked on is **RK9-custom** (identifier starts with `SEC-`, `RK-`, or the change touches only RK9-specific code like `9000`-series migrations, `rk9/` branches, or files under `skills/paperclip/`), create the PR **within the fork** — not against upstream:
+
+```bash
+gh pr create --repo mv50000/paperclip --base master --head <branch-name> ...
+```
+
+This ensures the GitHub webhook on `mv50000/paperclip` fires on merge and auto-closes the linked issue. Upstream (`paperclipai/paperclip`) has no webhook configured by us, so PRs merged there will NOT auto-close Paperclip board issues.
+
+**Rule of thumb:** if the issue identifier exists on the Paperclip board, the PR must merge on `mv50000/paperclip` (directly or via cherry-pick) for auto-close to work.
+
 ### When no fork exists
 
 If `git remote -v` shows only `paperclipai/paperclip` remotes (no user fork), fall back to pushing branches to `origin` as before. Do NOT create a fork on the user's behalf — ask first.

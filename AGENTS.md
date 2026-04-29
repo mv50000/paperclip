@@ -176,7 +176,15 @@ A change is done when all are true:
 4. Docs updated when behavior or commands change
 5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
 
-## 11. Fork-Specific: HenkDz/paperclip
+## 12. Fork PR Routing (mv50000/paperclip)
+
+This instance runs on the `mv50000/paperclip` fork. GitHub webhooks for auto-closing board issues are configured **only on the fork**, not on upstream `paperclipai/paperclip`.
+
+- **RK9-internal issues** (identifiers like `SEC-*`, `RK-*`, or changes to `9000`-series migrations, `rk9/` branches, `skills/paperclip/`): create PRs **within the fork** using `gh pr create --repo mv50000/paperclip`.
+- **Upstream-worthy changes** (generic features, bug fixes applicable to all Paperclip users): create PRs against `paperclipai/paperclip` as usual, then cherry-pick to the fork after merge.
+- **Rule of thumb:** if the issue exists on the Paperclip board, the PR must merge on `mv50000/paperclip` for the webhook auto-close to fire.
+
+## 13. Fork-Specific: HenkDz/paperclip
 
 This is a fork of `paperclipai/paperclip` with QoL patches and an **external-only** Hermes adapter story on branch `feat/externalize-hermes-adapter` ([tree](https://github.com/HenkDz/paperclip/tree/feat/externalize-hermes-adapter)).
 
