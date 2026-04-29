@@ -59,3 +59,4 @@ tests/e2e-companies/playwright-report/
 tests/e2e-companies/.last-run.json
 .superset/
 .claude/worktrees/
+/.playwright-mcp/
