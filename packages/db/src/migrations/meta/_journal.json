@@ -533,6 +533,13 @@
       "when": 1777351911226,
       "tag": "9003_rk9_email_escalation",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1777629600000,
+      "tag": "9004_rk9_resolve_stale_incidents",
+      "breakpoints": true
     }
   ]
 }
