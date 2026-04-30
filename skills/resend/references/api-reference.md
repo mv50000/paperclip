@@ -18,8 +18,7 @@ Request:
   "bodyMarkdown": "...",
   "replyTo": "tuki@ololla.fi",
   "templateKey": null,
-  "templateVars": {},
-  "escalateToCeo": false
+  "templateVars": {}
 }
 ```
 
@@ -33,7 +32,7 @@ Errors:
 - 403 `{reason: "suppressed", addresses: ["..."]}` — recipient on suppression list
 - 403 `{reason: "rate_limit", scope: "agent" | "company"}` — daily quota exceeded
 - 400 `{reason: "header_injection", field: "subject"}` — CRLF detected
-- 400 `{reason: "unknown_route_key"}` — route not configured for this company
+- 404 `{reason: "unknown_route_key"}` — route not configured for this company
 
 ## POST /email/reply
 
@@ -44,8 +43,7 @@ Request:
 ```json
 {
   "inReplyToMessageId": "uuid",
-  "bodyMarkdown": "...",
-  "escalateToCeo": false
+  "bodyMarkdown": "..."
 }
 ```
 
@@ -83,14 +81,13 @@ the assigned agent or the company CEO. See `security.md` for the contract.
   "providerMessageId": "...",
   "wrapped": "<untrusted_email_body ...>...</untrusted_email_body>",
   "format": "text",
-  "attachments": [{ "id": "uuid", "filename": "...", "contentType": "...", "sizeBytes": N }]
+  "attachments": [{ "index": 0, "filename": "...", "contentType": "...", "sizeBytes": N }]
 }
 ```
 
-## GET /email/attachments/:attachmentId
-
-Streams the attachment binary. Same ACL as body. Vaihe 6 lisää ClamAV-tarkistuksen
-ennen palautusta.
+There is no dedicated `/email/attachments/:attachmentId` binary endpoint yet.
+Use the body response only as attachment metadata; do not assume attachment
+content is retrievable through the email API.
 
 ## GET /email/suppression
 
@@ -115,10 +112,10 @@ Escalate an inbound issue to the CEO.
 ```json
 {
   "messageId": "uuid",
-  "reason": "Asiakas vaatii hyvitystä, oma autonomia ei riitä",
-  "ccCustomer": false
+  "reason": "Asiakas vaatii hyvitystä, oma autonomia ei riitä"
 }
 ```
 
-Sends a copy of the metadata + your justification to the company's configured
-CEO email (mv@rk9.fi by default).
+Sends a copy of the metadata and your justification to the configured CEO email
+(`PAPERCLIP_CEO_EMAIL`, default `mikko-ville.lahti@rk9.fi`). Customer CC is not
+supported; `ccCustomer: true` is rejected.

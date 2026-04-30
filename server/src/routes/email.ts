@@ -3,6 +3,7 @@ import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { emailMessages, emailOutboundAudit } from "@paperclipai/db";
 import { createEmailService } from "../services/email/index.js";
+import { DEFAULT_CEO_EMAIL } from "../services/email/escalation.js";
 import {
   addSuppression,
   listSuppressions,
@@ -11,6 +12,20 @@ import {
 import { wrapUntrusted } from "../services/email/sanitize.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unprocessable } from "../errors.js";
+
+function sendFailureStatus(reason: string): number {
+  return reason === "header_injection" || reason === "invalid_address"
+    ? 400
+    : reason === "domain_not_verified" ||
+        reason === "suppressed" ||
+        reason === "rate_limit"
+      ? 403
+      : reason === "unknown_route_key"
+        ? 404
+        : reason === "missing_api_key"
+          ? 503
+          : 502;
+}
 
 export function emailRoutes(db: Db) {
   const router = Router();
@@ -63,6 +78,83 @@ export function emailRoutes(db: Db) {
               ? 503
               : 502;
     res.status(status).json(result);
+  });
+
+  router.post("/companies/:companyId/email/escalate", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const actor = getActorInfo(req);
+    const body = req.body ?? {};
+    if (typeof body.messageId !== "string") throw unprocessable("messageId required");
+    if (typeof body.reason !== "string" || body.reason.trim().length === 0) {
+      throw unprocessable("reason required");
+    }
+
+    const [row] = await db
+      .select()
+      .from(emailMessages)
+      .where(and(eq(emailMessages.companyId, companyId), eq(emailMessages.id, body.messageId)));
+    if (!row) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+    if (row.direction !== "inbound") {
+      res.status(409).json({ error: "parent_not_inbound" });
+      return;
+    }
+    if (actor.actorType === "agent" && row.assignedAgentId !== actor.agentId) {
+      throw forbidden("Email escalation restricted to the assigned agent");
+    }
+    if (body.ccCustomer === true) {
+      throw unprocessable("ccCustomer is not supported for CEO escalations");
+    }
+
+    const routeKey = typeof body.routeKey === "string" ? body.routeKey : row.routeKey ?? "noreply";
+    const subject = `[Eskalaatio] ${row.subject ?? "Saapunut sähköposti"}`;
+    const messageReceived = row.receivedAt?.toISOString() ?? "?";
+    const escalationBody = [
+      "Agentti eskaloi saapuneen sähköpostin ihmiselle.",
+      "",
+      `**Perustelu:** ${body.reason.trim()}`,
+      "",
+      `**Lähettäjä:** ${row.fromAddress}`,
+      `**Aihe:** ${row.subject ?? "(ei aihetta)"}`,
+      `**Saapunut:** ${messageReceived}`,
+      `**Email message ID:** ${row.id}`,
+      row.issueId ? `**Issue ID:** ${row.issueId}` : null,
+      "",
+      "Katso alkuperäinen viesti Paperclipin email-näkymästä ennen asiakkaalle vastaamista.",
+    ]
+      .filter((line): line is string => line !== null)
+      .join("\n");
+
+    const result = await service.sendEmail({
+      companyId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      routeKey,
+      to: [DEFAULT_CEO_EMAIL],
+      subject,
+      bodyMarkdown: escalationBody,
+      inReplyToMessageId: row.id,
+      templateKey: "system.escalation.manual",
+    });
+
+    if (!result.ok) {
+      res.status(sendFailureStatus(result.reason)).json(result);
+      return;
+    }
+
+    await db
+      .update(emailMessages)
+      .set({ escalatedAt: new Date() })
+      .where(and(eq(emailMessages.companyId, companyId), eq(emailMessages.id, row.id)));
+
+    res.status(202).json({
+      messageId: result.messageId,
+      providerMessageId: result.providerMessageId,
+      escalatedMessageId: row.id,
+    });
   });
 
   router.post("/companies/:companyId/email/reply", async (req, res) => {

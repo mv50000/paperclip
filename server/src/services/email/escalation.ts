@@ -22,7 +22,7 @@ import { logger } from "../../middleware/logger.js";
 import type { EmailService } from "./index.js";
 
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const DEFAULT_CEO_EMAIL = process.env.PAPERCLIP_CEO_EMAIL ?? "mikko-ville.lahti@rk9.fi";
+export const DEFAULT_CEO_EMAIL = process.env.PAPERCLIP_CEO_EMAIL ?? "mikko-ville.lahti@rk9.fi";
 
 interface EscalationCandidate {
   companyId: string;
@@ -115,9 +115,8 @@ async function escalateOne(
     "_Tämä on automaattinen eskalaatio Resend-integraatiosta._",
   ].join("\n");
 
-  // Use 'noreply' as routeKey if configured; if not, fall back to whatever
-  // the inbound used (typically 'support' or 'accounting'). Both are valid
-  // — the email is going to the CEO not the customer.
+  // Prefer the inbound route so the escalation keeps company context; if the
+  // message has no route, fall back to a conventional noreply route.
   const routeKey = candidate.routeKey ?? "noreply";
 
   const result = await service.sendEmail({
