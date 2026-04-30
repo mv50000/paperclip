@@ -53,18 +53,23 @@ export function systemPauseService(
 
   async function setPause(input: SetPauseInput): Promise<InstanceSystemPauseState> {
     const previous = await readState();
-    const continuing = previous != null && previous.source === input.source;
+    const isTransition = previous == null || previous.source !== input.source;
     const state: InstanceSystemPauseState = {
-      pausedAt: continuing ? previous!.pausedAt : new Date().toISOString(),
+      pausedAt: isTransition ? new Date().toISOString() : previous!.pausedAt,
       pausedUntil: input.until,
       reason: input.reason,
       source: input.source,
       ...(input.quotaSnapshot ? { quotaSnapshot: input.quotaSnapshot } : {}),
     };
 
-    if (!isMeaningfullyDifferent(previous, state)) {
+    if (!isTransition && !isMeaningfullyDifferent(previous, state)) {
       cache = { value: state, expiresAt: Date.now() + CACHE_TTL_MS };
       return state;
+    }
+
+    if (!isTransition) {
+      cache = { value: previous, expiresAt: Date.now() + CACHE_TTL_MS };
+      return previous!;
     }
 
     await instanceSvc.updateGeneral({ systemPause: state });
