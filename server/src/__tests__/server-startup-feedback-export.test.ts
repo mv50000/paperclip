@@ -167,9 +167,21 @@ vi.mock("../services/index.js", () => ({
   riskRegistryService: vi.fn(() => ({
     takeSnapshot: vi.fn(async () => undefined),
   })),
+  systemPauseService: vi.fn(() => ({
+    isPaused: vi.fn(async () => false),
+    getState: vi.fn(async () => null),
+  })),
   startSlackEventForwarder: vi.fn(() => ({ stop: vi.fn() })),
   createSlackClientService: vi.fn(),
   createChannelResolver: vi.fn(),
+}));
+
+vi.mock("../services/slack/index.js", () => ({
+  startSlackEventForwarder: vi.fn(() => ({ stop: vi.fn() })),
+  createSystemPauseSlackNotifier: vi.fn(() => ({
+    onPaused: vi.fn(async () => undefined),
+    onResumed: vi.fn(async () => undefined),
+  })),
 }));
 
 vi.mock("../storage/index.js", () => ({

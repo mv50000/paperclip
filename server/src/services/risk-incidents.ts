@@ -27,6 +27,7 @@ export function riskIncidentService(db: Db) {
       title: string;
       severity: RiskIncidentSeverity;
       playbookCode?: string;
+      autoActionTypes?: string[] | null;
     },
   ): Promise<IncidentRow> {
     const playbook = input.playbookCode
@@ -75,7 +76,7 @@ export function riskIncidentService(db: Db) {
     });
 
     if (playbook) {
-      await executeAutoActions(companyId, incident, playbook);
+      await executeAutoActions(companyId, incident, playbook, input.autoActionTypes);
     }
 
     return incident;
@@ -85,10 +86,14 @@ export function riskIncidentService(db: Db) {
     companyId: string,
     incident: IncidentRow,
     playbook: Playbook,
+    autoActionTypes?: string[] | null,
   ): Promise<void> {
     const executedActions: Record<string, unknown>[] = [];
+    const actions = Array.isArray(autoActionTypes)
+      ? playbook.autoActions.filter((action) => autoActionTypes.includes(action.type))
+      : playbook.autoActions;
 
-    for (const action of playbook.autoActions) {
+    for (const action of actions) {
       try {
         if (action.type === "pause_agent" && incident.riskEntryId) {
           const entry = await registry.getEntry(companyId, incident.riskEntryId);

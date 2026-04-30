@@ -4,8 +4,9 @@ Paperclip-yritykset käyttävät Resendiä outbound- ja inbound-sähköpostiin. 
 dokumentti kuvaa per-yritys-käyttöönoton: domain-verifikaatio, secretit,
 reititys, smoke-testi.
 
-> **Status:** Vaihe 1 (outbound + skill) on koodattu, smoke-testi tekemättä.
-> Vaihe 2 (inbound multi-tenant router) tulossa.
+> **Status:** Outbound, inbound multi-tenant router, suppression, deliverability
+> monitorointi ja CEO-eskalaatio ovat koodissa. Provider-smoke vaatii vielä
+> per-yritys Resend-secretit ja DNS-verifikaation.
 
 Vaiheet 1–4 tehdään yhdessä. Vaihe 5 ajetaan kun kaikki muu on kunnossa.
 
@@ -42,7 +43,7 @@ curl -X POST $PAPERCLIP_API_URL/api/companies/$COMPANY_ID/secrets \
     "value": "re_..."
   }'
 
-# Svix signing secret — inbound-webhookien verifiointiin (Vaihe 2)
+# Svix signing secret — inbound-webhookien verifiointiin
 curl -X POST $PAPERCLIP_API_URL/api/companies/$COMPANY_ID/secrets \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -86,10 +87,10 @@ SPF/DMARC ovat kaikki passattuja.
 
 ## 4. Konfiguroi reititys (`email_routes`)
 
-Vaihe 1:ssä reititystaulu on jo olemassa, mutta sitä käytetään vasta Vaihe 2
-inboundissa. Outboundin `routeKey` viittaa silti tämän taulun riveihin
-(`tuki`, `kaisa`, `noreply` jne.) — `From:`-osoite rakennetaan
-`${routeKey}@${sending_domain}`-kaavalla.
+Reititystaulua käyttää sekä outbound että inbound. Outboundin `routeKey`
+viittaa tämän taulun riveihin (`tuki`, `kaisa`, `noreply` jne.) — `From:`-osoite
+rakennetaan `${routeKey}@${sending_domain}`-kaavalla. Inbound hakee ensin
+tarkan `local_part`-osuman ja sen jälkeen `*` catch-all-rivin.
 
 Esimerkki Ololla:lle:
 
@@ -102,9 +103,9 @@ VALUES
   ($1, '*',       'ololla.fi', 'catch-all',  $aski_id,    24);
 ```
 
-(`*`-rivi on Vaihe 2 inbound-fallback. Outboundin kannalta ei tarvita.)
+(`*`-rivi on inbound-fallback. Outboundin kannalta sitä ei tarvita.)
 
-## 5. Smoke-testi (Vaihe 1 outbound)
+## 5. Smoke-testi (outbound)
 
 Kun yritys on vihreänä (`company_email_config.status='verified'`),
 `resend.api_key` tallennettu, ja `email_routes`-rivit asetettu:
@@ -158,9 +159,17 @@ curl -X POST .../email/send -d '{
 # Rate limit — käy 51 send-kutsua → 51. blokataan
 ```
 
-## Inbound (Vaihe 2 — tulossa)
+## Inbound
 
-Kun Vaihe 2 valmis, MX-tietueen oikein konfigurointi tarkoittaa, että saapuvat
-sähköpostit `tuki@<domain>` luovat automaattisesti taskin asianomaiselle
-agentille, ja agentit lukevat bodyn vain `<untrusted_email_body>`-tagien sisältä.
+Resendin inbound-webhook osoittaa endpointtiin:
+
+```text
+POST /api/webhooks/resend-inbound
+```
+
+Kun MX-tietue ja Svix signing secret ovat oikein, saapuvat sähköpostit
+`tuki@<domain>` reititetään `email_routes`-taulun mukaan, luovat tarvittaessa
+taskin asianomaiselle agentille, ja agentit lukevat bodyn vain
+`<untrusted_email_body>`-tagien sisältä.
+
 Lisätietoa: `skills/resend/references/security.md`.

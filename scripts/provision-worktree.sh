@@ -29,6 +29,70 @@ if [[ -z "$source_config_path" ]]; then
 fi
 source_env_path="$(dirname "$source_config_path")/.env"
 
+source_can_seed_database() {
+  [[ -f "$source_config_path" ]] || return 1
+
+  SOURCE_CONFIG_PATH="$source_config_path" SOURCE_ENV_PATH="$source_env_path" node <<'EOF'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+function parseEnv(contents) {
+  const out = {};
+  for (const rawLine of contents.split(/\r?\n/)) {
+    if (!rawLine.trim() || rawLine.trim().startsWith("#")) continue;
+    const match = rawLine.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    const value = match[2].trim();
+    out[match[1]] =
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+        ? value.slice(1, -1)
+        : value.replace(/\s+#.*$/, "").trim();
+  }
+  return out;
+}
+
+function expandHome(value) {
+  if (!value) return value;
+  if (value === "~") return os.homedir();
+  if (value.startsWith("~/")) return path.resolve(os.homedir(), value.slice(2));
+  return value;
+}
+
+function resolveRuntimeLikePath(value, configPath) {
+  const expanded = expandHome(value);
+  if (path.isAbsolute(expanded)) return expanded;
+  return path.resolve(path.dirname(configPath), expanded);
+}
+
+const configPath = process.env.SOURCE_CONFIG_PATH;
+const envPath = process.env.SOURCE_ENV_PATH;
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+if (config?.secrets?.provider !== "local_encrypted") process.exit(0);
+
+const env = envPath && fs.existsSync(envPath) ? parseEnv(fs.readFileSync(envPath, "utf8")) : {};
+if (env.PAPERCLIP_SECRETS_MASTER_KEY) process.exit(0);
+
+const keyFile = env.PAPERCLIP_SECRETS_MASTER_KEY_FILE || config?.secrets?.localEncrypted?.keyFilePath;
+if (!keyFile) process.exit(1);
+
+process.exit(fs.existsSync(resolveRuntimeLikePath(keyFile, configPath)) ? 0 : 1);
+EOF
+}
+
+worktree_init_seed_args=()
+if [[ -f "$source_config_path" ]]; then
+  worktree_init_seed_args+=(--from-config "$source_config_path")
+  if source_can_seed_database; then
+    worktree_init_seed_args+=(--seed-mode minimal)
+  else
+    worktree_init_seed_args+=(--no-seed)
+  fi
+else
+  worktree_init_seed_args+=(--no-seed)
+fi
+
 mkdir -p "$paperclip_dir"
 
 run_isolated_worktree_init() {
@@ -38,7 +102,7 @@ run_isolated_worktree_init() {
   if [[ -f "$base_cli_runner" && -f "$base_cli_entry" ]]; then
     (
       cd "$worktree_cwd"
-      node "$base_cli_runner" "$base_cli_entry" worktree init --force --seed-mode minimal --name "$worktree_name" --from-config "$source_config_path"
+      node "$base_cli_runner" "$base_cli_entry" worktree init --force --name "$worktree_name" "${worktree_init_seed_args[@]}"
     )
     return 0
   fi
@@ -46,7 +110,7 @@ run_isolated_worktree_init() {
   if command -v pnpm >/dev/null 2>&1 && pnpm paperclipai --help >/dev/null 2>&1; then
     (
       cd "$worktree_cwd"
-      pnpm paperclipai worktree init --force --seed-mode minimal --name "$worktree_name" --from-config "$source_config_path"
+      pnpm paperclipai worktree init --force --name "$worktree_name" "${worktree_init_seed_args[@]}"
     )
     return 0
   fi
@@ -54,7 +118,7 @@ run_isolated_worktree_init() {
   if command -v paperclipai >/dev/null 2>&1; then
     (
       cd "$worktree_cwd"
-      paperclipai worktree init --force --seed-mode minimal --name "$worktree_name" --from-config "$source_config_path"
+      paperclipai worktree init --force --name "$worktree_name" "${worktree_init_seed_args[@]}"
     )
     return 0
   fi

@@ -91,7 +91,7 @@ Returns:
   "providerMessageId": "em_msg_01HXY...",
   "wrapped": "<untrusted_email_body sender=\"...\" subject=\"...\" message_id=\"...\" length=\"N\">\n[plaintext]\n</untrusted_email_body>",
   "format": "text",
-  "attachments": [{ "id": "uuid", "filename": "...", "contentType": "...", "sizeBytes": N }]
+  "attachments": [{ "index": 0, "filename": "...", "contentType": "...", "sizeBytes": N }]
 }
 ```
 
@@ -118,10 +118,10 @@ Use this when a customer asks to be removed.
 
 ## Escalation to human CEO
 
-When you cannot resolve an issue, do not silently give up. Set
-`escalateToCeo: true` in the `email.send` body, or use the dedicated
-`POST /api/companies/:companyId/email/escalate` endpoint, which copies the
-thread's metadata to the human CEO (mv@rk9.fi by default).
+When you cannot resolve an issue, do not silently give up. Call the dedicated
+`POST /api/companies/:companyId/email/escalate` endpoint,
+which copies the thread's metadata and your reason to the human CEO
+(`PAPERCLIP_CEO_EMAIL`, default `mikko-ville.lahti@rk9.fi`).
 
 Common cases:
 - The customer is angry and refund/credit is outside your authority

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockRegistry = vi.hoisted(() => ({
   getPolicy: vi.fn(async () => null),
   upsertMonitorRisk: vi.fn(async () => ({ id: "risk-entry-1", title: "Silent agent: TestAgent" })),
-  resolveMonitorRisk: vi.fn(async () => undefined),
+  resolveMonitorRisk: vi.fn(async () => []),
   ensureBuiltinCategories: vi.fn(async () => undefined),
 }));
 
@@ -96,7 +96,7 @@ describe("runAgentHealthMonitor", () => {
     vi.resetAllMocks();
     mockRegistry.getPolicy.mockResolvedValue(null);
     mockRegistry.upsertMonitorRisk.mockResolvedValue({ id: "risk-entry-1", title: "Silent agent: TestAgent" });
-    mockRegistry.resolveMonitorRisk.mockResolvedValue(undefined);
+    mockRegistry.resolveMonitorRisk.mockResolvedValue([]);
     mockIncidents.findOpenByRiskEntryId.mockResolvedValue([]);
   });
 
@@ -134,6 +134,53 @@ describe("runAgentHealthMonitor", () => {
       expect.objectContaining({ title: "Silent agent: ActiveAgent" }),
     );
     expect(result.risksCreated).toBe(1);
+  });
+
+  it("does not create or resolve monitor risks when the policy is disabled", async () => {
+    mockRegistry.getPolicy.mockResolvedValue({
+      enabled: false,
+      thresholdJson: {},
+      autoActions: null,
+      escalationSev: null,
+    });
+    const db = createDbStub({
+      agents: [makeAgent({ id: "active-agent", name: "ActiveAgent" })],
+      agentsWithRoutines: [{ agentId: "active-agent" }],
+    });
+
+    const { riskMonitorService } = await import("../services/risk-monitors.js");
+    const service = riskMonitorService(db as any);
+    const result = await service.runAgentHealthMonitor("company-1");
+
+    expect(mockRegistry.upsertMonitorRisk).not.toHaveBeenCalled();
+    expect(mockRegistry.resolveMonitorRisk).not.toHaveBeenCalled();
+    expect(mockIncidents.createIncident).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ risksCreated: 0, risksResolved: 0, incidentsCreated: 0 });
+  });
+
+  it("passes policy auto actions and escalation severity into created incidents", async () => {
+    mockRegistry.getPolicy.mockResolvedValue({
+      enabled: true,
+      thresholdJson: {},
+      autoActions: ["create_approval"],
+      escalationSev: "sev2",
+    });
+    const db = createDbStub({
+      agents: [makeAgent({ id: "active-agent", name: "ActiveAgent" })],
+      agentsWithRoutines: [{ agentId: "active-agent" }],
+    });
+
+    const { riskMonitorService } = await import("../services/risk-monitors.js");
+    const service = riskMonitorService(db as any);
+    await service.runAgentHealthMonitor("company-1");
+
+    expect(mockIncidents.createIncident).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        severity: "sev2",
+        autoActionTypes: ["create_approval"],
+      }),
+    );
   });
 
   it("does not create duplicate incidents for same risk entry", async () => {

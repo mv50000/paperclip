@@ -48,17 +48,24 @@ interface FailureRecord {
   attachmentPaths: string[];
 }
 
+interface FlakyRecord extends FailureRecord {
+  retryCount: number;
+}
+
 interface CompanySummary {
   company: CompanyTarget;
   passed: number;
+  flaky: number;
   failed: number;
   skipped: number;
   failures: FailureRecord[];
+  flakies: FlakyRecord[];
 }
 
 interface PreviousRun {
   timestamp: string;
   failures: { company: string; testTitle: string }[];
+  flakies?: { company: string; testTitle: string }[];
 }
 
 const ROOT = path.resolve(fileURLToPath(import.meta.url), "..", "..");
@@ -121,14 +128,53 @@ function writeCurrentRun(summaries: CompanySummary[]): void {
   const failures = summaries.flatMap((s) =>
     s.failures.map((f) => ({ company: f.company.name, testTitle: f.testTitle })),
   );
-  const payload: PreviousRun = { timestamp: new Date().toISOString(), failures };
+  const flakies = summaries.flatMap((s) =>
+    s.flakies.map((f) => ({ company: f.company.name, testTitle: f.testTitle })),
+  );
+  const payload: PreviousRun = { timestamp: new Date().toISOString(), failures, flakies };
   fs.writeFileSync(STATE_PATH, JSON.stringify(payload, null, 2));
+}
+
+function isFailureStatus(status: PlaywrightTestResult["status"]): boolean {
+  return status !== "passed" && status !== "skipped";
+}
+
+function failureRecordFromResult(
+  company: CompanyTarget,
+  describePath: string,
+  spec: PlaywrightSpec,
+  result: PlaywrightTestResult,
+): FailureRecord {
+  const errorMessage = (result.errors ?? [])
+    .map((e) => e.message ?? "")
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 4000);
+  const attachmentPaths = (result.attachments ?? [])
+    .filter((a) => a.path)
+    .map((a) => a.path!);
+  const fullTitle = describePath ? `${describePath} › ${spec.title}` : spec.title;
+  return {
+    company,
+    testTitle: fullTitle,
+    specFile: spec.file,
+    errorMessage: errorMessage || "(no error message captured)",
+    attachmentPaths,
+  };
 }
 
 function summariseReport(report: PlaywrightReport): CompanySummary[] {
   const byProject = new Map<string, CompanySummary>();
   for (const co of COMPANIES) {
-    byProject.set(co.name, { company: co, passed: 0, failed: 0, skipped: 0, failures: [] });
+    byProject.set(co.name, {
+      company: co,
+      passed: 0,
+      flaky: 0,
+      failed: 0,
+      skipped: 0,
+      failures: [],
+      flakies: [],
+    });
   }
 
   const allSpecs = report.suites.flatMap((s) => flattenSpecs(s));
@@ -138,26 +184,21 @@ function summariseReport(report: PlaywrightReport): CompanySummary[] {
       if (!summary) continue;
       const lastResult = test.results[test.results.length - 1];
       if (!lastResult) continue;
-      if (lastResult.status === "passed") summary.passed++;
-      else if (lastResult.status === "skipped") summary.skipped++;
-      else {
+      const failedAttempts = test.results.slice(0, -1).filter((result) => isFailureStatus(result.status));
+      if (lastResult.status === "passed") {
+        summary.passed++;
+        if (failedAttempts.length > 0) {
+          summary.flaky++;
+          summary.flakies.push({
+            ...failureRecordFromResult(summary.company, describePath, spec, failedAttempts[0]!),
+            retryCount: failedAttempts.length,
+          });
+        }
+      } else if (lastResult.status === "skipped") {
+        summary.skipped++;
+      } else {
         summary.failed++;
-        const errorMessage = (lastResult.errors ?? [])
-          .map((e) => e.message ?? "")
-          .filter(Boolean)
-          .join("\n\n")
-          .slice(0, 4000);
-        const attachmentPaths = (lastResult.attachments ?? [])
-          .filter((a) => a.path)
-          .map((a) => a.path!);
-        const fullTitle = describePath ? `${describePath} › ${spec.title}` : spec.title;
-        summary.failures.push({
-          company: summary.company,
-          testTitle: fullTitle,
-          specFile: spec.file,
-          errorMessage: errorMessage || "(no error message captured)",
-          attachmentPaths,
-        });
+        summary.failures.push(failureRecordFromResult(summary.company, describePath, spec, lastResult));
       }
     }
   }
@@ -318,13 +359,18 @@ async function main(): Promise<void> {
 
   const totalFailures = summaries.reduce((s, c) => s + c.failed, 0);
   const totalPassed = summaries.reduce((s, c) => s + c.passed, 0);
+  const totalFlaky = summaries.reduce((s, c) => s + c.flaky, 0);
 
   console.log(`E2E-companies smoke yhteenveto:`);
   for (const s of summaries) {
     const tag = s.failed > 0 ? `❌ FAIL ${s.failed}` : "✅ PASS";
-    console.log(`  ${s.company.name.padEnd(12)} ${tag} (passed=${s.passed}, skipped=${s.skipped})`);
+    const flakyPart = s.flaky > 0 ? `, flaky=${s.flaky}` : "";
+    console.log(`  ${s.company.name.padEnd(12)} ${tag} (passed=${s.passed}${flakyPart}, skipped=${s.skipped})`);
+    for (const flaky of s.flakies) {
+      console.log(`    ⚠️  flaky after ${flaky.retryCount} failed attempt(s): ${flaky.testTitle}`);
+    }
   }
-  console.log(`Total: ${totalPassed} passed, ${totalFailures} failed.`);
+  console.log(`Total: ${totalPassed} passed, ${totalFlaky} flaky, ${totalFailures} failed.`);
 
   // Resolve agent self per token. Side effect: agent_api_keys.last_used_at päivittyy.
   let agentSelfMap: Map<string, AgentSelf>;
@@ -373,7 +419,7 @@ async function main(): Promise<void> {
     // External-run heartbeat (vihreille ja failureille)
     if (!DRY_RUN && token && self) {
       const status: "succeeded" | "failed" = summary.failed > 0 ? "failed" : "succeeded";
-      const summaryText = `passed=${summary.passed} failed=${summary.failed} skipped=${summary.skipped}`;
+      const summaryText = `passed=${summary.passed} flaky=${summary.flaky} failed=${summary.failed} skipped=${summary.skipped}`;
       await recordExternalRun(token, self.agentId, {
         status,
         summary: summaryText,
@@ -383,11 +429,16 @@ async function main(): Promise<void> {
           source: "scripts/e2e-companies-report.ts",
           baseUrl: summary.company.baseUrl,
           passed: summary.passed,
+          flaky: summary.flaky,
           failed: summary.failed,
           skipped: summary.skipped,
           recurringFailures: summary.failures.filter((f) =>
             recurringKeys.has(`${f.company.name}::${f.testTitle}`),
           ).length,
+          flakies: summary.flakies.map((f) => ({
+            testTitle: f.testTitle,
+            retryCount: f.retryCount,
+          })),
         },
       });
       console.log(`→ ${summary.company.name}: external-run ${status} rekisteröity`);
