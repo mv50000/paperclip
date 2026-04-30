@@ -6397,6 +6397,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     if (systemPause && (await systemPause.isPaused())) {
       await writeSkippedRequest("system.paused");
+      if (source === "timer" || source === "automation") {
+        return null;
+      }
       const state = await systemPause.getState();
       throw conflict(`System paused: ${state?.reason ?? "Paused"}`, {
         source: state?.source ?? "manual",
@@ -7515,6 +7518,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     buildRunOutputSilence,
 
     tickTimers: async (now = new Date()) => {
+      if (systemPause && (await systemPause.isPaused())) {
+        return { checked: 0, enqueued: 0, skipped: 0 };
+      }
       const allAgents = await db.select().from(agents);
       let checked = 0;
       let enqueued = 0;
