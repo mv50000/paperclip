@@ -854,9 +854,10 @@ export async function startServer(): Promise<StartedServer> {
         return;
       }
 
+      const threshold = config.systemPauseThresholdPct;
       let sessionPct: number | null = null;
       let weekPct: number | null = null;
-      let earliestReset: string | null = null;
+      let blockingReset: string | null = null;
 
       for (const window of anthropic.windows) {
         const labelLower = window.label.toLowerCase();
@@ -866,15 +867,14 @@ export async function startServer(): Promise<StartedServer> {
         } else if (labelLower.startsWith("current week")) {
           weekPct = weekPct == null ? window.usedPercent : Math.max(weekPct, window.usedPercent);
         }
-        if (window.resetsAt) {
-          if (!earliestReset || window.resetsAt < earliestReset) {
-            earliestReset = window.resetsAt;
+        if (window.usedPercent >= threshold && window.resetsAt) {
+          if (!blockingReset || window.resetsAt > blockingReset) {
+            blockingReset = window.resetsAt;
           }
         }
       }
 
       const maxPct = Math.max(sessionPct ?? 0, weekPct ?? 0);
-      const threshold = config.systemPauseThresholdPct;
       const current = await systemPauseSvc.getState();
 
       if (maxPct >= threshold) {
@@ -884,7 +884,7 @@ export async function startServer(): Promise<StartedServer> {
         await systemPauseSvc.setPause({
           source: "auto",
           reason: `auto-pause: session=${sessionPct ?? "?"}% week=${weekPct ?? "?"}% (≥${threshold}%)`,
-          until: earliestReset,
+          until: blockingReset,
           quotaSnapshot: { sessionPct, weekPct },
         });
       } else if (current && current.source === "auto") {

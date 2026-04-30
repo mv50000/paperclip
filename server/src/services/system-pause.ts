@@ -62,26 +62,31 @@ export function systemPauseService(
       ...(input.quotaSnapshot ? { quotaSnapshot: input.quotaSnapshot } : {}),
     };
 
-    if (!isTransition && !isMeaningfullyDifferent(previous, state)) {
-      cache = { value: state, expiresAt: Date.now() + CACHE_TTL_MS };
-      return state;
-    }
+    const pausedUntilChanged = previous != null && previous.pausedUntil !== state.pausedUntil;
+    const shouldWriteDb = isTransition || pausedUntilChanged;
 
-    if (!isTransition) {
-      cache = { value: previous, expiresAt: Date.now() + CACHE_TTL_MS };
+    if (!shouldWriteDb) {
+      cache = { value: previous!, expiresAt: Date.now() + CACHE_TTL_MS };
       return previous!;
     }
 
     await instanceSvc.updateGeneral({ systemPause: state });
     invalidateCache();
-    logger.warn({ source: state.source, reason: state.reason, pausedUntil: state.pausedUntil }, "System paused");
 
-    if (hooks.onPaused) {
-      try {
-        await hooks.onPaused(state);
-      } catch (err) {
-        logger.error({ err }, "system-pause onPaused hook failed");
+    if (isTransition) {
+      logger.warn({ source: state.source, reason: state.reason, pausedUntil: state.pausedUntil }, "System paused");
+      if (hooks.onPaused) {
+        try {
+          await hooks.onPaused(state);
+        } catch (err) {
+          logger.error({ err }, "system-pause onPaused hook failed");
+        }
       }
+    } else {
+      logger.info(
+        { source: state.source, oldPausedUntil: previous!.pausedUntil, newPausedUntil: state.pausedUntil },
+        "System pause pausedUntil corrected (no notification)",
+      );
     }
     return state;
   }
