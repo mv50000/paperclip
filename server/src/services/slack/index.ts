@@ -19,3 +19,4 @@ export {
   createSlackInteractionsService,
   type SlackInteractionsService,
 } from "./interactions.js";
+export { createSystemPauseSlackNotifier } from "./system-notify.js";

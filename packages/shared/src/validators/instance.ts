@@ -24,6 +24,25 @@ export const backupRetentionPolicySchema = z.object({
   monthlyMonths: presetSchema(MONTHLY_RETENTION_PRESETS, "monthlyMonths").default(DEFAULT_BACKUP_RETENTION.monthlyMonths),
 });
 
+export const systemPauseSourceSchema = z.enum(["auto", "manual"]);
+
+export const systemPauseQuotaSnapshotSchema = z.object({
+  sessionPct: z.number().nullable(),
+  weekPct: z.number().nullable(),
+}).strict();
+
+export const instanceSystemPauseStateSchema = z.object({
+  pausedAt: z.string(),
+  pausedUntil: z.string().nullable(),
+  reason: z.string(),
+  source: systemPauseSourceSchema,
+  quotaSnapshot: systemPauseQuotaSnapshotSchema.optional(),
+}).strict();
+
+export const manualPauseRequestSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+}).strict();
+
 export const instanceGeneralSettingsSchema = z.object({
   censorUsernameInLogs: z.boolean().default(false),
   keyboardShortcuts: z.boolean().default(false),
@@ -31,6 +50,7 @@ export const instanceGeneralSettingsSchema = z.object({
     DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
   ),
   backupRetention: backupRetentionPolicySchema.default(DEFAULT_BACKUP_RETENTION),
+  systemPause: instanceSystemPauseStateSchema.nullable().default(null),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();
@@ -63,6 +83,7 @@ export type InstanceGeneralSettings = z.infer<typeof instanceGeneralSettingsSche
 export type PatchInstanceGeneralSettings = z.infer<typeof patchInstanceGeneralSettingsSchema>;
 export type InstanceExperimentalSettings = z.infer<typeof instanceExperimentalSettingsSchema>;
 export type PatchInstanceExperimentalSettings = z.infer<typeof patchInstanceExperimentalSettingsSchema>;
+export type ManualPauseRequest = z.infer<typeof manualPauseRequestSchema>;
 export type IssueGraphLivenessAutoRecoveryRequest = z.infer<
   typeof issueGraphLivenessAutoRecoveryRequestSchema
 >;

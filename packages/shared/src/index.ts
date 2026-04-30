@@ -264,6 +264,9 @@ export type {
   InstanceExperimentalSettings,
   InstanceGeneralSettings,
   InstanceSettings,
+  InstanceSystemPauseState,
+  SystemPauseSource,
+  SystemPauseQuotaSnapshot,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
   BackupRetentionPolicy,
@@ -553,6 +556,7 @@ export {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  SYSTEM_PAUSE_DEFAULT_THRESHOLD_PCT,
 } from "./types/instance.js";
 
 export {
@@ -569,6 +573,11 @@ export {
   issueGraphLivenessAutoRecoveryRequestSchema,
   type PatchInstanceExperimentalSettings,
   type IssueGraphLivenessAutoRecoveryRequest,
+  instanceSystemPauseStateSchema,
+  manualPauseRequestSchema,
+  systemPauseSourceSchema,
+  systemPauseQuotaSnapshotSchema,
+  type ManualPauseRequest,
 } from "./validators/index.js";
 
 export {

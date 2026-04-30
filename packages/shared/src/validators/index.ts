@@ -9,6 +9,11 @@ export {
   type InstanceExperimentalSettings,
   type PatchInstanceExperimentalSettings,
   type IssueGraphLivenessAutoRecoveryRequest,
+  instanceSystemPauseStateSchema,
+  manualPauseRequestSchema,
+  systemPauseSourceSchema,
+  systemPauseQuotaSnapshotSchema,
+  type ManualPauseRequest,
 } from "./instance.js";
 
 export {

@@ -46,6 +46,7 @@ import { secretService } from "./secrets.js";
 import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
+import type { SystemPauseService } from "./system-pause.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
@@ -364,13 +365,16 @@ export function routineService(
   deps: {
     heartbeat?: IssueAssignmentWakeupDeps;
     pluginWorkerManager?: PluginWorkerManager;
+    systemPause?: SystemPauseService;
   } = {},
 ) {
   const issueSvc = issueService(db);
   const secretsSvc = secretService(db);
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
+    systemPause: deps.systemPause,
   });
+  const systemPause = deps.systemPause;
 
   async function getRoutineById(id: string) {
     return db
@@ -1630,6 +1634,9 @@ export function routineService(
     },
 
     tickScheduledTriggers: async (now: Date = new Date()) => {
+      if (systemPause && (await systemPause.isPaused(now))) {
+        return { triggered: 0, skipped: "system_paused" as const };
+      }
       const due = await db
         .select({
           trigger: routineTriggers,

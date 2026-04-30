@@ -1,10 +1,25 @@
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { QuotaWindow } from "@paperclipai/shared";
 import { cn, quotaSourceDisplayName } from "@/lib/utils";
+import { instanceSettingsApi } from "@/api/instanceSettings";
+import { queryKeys } from "@/lib/queryKeys";
+import { Button } from "@/components/ui/button";
 
 interface ClaudeSubscriptionPanelProps {
   windows: QuotaWindow[];
   source?: string | null;
   error?: string | null;
+}
+
+function formatLocalTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
 const WINDOW_ORDER = [
@@ -57,6 +72,32 @@ export function ClaudeSubscriptionPanel({
   error = null,
 }: ClaudeSubscriptionPanelProps) {
   const ordered = orderedWindows(windows);
+  const queryClient = useQueryClient();
+  const [showPauseConfirm, setShowPauseConfirm] = useState(false);
+
+  const pauseStateQuery = useQuery({
+    queryKey: queryKeys.instance.systemPause,
+    queryFn: () => instanceSettingsApi.getSystemPauseState(),
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+  const pauseState = pauseStateQuery.data?.state ?? null;
+
+  const pauseMutation = useMutation({
+    mutationFn: (reason?: string) => instanceSettingsApi.pauseSystem(reason ? { reason } : {}),
+    onSuccess: (data) => {
+      queryClient.setQueryData(queryKeys.instance.systemPause, data);
+    },
+  });
+  const resumeMutation = useMutation({
+    mutationFn: () => instanceSettingsApi.resumeSystem(),
+    onSuccess: () => {
+      queryClient.setQueryData(queryKeys.instance.systemPause, { state: null });
+    },
+  });
+
+  const isPaused = pauseState != null;
+  const isMutating = pauseMutation.isPending || resumeMutation.isPending;
 
   return (
     <div className="border border-border px-4 py-4">
@@ -69,12 +110,89 @@ export function ClaudeSubscriptionPanel({
             Live Claude quota windows.
           </div>
         </div>
-        {source ? (
-          <span className="shrink-0 border border-border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-            {quotaSourceDisplayName(source)}
-          </span>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-2">
+          {source ? (
+            <span className="border border-border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              {quotaSourceDisplayName(source)}
+            </span>
+          ) : null}
+          {isPaused ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="default"
+              disabled={isMutating}
+              onClick={() => resumeMutation.mutate()}
+            >
+              {resumeMutation.isPending ? "Resuming…" : "Resume"}
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isMutating}
+              onClick={() => setShowPauseConfirm(true)}
+            >
+              Pause
+            </Button>
+          )}
+        </div>
       </div>
+
+      {isPaused ? (
+        <div className="mt-4 border border-red-500/40 bg-red-500/10 px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-red-700 dark:text-red-300">
+                Paperclip is paused
+              </div>
+              <div className="mt-1 text-sm text-red-700/90 dark:text-red-200/90">
+                {pauseState!.reason}
+              </div>
+              <div className="mt-1 text-xs text-red-700/80 dark:text-red-200/80">
+                {pauseState!.source === "auto" ? "Automatic pause" : "Manual pause"}
+                {pauseState!.pausedUntil
+                  ? ` • Auto-resumes ${formatLocalTime(pauseState!.pausedUntil)}`
+                  : " • Resumes manually"}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showPauseConfirm && !isPaused ? (
+        <div className="mt-4 border border-border bg-muted/30 px-3 py-3">
+          <div className="text-sm font-medium text-foreground">Pause all new agent runs?</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Active runs continue. New routine, scheduled, and manual runs are blocked until you Resume.
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="default"
+              disabled={pauseMutation.isPending}
+              onClick={() => {
+                pauseMutation.mutate(undefined, {
+                  onSuccess: () => setShowPauseConfirm(false),
+                });
+              }}
+            >
+              {pauseMutation.isPending ? "Pausing…" : "Confirm pause"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={pauseMutation.isPending}
+              onClick={() => setShowPauseConfirm(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {error ? (
         <div className="mt-4 border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">

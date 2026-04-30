@@ -88,6 +88,9 @@ export interface Config {
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
   slackSigningSecret: string | undefined;
+  systemPauseAutoEnabled: boolean;
+  systemPauseCheckIntervalMs: number;
+  systemPauseThresholdPct: number;
 }
 
 function detectTailnetBindHost(): string | undefined {
@@ -335,5 +338,8 @@ export function loadConfig(): Config {
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
     slackSigningSecret: process.env.SLACK_SIGNING_SECRET?.trim() || undefined,
+    systemPauseAutoEnabled: process.env.SYSTEM_PAUSE_AUTO_ENABLED !== "false",
+    systemPauseCheckIntervalMs: Math.max(60000, Number(process.env.SYSTEM_PAUSE_CHECK_INTERVAL_MS) || 300_000),
+    systemPauseThresholdPct: Math.min(100, Math.max(50, Number(process.env.SYSTEM_PAUSE_THRESHOLD_PCT) || 90)),
   };
 }

@@ -30,6 +30,9 @@ export type {
   BackupRetentionPolicy,
   IssueGraphLivenessAutoRecoveryPreview,
   IssueGraphLivenessAutoRecoveryPreviewItem,
+  InstanceSystemPauseState,
+  SystemPauseSource,
+  SystemPauseQuotaSnapshot,
 } from "./instance.js";
 export {
   DAILY_RETENTION_PRESETS,
@@ -39,6 +42,7 @@ export {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  SYSTEM_PAUSE_DEFAULT_THRESHOLD_PCT,
 } from "./instance.js";
 export type {
   CompanySkillSourceType,

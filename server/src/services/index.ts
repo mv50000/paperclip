@@ -40,6 +40,7 @@ export { inboxDismissalService } from "./inbox-dismissals.js";
 export { accessService } from "./access.js";
 export { boardAuthService } from "./board-auth.js";
 export { instanceSettingsService } from "./instance-settings.js";
+export { systemPauseService, type SystemPauseService } from "./system-pause.js";
 export { companyPortabilityService } from "./company-portability.js";
 export { environmentService } from "./environments.js";
 export { executionWorkspaceService } from "./execution-workspaces.js";

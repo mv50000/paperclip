@@ -2,12 +2,18 @@ import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   issueGraphLivenessAutoRecoveryRequestSchema,
+  manualPauseRequestSchema,
   patchInstanceExperimentalSettingsSchema,
   patchInstanceGeneralSettingsSchema,
 } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
-import { heartbeatService, instanceSettingsService, logActivity } from "../services/index.js";
+import {
+  heartbeatService,
+  instanceSettingsService,
+  logActivity,
+  type SystemPauseService,
+} from "../services/index.js";
 import { assertBoardOrgAccess, getActorInfo } from "./authz.js";
 
 function assertCanManageInstanceSettings(req: Request) {
@@ -20,10 +26,15 @@ function assertCanManageInstanceSettings(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
-export function instanceSettingsRoutes(db: Db) {
+export interface InstanceSettingsRoutesOptions {
+  systemPause?: SystemPauseService;
+}
+
+export function instanceSettingsRoutes(db: Db, opts: InstanceSettingsRoutesOptions = {}) {
   const router = Router();
   const svc = instanceSettingsService(db);
   const heartbeat = heartbeatService(db);
+  const systemPause = opts.systemPause;
 
   router.get("/instance/settings/general", async (req, res) => {
     // General settings (e.g. keyboardShortcuts) are readable by any
@@ -146,6 +157,78 @@ export function instanceSettingsRoutes(db: Db) {
       res.json(result);
     },
   );
+
+  router.get("/instance/system-pause", async (req, res) => {
+    assertBoardOrgAccess(req);
+    if (!systemPause) {
+      res.json({ state: null });
+      return;
+    }
+    res.json({ state: await systemPause.getState() });
+  });
+
+  router.post(
+    "/instance/system-pause",
+    validate(manualPauseRequestSchema),
+    async (req, res) => {
+      assertCanManageInstanceSettings(req);
+      if (!systemPause) {
+        throw forbidden("System pause service not available");
+      }
+      const reason = (req.body.reason as string | undefined)?.trim() || "Manual pause";
+      const state = await systemPause.setPause({
+        reason,
+        until: null,
+        source: "manual",
+      });
+      const actor = getActorInfo(req);
+      const companyIds = await svc.listCompanyIds();
+      await Promise.all(
+        companyIds.map((companyId) =>
+          logActivity(db, {
+            companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "instance.system_paused",
+            entityType: "instance_settings",
+            entityId: "default",
+            details: { reason: state.reason, source: state.source },
+          }),
+        ),
+      );
+      res.json({ state });
+    },
+  );
+
+  router.post("/instance/system-resume", async (req, res) => {
+    assertCanManageInstanceSettings(req);
+    if (!systemPause) {
+      throw forbidden("System pause service not available");
+    }
+    const cleared = await systemPause.clearPause("manual");
+    const actor = getActorInfo(req);
+    if (cleared) {
+      const companyIds = await svc.listCompanyIds();
+      await Promise.all(
+        companyIds.map((companyId) =>
+          logActivity(db, {
+            companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "instance.system_resumed",
+            entityType: "instance_settings",
+            entityId: "default",
+            details: { clearedBy: "manual" },
+          }),
+        ),
+      );
+    }
+    res.json({ state: null, cleared });
+  });
 
   return router;
 }

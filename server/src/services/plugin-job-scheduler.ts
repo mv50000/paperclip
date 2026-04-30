@@ -41,6 +41,7 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
+import type { SystemPauseService } from "./system-pause.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -75,6 +76,8 @@ export interface PluginJobSchedulerOptions {
   jobTimeoutMs?: number;
   /** Maximum number of concurrent job executions (default: 10). */
   maxConcurrentJobs?: number;
+  /** Optional global pause check; when active, ticks short-circuit before claiming jobs. */
+  systemPause?: SystemPauseService;
 }
 
 /**
@@ -210,6 +213,7 @@ export function createPluginJobScheduler(
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     jobTimeoutMs = DEFAULT_JOB_TIMEOUT_MS,
     maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS,
+    systemPause,
   } = options;
 
   const log = logger.child({ service: "plugin-job-scheduler" });
@@ -247,6 +251,12 @@ export function createPluginJobScheduler(
     // Prevent overlapping ticks (in case a tick takes longer than the interval)
     if (tickInProgress) {
       log.debug("skipping tick — previous tick still in progress");
+      return;
+    }
+
+    if (systemPause && (await systemPause.isPaused())) {
+      lastTickAt = new Date();
+      log.debug("skipping tick — system paused");
       return;
     }
 

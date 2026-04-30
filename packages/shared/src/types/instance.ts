@@ -19,11 +19,29 @@ export const DEFAULT_BACKUP_RETENTION: BackupRetentionPolicy = {
   monthlyMonths: 1,
 };
 
+export type SystemPauseSource = "auto" | "manual";
+
+export interface SystemPauseQuotaSnapshot {
+  sessionPct: number | null;
+  weekPct: number | null;
+}
+
+export interface InstanceSystemPauseState {
+  pausedAt: string;
+  pausedUntil: string | null;
+  reason: string;
+  source: SystemPauseSource;
+  quotaSnapshot?: SystemPauseQuotaSnapshot;
+}
+
+export const SYSTEM_PAUSE_DEFAULT_THRESHOLD_PCT = 90;
+
 export interface InstanceGeneralSettings {
   censorUsernameInLogs: boolean;
   keyboardShortcuts: boolean;
   feedbackDataSharingPreference: FeedbackDataSharingPreference;
   backupRetention: BackupRetentionPolicy;
+  systemPause: InstanceSystemPauseState | null;
 }
 
 export interface InstanceExperimentalSettings {

@@ -36,10 +36,12 @@ import {
   riskMonitorService,
   riskRegistryService,
   routineService,
+  systemPauseService,
 } from "./services/index.js";
+import { fetchAllQuotaWindows } from "./services/quota-windows.js";
 import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
-import { startSlackEventForwarder } from "./services/slack/index.js";
+import { startSlackEventForwarder, createSystemPauseSlackNotifier } from "./services/slack/index.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
 import { createEmailService } from "./services/email/index.js";
@@ -541,6 +543,14 @@ export async function startServer(): Promise<StartedServer> {
     shareClient: createFeedbackTraceShareClientFromConfig(config),
   });
   const backupSettingsSvc = instanceSettingsService(db);
+  const systemPauseSlackNotifier = createSystemPauseSlackNotifier({
+    db: db as any,
+    listCompanyIds: () => backupSettingsSvc.listCompanyIds(),
+  });
+  const systemPauseSvc = systemPauseService(backupSettingsSvc, {
+    onPaused: (state) => systemPauseSlackNotifier.onPaused(state),
+    onResumed: (previous) => systemPauseSlackNotifier.onResumed(previous),
+  });
   let databaseBackupInFlight = false;
   const runServerDatabaseBackup = async (
     trigger: InstanceDatabaseBackupTrigger,
@@ -626,6 +636,7 @@ export async function startServer(): Promise<StartedServer> {
     resolveSession,
     pluginWorkerManager,
     slackSigningSecret: config.slackSigningSecret,
+    systemPause: systemPauseSvc,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 
@@ -726,8 +737,8 @@ export async function startServer(): Promise<StartedServer> {
     });
   
   if (config.heartbeatSchedulerEnabled) {
-    const heartbeat = heartbeatService(db as any, { pluginWorkerManager });
-    const routines = routineService(db as any, { pluginWorkerManager });
+    const heartbeat = heartbeatService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc });
+    const routines = routineService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc });
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,
     // then resume any persisted queued runs that were waiting on the previous process.
@@ -826,7 +837,72 @@ export async function startServer(): Promise<StartedServer> {
         });
     }, config.heartbeatSchedulerIntervalMs);
   }
-  
+
+  if (config.systemPauseAutoEnabled) {
+    logger.info(
+      {
+        intervalMs: config.systemPauseCheckIntervalMs,
+        thresholdPct: config.systemPauseThresholdPct,
+      },
+      "Auto-pause monitor enabled",
+    );
+
+    const evaluateAutoPause = async () => {
+      const results = await fetchAllQuotaWindows();
+      const anthropic = results.find((r) => r.provider === "anthropic");
+      if (!anthropic || !anthropic.ok) {
+        return;
+      }
+
+      let sessionPct: number | null = null;
+      let weekPct: number | null = null;
+      let earliestReset: string | null = null;
+
+      for (const window of anthropic.windows) {
+        const labelLower = window.label.toLowerCase();
+        if (window.usedPercent == null) continue;
+        if (labelLower.startsWith("current session")) {
+          sessionPct = sessionPct == null ? window.usedPercent : Math.max(sessionPct, window.usedPercent);
+        } else if (labelLower.startsWith("current week")) {
+          weekPct = weekPct == null ? window.usedPercent : Math.max(weekPct, window.usedPercent);
+        }
+        if (window.resetsAt) {
+          if (!earliestReset || window.resetsAt < earliestReset) {
+            earliestReset = window.resetsAt;
+          }
+        }
+      }
+
+      const maxPct = Math.max(sessionPct ?? 0, weekPct ?? 0);
+      const threshold = config.systemPauseThresholdPct;
+      const current = await systemPauseSvc.getState();
+
+      if (maxPct >= threshold) {
+        if (current && current.source === "manual") {
+          return;
+        }
+        await systemPauseSvc.setPause({
+          source: "auto",
+          reason: `auto-pause: session=${sessionPct ?? "?"}% week=${weekPct ?? "?"}% (≥${threshold}%)`,
+          until: earliestReset,
+          quotaSnapshot: { sessionPct, weekPct },
+        });
+      } else if (current && current.source === "auto") {
+        await systemPauseSvc.clearPause("auto");
+      }
+    };
+
+    setInterval(() => {
+      void evaluateAutoPause().catch((err) => {
+        logger.error({ err }, "auto-pause monitor tick failed");
+      });
+    }, config.systemPauseCheckIntervalMs);
+
+    void evaluateAutoPause().catch((err) => {
+      logger.error({ err }, "initial auto-pause evaluation failed");
+    });
+  }
+
   if (config.databaseBackupEnabled) {
     const backupIntervalMs = config.databaseBackupIntervalMinutes * 60 * 1000;
 
