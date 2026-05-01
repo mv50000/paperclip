@@ -1,12 +1,13 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "@/lib/router";
-import { Check, ChevronDown, ChevronRight, Layers, MoreHorizontal, Plus, Repeat } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Layers, MoreHorizontal, Plus, Repeat } from "lucide-react";
 import { routinesApi } from "../api/routines";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
 import { issuesApi } from "../api/issues";
 import { heartbeatsApi } from "../api/heartbeats";
+import { instanceSettingsApi } from "../api/instanceSettings";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useToastActions } from "../context/ToastContext";
@@ -117,6 +118,31 @@ function formatRoutineRunStatus(value: string | null | undefined) {
   return value.replaceAll("_", " ");
 }
 
+function formatSystemPauseWindow(value: string | null | undefined) {
+  if (!value) return "Resume manually";
+  return `Auto-resumes ${new Date(value).toLocaleString()}`;
+}
+
+function formatQuotaSnapshot(snapshot: { sessionPct: number | null; weekPct: number | null } | undefined) {
+  if (!snapshot) return null;
+  const parts = [
+    snapshot.sessionPct == null ? null : `session ${snapshot.sessionPct}%`,
+    snapshot.weekPct == null ? null : `week ${snapshot.weekPct}%`,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function countWaitingScheduleTriggers(routines: RoutineListItem[], nowMs = Date.now()) {
+  return routines.reduce((count, routine) => {
+    if (routine.status !== "active") return count;
+    return count + routine.triggers.filter((trigger) => {
+      if (trigger.kind !== "schedule" || !trigger.enabled || !trigger.nextRunAt) return false;
+      const nextRunAtMs = new Date(trigger.nextRunAt).getTime();
+      return Number.isFinite(nextRunAtMs) && nextRunAtMs <= nowMs;
+    }).length;
+  }, 0);
+}
+
 function buildRoutineMutationPayload(input: {
   title: string;
   description: string;
@@ -188,6 +214,7 @@ function RoutineListRow({
   onRunNow,
   onToggleEnabled,
   onToggleArchived,
+  systemPaused,
 }: {
   routine: RoutineListItem;
   projectById: Map<string, { name: string; color?: string | null }>;
@@ -198,6 +225,7 @@ function RoutineListRow({
   onRunNow: (routine: RoutineListItem) => void;
   onToggleEnabled: (routine: RoutineListItem, enabled: boolean) => void;
   onToggleArchived: (routine: RoutineListItem) => void;
+  systemPaused: boolean;
 }) {
   const enabled = routine.status === "active";
   const isArchived = routine.status === "archived";
@@ -264,10 +292,10 @@ function RoutineListRow({
               <Link to={href}>Edit</Link>
             </DropdownMenuItem>
             <DropdownMenuItem
-              disabled={runningRoutineId === routine.id || isArchived}
+              disabled={runningRoutineId === routine.id || isArchived || systemPaused}
               onClick={() => onRunNow(routine)}
             >
-              {runningRoutineId === routine.id ? "Running..." : "Run now"}
+              {runningRoutineId === routine.id ? "Running..." : systemPaused ? "System paused" : "Run now"}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
@@ -357,6 +385,13 @@ export function Routines() {
     queryKey: [...queryKeys.issues.list(selectedCompanyId!), "routine-executions"],
     queryFn: () => issuesApi.list(selectedCompanyId!, { originKind: "routine_execution" }),
     enabled: !!selectedCompanyId && activeTab === "runs",
+  });
+  const { data: systemPauseData } = useQuery({
+    queryKey: queryKeys.instance.systemPause,
+    queryFn: () => instanceSettingsApi.getSystemPauseState(),
+    enabled: !!selectedCompanyId,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
   const { data: liveRuns } = useQuery({
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
@@ -498,6 +533,12 @@ export function Routines() {
     () => buildRoutineGroups(routines ?? [], routineViewState.groupBy, projectById, agentById),
     [agentById, projectById, routineViewState.groupBy, routines],
   );
+  const systemPauseState = systemPauseData?.state ?? null;
+  const waitingScheduleTriggers = useMemo(
+    () => countWaitingScheduleTriggers(routines ?? []),
+    [routines],
+  );
+  const systemPauseQuotaLabel = formatQuotaSnapshot(systemPauseState?.quotaSnapshot);
   const recentRunsIssueLinkState = useMemo(
     () =>
       createIssueDetailLocationState(
@@ -526,6 +567,14 @@ export function Routines() {
   }
 
   function handleRunNow(routine: RoutineListItem) {
+    if (systemPauseState) {
+      pushToast({
+        title: "Paperclip is paused",
+        body: "Resume the instance before starting new routine runs.",
+        tone: "warn",
+      });
+      return;
+    }
     setRunDialogRoutine(routine);
   }
 
@@ -575,6 +624,27 @@ export function Routines() {
           Create routine
         </Button>
       </div>
+
+      {systemPauseState ? (
+        <div className="flex gap-3 border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0 space-y-1">
+            <div className="font-medium">Paperclip is paused</div>
+            <div className="text-amber-900/90 dark:text-amber-100/90">
+              New routine runs are blocked while the instance is paused. {systemPauseState.reason}
+            </div>
+            <div className="text-xs text-amber-900/75 dark:text-amber-100/75">
+              {systemPauseState.source === "auto" ? "Automatic pause" : "Manual pause"}
+              {" · "}
+              {formatSystemPauseWindow(systemPauseState.pausedUntil)}
+              {systemPauseQuotaLabel ? ` · Quota: ${systemPauseQuotaLabel}` : ""}
+              {waitingScheduleTriggers > 0
+                ? ` · ${waitingScheduleTriggers} schedule trigger${waitingScheduleTriggers === 1 ? "" : "s"} waiting`
+                : ""}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>
         <PageTabBar
@@ -949,6 +1019,7 @@ export function Routines() {
                         onRunNow={handleRunNow}
                         onToggleEnabled={handleToggleEnabled}
                         onToggleArchived={handleToggleArchived}
+                        systemPaused={Boolean(systemPauseState)}
                       />
                     ))}
                   </CollapsibleContent>

@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { Issue, RoutineListItem } from "@paperclipai/shared";
+import type { InstanceSystemPauseState, Issue, RoutineListItem } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Routines, buildRoutineGroups } from "./Routines";
 
@@ -12,11 +12,15 @@ let currentSearch = "";
 const navigateMock = vi.fn();
 const routinesListMock = vi.fn<(companyId: string) => Promise<RoutineListItem[]>>();
 const issuesListMock = vi.fn<(companyId: string, filters?: Record<string, unknown>) => Promise<Issue[]>>();
+const getSystemPauseStateMock = vi.fn(
+  async (): Promise<{ state: InstanceSystemPauseState | null }> => ({ state: null }),
+);
 const issuesListRenderMock = vi.fn(({ issues }: { issues: Issue[] }) => (
   <div data-testid="issues-list">{issues.map((issue) => issue.title).join(", ")}</div>
 ));
 
 vi.mock("@/lib/router", () => ({
+  Link: ({ children, to }: { children: unknown; to: string }) => <a href={to}>{children as never}</a>,
   useNavigate: () => navigateMock,
   useLocation: () => ({ pathname: "/routines", search: currentSearch ? `?${currentSearch}` : "", hash: "" }),
   useSearchParams: () => [new URLSearchParams(currentSearch), vi.fn()],
@@ -161,6 +165,7 @@ vi.mock("../api/projects", () => ({
 vi.mock("../api/instanceSettings", () => ({
   instanceSettingsApi: {
     getExperimental: vi.fn(async () => ({ enableIsolatedWorkspaces: false })),
+    getSystemPauseState: () => getSystemPauseStateMock(),
   },
 }));
 
@@ -303,6 +308,8 @@ describe("Routines page", () => {
     navigateMock.mockReset();
     routinesListMock.mockReset();
     issuesListMock.mockReset();
+    getSystemPauseStateMock.mockReset();
+    getSystemPauseStateMock.mockResolvedValue({ state: null });
     issuesListRenderMock.mockClear();
     localStorage.clear();
   });
@@ -356,9 +363,69 @@ describe("Routines page", () => {
         </QueryClientProvider>,
       );
       await flush();
+      await flush();
     });
 
     expect(issuesListMock).toHaveBeenCalledWith("company-1", { originKind: "routine_execution" });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows a system pause banner with waiting schedule triggers", async () => {
+    getSystemPauseStateMock.mockResolvedValue({
+      state: {
+        pausedAt: "2026-04-30T06:39:19.364Z",
+        pausedUntil: "2026-05-03T18:00:00.000Z",
+        reason: "auto-pause: session=0% week=99% (>=90%)",
+        source: "auto",
+        quotaSnapshot: { sessionPct: 0, weekPct: 99 },
+      },
+    });
+    routinesListMock.mockResolvedValue([
+      createRoutine({
+        id: "routine-1",
+        triggers: [
+          {
+            id: "trigger-1",
+            kind: "schedule",
+            label: null,
+            enabled: true,
+            cronExpression: "*/15 * * * *",
+            timezone: "UTC",
+            nextRunAt: new Date(Date.now() - 60_000),
+            lastFiredAt: null,
+            lastResult: null,
+          },
+        ],
+      }),
+    ]);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Routines />
+        </QueryClientProvider>,
+      );
+      await flush();
+      await flush();
+    });
+    await act(async () => {
+      await flush();
+    });
+
+    expect(container.textContent).toContain("Paperclip is paused");
+    expect(container.textContent).toContain("New routine runs are blocked");
+    expect(container.textContent).toContain("1 schedule trigger waiting");
+    expect(container.textContent).toContain("Quota: session 0%, week 99%");
 
     await act(async () => {
       root.unmount();

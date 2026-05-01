@@ -1447,6 +1447,7 @@ export function routineService(
     },
 
     runRoutine: async (id: string, input: RunRoutine, actor?: Actor) => {
+      await systemPause?.assertNotPaused();
       const routine = await getRoutineById(id);
       if (!routine) throw notFound("Routine not found");
       if (routine.status === "archived") throw conflict("Routine is archived");
@@ -1481,6 +1482,7 @@ export function routineService(
       rawBody?: Buffer | null;
       payload?: Record<string, unknown> | null;
     }) => {
+      await systemPause?.assertNotPaused();
       const trigger = await db
         .select()
         .from(routineTriggers)
