@@ -15,14 +15,16 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unauthorized } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import type { SystemPauseService } from "../services/system-pause.js";
 
 export function routineRoutes(
   db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: { pluginWorkerManager?: PluginWorkerManager; systemPause?: SystemPauseService } = {},
 ) {
   const router = Router();
   const svc = routineService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
+    systemPause: options.systemPause,
   });
   const access = accessService(db);
 

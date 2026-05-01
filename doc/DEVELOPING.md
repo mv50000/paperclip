@@ -194,6 +194,12 @@ For `codex_local`, Paperclip also manages a per-company Codex home under the ins
 
 If the `codex` CLI is not installed or not on `PATH`, `codex_local` agent runs fail at execution time with a clear adapter error. Quota polling uses a short-lived `codex app-server` subprocess: when `codex` cannot be spawned, that provider reports `ok: false` in aggregated quota results and the API server keeps running (it must not exit on a missing binary).
 
+## Provider Subscription Quotas
+
+Paperclip supports API-billed adapters and subscription-backed local CLIs such as Claude Code or Codex. For subscription-backed runs, `cost_events.cost_cents` may legitimately be `0` because the provider is not returning per-run cents to Paperclip. In that mode, the control signal is provider quota windows plus instance `systemPause`, not the monthly cents rollup.
+
+When quota polling reports a configured threshold breach, Paperclip can set an automatic system pause. A system pause blocks new agent/routine work, leaves active work visible, and lets scheduled routines remain due until the instance resumes. Operators should not treat overdue routine `nextRunAt` values as scheduler corruption while `systemPause` is active; they are waiting for the provider quota window to recover.
+
 ## Worktree-local Instances
 
 When developing from multiple git worktrees, do not point two Paperclip servers at the same embedded PostgreSQL data directory.

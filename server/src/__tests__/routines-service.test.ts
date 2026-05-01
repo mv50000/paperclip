@@ -27,6 +27,9 @@ import {
 import { issueService } from "../services/issues.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { routineService } from "../services/routines.ts";
+import { conflict } from "../errors.ts";
+
+type RoutineServiceDeps = NonNullable<Parameters<typeof routineService>[1]>;
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -70,6 +73,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   });
 
   async function seedFixture(opts?: {
+    systemPause?: RoutineServiceDeps["systemPause"];
     wakeup?: (
       agentId: string,
       wakeupOpts: {
@@ -156,6 +160,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           return { id: queuedRunId };
         },
       },
+      systemPause: opts?.systemPause,
     });
     const issueSvc = issueService(db);
     const routine = await svc.create(
@@ -271,6 +276,24 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
         },
       },
     ]);
+  });
+
+  it("blocks manual routine runs while the instance is system-paused", async () => {
+    const systemPause = {
+      assertNotPaused: async () => {
+        throw conflict("System paused: provider quota exhausted");
+      },
+    } as RoutineServiceDeps["systemPause"];
+    const { routine, svc, wakeups } = await seedFixture({ systemPause });
+
+    await expect(svc.runRoutine(routine.id, { source: "manual" })).rejects.toMatchObject({
+      status: 409,
+      message: "System paused: provider quota exhausted",
+    });
+
+    expect(wakeups).toEqual([]);
+    const runs = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+    expect(runs).toHaveLength(0);
   });
 
   it("records the manual board runner on fresh routine issues so they appear in that user's inbox", async () => {
