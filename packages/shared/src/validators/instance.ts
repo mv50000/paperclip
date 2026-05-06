@@ -51,6 +51,7 @@ export const instanceGeneralSettingsSchema = z.object({
   ),
   backupRetention: backupRetentionPolicySchema.default(DEFAULT_BACKUP_RETENTION),
   systemPause: instanceSystemPauseStateSchema.nullable().default(null),
+  maxGlobalConcurrentRuns: z.number().int().min(1).max(100).nullable().default(null),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.partial();

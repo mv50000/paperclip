@@ -69,6 +69,8 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
 };
 
 export const AGENT_DEFAULT_MAX_CONCURRENT_RUNS = 5;
+export const INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS = 5;
+export const INSTANCE_MAX_GLOBAL_CONCURRENT_RUNS_BOUNDS = { min: 1, max: 100 } as const;
 export const WORKSPACE_BRANCH_ROUTINE_VARIABLE = "workspaceBranch";
 export const AGENT_ICON_NAMES = [
   "bot",

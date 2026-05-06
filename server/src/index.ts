@@ -737,7 +737,7 @@ export async function startServer(): Promise<StartedServer> {
     });
   
   if (config.heartbeatSchedulerEnabled) {
-    const heartbeat = heartbeatService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc });
+    const heartbeat = heartbeatService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc, maxGlobalConcurrentRunsDefault: config.maxGlobalConcurrentRuns });
     const routines = routineService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc });
   
     // Reap orphaned running runs at startup while in-memory execution state is empty,

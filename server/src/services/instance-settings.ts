@@ -26,6 +26,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
         parsed.data.feedbackDataSharingPreference ?? DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
       backupRetention: parsed.data.backupRetention ?? DEFAULT_BACKUP_RETENTION,
       systemPause: parsed.data.systemPause ?? null,
+      maxGlobalConcurrentRuns: parsed.data.maxGlobalConcurrentRuns ?? null,
     };
   }
   return {
@@ -34,6 +35,7 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
     feedbackDataSharingPreference: DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
     backupRetention: DEFAULT_BACKUP_RETENTION,
     systemPause: null,
+    maxGlobalConcurrentRuns: null,
   };
 }
 

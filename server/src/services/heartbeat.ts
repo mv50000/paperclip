@@ -7,6 +7,7 @@ import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lte, notInArr
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   isEnvironmentDriverSupportedForAdapter,
   type BillingType,
@@ -1977,6 +1978,7 @@ export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   systemPause?: SystemPauseService;
+  maxGlobalConcurrentRunsDefault?: number;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
@@ -2002,6 +2004,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   });
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
+
+  const maxGlobalDefault = options.maxGlobalConcurrentRunsDefault
+    ?? INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS;
+  let globalLimitCache: { value: number; expiresAt: number } | null = null;
+  let resumeRoundRobinOffset = 0;
+
+  async function getGlobalMaxConcurrentRuns(): Promise<number> {
+    const now = Date.now();
+    if (globalLimitCache && globalLimitCache.expiresAt > now) return globalLimitCache.value;
+    const general = await instanceSettings.getGeneral();
+    const effective = general.maxGlobalConcurrentRuns ?? maxGlobalDefault;
+    globalLimitCache = { value: effective, expiresAt: now + 10_000 };
+    return effective;
+  }
+
   const budgetHooks = {
     cancelWorkForScope: cancelBudgetScopeWork,
   };
@@ -4468,13 +4485,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function resumeQueuedRuns() {
+    const globalMax = await getGlobalMaxConcurrentRuns();
+    if (activeRunExecutions.size >= globalMax) return;
+
     const queuedRuns = await db
       .select({ agentId: heartbeatRuns.agentId })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.status, "queued"));
 
     const agentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
-    for (const agentId of agentIds) {
+    if (agentIds.length === 0) return;
+
+    const offset = resumeRoundRobinOffset % agentIds.length;
+    const ordered = [...agentIds.slice(offset), ...agentIds.slice(0, offset)];
+    resumeRoundRobinOffset = (resumeRoundRobinOffset + 1) % agentIds.length;
+
+    for (const agentId of ordered) {
+      if (activeRunExecutions.size >= globalMax) break;
       await startNextQueuedRunForAgent(agentId);
     }
   }
@@ -4592,6 +4619,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
 
+      const globalMax = await getGlobalMaxConcurrentRuns();
+      const globalAvailable = Math.max(0, globalMax - activeRunExecutions.size);
+      if (globalAvailable <= 0) return [];
+      const effectiveSlots = Math.min(availableSlots, globalAvailable);
+
       const queuedRuns = await db
         .select()
         .from(heartbeatRuns)
@@ -4638,7 +4670,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
-        if (claimedRuns.length >= availableSlots) break;
+        if (claimedRuns.length >= effectiveSlots) break;
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
       }
@@ -7490,6 +7522,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     promoteDueScheduledRetries,
 
     resumeQueuedRuns,
+
+    getGlobalRunningCount: () => activeRunExecutions.size,
+    getGlobalMaxConcurrentRuns,
 
     scheduleBoundedRetry: async (
       runId: string,

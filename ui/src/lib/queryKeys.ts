@@ -121,6 +121,7 @@ export const queryKeys = {
     schedulerHeartbeats: ["instance", "scheduler-heartbeats"] as const,
     experimentalSettings: ["instance", "experimental-settings"] as const,
     systemPause: ["instance", "system-pause"] as const,
+    concurrency: ["instance", "concurrency"] as const,
   },
   health: ["health"] as const,
   secrets: {

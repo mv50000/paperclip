@@ -91,6 +91,7 @@ export interface Config {
   systemPauseAutoEnabled: boolean;
   systemPauseCheckIntervalMs: number;
   systemPauseThresholdPct: number;
+  maxGlobalConcurrentRuns: number;
 }
 
 function detectTailnetBindHost(): string | undefined {
@@ -341,5 +342,6 @@ export function loadConfig(): Config {
     systemPauseAutoEnabled: process.env.SYSTEM_PAUSE_AUTO_ENABLED !== "false",
     systemPauseCheckIntervalMs: Math.max(60000, Number(process.env.SYSTEM_PAUSE_CHECK_INTERVAL_MS) || 300_000),
     systemPauseThresholdPct: Math.min(100, Math.max(50, Number(process.env.SYSTEM_PAUSE_THRESHOLD_PCT) || 90)),
+    maxGlobalConcurrentRuns: Math.min(100, Math.max(1, Number(process.env.PAPERCLIP_MAX_GLOBAL_CONCURRENT_RUNS) || 5)),
   };
 }

@@ -42,6 +42,7 @@ export interface InstanceGeneralSettings {
   feedbackDataSharingPreference: FeedbackDataSharingPreference;
   backupRetention: BackupRetentionPolicy;
   systemPause: InstanceSystemPauseState | null;
+  maxGlobalConcurrentRuns: number | null;
 }
 
 export interface InstanceExperimentalSettings {

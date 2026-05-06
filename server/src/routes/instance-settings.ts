@@ -230,5 +230,16 @@ export function instanceSettingsRoutes(db: Db, opts: InstanceSettingsRoutesOptio
     res.json({ state: null, cleared });
   });
 
+  router.get("/instance/concurrency", async (req, res) => {
+    assertBoardOrgAccess(req);
+    const globalMax = await heartbeat.getGlobalMaxConcurrentRuns();
+    const globalRunning = heartbeat.getGlobalRunningCount();
+    res.json({
+      maxGlobalConcurrentRuns: globalMax,
+      globalRunningCount: globalRunning,
+      globalAvailableSlots: Math.max(0, globalMax - globalRunning),
+    });
+  });
+
   return router;
 }

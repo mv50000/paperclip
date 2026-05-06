@@ -6,6 +6,8 @@ import {
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
+  INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS,
+  INSTANCE_MAX_GLOBAL_CONCURRENT_RUNS_BOUNDS,
 } from "@paperclipai/shared";
 import { LogOut, SlidersHorizontal } from "lucide-react";
 import { authApi } from "@/api/auth";
@@ -81,6 +83,7 @@ export function InstanceGeneralSettings() {
   const keyboardShortcuts = generalQuery.data?.keyboardShortcuts === true;
   const feedbackDataSharingPreference = generalQuery.data?.feedbackDataSharingPreference ?? "prompt";
   const backupRetention: BackupRetentionPolicy = generalQuery.data?.backupRetention ?? DEFAULT_BACKUP_RETENTION;
+  const maxGlobalConcurrentRuns = generalQuery.data?.maxGlobalConcurrentRuns ?? null;
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -168,6 +171,50 @@ export function InstanceGeneralSettings() {
             disabled={updateGeneralMutation.isPending}
             aria-label="Toggle keyboard shortcuts"
           />
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-border bg-card p-5">
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <h2 className="text-sm font-semibold">Global concurrency limit</h2>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Maximum number of heartbeat runs that can execute simultaneously across all agents.
+              Per-agent limits still apply within this global cap. Leave unset to use the server
+              default ({INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS}).
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <input
+              type="number"
+              min={INSTANCE_MAX_GLOBAL_CONCURRENT_RUNS_BOUNDS.min}
+              max={INSTANCE_MAX_GLOBAL_CONCURRENT_RUNS_BOUNDS.max}
+              value={maxGlobalConcurrentRuns ?? ""}
+              placeholder={String(INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS)}
+              disabled={updateGeneralMutation.isPending}
+              className="w-24 rounded-md border border-border bg-background px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+              onChange={(e) => {
+                const raw = e.target.value.trim();
+                if (raw === "") {
+                  updateGeneralMutation.mutate({ maxGlobalConcurrentRuns: null });
+                  return;
+                }
+                const num = Number(raw);
+                if (
+                  Number.isInteger(num) &&
+                  num >= INSTANCE_MAX_GLOBAL_CONCURRENT_RUNS_BOUNDS.min &&
+                  num <= INSTANCE_MAX_GLOBAL_CONCURRENT_RUNS_BOUNDS.max
+                ) {
+                  updateGeneralMutation.mutate({ maxGlobalConcurrentRuns: num });
+                }
+              }}
+            />
+            <span className="text-xs text-muted-foreground">
+              {maxGlobalConcurrentRuns != null
+                ? `Set to ${maxGlobalConcurrentRuns}`
+                : `Using default (${INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS})`}
+            </span>
+          </div>
         </div>
       </section>
 

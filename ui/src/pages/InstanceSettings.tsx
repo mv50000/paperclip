@@ -4,6 +4,7 @@ import { Clock3, ExternalLink, Settings } from "lucide-react";
 import type { InstanceSchedulerHeartbeatAgent } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { heartbeatsApi } from "../api/heartbeats";
+import { instanceSettingsApi } from "../api/instanceSettings";
 import { agentsApi } from "../api/agents";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { EmptyState } from "../components/EmptyState";
@@ -130,6 +131,12 @@ export function InstanceSettings() {
     },
   });
 
+  const concurrencyQuery = useQuery({
+    queryKey: queryKeys.instance.concurrency,
+    queryFn: () => instanceSettingsApi.getConcurrency(),
+    refetchInterval: 10_000,
+  });
+
   const agents = heartbeatsQuery.data ?? [];
   const activeCount = agents.filter((agent) => agent.schedulerActive).length;
   const disabledCount = agents.length - activeCount;
@@ -179,6 +186,11 @@ export function InstanceSettings() {
         <span><span className="font-semibold text-foreground">{activeCount}</span> active</span>
         <span><span className="font-semibold text-foreground">{disabledCount}</span> disabled</span>
         <span><span className="font-semibold text-foreground">{grouped.length}</span> {grouped.length === 1 ? "company" : "companies"}</span>
+        {concurrencyQuery.data && (
+          <span className="border-l border-border pl-4">
+            Global: <span className="font-semibold text-foreground">{concurrencyQuery.data.globalRunningCount}</span> / {concurrencyQuery.data.maxGlobalConcurrentRuns} running
+          </span>
+        )}
         {anyEnabled && (
           <Button
             variant="destructive"
