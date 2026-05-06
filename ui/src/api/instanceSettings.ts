@@ -17,6 +17,12 @@ export interface SystemResumeResponse {
   cleared: boolean;
 }
 
+export interface ConcurrencyResponse {
+  maxGlobalConcurrentRuns: number;
+  globalRunningCount: number;
+  globalAvailableSlots: number;
+}
+
 export const instanceSettingsApi = {
   getGeneral: () =>
     api.get<InstanceGeneralSettings>("/instance/settings/general"),
@@ -32,6 +38,8 @@ export const instanceSettingsApi = {
     api.post<SystemPauseStateResponse>("/instance/system-pause", input),
   resumeSystem: () =>
     api.post<SystemResumeResponse>("/instance/system-resume", {}),
+  getConcurrency: () =>
+    api.get<ConcurrencyResponse>("/instance/concurrency"),
   previewIssueGraphLivenessAutoRecovery: (input: { lookbackHours?: number }) =>
     api.post<IssueGraphLivenessAutoRecoveryPreview>(
       "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",
