@@ -44,6 +44,7 @@ interface PolicyThresholds {
   approval_stale_days?: number;
   allowed_models?: string[];
   required_effort?: string;
+  incident_cooldown_hours?: number;
 }
 
 type MonitorPolicy = {
@@ -89,6 +90,7 @@ export function riskMonitorService(db: Db) {
     severity: RiskSeverity,
     likelihood: RiskLikelihood,
     policyOverride?: MonitorPolicy,
+    scope?: { scopeType: string; scopeId: string },
   ): Promise<boolean> {
     const policy = policyOverride === undefined
       ? await registry.getPolicy(companyId, categoryCode)
@@ -98,6 +100,19 @@ export function riskMonitorService(db: Db) {
 
     const [existing] = await incidents.findOpenByRiskEntryId(companyId, riskEntryId);
     if (existing) return false;
+
+    const t = getThresholds(policy);
+    const cooldownHours = t.incident_cooldown_hours ?? 24;
+
+    if (scope && cooldownHours > 0) {
+      const recent = await incidents.findRecentlyResolvedByScope(
+        companyId, categoryCode, scope.scopeType, scope.scopeId, cooldownHours,
+      );
+      if (recent) {
+        await incidents.reopenIncident(companyId, recent.id, riskEntryId, incidentSev);
+        return true;
+      }
+    }
 
     await incidents.createIncident(companyId, {
       riskEntryId,
@@ -178,7 +193,7 @@ export function riskMonitorService(db: Db) {
           );
           result.risksCreated++;
 
-          if (await maybeCreateIncident(companyId, "AGENT_SILENT", entry.id, entry.title, severity, likelihood, policy)) {
+          if (await maybeCreateIncident(companyId, "AGENT_SILENT", entry.id, entry.title, severity, likelihood, policy, { scopeType: "agent", scopeId: agent.id })) {
             result.incidentsCreated++;
           }
         } else {
@@ -245,7 +260,7 @@ export function riskMonitorService(db: Db) {
           );
           result.risksCreated++;
 
-          if (await maybeCreateIncident(companyId, "AGENT_CRASH_LOOP", entry.id, entry.title, severity, likelihood, crashPolicy)) {
+          if (await maybeCreateIncident(companyId, "AGENT_CRASH_LOOP", entry.id, entry.title, severity, likelihood, crashPolicy, { scopeType: "agent", scopeId: agent.id })) {
             result.incidentsCreated++;
           }
         } else if (crashEnabled) {
@@ -336,7 +351,7 @@ export function riskMonitorService(db: Db) {
           );
           result.risksCreated++;
 
-          if (await maybeCreateIncident(companyId, "COST_ANOMALY", entry.id, entry.title, "high", "certain", policy)) {
+          if (await maybeCreateIncident(companyId, "COST_ANOMALY", entry.id, entry.title, "high", "certain", policy, { scopeType: "agent", scopeId: agentCost.agentId })) {
             result.incidentsCreated++;
           }
         } else {
