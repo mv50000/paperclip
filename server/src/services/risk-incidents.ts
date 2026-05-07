@@ -295,6 +295,71 @@ export function riskIncidentService(db: Db) {
       .limit(1);
   }
 
+  async function findRecentlyResolvedByScope(
+    companyId: string,
+    sourceMonitor: string,
+    scopeType: string,
+    scopeId: string,
+    cooldownHours: number,
+  ): Promise<IncidentRow | null> {
+    const cutoff = new Date(Date.now() - cooldownHours * 60 * 60 * 1000);
+    const [row] = await db
+      .select({ incident: riskIncidents })
+      .from(riskIncidents)
+      .innerJoin(riskEntries, eq(riskIncidents.riskEntryId, riskEntries.id))
+      .where(
+        and(
+          eq(riskIncidents.companyId, companyId),
+          eq(riskIncidents.status, "resolved"),
+          eq(riskEntries.sourceMonitor, sourceMonitor),
+          eq(riskEntries.scopeType, scopeType),
+          eq(riskEntries.scopeId, scopeId),
+          sql`${riskIncidents.resolvedAt} >= ${cutoff}`,
+        ),
+      )
+      .orderBy(desc(riskIncidents.resolvedAt))
+      .limit(1);
+    return row?.incident ?? null;
+  }
+
+  async function reopenIncident(
+    companyId: string,
+    incidentId: string,
+    newRiskEntryId: string,
+    newSeverity: RiskIncidentSeverity,
+  ): Promise<IncidentRow> {
+    const incident = await getIncident(companyId, incidentId);
+    const timeline = (incident.timelineJson as unknown as TimelineEntry[]) ?? [];
+    timeline.push({
+      timestamp: new Date().toISOString(),
+      actor: "risk-monitor",
+      action: "reopened",
+      detail: `Risk condition recurred (was resolved ${incident.resolvedAt ? Math.round((Date.now() - new Date(incident.resolvedAt).getTime()) / (1000 * 60 * 60)) + "h" : "recently"} ago)`,
+    });
+
+    const [updated] = await db
+      .update(riskIncidents)
+      .set({
+        status: "detected" as RiskIncidentStatus,
+        riskEntryId: newRiskEntryId,
+        severity: newSeverity,
+        resolvedAt: null,
+        resolutionNote: null,
+        timelineJson: timeline as unknown as Record<string, unknown>[],
+        updatedAt: new Date(),
+      })
+      .where(eq(riskIncidents.id, incident.id))
+      .returning();
+
+    publishLiveEvent({
+      companyId,
+      type: "risk.incident.updated",
+      payload: { incidentId: updated.id, status: "detected", reopened: true },
+    });
+
+    return updated;
+  }
+
   async function addTimelineEntry(
     companyId: string,
     incidentId: string,
@@ -367,6 +432,8 @@ export function riskIncidentService(db: Db) {
     listIncidents,
     listOpenIncidents,
     findOpenByRiskEntryId,
+    findRecentlyResolvedByScope,
+    reopenIncident,
     addTimelineEntry,
     autoResolveByRiskEntryIds,
   };

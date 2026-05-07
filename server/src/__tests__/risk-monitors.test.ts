@@ -11,6 +11,8 @@ const mockIncidents = vi.hoisted(() => ({
   createIncident: vi.fn(async () => ({ id: "incident-1" })),
   listOpenIncidents: vi.fn(async () => []),
   findOpenByRiskEntryId: vi.fn(async () => []),
+  findRecentlyResolvedByScope: vi.fn(async () => null),
+  reopenIncident: vi.fn(async () => ({ id: "incident-1", status: "detected" })),
 }));
 
 vi.mock("../services/risk-registry.js", () => ({
@@ -98,6 +100,7 @@ describe("runAgentHealthMonitor", () => {
     mockRegistry.upsertMonitorRisk.mockResolvedValue({ id: "risk-entry-1", title: "Silent agent: TestAgent" });
     mockRegistry.resolveMonitorRisk.mockResolvedValue([]);
     mockIncidents.findOpenByRiskEntryId.mockResolvedValue([]);
+    mockIncidents.findRecentlyResolvedByScope.mockResolvedValue(null);
   });
 
   it("skips agents without active routines (idle by design)", async () => {
@@ -225,6 +228,30 @@ describe("runAgentHealthMonitor", () => {
     const result = await service.runAgentHealthMonitor("company-1");
 
     expect(mockRegistry.upsertMonitorRisk).not.toHaveBeenCalled();
+  });
+
+  it("reopens recently resolved incident instead of creating new one", async () => {
+    const recentIncident = {
+      id: "old-incident-1",
+      status: "resolved",
+      resolvedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    };
+    mockIncidents.findRecentlyResolvedByScope.mockResolvedValue(recentIncident);
+
+    const db = createDbStub({
+      agents: [makeAgent({ id: "agent-1" })],
+      agentsWithRoutines: [{ agentId: "agent-1" }],
+    });
+
+    const { riskMonitorService } = await import("../services/risk-monitors.js");
+    const service = riskMonitorService(db as any);
+    const result = await service.runAgentHealthMonitor("company-1");
+
+    expect(mockIncidents.reopenIncident).toHaveBeenCalledWith(
+      "company-1", "old-incident-1", "risk-entry-1", expect.any(String),
+    );
+    expect(mockIncidents.createIncident).not.toHaveBeenCalled();
+    expect(result.incidentsCreated).toBe(1);
   });
 
   it("resolves risk for agents within expected silence window", async () => {
