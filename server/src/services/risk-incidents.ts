@@ -4,6 +4,7 @@ import { agents, approvals, issues, riskEntries, riskIncidents } from "@papercli
 import type { RiskIncidentSeverity, RiskIncidentStatus } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { emitApprovalCreated } from "./approvals.js";
 import { publishLiveEvent } from "./live-events.js";
 import { PLAYBOOKS, type Playbook } from "./risk-playbooks.js";
 import { riskRegistryService } from "./risk-registry.js";
@@ -144,6 +145,7 @@ export function riskIncidentService(db: Db) {
                 type: "risk_incident_acknowledgment",
                 status: "pending",
                 payload: {
+                  title: `Risk incident: ${incident.title}`,
                   incidentId: incident.id,
                   incidentTitle: incident.title,
                   severity: incident.severity,
@@ -155,6 +157,7 @@ export function riskIncidentService(db: Db) {
               .update(riskIncidents)
               .set({ approvalId: approval.id, updatedAt: new Date() })
               .where(eq(riskIncidents.id, incident.id));
+            emitApprovalCreated(approval);
             executedActions.push({ type: "create_approval", approvalId: approval.id, success: true });
           }
         }

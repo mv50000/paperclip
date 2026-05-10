@@ -9,37 +9,39 @@ import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { publishLiveEvent } from "./live-events.js";
 
+type ApprovalRow = typeof approvals.$inferSelect;
+
+function approvalPayloadAsRecord(approval: ApprovalRow): Record<string, unknown> {
+  return typeof approval.payload === "object" && approval.payload !== null
+    ? (approval.payload as Record<string, unknown>)
+    : {};
+}
+
+export function emitApprovalCreated(approval: ApprovalRow) {
+  const payload = approvalPayloadAsRecord(approval);
+  publishLiveEvent({
+    companyId: approval.companyId,
+    type: "approval.created",
+    payload: {
+      id: approval.id,
+      type: approval.type,
+      status: approval.status,
+      requestedByAgentId: approval.requestedByAgentId,
+      requestedByUserId: approval.requestedByUserId,
+      title: typeof payload.title === "string" ? payload.title : null,
+      subject: typeof payload.subject === "string" ? payload.subject : null,
+    },
+  });
+}
+
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
   const budgets = budgetService(db);
   const instanceSettings = instanceSettingsService(db);
   const canResolveStatuses = new Set(["pending", "revision_requested"]);
   const resolvableStatuses = Array.from(canResolveStatuses);
-  type ApprovalRecord = typeof approvals.$inferSelect;
+  type ApprovalRecord = ApprovalRow;
   type ResolutionResult = { approval: ApprovalRecord; applied: boolean };
-
-  function approvalPayloadAsRecord(approval: ApprovalRecord): Record<string, unknown> {
-    return typeof approval.payload === "object" && approval.payload !== null
-      ? (approval.payload as Record<string, unknown>)
-      : {};
-  }
-
-  function emitApprovalCreated(approval: ApprovalRecord) {
-    const payload = approvalPayloadAsRecord(approval);
-    publishLiveEvent({
-      companyId: approval.companyId,
-      type: "approval.created",
-      payload: {
-        id: approval.id,
-        type: approval.type,
-        status: approval.status,
-        requestedByAgentId: approval.requestedByAgentId,
-        requestedByUserId: approval.requestedByUserId,
-        title: typeof payload.title === "string" ? payload.title : null,
-        subject: typeof payload.subject === "string" ? payload.subject : null,
-      },
-    });
-  }
 
   function emitApprovalDecided(
     approval: ApprovalRecord,
