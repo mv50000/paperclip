@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, approvals, issues, riskEntries, riskIncidents } from "@paperclipai/db";
 import type { RiskIncidentSeverity, RiskIncidentStatus } from "@paperclipai/shared";
@@ -317,7 +317,7 @@ export function riskIncidentService(db: Db) {
           eq(riskEntries.sourceMonitor, sourceMonitor),
           eq(riskEntries.scopeType, scopeType),
           eq(riskEntries.scopeId, scopeId),
-          sql`${riskIncidents.resolvedAt} >= ${cutoff}`,
+          gte(riskIncidents.resolvedAt, cutoff),
         ),
       )
       .orderBy(desc(riskIncidents.resolvedAt))

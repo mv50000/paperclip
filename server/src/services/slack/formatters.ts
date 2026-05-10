@@ -11,13 +11,19 @@ export function publicUrl(): string {
   return (process.env.PAPERCLIP_PUBLIC_URL ?? "http://localhost:3100").replace(/\/$/, "");
 }
 
-export function dashboardLink(companyId: string, label = "Open in Paperclip"): Block {
+export function companyBaseUrl(companyPrefix: string | null, companyId: string): string {
+  // Prefer the prefix-based UI route (e.g. /AUR/...). Fall back to /companies/<uuid>
+  // for legacy callers, but the UI now also handles that fallback via redirect.
+  return companyPrefix ? `${publicUrl()}/${companyPrefix}` : `${publicUrl()}/companies/${companyId}`;
+}
+
+export function dashboardLink(companyId: string, companyPrefix: string | null = null, label = "Open in Paperclip"): Block {
   return {
     type: "context",
     elements: [
       {
         type: "mrkdwn",
-        text: `<${publicUrl()}/companies/${companyId}|${label}>`,
+        text: `<${companyBaseUrl(companyPrefix, companyId)}|${label}>`,
       },
     ],
   };
@@ -50,7 +56,7 @@ function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function formatBudgetExceeded(event: LiveEvent, companyName: string): FormattedMessage {
+export function formatBudgetExceeded(event: LiveEvent, companyName: string, companyPrefix: string | null = null): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
   const scopeName = asString(payload.scopeName ?? payload.entityName ?? companyName);
   const spentCents = asNumber(payload.spentCents);
@@ -67,12 +73,12 @@ export function formatBudgetExceeded(event: LiveEvent, companyName: string): For
         ["Spent", spent],
         ["Budget", budget],
       ]),
-      dashboardLink(event.companyId, "Open dashboard"),
+      dashboardLink(event.companyId, companyPrefix, "Open dashboard"),
     ],
   };
 }
 
-export function formatAgentStatus(event: LiveEvent, companyName: string): FormattedMessage {
+export function formatAgentStatus(event: LiveEvent, companyName: string, companyPrefix: string | null = null): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
   const status = asString(payload.status, "unknown");
   const agentName = asString(payload.agentName ?? payload.name);
@@ -82,7 +88,7 @@ export function formatAgentStatus(event: LiveEvent, companyName: string): Format
   const blocks: Block[] = [
     header(`${emoji} Agent ${status}`),
     section(`*${agentName}* in *${companyName}* changed status to *${status}*${reason ? `\n_${reason}_` : ""}`),
-    dashboardLink(event.companyId, "Open agent"),
+    dashboardLink(event.companyId, companyPrefix, "Open agent"),
   ];
   return { text, blocks };
 }
@@ -91,6 +97,7 @@ export function formatHeartbeatFailureBurst(
   event: LiveEvent,
   companyName: string,
   consecutiveFailures: number,
+  companyPrefix: string | null = null,
 ): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
   const agentName = asString(payload.agentName ?? payload.name);
@@ -103,7 +110,7 @@ export function formatHeartbeatFailureBurst(
       section(
         `*${agentName}* in *${companyName}* has failed *${consecutiveFailures}* consecutive runs.${errorMsg ? `\n\`\`\`${errorMsg.slice(0, 400)}\`\`\`` : ""}`,
       ),
-      dashboardLink(event.companyId, "Investigate"),
+      dashboardLink(event.companyId, companyPrefix, "Investigate"),
     ],
   };
 }
@@ -132,7 +139,7 @@ function approvalLabel(type: string): string {
   return APPROVAL_TYPE_LABEL[type] ?? type;
 }
 
-function actionsBlock(approvalId: string, companyId: string): Block {
+function actionsBlock(approvalId: string, companyId: string, companyPrefix: string | null): Block {
   const blockId = JSON.stringify({ kind: "approval-actions", approvalId });
   return {
     type: "actions",
@@ -162,13 +169,13 @@ function actionsBlock(approvalId: string, companyId: string): Block {
         type: "button",
         action_id: "approval_open_in_ui",
         text: { type: "plain_text", text: "Open in Paperclip", emoji: true },
-        url: `${publicUrl()}/companies/${companyId}/approvals/${approvalId}`,
+        url: `${companyBaseUrl(companyPrefix, companyId)}/approvals/${approvalId}`,
       },
     ],
   };
 }
 
-export function formatApprovalCreated(event: LiveEvent, companyName: string): FormattedMessage {
+export function formatApprovalCreated(event: LiveEvent, companyName: string, companyPrefix: string | null = null): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
   const approvalId = asString(payload.id, "");
   const type = asString(payload.type, "approval");
@@ -192,12 +199,12 @@ export function formatApprovalCreated(event: LiveEvent, companyName: string): Fo
       header(`${emoji} Approval needed`),
       section(`*${title}*\n_${companyName}_`),
       { type: "context", elements: contextElements },
-      actionsBlock(approvalId, event.companyId),
+      actionsBlock(approvalId, event.companyId, companyPrefix),
     ],
   };
 }
 
-export function formatApprovalDecided(event: LiveEvent, companyName: string): FormattedMessage {
+export function formatApprovalDecided(event: LiveEvent, companyName: string, companyPrefix: string | null = null): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
   const approvalId = asString(payload.id, "");
   const type = asString(payload.type, "approval");
@@ -220,7 +227,7 @@ export function formatApprovalDecided(event: LiveEvent, companyName: string): Fo
       elements: [
         { type: "mrkdwn", text: `By *${decidedBy}*` },
         ...(note ? [{ type: "mrkdwn", text: `_${note}_` }] : []),
-        { type: "mrkdwn", text: `<${publicUrl()}/companies/${event.companyId}/approvals/${approvalId}|Open in Paperclip>` },
+        { type: "mrkdwn", text: `<${companyBaseUrl(companyPrefix, event.companyId)}/approvals/${approvalId}|Open in Paperclip>` },
       ],
     },
   ];

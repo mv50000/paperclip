@@ -39,28 +39,30 @@ export const __testing__ = {
   resetState() {
     failureCounters.clear();
     debounceCache.clear();
-    companyNameCache.clear();
+    companyInfoCache.clear();
   },
 };
 
 const failureCounters = new Map<string, ConsecutiveFailureState>();
 const debounceCache = new Map<string, number>();
-const companyNameCache = new Map<string, { name: string; fetchedAt: number }>();
-const COMPANY_NAME_CACHE_MS = 5 * 60 * 1000;
+interface CompanyInfo { name: string; prefix: string | null; fetchedAt: number }
+const companyInfoCache = new Map<string, CompanyInfo>();
+const COMPANY_INFO_CACHE_MS = 5 * 60 * 1000;
 
-async function getCompanyName(db: Db, companyId: string): Promise<string> {
-  const cached = companyNameCache.get(companyId);
-  if (cached && Date.now() - cached.fetchedAt < COMPANY_NAME_CACHE_MS) {
-    return cached.name;
+async function getCompanyInfo(db: Db, companyId: string): Promise<{ name: string; prefix: string | null }> {
+  const cached = companyInfoCache.get(companyId);
+  if (cached && Date.now() - cached.fetchedAt < COMPANY_INFO_CACHE_MS) {
+    return { name: cached.name, prefix: cached.prefix };
   }
   const row = await db
-    .select({ name: companies.name })
+    .select({ name: companies.name, prefix: companies.issuePrefix })
     .from(companies)
     .where(eq(companies.id, companyId))
     .then((rows) => rows[0] ?? null);
   const name = row?.name ?? "Unknown company";
-  companyNameCache.set(companyId, { name, fetchedAt: Date.now() });
-  return name;
+  const prefix = row?.prefix ?? null;
+  companyInfoCache.set(companyId, { name, prefix, fetchedAt: Date.now() });
+  return { name, prefix };
 }
 
 function debounceKey(companyId: string, kind: string, suffix = ""): string {
@@ -102,7 +104,7 @@ function resetHeartbeatCounter(companyId: string, agentId: string) {
   failureCounters.delete(`${companyId}:${agentId}`);
 }
 
-export function classifyEvent(event: LiveEvent, companyName: string): DispatchTarget[] {
+export function classifyEvent(event: LiveEvent, companyName: string, companyPrefix: string | null = null): DispatchTarget[] {
   const payload = event.payload as Record<string, unknown>;
 
   switch (event.type) {
@@ -112,7 +114,7 @@ export function classifyEvent(event: LiveEvent, companyName: string): DispatchTa
         if (shouldDebounce(debounceKey(event.companyId, "budget.exceeded", String(payload.scopeId ?? "")))) {
           return [];
         }
-        const message = formatBudgetExceeded(event, companyName);
+        const message = formatBudgetExceeded(event, companyName, companyPrefix);
         return [
           { target: "company", message },
           { target: "board", message },
@@ -127,7 +129,7 @@ export function classifyEvent(event: LiveEvent, companyName: string): DispatchTa
         if (shouldDebounce(debounceKey(event.companyId, "agent.status", String(payload.agentId ?? "")))) {
           return [];
         }
-        return [{ target: "company", message: formatAgentStatus(event, companyName) }];
+        return [{ target: "company", message: formatAgentStatus(event, companyName, companyPrefix) }];
       }
       return [];
     }
@@ -143,7 +145,7 @@ export function classifyEvent(event: LiveEvent, companyName: string): DispatchTa
       if (status === "failed" || status === "error" || status === "timed_out") {
         const count = recordHeartbeatFailure(event.companyId, agentId);
         if (!shouldNotifyHeartbeat(event.companyId, agentId, count)) return [];
-        return [{ target: "company", message: formatHeartbeatFailureBurst(event, companyName, count) }];
+        return [{ target: "company", message: formatHeartbeatFailureBurst(event, companyName, count, companyPrefix) }];
       }
       return [];
     }
@@ -154,7 +156,7 @@ export function classifyEvent(event: LiveEvent, companyName: string): DispatchTa
       if (shouldDebounce(debounceKey(event.companyId, "approval.created", approvalId))) {
         return [];
       }
-      return [{ target: "company", message: formatApprovalCreated(event, companyName) }];
+      return [{ target: "company", message: formatApprovalCreated(event, companyName, companyPrefix) }];
     }
 
     case "approval.decided":
@@ -255,18 +257,18 @@ export function startSlackEventForwarder(db: Db): SlackEventForwarder {
     if (event.companyId === "*") return;
     void (async () => {
       try {
-        const companyName = await getCompanyName(db, event.companyId);
+        const { name: companyName, prefix: companyPrefix } = await getCompanyInfo(db, event.companyId);
         if (event.type === "approval.decided") {
           const approvalId =
             typeof (event.payload as Record<string, unknown>).id === "string"
               ? ((event.payload as Record<string, unknown>).id as string)
               : null;
           if (!approvalId) return;
-          const message = formatApprovalDecided(event, companyName);
+          const message = formatApprovalDecided(event, companyName, companyPrefix);
           await dispatchApprovalUpdate(db, client, event.companyId, approvalId, message);
           return;
         }
-        const targets = classifyEvent(event, companyName);
+        const targets = classifyEvent(event, companyName, companyPrefix);
         if (targets.length === 0) return;
         const dispatched = await dispatch(client, resolver, event.companyId, targets);
         if (
