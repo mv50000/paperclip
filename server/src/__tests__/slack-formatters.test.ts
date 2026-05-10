@@ -42,7 +42,30 @@ describe("slack formatters", () => {
     expect(msg.text).toContain("Alli-Audit");
     expect(JSON.stringify(msg.blocks)).toContain("€870.00");
     expect(JSON.stringify(msg.blocks)).toContain("€1000.00");
+    // Without companyPrefix, falls back to /companies/<uuid> for back-compat
     expect(JSON.stringify(msg.blocks)).toContain("https://paperclip.example.com/companies/" + COMPANY_ID);
+  });
+
+  it("uses prefix-based URL when companyPrefix provided", () => {
+    const event = makeEvent("approval.created", {
+      id: "ap-42",
+      type: "request_board_approval",
+      title: "Verify",
+    });
+    const msg = formatApprovalCreated(event, "Aurinko Terassit", "AUR");
+    const blocksJson = JSON.stringify(msg.blocks);
+    expect(blocksJson).toContain("https://paperclip.example.com/AUR/approvals/ap-42");
+    expect(blocksJson).not.toContain(`/companies/${COMPANY_ID}/`);
+  });
+
+  it("approval.decided link uses prefix-based URL", () => {
+    const event = makeEvent("approval.decided", {
+      id: "ap-99",
+      type: "risk_incident_acknowledgment",
+      decision: "approved",
+    });
+    const msg = formatApprovalDecided(event, "Aurinko Terassit", "AUR");
+    expect(JSON.stringify(msg.blocks)).toContain("https://paperclip.example.com/AUR/approvals/ap-99");
   });
 
   it("formats agent status with reason when paused", () => {

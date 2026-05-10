@@ -232,6 +232,40 @@ function UnprefixedBoardRedirect() {
   );
 }
 
+// Resolves a /companies/:companyId/<suffix> URL (used by older Slack messages
+// and external integrations) to /{issuePrefix}/<suffix>. The Slack formatters
+// now emit prefix-based URLs directly, but this redirect lets historical
+// links keep working.
+function CompanyUuidRedirect() {
+  const location = useLocation();
+  const { companyId } = useParams<{ companyId: string }>();
+  const { companies, loading } = useCompany();
+
+  if (loading) {
+    return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
+  }
+
+  const matched = companyId
+    ? companies.find((c) => c.id === companyId) ?? null
+    : null;
+  if (!matched) {
+    return <NotFoundPage scope="global" />;
+  }
+
+  // Strip the leading "/companies/<uuid>" segment from the current URL,
+  // keep whatever sub-path remains (e.g. "/approvals/<id>" or "").
+  const prefix = `/companies/${companyId}`;
+  const suffix = location.pathname.startsWith(prefix)
+    ? location.pathname.slice(prefix.length)
+    : "";
+  return (
+    <Navigate
+      to={`/${matched.issuePrefix}${suffix}${location.search}${location.hash}`}
+      replace
+    />
+  );
+}
+
 function NoCompaniesStartPage() {
   const { openOnboarding } = useDialog();
 
@@ -274,6 +308,8 @@ export function App() {
             <Route path="plugins/:pluginId" element={<PluginSettings />} />
             <Route path="adapters" element={<AdapterManager />} />
           </Route>
+          <Route path="companies/:companyId/*" element={<CompanyUuidRedirect />} />
+          <Route path="companies/:companyId" element={<CompanyUuidRedirect />} />
           <Route path="companies" element={<UnprefixedBoardRedirect />} />
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />
