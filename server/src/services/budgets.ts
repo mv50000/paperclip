@@ -23,6 +23,7 @@ import type {
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { emitApprovalCreated } from "./approvals.js";
 
 type ScopeRecord = {
   companyId: string;
@@ -173,6 +174,7 @@ function buildApprovalPayload(input: {
   windowEnd: Date;
 }) {
   return {
+    title: `Budget override: ${input.scopeName} (${input.policy.metric})`,
     scopeType: input.policy.scopeType,
     scopeId: input.policy.scopeId,
     scopeName: input.scopeName,
@@ -390,6 +392,10 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .returning()
         .then((rows) => rows[0] ?? null)
       : null;
+
+    if (approval) {
+      emitApprovalCreated(approval);
+    }
 
     return db
       .insert(budgetIncidents)
