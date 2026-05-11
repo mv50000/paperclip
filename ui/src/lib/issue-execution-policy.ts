@@ -85,11 +85,14 @@ export function buildExecutionPolicy(input: {
     });
   }
 
-  if (stages.length === 0) return null;
+  const outcomeRequirements = input.existingPolicy?.outcomeRequirements ?? [];
+
+  if (stages.length === 0 && outcomeRequirements.length === 0) return null;
 
   return {
     mode,
     commentRequired: true,
     stages,
+    outcomeRequirements,
   };
 }

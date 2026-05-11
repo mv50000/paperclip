@@ -77,6 +77,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { environmentService } from "../services/environments.js";
 import {
   applyIssueExecutionPolicyTransition,
+  evaluateIssueOutcomeRequirements,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
 } from "../services/issue-execution-policy.js";
@@ -2041,6 +2042,22 @@ export function issueRoutes(
       };
     }
     Object.assign(updateFields, transition.patch);
+
+    // Enforced outcomes gate (SEC-91): when the final transition will land the issue
+    // in `done`, evaluate the policy's outcomeRequirements against current work products.
+    const willTransitionToDone = updateFields.status === "done";
+    if (willTransitionToDone && nextExecutionPolicy && nextExecutionPolicy.outcomeRequirements.length > 0) {
+      const workProducts = await workProductsSvc.listForIssue(existing.id);
+      const failures = evaluateIssueOutcomeRequirements(nextExecutionPolicy, workProducts);
+      if (failures.length > 0) {
+        res.status(422).json({
+          error: "Outcome requirements not satisfied",
+          details: { outcomeFailures: failures },
+        });
+        return;
+      }
+    }
+
     if (reviewRequest !== undefined && transition.patch.executionState === undefined) {
       const existingExecutionState = parseIssueExecutionState(existing.executionState);
       if (!existingExecutionState || existingExecutionState.status !== "pending") {

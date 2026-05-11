@@ -100,10 +100,23 @@ export const issueExecutionStageSchema = z.object({
   participants: z.array(issueExecutionStageParticipantSchema).default([]),
 });
 
+export const issueOutcomeRequirementWorkProductPresentSchema = z.object({
+  kind: z.literal("work_product_present"),
+  id: z.string().optional(),
+  workProductType: z.string().min(1).max(64),
+  healthStatus: z.enum(["unknown", "healthy", "unhealthy"]).optional(),
+  description: z.string().max(500).optional(),
+});
+
+export const issueOutcomeRequirementSchema = z.discriminatedUnion("kind", [
+  issueOutcomeRequirementWorkProductPresentSchema,
+]);
+
 export const issueExecutionPolicySchema = z.object({
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
   stages: z.array(issueExecutionStageSchema).default([]),
+  outcomeRequirements: z.array(issueOutcomeRequirementSchema).optional().default([]),
 });
 
 export const issueReviewRequestSchema = z.object({

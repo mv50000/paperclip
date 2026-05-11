@@ -308,6 +308,7 @@ function createExecutionPolicy(overrides: Partial<IssueExecutionPolicy> = {}): I
     mode: "normal",
     commentRequired: true,
     stages: [],
+    outcomeRequirements: [],
     ...overrides,
   };
 }
