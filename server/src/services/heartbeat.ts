@@ -3775,6 +3775,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return null;
     }
     if (await isCompanyPaused(run.companyId)) {
+      await cancelRunInternal(run.id, "Cancelled because the company is paused");
       return null;
     }
     const agent = await getAgent(run.agentId);
