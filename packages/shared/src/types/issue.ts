@@ -183,10 +183,29 @@ export interface IssueExecutionStage {
   participants: IssueExecutionStageParticipant[];
 }
 
+export type IssueOutcomeRequirementHealthStatus = "unknown" | "healthy" | "unhealthy";
+
+export interface IssueOutcomeRequirementWorkProductPresent {
+  kind: "work_product_present";
+  id?: string;
+  workProductType: string;
+  healthStatus?: IssueOutcomeRequirementHealthStatus;
+  description?: string;
+}
+
+export type IssueOutcomeRequirement = IssueOutcomeRequirementWorkProductPresent;
+
+export interface IssueOutcomeRequirementFailure {
+  requirementId: string | null;
+  kind: IssueOutcomeRequirement["kind"];
+  message: string;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   commentRequired: boolean;
   stages: IssueExecutionStage[];
+  outcomeRequirements: IssueOutcomeRequirement[];
 }
 
 export interface IssueReviewRequest {

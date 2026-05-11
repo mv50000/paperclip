@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { IssueExecutionDecision, IssueExecutionPolicy, IssueExecutionStage, IssueExecutionStagePrincipal, IssueExecutionState } from "@paperclipai/shared";
+import type {
+  IssueExecutionDecision,
+  IssueExecutionPolicy,
+  IssueExecutionStage,
+  IssueExecutionStagePrincipal,
+  IssueExecutionState,
+  IssueOutcomeRequirement,
+  IssueOutcomeRequirementFailure,
+  IssueWorkProduct,
+} from "@paperclipai/shared";
 import { issueExecutionPolicySchema, issueExecutionStateSchema } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
 
@@ -81,13 +90,52 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     })
     .filter((stage): stage is NonNullable<typeof stage> => stage !== null);
 
-  if (stages.length === 0) return null;
+  const outcomeRequirements: IssueOutcomeRequirement[] = (parsed.data.outcomeRequirements ?? []).map((requirement) => ({
+    ...requirement,
+    id: requirement.id ?? randomUUID(),
+  }));
+
+  if (stages.length === 0 && outcomeRequirements.length === 0) return null;
 
   return {
     mode: parsed.data.mode ?? "normal",
     commentRequired: true,
     stages,
+    outcomeRequirements,
   };
+}
+
+export function evaluateIssueOutcomeRequirements(
+  policy: IssueExecutionPolicy | null,
+  workProducts: Pick<IssueWorkProduct, "type" | "healthStatus">[],
+): IssueOutcomeRequirementFailure[] {
+  if (!policy || policy.outcomeRequirements.length === 0) return [];
+  const failures: IssueOutcomeRequirementFailure[] = [];
+  for (const requirement of policy.outcomeRequirements) {
+    if (requirement.kind === "work_product_present") {
+      const matches = workProducts.filter((wp) => wp.type === requirement.workProductType);
+      if (matches.length === 0) {
+        failures.push({
+          requirementId: requirement.id ?? null,
+          kind: requirement.kind,
+          message:
+            requirement.description?.trim() ||
+            `Required work product of type "${requirement.workProductType}" is missing`,
+        });
+        continue;
+      }
+      if (requirement.healthStatus && !matches.some((wp) => wp.healthStatus === requirement.healthStatus)) {
+        failures.push({
+          requirementId: requirement.id ?? null,
+          kind: requirement.kind,
+          message:
+            requirement.description?.trim() ||
+            `Required work product "${requirement.workProductType}" must have healthStatus="${requirement.healthStatus}"`,
+        });
+      }
+    }
+  }
+  return failures;
 }
 
 export function parseIssueExecutionState(input: unknown): IssueExecutionState | null {

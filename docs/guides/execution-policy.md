@@ -4,15 +4,16 @@ Paperclip's execution policy system ensures tasks are completed with the right l
 
 ## Overview
 
-An execution policy is an optional structured object on any issue that defines what must happen after the executor finishes their work. It supports three layers of enforcement:
+An execution policy is an optional structured object on any issue that defines what must happen after the executor finishes their work. It supports four layers of enforcement:
 
 | Layer | Purpose | Scope |
 |---|---|---|
 | **Comment required** | Every agent run must post a comment back to the issue | Runtime invariant (always on) |
 | **Review stage** | A reviewer checks quality/correctness and can request changes | Per-issue, optional |
 | **Approval stage** | A manager/stakeholder gives final sign-off | Per-issue, optional |
+| **Outcome requirements** | Machine-checkable predicates on artifacts (e.g., required work product present and healthy) | Per-issue, optional |
 
-These layers compose. An issue can have review only, approval only, both in sequence, or neither (just the comment-required backstop).
+These layers compose. An issue can have review only, approval only, both in sequence, outcome requirements only, or any combination (with the comment-required backstop always on).
 
 ## Data Model
 
@@ -21,9 +22,18 @@ These layers compose. An issue can have review only, approval only, both in sequ
 ```ts
 interface IssueExecutionPolicy {
   mode: "normal" | "auto";
-  commentRequired: boolean;       // always true, enforced by runtime
-  stages: IssueExecutionStage[];  // ordered list of review/approval stages
+  commentRequired: boolean;            // always true, enforced by runtime
+  stages: IssueExecutionStage[];       // ordered list of review/approval stages
+  outcomeRequirements: IssueOutcomeRequirement[]; // predicates that must pass before `done`
 }
+
+type IssueOutcomeRequirement = {
+  kind: "work_product_present";
+  id?: string;                                    // auto-generated UUID if omitted
+  workProductType: string;                        // e.g. "runtime_service", "pull_request"
+  healthStatus?: "unknown" | "healthy" | "unhealthy";
+  description?: string;                           // human-readable failure message
+};
 
 interface IssueExecutionStage {
   id: string;                                 // auto-generated UUID
@@ -148,6 +158,51 @@ Executor finishes → approver signs off → done.
 
 **Multiple reviewers/approvers:**
 Each stage supports multiple participants. The runtime selects one to act, excluding the original executor to prevent self-review.
+
+## Outcome Requirements
+
+Outcome requirements are declarative predicates evaluated server-side at the final transition into `done`. They run *after* any review/approval stages have approved, and *before* the issue can land in `done`. If any predicate fails, the transition is rejected with `422 Outcome requirements not satisfied` and the response body includes `details.outcomeFailures` listing every unmet predicate.
+
+### Supported predicates
+
+**`work_product_present`** — requires at least one work product of the given type. If `healthStatus` is set, at least one matching work product must have that health status.
+
+```json
+{
+  "kind": "work_product_present",
+  "workProductType": "runtime_service",
+  "healthStatus": "healthy",
+  "description": "Deployment must report a healthy health-check before closure"
+}
+```
+
+### Example: deployment ticket cannot close without a healthy health-check
+
+```json
+{
+  "executionPolicy": {
+    "outcomeRequirements": [
+      {
+        "kind": "work_product_present",
+        "workProductType": "runtime_service",
+        "healthStatus": "healthy"
+      }
+    ]
+  }
+}
+```
+
+### Composition with review/approval stages
+
+Outcome requirements run after the final stage approval. If the issue has no stages, they run when any actor transitions the issue directly to `done`. This means:
+
+- **Stages without outcomes**: The approver's word is enough.
+- **Outcomes without stages**: No reviewer is needed, but the machine-checkable proof must be on the issue before any actor can close it.
+- **Both**: The reviewer/approver approves the work; the runtime then double-checks that the required artifacts exist before completing the transition.
+
+### Extensibility
+
+The predicate set is a discriminated union keyed by `kind`. Future predicates (e.g., `comment_contains`, `linked_pr_merged`, `subtasks_completed`) can be added without breaking existing policies.
 
 ## Comment Required Backstop
 
