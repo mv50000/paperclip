@@ -18,7 +18,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { secretsApi } from "../api/secrets";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Settings, Check, Download, Upload } from "lucide-react";
+import { Settings, Check, Download, Upload, Pause, Play } from "lucide-react";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import { JsonSchemaForm, getDefaultValues, validateJsonSchemaForm } from "@/components/JsonSchemaForm";
 import {
@@ -436,6 +436,20 @@ export function CompanySettings() {
     setEnvironmentForm(createEmptyEnvironmentForm());
     setProbeResults({});
   }, [selectedCompanyId]);
+
+  const pauseMutation = useMutation({
+    mutationFn: (companyId: string) => companiesApi.pause(companyId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: (companyId: string) => companiesApi.resume(companyId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    },
+  });
 
   const archiveMutation = useMutation({
     mutationFn: ({
@@ -1244,6 +1258,63 @@ export function CompanySettings() {
               </a>
             </Button>
           </div>
+        </div>
+      </div>
+
+      {/* Pause / Resume */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-yellow-600 dark:text-yellow-400 uppercase tracking-wide">
+          Operations
+        </div>
+        <div className="space-y-3 rounded-md border border-yellow-500/40 bg-yellow-500/5 px-4 py-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">
+                {selectedCompany.status === "paused" ? "Company is paused" : "Pause company"}
+              </p>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                {selectedCompany.status === "paused"
+                  ? "No agents can run while the company is paused. Resume to allow execution."
+                  : "Pause all agent execution for this company. Active runs will continue to completion."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={
+                pauseMutation.isPending ||
+                resumeMutation.isPending ||
+                selectedCompany.status === "archived"
+              }
+              onClick={() => {
+                if (!selectedCompanyId) return;
+                if (selectedCompany.status === "paused") {
+                  resumeMutation.mutate(selectedCompanyId);
+                } else {
+                  pauseMutation.mutate(selectedCompanyId);
+                }
+              }}
+            >
+              {selectedCompany.status === "paused" ? (
+                <>
+                  <Play className="h-3.5 w-3.5 sm:mr-1" />
+                  <span className="hidden sm:inline">Resume</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="h-3.5 w-3.5 sm:mr-1" />
+                  <span className="hidden sm:inline">Pause</span>
+                </>
+              )}
+            </Button>
+          </div>
+          {(pauseMutation.isError || resumeMutation.isError) && (
+            <p className="text-xs text-destructive">
+              {((pauseMutation.error ?? resumeMutation.error) instanceof Error
+                ? (pauseMutation.error ?? resumeMutation.error)!.message
+                : "Operation failed")}
+            </p>
+          )}
         </div>
       </div>
 
