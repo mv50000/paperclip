@@ -26,6 +26,8 @@ import {
   CircleDot,
   DollarSign,
   Calendar,
+  Pause,
+  Play,
 } from "lucide-react";
 
 export function Companies() {
@@ -65,6 +67,20 @@ export function Companies() {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.stats });
       setConfirmDeleteId(null);
+    },
+  });
+
+  const pauseMutation = useMutation({
+    mutationFn: (id: string) => companiesApi.pause(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: (id: string) => companiesApi.resume(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     },
   });
 
@@ -217,6 +233,29 @@ export function Companies() {
                         <Pencil className="h-3.5 w-3.5" />
                         Rename
                       </DropdownMenuItem>
+                      {company.status !== "archived" && (
+                        <DropdownMenuItem
+                          onClick={() => {
+                            if (company.status === "paused") {
+                              resumeMutation.mutate(company.id);
+                            } else {
+                              pauseMutation.mutate(company.id);
+                            }
+                          }}
+                        >
+                          {company.status === "paused" ? (
+                            <>
+                              <Play className="h-3.5 w-3.5" />
+                              Resume
+                            </>
+                          ) : (
+                            <>
+                              <Pause className="h-3.5 w-3.5" />
+                              Pause
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         variant="destructive"

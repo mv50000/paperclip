@@ -29,7 +29,7 @@ import {
   companySkills,
   documents,
 } from "@paperclipai/db";
-import { notFound, unprocessable } from "../errors.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { environmentService } from "./environments.js";
 import { seedDefaultTemplates } from "./email/template-seed.js";
 
@@ -42,6 +42,8 @@ export function companyService(db: Db) {
     name: companies.name,
     description: companies.description,
     status: companies.status,
+    pauseReason: companies.pauseReason,
+    pausedAt: companies.pausedAt,
     issuePrefix: companies.issuePrefix,
     issueCounter: companies.issueCounter,
     budgetMonthlyCents: companies.budgetMonthlyCents,
@@ -272,6 +274,44 @@ export function companyService(db: Db) {
         const [hydrated] = await hydrateCompanySpend([row], tx);
         return enrichCompany(hydrated);
       }),
+
+    pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
+      const existing = await getCompanyQuery(db)
+        .where(eq(companies.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!existing) return null;
+      if (existing.status === "archived") throw conflict("Cannot pause an archived company");
+      if (existing.status === "paused") throw conflict("Company is already paused");
+      await db
+        .update(companies)
+        .set({ status: "paused", pauseReason: reason, pausedAt: new Date(), updatedAt: new Date() })
+        .where(eq(companies.id, id));
+      const row = await getCompanyQuery(db)
+        .where(eq(companies.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!row) return null;
+      const [hydrated] = await hydrateCompanySpend([row], db);
+      return enrichCompany(hydrated);
+    },
+
+    resume: async (id: string) => {
+      const existing = await getCompanyQuery(db)
+        .where(eq(companies.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!existing) return null;
+      if (existing.status === "archived") throw conflict("Cannot resume an archived company");
+      if (existing.status !== "paused") throw conflict("Company is not paused");
+      await db
+        .update(companies)
+        .set({ status: "active", pauseReason: null, pausedAt: null, updatedAt: new Date() })
+        .where(eq(companies.id, id));
+      const row = await getCompanyQuery(db)
+        .where(eq(companies.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!row) return null;
+      const [hydrated] = await hydrateCompanySpend([row], db);
+      return enrichCompany(hydrated);
+    },
 
     remove: (id: string) =>
       db.transaction(async (tx) => {

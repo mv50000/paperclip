@@ -331,7 +331,10 @@ export function createInboundRouter(db: Db, opts: { emailService?: EmailService 
       // Auto-reply if route has a template configured. Run outside the tx
       // (after commit) so we don't hold a long lock during the Resend HTTP call.
       const autoReplyTemplateId = matchedRoute!.autoReplyTemplateId;
-      if (autoReplyTemplateId) {
+      const senderDomain = from.split("@")[1]?.toLowerCase();
+      const ownDomain = matchedRoute!.domain.toLowerCase();
+      const isSelfLoop = senderDomain === ownDomain;
+      if (autoReplyTemplateId && !isSelfLoop) {
         // Defer to next tick — we'll fire after the transaction returns.
         const messageId = persisted.id;
         const senderAddr = from;

@@ -22,6 +22,7 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   activityLog,
+  companies,
   companySkills as companySkillsTable,
   documentRevisions,
   issueDocuments,
@@ -2005,6 +2006,22 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
 
+  const companyPauseCache = new Map<string, { paused: boolean; expiresAt: number }>();
+  const COMPANY_PAUSE_CACHE_TTL_MS = 10_000;
+  async function isCompanyPaused(companyId: string): Promise<boolean> {
+    const now = Date.now();
+    const cached = companyPauseCache.get(companyId);
+    if (cached && cached.expiresAt > now) return cached.paused;
+    const row = await db
+      .select({ status: companies.status })
+      .from(companies)
+      .where(eq(companies.id, companyId))
+      .then((rows) => rows[0] ?? null);
+    const paused = row?.status === "paused";
+    companyPauseCache.set(companyId, { paused, expiresAt: now + COMPANY_PAUSE_CACHE_TTL_MS });
+    return paused;
+  }
+
   const maxGlobalDefault = options.maxGlobalConcurrentRunsDefault
     ?? INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS;
   let globalLimitCache: { value: number; expiresAt: number } | null = null;
@@ -3757,6 +3774,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (systemPause && (await systemPause.isPaused())) {
       return null;
     }
+    if (await isCompanyPaused(run.companyId)) {
+      await cancelRunInternal(run.id, "Cancelled because the company is paused");
+      return null;
+    }
     const agent = await getAgent(run.agentId);
     if (!agent) {
       await cancelRunInternal(run.id, "Cancelled because the agent no longer exists");
@@ -4611,6 +4632,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       const agent = await getAgent(agentId);
       if (!agent) return [];
+      if (await isCompanyPaused(agent.companyId)) {
+        return [];
+      }
       if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
         return [];
       }
@@ -6439,6 +6463,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
     }
 
+    if (await isCompanyPaused(agent.companyId)) {
+      await writeSkippedRequest("company.paused");
+      if (source === "timer" || source === "automation") {
+        return null;
+      }
+      throw conflict("Company is paused", { companyId: agent.companyId });
+    }
+
     const budgetBlock = await budgets.getInvocationBlock(agent.companyId, agentId, {
       issueId,
       projectId,
@@ -7563,6 +7595,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       for (const agent of allAgents) {
         if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") continue;
+        if (await isCompanyPaused(agent.companyId)) continue;
         const policy = parseHeartbeatPolicy(agent);
         if (!policy.enabled || policy.intervalSec <= 0) continue;
 
