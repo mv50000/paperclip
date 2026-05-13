@@ -43,6 +43,14 @@ export const COMPANIES: CompanyTarget[] = [
     ownerAgent: "saatavilla-tech-lead",
     authRedirects: false,
   },
+  {
+    name: "sunspot",
+    displayName: "Sunspot",
+    baseUrl: "https://sunspot-dev.rk9.fi",
+    paperclipCompany: "sunspot",
+    ownerAgent: "sunspot-tech-lead",
+    authRedirects: false,
+  },
 ];
 
 export function companyByName(name: string): CompanyTarget {
