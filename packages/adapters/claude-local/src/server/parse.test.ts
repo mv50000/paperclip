@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   extractClaudeRetryNotBefore,
   isClaudeTransientUpstreamError,
+  parseClaudeStreamJson,
+  extractClaudeLoginUrl,
+  detectClaudeLoginRequired,
+  describeClaudeFailure,
+  isClaudeMaxTurnsResult,
+  isClaudeUnknownSessionError,
 } from "./parse.js";
 
 describe("isClaudeTransientUpstreamError", () => {
@@ -119,5 +125,252 @@ describe("extractClaudeRetryNotBefore", () => {
     expect(
       extractClaudeRetryNotBefore({ errorMessage: "Overloaded. Try again later." }, new Date()),
     ).toBeNull();
+  });
+});
+
+describe("parseClaudeStreamJson", () => {
+  it("extracts session id, model, cost, usage, and summary from a complete stream", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "system",
+        subtype: "init",
+        session_id: "sess_abc123",
+        model: "claude-sonnet-4-20250514",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        session_id: "sess_abc123",
+        message: {
+          content: [{ type: "text", text: "Hello from Claude" }],
+        },
+      }),
+      JSON.stringify({
+        type: "result",
+        session_id: "sess_abc123",
+        result: "Task completed successfully.",
+        total_cost_usd: 0.0042,
+        usage: {
+          input_tokens: 150,
+          cache_read_input_tokens: 30,
+          output_tokens: 60,
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.sessionId).toBe("sess_abc123");
+    expect(parsed.model).toBe("claude-sonnet-4-20250514");
+    expect(parsed.costUsd).toBeCloseTo(0.0042, 6);
+    expect(parsed.usage).toEqual({
+      inputTokens: 150,
+      cachedInputTokens: 30,
+      outputTokens: 60,
+    });
+    expect(parsed.summary).toBe("Task completed successfully.");
+    expect(parsed.resultJson).not.toBeNull();
+  });
+
+  it("returns assistant text as summary when no result event is present", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "system",
+        subtype: "init",
+        session_id: "sess_noResult",
+        model: "claude-opus-4-20250514",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "First paragraph" },
+            { type: "text", text: "Second paragraph" },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.sessionId).toBe("sess_noResult");
+    expect(parsed.summary).toBe("First paragraph\n\nSecond paragraph");
+    expect(parsed.costUsd).toBeNull();
+    expect(parsed.usage).toBeNull();
+    expect(parsed.resultJson).toBeNull();
+  });
+
+  it("handles empty stdout gracefully", () => {
+    const parsed = parseClaudeStreamJson("");
+    expect(parsed.sessionId).toBeNull();
+    expect(parsed.model).toBe("");
+    expect(parsed.summary).toBe("");
+    expect(parsed.costUsd).toBeNull();
+    expect(parsed.usage).toBeNull();
+  });
+
+  it("skips non-JSON lines without crashing", () => {
+    const stdout = [
+      "some random debug output",
+      JSON.stringify({ type: "system", subtype: "init", session_id: "s1", model: "m1" }),
+      "another noisy line",
+      JSON.stringify({ type: "result", result: "Done", usage: { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 0 }, total_cost_usd: 0.001 }),
+    ].join("\n");
+
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.sessionId).toBe("s1");
+    expect(parsed.summary).toBe("Done");
+  });
+
+  it("ignores non-text content blocks in assistant messages", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "bash", input: "ls" },
+            { type: "text", text: "Here are the files" },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.summary).toBe("Here are the files");
+  });
+});
+
+describe("extractClaudeLoginUrl", () => {
+  it("extracts an anthropic auth URL", () => {
+    const text = "Please visit https://console.anthropic.com/auth/login to log in.";
+    expect(extractClaudeLoginUrl(text)).toBe("https://console.anthropic.com/auth/login");
+  });
+
+  it("extracts a claude URL when multiple URLs are present", () => {
+    const text = "Go to https://example.com/unrelated or https://claude.ai/auth/callback for login.";
+    expect(extractClaudeLoginUrl(text)).toBe("https://claude.ai/auth/callback");
+  });
+
+  it("returns the first URL if no claude/anthropic/auth URL is found", () => {
+    const text = "Visit https://example.com/dashboard for help.";
+    expect(extractClaudeLoginUrl(text)).toBe("https://example.com/dashboard");
+  });
+
+  it("returns null for text with no URLs", () => {
+    expect(extractClaudeLoginUrl("No URLs here")).toBeNull();
+  });
+});
+
+describe("detectClaudeLoginRequired", () => {
+  it("detects login required from parsed result", () => {
+    const result = detectClaudeLoginRequired({
+      parsed: { result: "not logged in" },
+      stdout: "",
+      stderr: "",
+    });
+    expect(result.requiresLogin).toBe(true);
+  });
+
+  it("detects login required from stderr", () => {
+    const result = detectClaudeLoginRequired({
+      parsed: null,
+      stdout: "",
+      stderr: "Please run `claude login` first",
+    });
+    expect(result.requiresLogin).toBe(true);
+  });
+
+  it("detects login required from error messages", () => {
+    const result = detectClaudeLoginRequired({
+      parsed: { errors: ["authentication required"] },
+      stdout: "",
+      stderr: "",
+    });
+    expect(result.requiresLogin).toBe(true);
+  });
+
+  it("returns false when no login is required", () => {
+    const result = detectClaudeLoginRequired({
+      parsed: { result: "Task completed" },
+      stdout: "all good",
+      stderr: "",
+    });
+    expect(result.requiresLogin).toBe(false);
+  });
+
+  it("extracts login URL when present", () => {
+    const result = detectClaudeLoginRequired({
+      parsed: null,
+      stdout: "Please log in at https://console.anthropic.com/auth/login",
+      stderr: "",
+    });
+    expect(result.requiresLogin).toBe(true);
+    expect(result.loginUrl).toBe("https://console.anthropic.com/auth/login");
+  });
+});
+
+describe("describeClaudeFailure", () => {
+  it("includes subtype and result detail", () => {
+    const desc = describeClaudeFailure({
+      subtype: "error_max_turns",
+      result: "Reached maximum turns",
+    });
+    expect(desc).toBe("Claude run failed: subtype=error_max_turns: Reached maximum turns");
+  });
+
+  it("falls back to error messages when result is empty", () => {
+    const desc = describeClaudeFailure({
+      errors: ["something broke"],
+    });
+    expect(desc).toBe("Claude run failed: something broke");
+  });
+
+  it("returns null when there is no detail", () => {
+    expect(describeClaudeFailure({})).toBeNull();
+  });
+});
+
+describe("isClaudeMaxTurnsResult", () => {
+  it("detects error_max_turns subtype", () => {
+    expect(isClaudeMaxTurnsResult({ subtype: "error_max_turns" })).toBe(true);
+  });
+
+  it("detects max_turns stop_reason", () => {
+    expect(isClaudeMaxTurnsResult({ stop_reason: "max_turns" })).toBe(true);
+  });
+
+  it("detects max turns in result text", () => {
+    expect(isClaudeMaxTurnsResult({ result: "Reached maximum turns limit" })).toBe(true);
+  });
+
+  it("returns false for normal results", () => {
+    expect(isClaudeMaxTurnsResult({ result: "Completed normally" })).toBe(false);
+  });
+
+  it("returns false for null/undefined", () => {
+    expect(isClaudeMaxTurnsResult(null)).toBe(false);
+    expect(isClaudeMaxTurnsResult(undefined)).toBe(false);
+  });
+});
+
+describe("isClaudeUnknownSessionError", () => {
+  it("detects 'no conversation found with session id'", () => {
+    expect(
+      isClaudeUnknownSessionError({ result: "no conversation found with session id sess_abc" }),
+    ).toBe(true);
+  });
+
+  it("detects 'unknown session'", () => {
+    expect(
+      isClaudeUnknownSessionError({ errors: ["unknown session"] }),
+    ).toBe(true);
+  });
+
+  it("detects 'session ... not found'", () => {
+    expect(
+      isClaudeUnknownSessionError({ result: "session sess_xyz not found" }),
+    ).toBe(true);
+  });
+
+  it("does not classify unrelated failures as stale sessions", () => {
+    expect(isClaudeUnknownSessionError({ result: "model overloaded" })).toBe(false);
+    expect(isClaudeUnknownSessionError({ errors: ["rate limited"] })).toBe(false);
   });
 });
