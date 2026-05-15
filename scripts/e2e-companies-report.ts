@@ -304,29 +304,49 @@ function buildIssueDescription(failure: FailureRecord, isRecurring: boolean): st
   return lines.join("\n");
 }
 
+async function resolveAiAgentId(companyId: string, token: string): Promise<string | null> {
+  try {
+    const agents = await apiFetch<Array<{ id: string; name: string; status: string }>>(
+      `/api/companies/${companyId}/agents`,
+      token,
+    );
+    const ai = agents.find((a) => a.name === "AI" && a.status !== "terminated" && a.status !== "paused");
+    return ai?.id ?? null;
+  } catch (err) {
+    console.warn(`⚠️  AI-agentin haku epäonnistui (${companyId}):`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
 async function createIssue(
   companyId: string,
   token: string,
   failure: FailureRecord,
   isRecurring: boolean,
+  assigneeAgentId: string | null,
 ): Promise<{ id: string; identifier?: string }> {
   const priority = isRecurring ? "critical" : "high";
   const title = `[E2E] ${failure.company.displayName}: ${failure.testTitle.slice(0, 80)}`;
   const description = buildIssueDescription(failure, isRecurring);
 
   if (DRY_RUN) {
-    console.log(`[DRY-RUN] would create issue for ${failure.company.name}: "${title}" (priority=${priority})`);
+    console.log(`[DRY-RUN] would create issue for ${failure.company.name}: "${title}" (priority=${priority}, assignee=${assigneeAgentId ?? "unassigned"})`);
     return { id: "dry-run", identifier: "DRY-0" };
+  }
+
+  const body: Record<string, unknown> = {
+    title,
+    description,
+    status: "todo",
+    priority,
+  };
+  if (assigneeAgentId) {
+    body.assigneeAgentId = assigneeAgentId;
   }
 
   return apiFetch(`/api/companies/${companyId}/issues`, token, {
     method: "POST",
-    body: JSON.stringify({
-      title,
-      description,
-      status: "todo",
-      priority,
-    }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -400,13 +420,19 @@ async function main(): Promise<void> {
           `⚠️  Slugille "${summary.company.paperclipCompany}" puuttuu ${!token ? "token" : "agentId/companyId"} — skipataan tikettien luonti.`,
         );
       } else {
+        const aiAgentId = await resolveAiAgentId(self.companyId, token);
+        if (!aiAgentId) {
+          console.warn(
+            `⚠️  ${summary.company.name}: AI-agentti puuttuu — tiketit luodaan unassigned (CEO triagettaa).`,
+          );
+        }
         for (const failure of summary.failures) {
           const key = `${failure.company.name}::${failure.testTitle}`;
           const isRecurring = recurringKeys.has(key);
           try {
-            const issue = await createIssue(self.companyId, token, failure, isRecurring);
+            const issue = await createIssue(self.companyId, token, failure, isRecurring, aiAgentId);
             console.log(
-              `→ ${summary.company.name}: ${isRecurring ? "RECURRING" : "new"} failure → issue ${issue.identifier ?? issue.id}`,
+              `→ ${summary.company.name}: ${isRecurring ? "RECURRING" : "new"} failure → issue ${issue.identifier ?? issue.id}${aiAgentId ? " (→ AI)" : " (unassigned)"}`,
             );
           } catch (err) {
             console.error(`Issue luonti epäonnistui (${summary.company.name} / ${failure.testTitle}):`, err);

@@ -772,6 +772,12 @@ export function issueRoutes(
     if (!resolved.agent) {
       throw notFound("Agent not found");
     }
+    if (resolved.agent.status === "paused" || resolved.agent.status === "terminated") {
+      throw conflict(
+        `Cannot assign issue to ${resolved.agent.status} agent "${resolved.agent.name}". ` +
+          `Assign to an active agent or to "AI" for heavy implementation work.`,
+      );
+    }
     return resolved.agent.id;
   }
   function toValidTimestamp(value: Date | string | null | undefined) {
