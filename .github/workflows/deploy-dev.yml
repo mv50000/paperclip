@@ -1,8 +1,11 @@
 name: Deploy to Dev
 
 on:
-  push:
-    branches: [master]
+  # Push trigger disabled 2026-05-15: Paperclip is deployed manually via
+  # `sudo cp -r /home/rk9admin/paperclip/. /opt/paperclip/ && sudo systemctl restart paperclip`.
+  # No self-hosted runner is registered for mv50000/paperclip with label
+  # `paperclip-dev`, so push-triggered runs queued indefinitely (24h before cancel).
+  # Keep workflow_dispatch so it can still be invoked manually if needed.
   workflow_dispatch:
 
 concurrency:
