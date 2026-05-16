@@ -172,7 +172,15 @@ function formatIssueLinksForComment(relations: Array<{ identifier?: string | nul
 }
 
 function isAgentInvokable(agent: typeof agents.$inferSelect | null | undefined) {
-  return Boolean(agent && !["paused", "terminated", "pending_approval"].includes(agent.status));
+  if (!agent) return false;
+  if (["paused", "terminated", "pending_approval"].includes(agent.status)) return false;
+  // Agents with heartbeat explicitly disabled are not auto-executable. They exist
+  // as work-target identities only (e.g. "AI" board-member picked up by humans via
+  // /implement, or "E2E Smoke Tarkkailija" reporting external Playwright runs).
+  // Auto-recovery must not enqueue dispatch for them — it just loops on adapter failures.
+  const heartbeatEnabled = (agent.runtimeConfig as { heartbeat?: { enabled?: boolean } } | null | undefined)?.heartbeat?.enabled;
+  if (heartbeatEnabled === false) return false;
+  return true;
 }
 
 function isStrandedIssueRecoveryIssue(issue: Pick<typeof issues.$inferSelect, "originKind">) {
