@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -437,35 +437,50 @@ function buildClaudeCliShellProbeCommand(): string {
   return `${feed} | script -q -e -f -c ${quoteForShell(claudeCommand)} /dev/null`;
 }
 
-export async function captureClaudeCliUsageText(timeoutMs = 12_000): Promise<string> {
+export function captureClaudeCliUsageText(timeoutMs = 12_000): Promise<string> {
   const command = buildClaudeCliShellProbeCommand();
-  try {
-    const { stdout, stderr } = await execFileAsync("sh", ["-c", command], {
+  return new Promise((resolve, reject) => {
+    const child = spawn("sh", ["-c", command], {
       env: createClaudeQuotaEnv(),
-      timeout: timeoutMs,
-      maxBuffer: 8 * 1024 * 1024,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    const output = `${stdout}${stderr}`;
-    const cleaned = cleanTerminalText(output);
-    if (usageOutputLooksComplete(cleaned)) return output;
-    throw new Error("Claude CLI usage probe ended before rendering usage.");
-  } catch (error) {
-    const stdout =
-      typeof error === "object" && error !== null && "stdout" in error && typeof error.stdout === "string"
-        ? error.stdout
-        : "";
-    const stderr =
-      typeof error === "object" && error !== null && "stderr" in error && typeof error.stderr === "string"
-        ? error.stderr
-        : "";
-    const output = `${stdout}${stderr}`;
-    const cleaned = cleanTerminalText(output);
-    if (usageOutputLooksComplete(cleaned)) return output;
-    if (usageOutputLooksRelevant(cleaned)) {
-      throw new Error("Claude CLI usage probe ended before rendering usage.");
-    }
-    throw error instanceof Error ? error : new Error(String(error));
-  }
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    child.stdout!.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    const killGroup = () => {
+      try { process.kill(-child.pid!, "SIGKILL"); } catch { /* already dead */ }
+    };
+
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      killGroup();
+      const output = stdout + stderr;
+      const cleaned = cleanTerminalText(output);
+      if (usageOutputLooksComplete(cleaned)) { resolve(output); return; }
+      if (error) {
+        reject(usageOutputLooksRelevant(cleaned)
+          ? new Error("Claude CLI usage probe ended before rendering usage.")
+          : error);
+        return;
+      }
+      reject(new Error("Claude CLI usage probe ended before rendering usage."));
+    };
+
+    const timer = setTimeout(
+      () => settle(new Error("Claude CLI probe timed out after " + timeoutMs + "ms")),
+      timeoutMs,
+    );
+    child.on("close", () => settle());
+    child.on("error", (err) => settle(err));
+  });
 }
 
 export async function fetchClaudeCliQuota(): Promise<QuotaWindow[]> {
