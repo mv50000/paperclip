@@ -85,6 +85,7 @@ import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
+import { humanProxyAdapter } from "./human-proxy/index.js";
 
 function normalizeHermesConfig<T extends { config?: unknown; agent?: unknown }>(ctx: T): T {
   const config =
@@ -321,6 +322,7 @@ function registerBuiltInAdapters() {
     hermesLocalAdapter,
     processAdapter,
     httpAdapter,
+    humanProxyAdapter,
   ]) {
     adaptersByType.set(adapter.type, adapter);
   }
@@ -423,7 +425,12 @@ export function registerServerAdapter(adapter: ServerAdapterModule): void {
 }
 
 export function unregisterServerAdapter(type: string): void {
-  if (type === processAdapter.type || type === httpAdapter.type) return;
+  if (
+    type === processAdapter.type ||
+    type === httpAdapter.type ||
+    type === humanProxyAdapter.type
+  )
+    return;
   if (builtinFallbacks.has(type)) {
     pausedOverrides.delete(type);
     const fallback = builtinFallbacks.get(type);

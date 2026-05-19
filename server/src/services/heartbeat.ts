@@ -112,6 +112,7 @@ import {
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import { recoveryService } from "./recovery/service.js";
+import { isHumanProxyAgent } from "./human-proxy.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
 import {
@@ -6442,6 +6443,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
     };
 
+    if (isHumanProxyAgent(agent)) {
+      await writeSkippedRequest("agent.human_proxy");
+      return null;
+    }
+
     let projectId = readNonEmptyString(enrichedContextSnapshot.projectId);
     if (!projectId && issueId) {
       projectId = await db
@@ -7594,6 +7600,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       let skipped = 0;
 
       for (const agent of allAgents) {
+        if (isHumanProxyAgent(agent)) continue;
         if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") continue;
         if (await isCompanyPaused(agent.companyId)) continue;
         const policy = parseHeartbeatPolicy(agent);

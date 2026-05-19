@@ -41,7 +41,7 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
     <div className="space-y-4">
       <div className="space-y-1">
         <PropertyRow label="Status">
-          <StatusBadge status={agent.status} />
+          <StatusBadge status={agent.status} adapterType={agent.adapterType} />
         </PropertyRow>
         <PropertyRow label="Role">
           <span className="text-sm">{roleLabels[agent.role] ?? agent.role}</span>

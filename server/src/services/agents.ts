@@ -19,6 +19,7 @@ import {
 import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
+import { HUMAN_PROXY_ADAPTER_TYPE } from "./human-proxy.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
 
 function hashToken(token: string) {
@@ -123,12 +124,22 @@ function parseFiniteNumberLike(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizeRuntimeConfigForNewAgent(runtimeConfig: unknown): Record<string, unknown> {
+function normalizeRuntimeConfigForNewAgent(
+  runtimeConfig: unknown,
+  adapterType?: string | null,
+): Record<string, unknown> {
   const normalizedRuntimeConfig = isPlainRecord(runtimeConfig) ? { ...runtimeConfig } : {};
   const heartbeat = isPlainRecord(normalizedRuntimeConfig.heartbeat)
     ? { ...normalizedRuntimeConfig.heartbeat }
     : {};
-  if (parseFiniteNumberLike(heartbeat.maxConcurrentRuns) == null) {
+  if (adapterType === HUMAN_PROXY_ADAPTER_TYPE) {
+    // Human-proxy agents never run automatically. Force a fully disabled
+    // heartbeat policy so they cannot be invoked by any scheduler path.
+    heartbeat.enabled = false;
+    heartbeat.wakeOnDemand = false;
+    heartbeat.intervalSec = 0;
+    heartbeat.maxConcurrentRuns = 0;
+  } else if (parseFiniteNumberLike(heartbeat.maxConcurrentRuns) == null) {
     heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
   }
   normalizedRuntimeConfig.heartbeat = heartbeat;
@@ -429,10 +440,21 @@ export function agentService(db: Db) {
 
       const role = data.role ?? "general";
       const normalizedPermissions = normalizeAgentPermissions(data.permissions, role);
-      const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig);
+      const adapterType = data.adapterType ?? "process";
+      const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig, adapterType);
+      const isHumanProxy = adapterType === HUMAN_PROXY_ADAPTER_TYPE;
+      const insertValues: typeof agents.$inferInsert = {
+        ...data,
+        name: uniqueName,
+        companyId,
+        role,
+        permissions: normalizedPermissions,
+        runtimeConfig,
+        ...(isHumanProxy ? { budgetMonthlyCents: 0, spentMonthlyCents: 0 } : {}),
+      };
       const created = await db
         .insert(agents)
-        .values({ ...data, name: uniqueName, companyId, role, permissions: normalizedPermissions, runtimeConfig })
+        .values(insertValues)
         .returning()
         .then((rows) => rows[0]);
 

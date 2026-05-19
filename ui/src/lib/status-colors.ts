@@ -47,6 +47,7 @@ export const statusBadge: Record<string, string> = {
   paused: "bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300",
   idle: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300",
   archived: "bg-muted text-muted-foreground",
+  human_proxy: "bg-violet-100 text-violet-700 dark:bg-violet-900/50 dark:text-violet-300",
 
   // Goal statuses
   planned: "bg-muted text-muted-foreground",
@@ -112,6 +113,7 @@ export const agentStatusDot: Record<string, string> = {
   pending_approval: "bg-amber-400",
   error: "bg-red-400",
   archived: "bg-neutral-400",
+  human_proxy: "bg-violet-400",
 };
 
 export const agentStatusDotDefault = "bg-neutral-400";
