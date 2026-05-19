@@ -586,17 +586,27 @@ export function agentRoutes(
     };
   }
 
-  function normalizeNewAgentRuntimeConfig(runtimeConfig: unknown): Record<string, unknown> {
+  function normalizeNewAgentRuntimeConfig(
+    runtimeConfig: unknown,
+    adapterType?: string | null,
+  ): Record<string, unknown> {
     const parsedRuntimeConfig = asRecord(runtimeConfig);
     const normalizedRuntimeConfig = parsedRuntimeConfig ? { ...parsedRuntimeConfig } : {};
     const parsedHeartbeat = asRecord(normalizedRuntimeConfig.heartbeat);
     const heartbeat = parsedHeartbeat ? { ...parsedHeartbeat } : {};
 
-    if (parseBooleanLike(heartbeat.enabled) == null) {
+    if (adapterType === "human_proxy") {
       heartbeat.enabled = false;
-    }
-    if (parseNumberLike(heartbeat.maxConcurrentRuns) == null) {
-      heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+      heartbeat.wakeOnDemand = false;
+      heartbeat.intervalSec = 0;
+      heartbeat.maxConcurrentRuns = 0;
+    } else {
+      if (parseBooleanLike(heartbeat.enabled) == null) {
+        heartbeat.enabled = false;
+      }
+      if (parseNumberLike(heartbeat.maxConcurrentRuns) == null) {
+        heartbeat.maxConcurrentRuns = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+      }
     }
 
     normalizedRuntimeConfig.heartbeat = heartbeat;
@@ -1502,7 +1512,7 @@ export function agentRoutes(
     const normalizedHireInput = {
       ...hireInput,
       adapterConfig: normalizedAdapterConfig,
-      runtimeConfig: normalizeNewAgentRuntimeConfig(hireInput.runtimeConfig),
+      runtimeConfig: normalizeNewAgentRuntimeConfig(hireInput.runtimeConfig, hireInput.adapterType),
     };
 
     const company = await db
@@ -1693,7 +1703,7 @@ export function agentRoutes(
     const createdAgent = await svc.create(companyId, {
       ...createInput,
       adapterConfig: normalizedAdapterConfig,
-      runtimeConfig: normalizeNewAgentRuntimeConfig(createInput.runtimeConfig),
+      runtimeConfig: normalizeNewAgentRuntimeConfig(createInput.runtimeConfig, createInput.adapterType),
       status: "idle",
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,

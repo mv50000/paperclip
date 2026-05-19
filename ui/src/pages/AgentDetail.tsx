@@ -947,7 +947,7 @@ export function AgentDetail() {
             onResume={() => agentAction.mutate("resume")}
             disabled={agentAction.isPending || isPendingApproval}
           />
-          <span className="hidden sm:inline"><StatusBadge status={agent.status} /></span>
+          <span className="hidden sm:inline"><StatusBadge status={agent.status} adapterType={agent.adapterType} /></span>
           {mobileLiveRun && (
             <Link
               to={`/agents/${canonicalAgentRef}/runs/${mobileLiveRun.id}`}

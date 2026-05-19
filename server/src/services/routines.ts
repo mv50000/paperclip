@@ -49,6 +49,7 @@ import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./is
 import type { SystemPauseService } from "./system-pause.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import { isHumanProxyAgent } from "./human-proxy.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
@@ -402,12 +403,20 @@ export function routineService(
   async function assertAssignableAgent(companyId: string, agentId: string | null | undefined) {
     if (!agentId) return;
     const agent = await db
-      .select({ id: agents.id, companyId: agents.companyId, status: agents.status })
+      .select({
+        id: agents.id,
+        companyId: agents.companyId,
+        status: agents.status,
+        adapterType: agents.adapterType,
+      })
       .from(agents)
       .where(eq(agents.id, agentId))
       .then((rows) => rows[0] ?? null);
     if (!agent) throw notFound("Assignee agent not found");
     if (agent.companyId !== companyId) throw unprocessable("Assignee must belong to same company");
+    if (isHumanProxyAgent(agent)) {
+      throw conflict("Cannot assign routines to human-proxy agents — they are picked up manually via /implement");
+    }
     if (agent.status === "pending_approval") throw conflict("Cannot assign routines to pending approval agents");
     if (agent.status === "terminated") throw conflict("Cannot assign routines to terminated agents");
   }
@@ -819,6 +828,21 @@ export function routineService(
     const assigneeAgentId = input.assigneeAgentId ?? input.routine.assigneeAgentId ?? null;
     if (!assigneeAgentId) {
       throw unprocessable("Default agent required");
+    }
+    const assigneeAgent = await db
+      .select({ id: agents.id, adapterType: agents.adapterType })
+      .from(agents)
+      .where(eq(agents.id, assigneeAgentId))
+      .then((rows) => rows[0] ?? null);
+    if (isHumanProxyAgent(assigneeAgent)) {
+      // Defense in depth — assertAssignableAgent already rejects human_proxy when
+      // routines are created/assigned, but if an existing routine references one,
+      // refuse to dispatch rather than emit an unrunnable job.
+      logger.warn(
+        { routineId: input.routine.id, assigneeAgentId },
+        "[routines] refusing dispatch for human_proxy agent",
+      );
+      throw conflict("Cannot dispatch routine to human-proxy agent");
     }
     const automaticVariables: Record<string, string | number | boolean> = {};
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
@@ -1692,12 +1716,21 @@ export function routineService(
         if (!claimed) continue;
 
         for (let i = 0; i < runCount; i += 1) {
-          await dispatchRoutineRun({
-            routine: row.routine,
-            trigger: row.trigger,
-            source: "schedule",
-          });
-          triggered += 1;
+          try {
+            await dispatchRoutineRun({
+              routine: row.routine,
+              trigger: row.trigger,
+              source: "schedule",
+            });
+            triggered += 1;
+          } catch (error) {
+            // Catch dispatch-time refusals (e.g. human_proxy assignee) so one bad
+            // routine doesn't poison the scheduler tick for everyone else.
+            logger.warn(
+              { routineId: row.routine.id, triggerId: row.trigger.id, error },
+              "[routines] scheduled dispatch failed; continuing scheduler tick",
+            );
+          }
         }
       }
 

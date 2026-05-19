@@ -73,6 +73,7 @@ import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
+import { isHumanProxyAgent } from "../services/human-proxy.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { environmentService } from "../services/environments.js";
 import {
@@ -771,6 +772,11 @@ export function issueRoutes(
     }
     if (!resolved.agent) {
       throw notFound("Agent not found");
+    }
+    // Human-proxy agents are always assignable regardless of status — they exist
+    // purely as assignment targets, and a human picks up the work via /implement.
+    if (isHumanProxyAgent(resolved.agent)) {
+      return resolved.agent.id;
     }
     if (resolved.agent.status === "paused" || resolved.agent.status === "terminated") {
       throw conflict(

@@ -43,6 +43,7 @@ import {
   type IssueLivenessFinding,
 } from "./issue-graph-liveness.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { isHumanProxyAgent } from "../human-proxy.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
@@ -173,11 +174,14 @@ function formatIssueLinksForComment(relations: Array<{ identifier?: string | nul
 
 function isAgentInvokable(agent: typeof agents.$inferSelect | null | undefined) {
   if (!agent) return false;
+  // Human-proxy agents are assignment-target identities only — they never run
+  // automatically (issues are picked up by humans via /implement). Auto-recovery
+  // must not enqueue dispatch for them.
+  if (isHumanProxyAgent(agent)) return false;
   if (["paused", "terminated", "pending_approval"].includes(agent.status)) return false;
-  // Agents with heartbeat explicitly disabled are not auto-executable. They exist
-  // as work-target identities only (e.g. "AI" board-member picked up by humans via
-  // /implement, or "E2E Smoke Tarkkailija" reporting external Playwright runs).
-  // Auto-recovery must not enqueue dispatch for them — it just loops on adapter failures.
+  // Agents with heartbeat explicitly disabled are not auto-executable (e.g.
+  // E2E Smoke Tarkkailija reporting external Playwright runs). Auto-recovery
+  // must not enqueue dispatch for them — it just loops on adapter failures.
   const heartbeatEnabled = (agent.runtimeConfig as { heartbeat?: { enabled?: boolean } } | null | undefined)?.heartbeat?.enabled;
   if (heartbeatEnabled === false) return false;
   return true;
