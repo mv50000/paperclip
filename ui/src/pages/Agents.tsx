@@ -242,7 +242,7 @@ export function Agents() {
                           liveCount={liveRunByAgent.get(agent.id)!.liveCount}
                         />
                       ) : (
-                        <StatusBadge status={agent.status} />
+                        <StatusBadge status={agent.status} adapterType={agent.adapterType} />
                       )}
                     </span>
                     <div className="hidden sm:flex items-center gap-3">
@@ -260,7 +260,7 @@ export function Agents() {
                         {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
                       </span>
                       <span className="w-20 flex justify-end">
-                        <StatusBadge status={agent.status} />
+                        <StatusBadge status={agent.status} adapterType={agent.adapterType} />
                       </span>
                     </div>
                   </div>
@@ -343,7 +343,7 @@ function OrgTreeNode({
                 liveCount={liveRunByAgent.get(node.id)!.liveCount}
               />
             ) : (
-              <StatusBadge status={node.status} />
+              <StatusBadge status={node.status} adapterType={agent?.adapterType} />
             )}
           </span>
           <div className="hidden sm:flex items-center gap-3">
@@ -365,7 +365,7 @@ function OrgTreeNode({
               </>
             )}
             <span className="w-20 flex justify-end">
-              <StatusBadge status={node.status} />
+              <StatusBadge status={node.status} adapterType={agent?.adapterType} />
             </span>
           </div>
         </div>
