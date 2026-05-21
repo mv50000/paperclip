@@ -1569,6 +1569,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }
 
   async function reconcileStrandedAssignedIssues() {
+    const experimentalSettings = await instanceSettings.getExperimental();
+    const strictInProgressOnly = asBoolean(
+      experimentalSettings.recoveryStrictInProgressOnly,
+      false,
+    );
+
     const candidates = await db
       .select()
       .from(issues)
@@ -1590,26 +1596,54 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       issueIds: [] as string[],
     };
 
+    const logCandidate = (
+      issue: typeof issues.$inferSelect,
+      decision: string,
+      latestRun: LatestIssueRun,
+      extra?: Record<string, unknown>,
+    ) => {
+      logger.info(
+        {
+          scope: "recovery.reconcile_stranded_assigned_issue",
+          companyId: issue.companyId,
+          issueId: issue.id,
+          identifier: issue.identifier,
+          status: issue.status,
+          decision,
+          hasLatestRun: latestRun !== null,
+          latestRunStatus: latestRun?.status ?? null,
+          strictInProgressOnly,
+          wouldRecoverUnderStrictPolicy: issue.status === "in_progress",
+          ...(extra ?? {}),
+        },
+        "stranded assigned issue decision",
+      );
+    };
+
     for (const issue of candidates) {
       const agentId = issue.assigneeAgentId;
       if (!agentId) {
         result.skipped += 1;
+        logCandidate(issue, "skipped_no_agent", null);
         continue;
       }
 
       const agent = await getAgent(agentId);
       if (!agent || agent.companyId !== issue.companyId || !isAgentInvokable(agent)) {
         result.skipped += 1;
+        logCandidate(issue, "skipped_agent_not_invokable", null);
         continue;
       }
 
       if (await hasActiveExecutionPath(issue.companyId, issue.id)) {
         result.skipped += 1;
+        logCandidate(issue, "skipped_active_execution_path", null);
         continue;
       }
 
       if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
         result.skipped += 1;
+        logCandidate(issue, "skipped_pause_hold", null);
         continue;
       }
 
@@ -1623,21 +1657,31 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         if (updated) {
           result.escalated += 1;
           result.issueIds.push(issue.id);
+          logCandidate(issue, "escalated_recovery_issue_terminal", latestRun);
         } else {
           result.skipped += 1;
+          logCandidate(issue, "skipped_recovery_escalation_no_update", latestRun);
         }
         continue;
       }
 
       if (issue.status === "todo") {
+        if (strictInProgressOnly) {
+          result.skipped += 1;
+          logCandidate(issue, "skipped_strict_in_progress_only", latestRun);
+          continue;
+        }
+
         if (!latestRun) {
           if (await hasQueuedIssueWake(issue.companyId, issue.id)) {
             result.skipped += 1;
+            logCandidate(issue, "skipped_queued_wake_exists", latestRun);
             continue;
           }
 
           if (await isInvocationBudgetBlocked(issue, agentId)) {
             result.skipped += 1;
+            logCandidate(issue, "skipped_budget_blocked", latestRun);
             continue;
           }
 
@@ -1645,14 +1689,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           if (queued) {
             result.assignmentDispatched += 1;
             result.issueIds.push(issue.id);
+            logCandidate(issue, "assignment_dispatched", latestRun);
           } else {
             result.skipped += 1;
+            logCandidate(issue, "skipped_initial_dispatch_not_queued", latestRun);
           }
           continue;
         }
 
         if (latestRun.status === "succeeded") {
           result.skipped += 1;
+          logCandidate(issue, "skipped_latest_run_succeeded", latestRun);
           continue;
         }
 
@@ -1670,14 +1717,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           if (updated) {
             result.escalated += 1;
             result.issueIds.push(issue.id);
+            logCandidate(issue, "escalated_todo_after_retry_failed", latestRun);
           } else {
             result.skipped += 1;
+            logCandidate(issue, "skipped_todo_escalation_no_update", latestRun);
           }
           continue;
         }
 
         if (await isInvocationBudgetBlocked(issue, agentId)) {
           result.skipped += 1;
+          logCandidate(issue, "skipped_budget_blocked", latestRun);
           continue;
         }
 
@@ -1692,14 +1742,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         if (queued) {
           result.dispatchRequeued += 1;
           result.issueIds.push(issue.id);
+          logCandidate(issue, "dispatch_requeued", latestRun);
         } else {
           result.skipped += 1;
+          logCandidate(issue, "skipped_dispatch_requeue_not_queued", latestRun);
         }
         continue;
       }
 
       if (!latestRun && !issue.checkoutRunId && !issue.executionRunId) {
         result.skipped += 1;
+        logCandidate(issue, "skipped_in_progress_no_run_reference", latestRun);
         continue;
       }
       if (didAutomaticRecoveryFail(latestRun, "issue_continuation_needed")) {
@@ -1716,14 +1769,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         if (updated) {
           result.escalated += 1;
           result.issueIds.push(issue.id);
+          logCandidate(issue, "escalated_in_progress_after_retry_failed", latestRun);
         } else {
           result.skipped += 1;
+          logCandidate(issue, "skipped_in_progress_escalation_no_update", latestRun);
         }
         continue;
       }
 
       if (await isInvocationBudgetBlocked(issue, agentId)) {
         result.skipped += 1;
+        logCandidate(issue, "skipped_budget_blocked", latestRun);
         continue;
       }
 
@@ -1738,8 +1794,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       if (queued) {
         result.continuationRequeued += 1;
         result.issueIds.push(issue.id);
+        logCandidate(issue, "continuation_requeued", latestRun);
       } else {
         result.skipped += 1;
+        logCandidate(issue, "skipped_continuation_requeue_not_queued", latestRun);
       }
     }
 
