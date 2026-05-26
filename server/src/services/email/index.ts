@@ -5,7 +5,7 @@
 //   4. Atomic rate-limit check (per-agent + per-company)
 //   5. Render markdown → html+text, build From: address
 //   6. Resolve resend.api_key from company secrets
-//   7. Call Resend
+//   7. Send via the configured provider (createMailProvider; default resend)
 //   8. Persist to email_messages + email_outbound_audit
 // Each blocking step also writes a row to email_outbound_audit so we have a
 // complete audit trail (rate limits, suppression, header injection attempts).
@@ -20,7 +20,7 @@ import {
 } from "@paperclipai/db";
 import { secretService } from "../secrets.js";
 import { logger } from "../../middleware/logger.js";
-import { sendViaResend } from "./resend-client.js";
+import { createMailProvider } from "./provider.js";
 import { checkAndConsumeRateLimit } from "./rate-limiter.js";
 import { findSuppressed } from "./suppression.js";
 import { buildFromAddress, renderMarkdown, validateOutboundHeaders } from "./render.js";
@@ -234,8 +234,9 @@ export function createEmailService(db: Db): EmailService {
     }
     const apiKey = await secrets.resolveSecretValue(input.companyId, secret.id, "latest");
 
-    // 7. Resend
-    const sendResult = await sendViaResend(apiKey, {
+    // 7. Send via the configured provider (config.mailProvider; default resend)
+    const provider = createMailProvider(config.mailProvider, { resendApiKey: apiKey });
+    const sendResult = await provider.send({
       from: fromAddress,
       to: input.to,
       cc: input.cc,
