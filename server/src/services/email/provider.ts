@@ -19,6 +19,7 @@ import {
   type ResendSendResult,
   type ResendDomainResult,
 } from "./resend-client.js";
+import { SesProvider, sesConfigFromEnv, type SesProviderConfig } from "./ses-client.js";
 
 // Provider-neutral send/domain shapes. They currently mirror Resend's wire
 // shape; the SES provider will conform its results to these same types so
@@ -43,6 +44,8 @@ export interface MailProvider {
 export interface MailProviderCredentials {
   /** Per-company Resend API key (from the `resend.api_key` secret). */
   resendApiKey?: string;
+  /** Explicit SES config; when omitted the `"ses"` case reads it from the env. */
+  ses?: SesProviderConfig;
 }
 
 class ResendProvider implements MailProvider {
@@ -72,8 +75,7 @@ export function createMailProvider(
       return new ResendProvider(creds.resendApiKey);
     }
     case "ses":
-      // Implemented in SEC-105 (L2: SesProvider via @aws-sdk/client-sesv2).
-      throw new Error("ses mail provider not yet implemented (SEC-105)");
+      return new SesProvider(creds.ses ?? sesConfigFromEnv());
     default:
       throw new Error(`unknown mail provider: ${providerName}`);
   }

@@ -217,25 +217,29 @@ export function createEmailService(db: Db): EmailService {
     // 5. Render
     const { html, text } = renderMarkdown(input.bodyMarkdown);
 
-    // 6. API key
-    const secret = await secrets.getByName(input.companyId, RESEND_API_KEY_SECRET);
-    if (!secret) {
-      await audit({
-        companyId: input.companyId,
-        agentId: input.agentId,
-        runId: input.runId,
-        fromAddress,
-        toAddresses: input.to,
-        subject: input.subject,
-        templateKey: input.templateKey ?? null,
-        status: "failed_missing_api_key",
-      });
-      return { ok: false, reason: "missing_api_key" };
+    // 6. Provider credentials. Resend needs a per-company API key from secrets;
+    //    SES uses shared AWS creds from the environment (resolved in the factory).
+    let resendApiKey: string | undefined;
+    if (config.mailProvider === "resend") {
+      const secret = await secrets.getByName(input.companyId, RESEND_API_KEY_SECRET);
+      if (!secret) {
+        await audit({
+          companyId: input.companyId,
+          agentId: input.agentId,
+          runId: input.runId,
+          fromAddress,
+          toAddresses: input.to,
+          subject: input.subject,
+          templateKey: input.templateKey ?? null,
+          status: "failed_missing_api_key",
+        });
+        return { ok: false, reason: "missing_api_key" };
+      }
+      resendApiKey = await secrets.resolveSecretValue(input.companyId, secret.id, "latest");
     }
-    const apiKey = await secrets.resolveSecretValue(input.companyId, secret.id, "latest");
 
     // 7. Send via the configured provider (config.mailProvider; default resend)
-    const provider = createMailProvider(config.mailProvider, { resendApiKey: apiKey });
+    const provider = createMailProvider(config.mailProvider, { resendApiKey });
     const sendResult = await provider.send({
       from: fromAddress,
       to: input.to,
