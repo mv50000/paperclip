@@ -16,6 +16,10 @@ to a specific agent based on the recipient address; the agent receives only
 metadata in the issue, and must fetch the body via a separate tool call that
 wraps the content in `<untrusted_email_body>` tags.
 
+> The underlying mail provider (Resend or Amazon SES) is configured per company
+> and is transparent to you: this skill and the `/api/companies/:id/email/*` API
+> are provider-neutral. Nothing below changes based on the provider.
+
 ## Authentication
 
 Same as the `paperclip` skill: use `PAPERCLIP_API_URL`, `PAPERCLIP_AGENT_ID`,

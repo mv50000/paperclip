@@ -1,5 +1,10 @@
 # Resend-integraatio — käyttöönotto
 
+> **Huom:** sähköposti kulkee provider-abstraktion läpi ja yritys voi ajaa myös
+> Amazon SES:llä (`company_email_config.mail_provider`). Uusille yrityksille
+> suositellaan SES:iä (GDPR/EU-region) — ks. [SES-SETUP.md](./SES-SETUP.md).
+> Tämä dokumentti kuvaa Resend-polun.
+
 Paperclip-yritykset käyttävät Resendiä outbound- ja inbound-sähköpostiin. Tämä
 dokumentti kuvaa per-yritys-käyttöönoton: domain-verifikaatio, secretit,
 reititys, smoke-testi.
