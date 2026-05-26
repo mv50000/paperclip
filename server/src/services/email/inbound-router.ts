@@ -45,7 +45,7 @@ interface SecretCache {
   secrets: CachedSecret[];
 }
 
-interface InboundEmailEvent {
+export interface InboundEmailEvent {
   type: "email.received";
   created_at: string;
   data: {
@@ -66,7 +66,7 @@ interface InboundEmailEvent {
   };
 }
 
-interface BounceEvent {
+export interface BounceEvent {
   type: "email.bounced";
   data: {
     email_id?: string;
@@ -79,7 +79,7 @@ interface BounceEvent {
   };
 }
 
-interface ComplaintEvent {
+export interface ComplaintEvent {
   type: "email.complained";
   data: {
     email_id?: string;
@@ -88,7 +88,7 @@ interface ComplaintEvent {
   };
 }
 
-type ResendEvent = InboundEmailEvent | BounceEvent | ComplaintEvent | { type: string; data?: unknown };
+export type ResendEvent = InboundEmailEvent | BounceEvent | ComplaintEvent | { type: string; data?: unknown };
 
 /**
  * Parse a recipient address from the Resend `to[]` field. Supports both
