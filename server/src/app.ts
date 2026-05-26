@@ -46,6 +46,7 @@ import { adapterRoutes } from "./routes/adapters.js";
 import { riskRoutes } from "./routes/risk.js";
 import { emailRoutes } from "./routes/email.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
+import { sesInboundRoutes } from "./routes/ses-inbound.js";
 import { slackInteractionsRoutes } from "./routes/slack-interactions.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { applyUiBranding } from "./ui-branding.js";
@@ -299,6 +300,7 @@ export async function createApp(
   api.use(riskRoutes(db));
   api.use(emailRoutes(db));
   api.use(resendInboundRoutes(db));
+  api.use(sesInboundRoutes(db));
   api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));
   api.use(
     accessRoutes(db, {
