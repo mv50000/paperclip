@@ -20,8 +20,8 @@
 // company_secretseihin. Luo SES-identiteetti + Easy DKIM ensin (konsoli / aws cli),
 // aja sitten tämä → tulostaa julkaistavat DNS-tietueet.
 
-import { eq } from "drizzle-orm";
-import { createDb, companyEmailConfig, companies } from "@paperclipai/db";
+import { eq, companyEmailConfig, companies, type Db } from "../packages/db/src/index.js";
+import { openDb } from "./resolve-db.js";
 import { SesProvider, sesConfigFromEnv } from "../server/src/services/email/ses-client.js";
 import { seedDefaultTemplates } from "../server/src/services/email/template-seed.js";
 
@@ -88,7 +88,7 @@ function printDnsRecords(
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const db = await createDb();
+  const db = openDb();
 
   const [company] = await db.select().from(companies).where(eq(companies.id, args.companyId));
   if (!company) {
@@ -158,7 +158,7 @@ async function main() {
   console.log(`\nnext: julkaise DNS-tietueet ja aja --verify kun SES näyttää DKIM Verified.`);
 }
 
-async function runVerify(db: Awaited<ReturnType<typeof createDb>>, companyId: string, regionArg?: string) {
+async function runVerify(db: Db, companyId: string, regionArg?: string) {
   const [config] = await db
     .select()
     .from(companyEmailConfig)

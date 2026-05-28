@@ -17,9 +17,12 @@
 //
 // Skripti ON read-only — ei tee mitään muutoksia DB:hen tai Resendiin.
 
-import { and, desc, eq, gt, sql } from "drizzle-orm";
 import {
-  createDb,
+  and,
+  desc,
+  eq,
+  gt,
+  sql,
   companies,
   companyEmailConfig,
   companySecrets,
@@ -29,7 +32,9 @@ import {
   emailSuppressionList,
   emailTemplates,
   issues,
-} from "@paperclipai/db";
+  type Db,
+} from "../packages/db/src/index.js";
+import { openDb } from "./resolve-db.js";
 import { secretService } from "../server/src/services/secrets.js";
 import { getDomainStatus } from "../server/src/services/email/resend-client.js";
 import { computeDeliverabilityRates } from "../server/src/services/email/deliverability-monitor.js";
@@ -111,7 +116,7 @@ interface CompanyStatus {
 }
 
 async function checkCompany(
-  db: Awaited<ReturnType<typeof createDb>>,
+  db: Db,
   companyId: string,
   companyName: string,
 ): Promise<CompanyStatus> {
@@ -427,7 +432,7 @@ function formatHuman(s: CompanyStatus): string {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const db = await createDb();
+  const db = openDb();
 
   let targets: Array<{ id: string; name: string }>;
   if (args.companyId) {

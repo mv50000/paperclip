@@ -17,8 +17,8 @@
 // Skripti EI kosketa company_secretsejä — secret tallennetaan
 // erikseen (ks. doc/RESEND-SETUP.md kohta 2).
 
-import { eq } from "drizzle-orm";
-import { createDb, companyEmailConfig, companies } from "@paperclipai/db";
+import { eq, companyEmailConfig, companies, type Db } from "../packages/db/src/index.js";
+import { openDb } from "./resolve-db.js";
 import { secretService } from "../server/src/services/secrets.js";
 import { getDomainStatus } from "../server/src/services/email/resend-client.js";
 import { seedDefaultTemplates } from "../server/src/services/email/template-seed.js";
@@ -81,7 +81,7 @@ function parseArgs(argv: string[]): Args {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const db = await createDb();
+  const db = openDb();
 
   const [company] = await db
     .select()
@@ -147,7 +147,7 @@ async function main() {
   );
 }
 
-async function runVerify(db: Awaited<ReturnType<typeof createDb>>, companyId: string) {
+async function runVerify(db: Db, companyId: string) {
   const [config] = await db
     .select()
     .from(companyEmailConfig)

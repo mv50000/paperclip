@@ -39,12 +39,16 @@ Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-s
    ```
 2. **Rekisteröi config + tulosta DNS-tietueet:**
    ```bash
-   pnpm tsx scripts/install-ses.ts \
+   # Dev (workspace-juuri): DATABASE_URL otetaan loadConfig-fallbackista jos ei asetettu.
+   DATABASE_URL=postgres://paperclip:paperclip@127.0.0.1:5432/paperclip \
+     pnpm tsx scripts/install-ses.ts \
      --company-id <uuid> --primary-domain <domain> --sending-domain <domain> \
-     --region eu-west-1 --default-from-name "<Nimi>"
+     --region <eu-region> --default-from-name "<Nimi>"
    ```
    Tämä luo `company_email_config` (`mail_provider=ses`, status=pending), seedaa templatet ja tulostaa
-   julkaistavat DNS-tietueet.
+   julkaistavat DNS-tietueet. `--region` = sama region jossa SES-identiteetti on verifioitu (esim.
+   `eu-north-1`). Tuotannossa `/opt/paperclip`:ssa aja `./server/node_modules/.bin/tsx scripts/install-ses.ts`
+   ja anna `DATABASE_URL` + `SES_REGION`/`AWS_*` env eksplisiittisesti (ks. [[reference_paperclip_deployment]]).
 3. **Julkaise DNS-tietueet** domainin **julkiseen** auktoritatiiviseen zoneen (ei sisäverkon Piholeen):
    - DKIM: 3× `CNAME` `<token>._domainkey.<domain>` → `<token>.dkim.amazonses.com`
    - MAIL FROM: `MX mail.<domain>` → `10 feedback-smtp.eu-west-1.amazonses.com`
@@ -52,7 +56,8 @@ Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-s
    - DMARC: `TXT _dmarc.<domain>` → `v=DMARC1; p=none; rua=mailto:dmarc@<domain>` (kiristä myöhemmin)
 4. **Verifioi** kun DKIM näkyy SES:ssä:
    ```bash
-   pnpm tsx scripts/install-ses.ts --company-id <uuid> --region eu-west-1 --verify
+   DATABASE_URL=postgres://paperclip:paperclip@127.0.0.1:5432/paperclip \
+     pnpm tsx scripts/install-ses.ts --company-id <uuid> --region <eu-region> --verify
    ```
    Flippaa `status=verified` → lähetys sallittu.
 
