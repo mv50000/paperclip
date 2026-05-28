@@ -145,4 +145,19 @@ describe("domain helpers", () => {
     expect(recipientDomains({ destination: ["Tuki@Sunspot.FI", "x@other.com"] })).toEqual(["sunspot.fi", "other.com"]);
     expect(sourceDomain({ source: "noreply@Sunspot.FI" })).toBe("sunspot.fi");
   });
+
+  it("unwraps display-name addresses (SES sends mail.source as '\"Name\" <addr>')", () => {
+    // Regression: a naive split('@')[1] yielded "sunspot.fi>" and broke tenant
+    // resolution for bounce/complaint notifications.
+    expect(sourceDomain({ source: '"Sunspot" <info@sunspot.fi>' })).toBe("sunspot.fi");
+    expect(recipientDomains({ destination: ['"Tuki" <tuki@sunspot.fi>', "x@other.com"] })).toEqual([
+      "sunspot.fi",
+      "other.com",
+    ]);
+  });
+
+  it("returns nothing for malformed addresses", () => {
+    expect(sourceDomain({ source: "not-an-address" })).toBeUndefined();
+    expect(recipientDomains({ destination: ["bad", "good@x.io"] })).toEqual(["x.io"]);
+  });
 });
