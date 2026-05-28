@@ -152,14 +152,31 @@ export function normalizeComplaint(parsed: Extract<SesNotification, { kind: "com
   };
 }
 
+/**
+ * Extract the lowercased domain from an address that may be in bare
+ * (`info@sunspot.fi`) or display-name (`"Sunspot" <info@sunspot.fi>`) form.
+ * SES's `mail.source` / `mail.destination` can carry the full header value, so
+ * the angle-bracket address must be unwrapped before splitting on `@` — a naive
+ * split would yield `sunspot.fi>` and break tenant resolution.
+ */
+function addressDomain(addr: string): string | undefined {
+  let s = addr.trim();
+  const lt = s.lastIndexOf("<");
+  const gt = s.lastIndexOf(">");
+  if (lt >= 0 && gt > lt) s = s.slice(lt + 1, gt).trim();
+  const at = s.lastIndexOf("@");
+  if (at < 0 || at === s.length - 1) return undefined;
+  return s.slice(at + 1).toLowerCase();
+}
+
 /** The recipient domains of an inbound mail, lowercased (for tenant lookup). */
 export function recipientDomains(mail: SesMail): string[] {
   return (mail.destination ?? [])
-    .map((addr) => addr.split("@")[1]?.toLowerCase())
+    .map((addr) => addressDomain(addr))
     .filter((x): x is string => !!x);
 }
 
 /** The sender domain of a bounce/complaint (the company that sent it). */
 export function sourceDomain(mail: SesMail): string | undefined {
-  return mail.source?.split("@")[1]?.toLowerCase();
+  return mail.source ? addressDomain(mail.source) : undefined;
 }
