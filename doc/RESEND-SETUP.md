@@ -70,7 +70,9 @@ secretejä.
 
 ```bash
 cd /home/rk9admin/paperclip
-pnpm tsx scripts/install-resend-skill.ts \
+# DATABASE_URL otetaan loadConfig-fallbackista jos ei asetettu; tuotannossa anna se eksplisiittisesti.
+DATABASE_URL=postgres://paperclip:paperclip@127.0.0.1:5432/paperclip \
+  pnpm tsx scripts/install-resend-skill.ts \
   --company-id $COMPANY_ID \
   --primary-domain ololla.fi \
   --sending-domain ololla.fi \

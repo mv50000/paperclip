@@ -1,3 +1,9 @@
+// Re-export the common Drizzle query operators from the package that actually
+// depends on `drizzle-orm`. Root-level scripts (scripts/*.ts) cannot resolve the
+// bare `drizzle-orm` specifier — it is only present under packages/db's deps —
+// so they import operators from here via the relative path instead.
+export { and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, not, or, sql } from "drizzle-orm";
+
 export {
   createDb,
   getPostgresDataDirectory,
