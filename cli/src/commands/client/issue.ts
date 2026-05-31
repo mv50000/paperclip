@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import {
   addIssueCommentSchema,
@@ -59,7 +60,8 @@ interface IssueUpdateOptions extends BaseClientOptions {
 }
 
 interface IssueCommentOptions extends BaseClientOptions {
-  body: string;
+  body?: string;
+  bodyFile?: string;
   reopen?: boolean;
   resume?: boolean;
 }
@@ -240,14 +242,22 @@ export function registerIssueCommands(program: Command): void {
       .command("comment")
       .description("Add comment to issue")
       .argument("<issueId>", "Issue ID")
-      .requiredOption("--body <text>", "Comment body")
+      .option("--body <text>", "Comment body (mutually exclusive with --body-file)")
+      .option("--body-file <path>", "Read the comment body from a file (use '-' for stdin)")
       .option("--reopen", "Reopen if issue is done/cancelled")
       .option("--resume", "Request explicit follow-up and wake the assignee when resumable")
       .action(async (issueId: string, opts: IssueCommentOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
+          if ((opts.body == null) === (opts.bodyFile == null)) {
+            throw new Error("Provide exactly one of --body or --body-file");
+          }
+          const body =
+            opts.bodyFile != null
+              ? readFileSync(opts.bodyFile === "-" ? 0 : opts.bodyFile, "utf8")
+              : opts.body;
           const payload = addIssueCommentSchema.parse({
-            body: opts.body,
+            body,
             reopen: opts.reopen,
             resume: opts.resume,
           });
