@@ -50,6 +50,7 @@ export interface InstanceExperimentalSettings {
   enableIsolatedWorkspaces: boolean;
   autoRestartDevServerWhenIdle: boolean;
   enableIssueGraphLivenessAutoRecovery: boolean;
+  knowledgeRecallInjectionEnabled: boolean;
   issueGraphLivenessAutoRecoveryLookbackHours: number;
   recoveryStrictInProgressOnly: boolean;
 }

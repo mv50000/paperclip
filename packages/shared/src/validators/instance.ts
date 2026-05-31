@@ -61,6 +61,9 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableIsolatedWorkspaces: z.boolean().default(false),
   autoRestartDevServerWhenIdle: z.boolean().default(false),
   enableIssueGraphLivenessAutoRecovery: z.boolean().default(false),
+  // RK9-18 (C6): global kill-switch for heartbeat knowledge-recall injection. Default off;
+  // even when on, injection still requires per-agent opt-in (agents.runtimeConfig.knowledgeRecall.enabled).
+  knowledgeRecallInjectionEnabled: z.boolean().default(false),
   issueGraphLivenessAutoRecoveryLookbackHours: z
     .number()
     .int()

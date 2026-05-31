@@ -66,6 +66,7 @@ describe("instance settings routes", () => {
       enableIsolatedWorkspaces: false,
       autoRestartDevServerWhenIdle: false,
       enableIssueGraphLivenessAutoRecovery: true,
+      knowledgeRecallInjectionEnabled: false,
       issueGraphLivenessAutoRecoveryLookbackHours: 24,
       recoveryStrictInProgressOnly: false,
     });
@@ -84,6 +85,7 @@ describe("instance settings routes", () => {
         enableIsolatedWorkspaces: true,
         autoRestartDevServerWhenIdle: false,
         enableIssueGraphLivenessAutoRecovery: true,
+        knowledgeRecallInjectionEnabled: false,
         issueGraphLivenessAutoRecoveryLookbackHours: 24,
         recoveryStrictInProgressOnly: false,
       },
@@ -127,6 +129,7 @@ describe("instance settings routes", () => {
       enableIsolatedWorkspaces: false,
       autoRestartDevServerWhenIdle: false,
       enableIssueGraphLivenessAutoRecovery: true,
+      knowledgeRecallInjectionEnabled: false,
       issueGraphLivenessAutoRecoveryLookbackHours: 24,
       recoveryStrictInProgressOnly: false,
     });

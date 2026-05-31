@@ -102,6 +102,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { buildKnowledgeContext } from "./knowledge-injection.js";
 import {
   RECOVERY_ORIGIN_KINDS,
   RUN_LIVENESS_CONTINUATION_REASON,
@@ -4921,6 +4922,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       context.paperclipTaskMarkdown = taskMarkdown;
     } else {
       delete context.paperclipTaskMarkdown;
+    }
+    // RK9-18 (C6): optional knowledge-recall preamble. Two gates (global kill-switch +
+    // per-agent opt-in), both default-off. Hard-capped (~500 tok); never blocks the heartbeat.
+    try {
+      const knowledgeInjectionEnabled = (await instanceSettings.getExperimental()).knowledgeRecallInjectionEnabled;
+      const knowledgeContext = await buildKnowledgeContext(db, {
+        agent,
+        globalEnabled: knowledgeInjectionEnabled,
+        runId: run.id,
+      });
+      if (knowledgeContext) {
+        context.paperclipKnowledgeContext = knowledgeContext.markdown;
+      } else {
+        delete context.paperclipKnowledgeContext;
+      }
+    } catch (error) {
+      logger.warn({ err: error, runId: run.id }, "knowledge-injection: preamble build failed; continuing");
+      delete context.paperclipKnowledgeContext;
     }
     const existingExecutionWorkspace =
       issueRef?.executionWorkspaceId ? await executionWorkspacesSvc.getById(issueRef.executionWorkspaceId) : null;

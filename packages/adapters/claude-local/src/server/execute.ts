@@ -474,11 +474,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(promptTemplate, templateData);
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
   const taskContextNote = asString(context.paperclipTaskMarkdown, "").trim();
+  // RK9-18 (C6): knowledge-recall preamble, injected by the server (see knowledge-injection.ts).
+  const knowledgeContextNote = asString(context.paperclipKnowledgeContext, "").trim();
   const prompt = joinPromptSections([
     renderedBootstrapPrompt,
     wakePrompt,
     sessionHandoffNote,
     taskContextNote,
+    knowledgeContextNote,
     renderedPrompt,
   ]);
   const promptMetrics = {
@@ -487,6 +490,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     wakePromptChars: wakePrompt.length,
     sessionHandoffChars: sessionHandoffNote.length,
     taskContextChars: taskContextNote.length,
+    knowledgeContextChars: knowledgeContextNote.length,
     heartbeatPromptChars: renderedPrompt.length,
   };
 
