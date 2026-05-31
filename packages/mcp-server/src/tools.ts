@@ -242,6 +242,21 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
       async ({ companyId }) => client.requestJson("GET", `/companies/${client.resolveCompanyId(companyId)}/agents`),
     ),
     makeTool(
+      "paperclipRecallKnowledge",
+      "Recall company-scoped facts from the RK9 knowledge vault (qmd). Returns the company's own + shared knowledge only.",
+      z.object({
+        query: z.string().min(1).max(1000),
+        limit: z.number().int().positive().max(50).optional(),
+        companyId: companyIdOptional,
+      }),
+      async ({ query, limit, companyId }) =>
+        client.requestJson(
+          "POST",
+          `/companies/${client.resolveCompanyId(companyId)}/knowledge/recall`,
+          { body: { query, limit } },
+        ),
+    ),
+    makeTool(
       "paperclipGetAgent",
       "Get a single agent by id",
       z.object({ agentId: z.string().min(1), companyId: companyIdOptional }),
