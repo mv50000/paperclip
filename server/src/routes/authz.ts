@@ -39,6 +39,11 @@ export function assertInstanceAdmin(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
+/** Non-throwing instance-admin check (board actor that is local-implicit or flagged admin). */
+export function isInstanceAdmin(req: Request): boolean {
+  return req.actor.type === "board" && (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true);
+}
+
 export function assertCompanyAccess(req: Request, companyId: string) {
   assertAuthenticated(req);
   if (req.actor.type === "agent" && req.actor.companyId !== companyId) {
