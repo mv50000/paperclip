@@ -3,20 +3,21 @@ import type { Db } from "@paperclipai/db";
 import {
   PREFIX_TO_VAULT_SLUG,
   buildQmdArgs,
-  buildRecallCollections,
+  candidateCollections,
   clampLimit,
   collectionFromUri,
+  parseCollectionList,
   parseQmdJson,
   recallKnowledge,
   type QmdRunner,
 } from "./knowledge-recall.js";
 
 // recallKnowledge calls logActivity(db, ...) best-effort; a stub db that rejects is fine
-// because the service swallows activity-log failures. We inject resolveSlug + runQmd so
-// neither a real DB nor the qmd binary is needed.
+// because the service swallows activity-log failures. We inject resolveSlug + runQmd +
+// listCollections so neither a real DB nor the qmd binary is needed.
 const stubDb = {} as unknown as Db;
 
-// Real `qmd search --json` row shape: {docid, score, file, line, title, snippet}.
+// Real `qmd vsearch --json` row shape: {docid, score, file, line, title, snippet}.
 // There is no `path` or `collection` field — collection = the qmd://<col>/ prefix of `file`.
 function qmdRows(
   rows: Array<Partial<{ docid: string; file: string; title: string; score: number; line: number; snippet: string }>>,
@@ -24,13 +25,26 @@ function qmdRows(
   return JSON.stringify(rows);
 }
 
-describe("buildRecallCollections", () => {
-  it("scopes a company to its own collection + shared", () => {
-    expect(buildRecallCollections("rk9")).toEqual(["rk9", "shared"]);
-    expect(buildRecallCollections("sunspot")).toEqual(["sunspot", "shared"]);
+describe("candidateCollections", () => {
+  it("scopes a company to its facts + docs collections + shared", () => {
+    expect(candidateCollections("rk9")).toEqual(["rk9", "rk9-docs", "shared"]);
+    expect(candidateCollections("sunspot")).toEqual(["sunspot", "sunspot-docs", "shared"]);
   });
   it("shared queries only shared", () => {
-    expect(buildRecallCollections("shared")).toEqual(["shared"]);
+    expect(candidateCollections("shared")).toEqual(["shared"]);
+  });
+});
+
+describe("parseCollectionList", () => {
+  it("parses qmd collection list output into names", () => {
+    const out = parseCollectionList(
+      "Collections (3):\n\nrk9 (qmd://rk9/)\nshared (qmd://shared/)\nsunspot-docs (qmd://sunspot-docs/)\n",
+    );
+    expect(out).toEqual(["rk9", "shared", "sunspot-docs"]);
+  });
+  it("returns empty for noise", () => {
+    expect(parseCollectionList("")).toEqual([]);
+    expect(parseCollectionList("no collections here")).toEqual([]);
   });
 });
 
@@ -44,9 +58,9 @@ describe("clampLimit", () => {
 });
 
 describe("buildQmdArgs", () => {
-  it("emits search with -c per collection, -n limit, and --json", () => {
+  it("emits vsearch with -c per collection, -n limit, and --json", () => {
     expect(buildQmdArgs("token use", ["rk9", "shared"], 5)).toEqual([
-      "search",
+      "vsearch",
       "token use",
       "-c",
       "rk9",
@@ -62,7 +76,7 @@ describe("buildQmdArgs", () => {
 describe("collectionFromUri", () => {
   it("extracts the collection from a qmd:// uri", () => {
     expect(collectionFromUri("qmd://rk9/projects/a.md")).toBe("rk9");
-    expect(collectionFromUri("qmd://shared/resources/b.md")).toBe("shared");
+    expect(collectionFromUri("qmd://sunspot-docs/doc/b.md")).toBe("sunspot-docs");
   });
   it("returns empty for a non-matching uri", () => {
     expect(collectionFromUri("/opt/repos/rk9-knowledge/rk9/a.md")).toBe("");
@@ -113,49 +127,89 @@ describe("PREFIX_TO_VAULT_SLUG", () => {
   });
 });
 
+// helper: capture the -c collection args a runQmd was called with
+function captureRunQmd(stdout: string): { runQmd: QmdRunner; seen: string[][] } {
+  const seen: string[][] = [];
+  const runQmd: QmdRunner = async (args) => {
+    const cols: string[] = [];
+    for (let i = 0; i < args.length; i++) if (args[i] === "-c") cols.push(args[i + 1]);
+    seen.push(cols);
+    return { stdout, timedOut: false };
+  };
+  return { runQmd, seen };
+}
+
 describe("recallKnowledge", () => {
-  it("queries ONLY the company's own collection + shared (scoping enforced server-side)", async () => {
-    const seen: string[][] = [];
-    const runQmd: QmdRunner = async (args) => {
-      // capture the -c collection args
-      const cols: string[] = [];
-      for (let i = 0; i < args.length; i++) if (args[i] === "-c") cols.push(args[i + 1]);
-      seen.push(cols);
-      return { stdout: qmdRows([{ file: "qmd://rk9/a.md", snippet: "x", score: 0.5 }]), timedOut: false };
-    };
+  it("scopes to the company's existing collections only (facts + shared when no docs exist)", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([{ file: "qmd://rk9/a.md", snippet: "x", score: 0.5 }]));
     const res = await recallKnowledge(
       stubDb,
       { query: "anything", companyId: "company-uuid" },
-      { runQmd, resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
     );
-    expect(seen).toEqual([["rk9", "shared"]]);
+    expect(seen).toEqual([["rk9", "shared"]]); // rk9-docs candidate dropped (does not exist)
     expect(res.collections).toEqual(["rk9", "shared"]);
     expect(res.snippets).toHaveLength(1);
   });
 
-  it("filters out any out-of-scope row even if qmd returned one", async () => {
+  it("includes the <slug>-docs collection when it exists, and drops the non-existent facts collection", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([{ file: "qmd://sunspot-docs/doc/a.md", snippet: "x", score: 0.6 }]));
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      {
+        runQmd,
+        listCollections: async () => ["rk9", "shared", "sunspot-docs", "saatavilla-docs"],
+        resolveSlug: async () => "sunspot",
+        vaultRoot: "/tmp/vault",
+      },
+    );
+    // candidates [sunspot, sunspot-docs, shared] ∩ existing => [sunspot-docs, shared]
+    expect(seen).toEqual([["sunspot-docs", "shared"]]);
+    expect(res.collections).toEqual(["sunspot-docs", "shared"]);
+    expect(res.snippets).toHaveLength(1);
+  });
+
+  it("never queries another company's collection (cross-company isolation)", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([]));
+    await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      {
+        runQmd,
+        // even though ololla-docs exists in the index, a sunspot caller must never see it
+        listCollections: async () => ["sunspot-docs", "ololla-docs", "shared"],
+        resolveSlug: async () => "sunspot",
+        vaultRoot: "/tmp/vault",
+      },
+    );
+    expect(seen).toEqual([["sunspot-docs", "shared"]]);
+    expect(seen[0]).not.toContain("ololla-docs");
+  });
+
+  it("filters out any out-of-scope row even if qmd returned one (defense in depth)", async () => {
     const runQmd: QmdRunner = async () => ({
       stdout: qmdRows([
         { file: "qmd://rk9/a.md", snippet: "ok", score: 0.9 },
-        { file: "qmd://quantimodo/secret.md", snippet: "LEAK", score: 0.99 },
+        { file: "qmd://quantimodo-docs/secret.md", snippet: "LEAK", score: 0.99 },
       ]),
       timedOut: false,
     });
     const res = await recallKnowledge(
       stubDb,
       { query: "q", companyId: "c" },
-      { runQmd, resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
     );
     expect(res.snippets.every((s) => s.collection === "rk9" || s.collection === "shared")).toBe(true);
     expect(res.snippets.find((s) => s.snippet === "LEAK")).toBeUndefined();
   });
 
-  it("returns empty + timedOut when qmd is killed at the deadline (never blocks the agent)", async () => {
+  it("returns empty + timedOut when qmd is killed at the deadline (never blocks the caller)", async () => {
     const runQmd: QmdRunner = async () => ({ stdout: "", timedOut: true });
     const res = await recallKnowledge(
       stubDb,
       { query: "q", companyId: "c" },
-      { runQmd, resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
     );
     expect(res.snippets).toEqual([]);
     expect(res.timedOut).toBe(true);
@@ -166,11 +220,41 @@ describe("recallKnowledge", () => {
     const res = await recallKnowledge(
       stubDb,
       { query: "q", companyId: "c" },
-      { runQmd, resolveSlug: async () => null, vaultRoot: "/tmp/vault" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => null, vaultRoot: "/tmp/vault" },
     );
     expect(runQmd).not.toHaveBeenCalled();
     expect(res.snippets).toEqual([]);
     expect(res.collections).toEqual([]);
+  });
+
+  it("does not invoke vsearch when none of the candidate collections exist", async () => {
+    const runQmd = vi.fn<QmdRunner>(async () => ({ stdout: qmdRows([]), timedOut: false }));
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      { runQmd, listCollections: async () => [], resolveSlug: async () => "sunspot", vaultRoot: "/tmp/vault" },
+    );
+    expect(runQmd).not.toHaveBeenCalled();
+    expect(res.snippets).toEqual([]);
+    expect(res.collections).toEqual([]);
+  });
+
+  it("falls back to shared only when listing collections fails", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([{ file: "qmd://shared/a.md", snippet: "x", score: 0.4 }]));
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      {
+        runQmd,
+        listCollections: async () => {
+          throw new Error("qmd collection list failed");
+        },
+        resolveSlug: async () => "sunspot",
+        vaultRoot: "/tmp/vault",
+      },
+    );
+    expect(seen).toEqual([["shared"]]); // candidates ∩ [shared] (fallback) => [shared]
+    expect(res.collections).toEqual(["shared"]);
   });
 
   it("returns empty (not throw) when the qmd runner errors", async () => {
@@ -180,7 +264,7 @@ describe("recallKnowledge", () => {
     const res = await recallKnowledge(
       stubDb,
       { query: "q", companyId: "c" },
-      { runQmd, resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
     );
     expect(res.snippets).toEqual([]);
   });
