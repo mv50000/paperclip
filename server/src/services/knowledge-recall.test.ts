@@ -307,4 +307,30 @@ describe("recallKnowledge", () => {
     );
     expect(seen).toEqual([["sunspot-docs", "shared"]]); // NOT ololla-docs, NOT rk9
   });
+
+  it("sheds load (busy=true, no qmd spawned) when the concurrency cap is hit", async () => {
+    const runQmd = vi.fn<QmdRunner>(async () => ({
+      stdout: qmdRows([{ file: "qmd://rk9/a.md", snippet: "x", score: 0.5 }]),
+      timedOut: false,
+    }));
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault", maxConcurrent: 0 },
+    );
+    expect(res.busy).toBe(true);
+    expect(runQmd).not.toHaveBeenCalled(); // never piled another model-loading qmd onto a busy box
+    expect(res.snippets).toEqual([]);
+  });
+
+  it("is not busy on a normal call (cap not hit)", async () => {
+    const { runQmd } = captureRunQmd(qmdRows([{ file: "qmd://rk9/a.md", snippet: "x", score: 0.5 }]));
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+    );
+    expect(res.busy).toBe(false);
+    expect(res.snippets).toHaveLength(1);
+  });
 });

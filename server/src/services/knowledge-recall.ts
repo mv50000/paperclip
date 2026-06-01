@@ -53,6 +53,17 @@ const QMD_MAX_BUFFER = 16 * 1024 * 1024;
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 
+// Concurrency guard: each vsearch spawns a qmd that loads the ~300MB embed model. Unbounded
+// concurrent recalls (operator + agents + multiple hosts) contend, melt the box (observed load
+// 34), and cascade into a timeout→empty→retry storm. Cap simultaneous vsearch spawns; excess
+// recalls fast-fail to an empty `busy` result (graceful — the caller just proceeds without recall)
+// rather than piling on. Module-level: the server is a single process. Env-tunable.
+function maxConcurrentQmd(): number {
+  const n = Number(process.env.PAPERCLIP_RECALL_MAX_CONCURRENT);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2;
+}
+let activeQmdRecalls = 0;
+
 export interface RecallInput {
   query: string;
   companyId: string;
@@ -82,6 +93,8 @@ export interface RecallResult {
   snippets: RecallSnippet[];
   collections: string[];
   timedOut: boolean;
+  /** True when the recall was skipped because the concurrency cap was hit (load shedding). */
+  busy?: boolean;
 }
 
 /** Result of one qmd invocation. `timedOut` true when the process was killed at the deadline. */
@@ -100,6 +113,8 @@ export interface RecallDeps {
   resolveSlug?: (db: Db, companyId: string) => Promise<string | null>;
   vaultRoot?: string;
   qmdBin?: string;
+  /** Override the concurrency cap (default 2, or PAPERCLIP_RECALL_MAX_CONCURRENT). For tests. */
+  maxConcurrent?: number;
 }
 
 /**
@@ -244,8 +259,10 @@ export async function recallKnowledge(
 
   let slug: string | null = null;
   let timedOut = false;
+  let busy = false;
   let snippets: RecallSnippet[] = [];
   let collections: string[] = [];
+  const cap = deps.maxConcurrent ?? maxConcurrentQmd();
   try {
     slug = await resolveSlug(db, input.companyId); // for audit logging; not required in operator mode
     // List collections that actually exist — qmd errors if passed a `-c` that doesn't exist.
@@ -268,11 +285,22 @@ export async function recallKnowledge(
     }
 
     if (collections.length > 0) {
-      const allowed = new Set(collections);
-      const args = buildQmdArgs(input.query, collections, limit);
-      const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
-      timedOut = result.timedOut;
-      snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
+      // Concurrency guard: shed load instead of piling another model-loading qmd onto a busy box.
+      if (activeQmdRecalls >= cap) {
+        busy = true;
+        logger.warn({ activeQmdRecalls, cap, companyId: input.companyId }, "knowledge-recall: at concurrency cap; shedding (busy)");
+      } else {
+        const allowed = new Set(collections);
+        const args = buildQmdArgs(input.query, collections, limit);
+        activeQmdRecalls++;
+        try {
+          const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
+          timedOut = result.timedOut;
+          snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
+        } finally {
+          activeQmdRecalls--;
+        }
+      }
     } else {
       logger.warn({ companyId: input.companyId, slug }, "knowledge-recall: no collections in scope");
     }
@@ -298,6 +326,7 @@ export async function recallKnowledge(
         resultCount: snippets.length,
         topScore: snippets[0]?.score ?? null,
         timedOut,
+        busy,
         latencyMs: Date.now() - startedAt,
       },
     });
@@ -305,5 +334,5 @@ export async function recallKnowledge(
     logger.warn({ err: error }, "knowledge-recall: activity log failed");
   }
 
-  return { snippets, collections, timedOut };
+  return { snippets, collections, timedOut, busy };
 }
