@@ -18,6 +18,11 @@ function qmdBin(): string {
   return process.env.PAPERCLIP_QMD_BIN ?? "qmd";
 }
 
+/** HOME for the qmd process — qmd loads its GGUF models from <HOME>/.cache/qmd (needed by vsearch). */
+function qmdHome(): string {
+  return process.env.PAPERCLIP_QMD_HOME ?? "/var/lib/paperclip";
+}
+
 /**
  * RK9 Knowledge Vault recall (RK9-17 / C5).
  *
@@ -41,7 +46,9 @@ export const PREFIX_TO_VAULT_SLUG: Readonly<Record<string, string>> = {
 };
 
 export const SHARED_COLLECTION = "shared";
-const QMD_TIMEOUT_MS = 10_000;
+// vsearch (semantic) loads the embedding model; on a warm box it's ~2s, but allow headroom.
+const QMD_TIMEOUT_MS = 20_000;
+const QMD_LIST_TIMEOUT_MS = 5_000;
 const QMD_MAX_BUFFER = 16 * 1024 * 1024;
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -82,14 +89,32 @@ export type QmdRunner = (args: string[], opts: { cwd: string; timeoutMs: number 
 
 export interface RecallDeps {
   runQmd?: QmdRunner;
+  /** Lists collection names present in the vault index; used to drop non-existent scopes. */
+  listCollections?: (cwd: string) => Promise<string[]>;
   resolveSlug?: (db: Db, companyId: string) => Promise<string | null>;
   vaultRoot?: string;
   qmdBin?: string;
 }
 
-/** Collections an agent in `slug` may recall from: its own + shared (shared queries only shared). */
-export function buildRecallCollections(slug: string): string[] {
-  return slug === SHARED_COLLECTION ? [SHARED_COLLECTION] : [slug, SHARED_COLLECTION];
+/**
+ * Collections an agent in `slug` MAY recall from: its own curated-facts collection (`<slug>`),
+ * its repo-docs collection (`<slug>-docs`), and the cross-cutting `shared`. The `shared` slug
+ * queries only `shared`. These are *candidates* — they're then intersected with the collections
+ * that actually exist (see recallKnowledge), because qmd errors if passed a non-existent `-c`.
+ */
+export function candidateCollections(slug: string): string[] {
+  if (slug === SHARED_COLLECTION) return [SHARED_COLLECTION];
+  return [slug, `${slug}-docs`, SHARED_COLLECTION];
+}
+
+/** Parse `qmd collection list` output ("name (qmd://name/)" lines) into collection names. */
+export function parseCollectionList(stdout: string): string[] {
+  const names: string[] = [];
+  for (const line of stdout.split("\n")) {
+    const m = /^([a-z0-9_-]+)\s+\(qmd:\/\//i.exec(line.trim());
+    if (m) names.push(m[1]);
+  }
+  return names;
 }
 
 export function clampLimit(limit: number | undefined): number {
@@ -97,9 +122,13 @@ export function clampLimit(limit: number | undefined): number {
   return Math.min(Math.floor(limit), MAX_LIMIT);
 }
 
-/** Build the exact `qmd search` argv. Scoping lives here: only the given collections are passed. */
+/**
+ * Build the exact `qmd vsearch` argv. Scoping lives here: only the given collections are passed.
+ * We use vsearch (vector/semantic) rather than `search` (BM25) so cross-host callers get the same
+ * semantic recall as the local /recall — qmd `query` (hybrid) is far too slow on CPU (~3.5 min).
+ */
 export function buildQmdArgs(query: string, collections: string[], limit: number): string[] {
-  const args = ["search", query];
+  const args = ["vsearch", query];
   for (const c of collections) args.push("-c", c);
   args.push("-n", String(limit), "--json");
   return args;
@@ -115,7 +144,7 @@ export function collectionFromUri(file: string): string {
 }
 
 /**
- * Parse `qmd search --json` output: an array of
+ * Parse `qmd vsearch --json` output: an array of
  * {docid, score, file, line, title, snippet}. There is no `path` or `collection`
  * field — the collection is the `qmd://<collection>/` prefix of `file`.
  * Filters to `allowed` collections as a belt-and-suspenders check on top of the -c flags.
@@ -156,6 +185,9 @@ const defaultRunQmd: QmdRunner = async (args, opts) => {
       timeout: opts.timeoutMs,
       maxBuffer: QMD_MAX_BUFFER,
       killSignal: "SIGKILL",
+      // qmd resolves its model cache from HOME; set it explicitly so vsearch finds the embed model
+      // regardless of how the server process inherited its environment.
+      env: { ...process.env, HOME: qmdHome() },
     });
     return { stdout, timedOut: false };
   } catch (error) {
@@ -167,6 +199,12 @@ const defaultRunQmd: QmdRunner = async (args, opts) => {
     throw error;
   }
 };
+
+/** Default: list existing collections via the injectable runner so it shares timeout/env handling. */
+async function defaultListCollections(cwd: string): Promise<string[]> {
+  const { stdout } = await defaultRunQmd(["collection", "list"], { cwd, timeoutMs: QMD_LIST_TIMEOUT_MS });
+  return parseCollectionList(stdout);
+}
 
 /** Resolve a company's vault slug from its issue prefix. Returns null if unmapped. */
 export async function resolveCompanyVaultSlug(db: Db, companyId: string): Promise<string | null> {
@@ -192,6 +230,7 @@ export async function recallKnowledge(
   deps: RecallDeps = {},
 ): Promise<RecallResult> {
   const runQmd = deps.runQmd ?? defaultRunQmd;
+  const listCollections = deps.listCollections ?? defaultListCollections;
   const resolveSlug = deps.resolveSlug ?? resolveCompanyVaultSlug;
   const resolvedVaultRoot = deps.vaultRoot ?? vaultRoot();
   const limit = clampLimit(input.limit);
@@ -200,24 +239,38 @@ export async function recallKnowledge(
   let slug: string | null = null;
   let timedOut = false;
   let snippets: RecallSnippet[] = [];
+  let collections: string[] = [];
   try {
     slug = await resolveSlug(db, input.companyId);
     if (!slug) {
       logger.warn({ companyId: input.companyId }, "knowledge-recall: company has no vault slug");
     } else {
-      const collections = buildRecallCollections(slug);
-      const allowed = new Set(collections);
-      const args = buildQmdArgs(input.query, collections, limit);
-      const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
-      timedOut = result.timedOut;
-      snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
+      // Intersect the candidate scope with collections that actually exist — qmd errors if any
+      // passed `-c` is missing (the per-company facts collections + a missing `<slug>-docs` would
+      // otherwise blow up the whole query). This NEVER widens scope beyond the candidates.
+      const candidates = candidateCollections(slug);
+      let existing: string[];
+      try {
+        existing = await listCollections(resolvedVaultRoot);
+      } catch (error) {
+        logger.warn({ err: error }, "knowledge-recall: collection list failed; falling back to shared only");
+        existing = [SHARED_COLLECTION];
+      }
+      collections = candidates.filter((c) => existing.includes(c));
+      if (collections.length > 0) {
+        const allowed = new Set(collections);
+        const args = buildQmdArgs(input.query, collections, limit);
+        const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
+        timedOut = result.timedOut;
+        snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
+      } else {
+        logger.warn({ companyId: input.companyId, slug }, "knowledge-recall: no existing collections in scope");
+      }
     }
   } catch (error) {
     logger.error({ err: error, companyId: input.companyId }, "knowledge-recall failed; returning empty");
     snippets = [];
   }
-
-  const collections = slug ? buildRecallCollections(slug) : [];
 
   // Usage tracking via the standard activity-log pattern. Best-effort; never block recall on it.
   try {
