@@ -57,6 +57,12 @@ export interface RecallInput {
   query: string;
   companyId: string;
   limit?: number;
+  /**
+   * Operator mode: search EVERY existing collection (rk9 + shared + all <company>-docs) instead
+   * of the caller's company scope. The route only sets this for instance-admins — agents and
+   * non-admin board users never get it, preserving cross-company isolation.
+   */
+  allCollections?: boolean;
   /** Optional audit context (route fills these from the auth context). */
   actorType?: "agent" | "user" | "system" | "plugin";
   actorId?: string;
@@ -241,31 +247,34 @@ export async function recallKnowledge(
   let snippets: RecallSnippet[] = [];
   let collections: string[] = [];
   try {
-    slug = await resolveSlug(db, input.companyId);
-    if (!slug) {
-      logger.warn({ companyId: input.companyId }, "knowledge-recall: company has no vault slug");
+    slug = await resolveSlug(db, input.companyId); // for audit logging; not required in operator mode
+    // List collections that actually exist — qmd errors if passed a `-c` that doesn't exist.
+    let existing: string[];
+    try {
+      existing = await listCollections(resolvedVaultRoot);
+    } catch (error) {
+      logger.warn({ err: error }, "knowledge-recall: collection list failed; falling back to shared only");
+      existing = [SHARED_COLLECTION];
+    }
+
+    if (input.allCollections) {
+      // Operator mode (instance-admin only, enforced at the route): every existing collection.
+      collections = existing;
+    } else if (slug) {
+      // Company scope: candidate collections ∩ existing. NEVER widens beyond the caller's company.
+      collections = candidateCollections(slug).filter((c) => existing.includes(c));
     } else {
-      // Intersect the candidate scope with collections that actually exist — qmd errors if any
-      // passed `-c` is missing (the per-company facts collections + a missing `<slug>-docs` would
-      // otherwise blow up the whole query). This NEVER widens scope beyond the candidates.
-      const candidates = candidateCollections(slug);
-      let existing: string[];
-      try {
-        existing = await listCollections(resolvedVaultRoot);
-      } catch (error) {
-        logger.warn({ err: error }, "knowledge-recall: collection list failed; falling back to shared only");
-        existing = [SHARED_COLLECTION];
-      }
-      collections = candidates.filter((c) => existing.includes(c));
-      if (collections.length > 0) {
-        const allowed = new Set(collections);
-        const args = buildQmdArgs(input.query, collections, limit);
-        const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
-        timedOut = result.timedOut;
-        snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
-      } else {
-        logger.warn({ companyId: input.companyId, slug }, "knowledge-recall: no existing collections in scope");
-      }
+      logger.warn({ companyId: input.companyId }, "knowledge-recall: company has no vault slug");
+    }
+
+    if (collections.length > 0) {
+      const allowed = new Set(collections);
+      const args = buildQmdArgs(input.query, collections, limit);
+      const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
+      timedOut = result.timedOut;
+      snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
+    } else {
+      logger.warn({ companyId: input.companyId, slug }, "knowledge-recall: no collections in scope");
     }
   } catch (error) {
     logger.error({ err: error, companyId: input.companyId }, "knowledge-recall failed; returning empty");

@@ -268,4 +268,43 @@ describe("recallKnowledge", () => {
     );
     expect(res.snippets).toEqual([]);
   });
+
+  it("operator mode (allCollections) searches EVERY existing collection, not just the company's", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([{ file: "qmd://ololla-docs/a.md", snippet: "x", score: 0.7 }]));
+    const all = ["rk9", "shared", "sunspot-docs", "ololla-docs", "quantimodo-docs"];
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c", allCollections: true },
+      { runQmd, listCollections: async () => all, resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+    );
+    expect(seen).toEqual([all]); // every collection passed to qmd
+    expect(res.collections).toEqual(all);
+    expect(res.snippets).toHaveLength(1);
+  });
+
+  it("operator mode works even when the company has no slug (admin passes any company id)", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([]));
+    const all = ["rk9", "shared", "sunspot-docs"];
+    await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c", allCollections: true },
+      { runQmd, listCollections: async () => all, resolveSlug: async () => null, vaultRoot: "/tmp/vault" },
+    );
+    expect(seen).toEqual([all]);
+  });
+
+  it("WITHOUT allCollections, stays company-scoped even if many collections exist (isolation)", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([]));
+    await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      {
+        runQmd,
+        listCollections: async () => ["rk9", "shared", "sunspot-docs", "ololla-docs"],
+        resolveSlug: async () => "sunspot",
+        vaultRoot: "/tmp/vault",
+      },
+    );
+    expect(seen).toEqual([["sunspot-docs", "shared"]]); // NOT ololla-docs, NOT rk9
+  });
 });

@@ -25,19 +25,25 @@ COMPANY="${PAPERCLIP_COMPANY_ID:?set PAPERCLIP_COMPANY_ID to the target company 
 N=6
 JSON=0
 QUERY=""
+# scope: "all" = operator mode (every collection: rk9 + shared + all <company>-docs); only honored
+# server-side for instance-admin tokens, else silently company-scoped. Default "all" since this
+# client is the operator's cross-host tool; pass --company-scope to restrict to PAPERCLIP_COMPANY_ID.
+SCOPE=all
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n) N="${2:?}"; shift 2;;
     --json) JSON=1; shift;;
+    --company-scope) SCOPE=company; shift;;
+    --all) SCOPE=all; shift;;
     -h|--help) sed -n '2,20p' "$0"; exit 0;;
     -*) echo "qmd-recall-remote: unknown flag $1" >&2; exit 2;;
     *) QUERY="$1"; shift;;
   esac
 done
-[[ -z "$QUERY" ]] && { echo "usage: qmd-recall-remote.sh [-n N] [--json] \"<query>\"" >&2; exit 2; }
+[[ -z "$QUERY" ]] && { echo "usage: qmd-recall-remote.sh [-n N] [--company-scope] [--json] \"<query>\"" >&2; exit 2; }
 
 # jq builds the JSON body safely (query may contain quotes/newlines).
-body=$(jq -nc --arg q "$QUERY" --argjson n "$N" '{query:$q, limit:$n}')
+body=$(jq -nc --arg q "$QUERY" --argjson n "$N" --arg s "$SCOPE" '{query:$q, limit:$n, scope:$s}')
 resp=$(curl -fsS -X POST "$BASE/api/companies/$COMPANY/knowledge/recall" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "$body") || {
   echo "qmd-recall-remote: request failed (base/token/company/network?)" >&2; exit 1; }
