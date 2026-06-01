@@ -19,6 +19,11 @@
 #   qmd-recall-remote.sh --json "..."        # raw API JSON
 set -euo pipefail
 
+# Auto-load config so this works no matter how it's invoked (each Claude Code Bash tool call is a
+# fresh shell — never rely on the caller having sourced the env first).
+CONFIG="${RK9_RECALL_ENV:-$HOME/.config/rk9-recall.env}"
+if [ -z "${PAPERCLIP_API_TOKEN:-}" ] && [ -f "$CONFIG" ]; then set -a; . "$CONFIG"; set +a; fi
+
 BASE="${PAPERCLIP_API_BASE:-https://paperclip.rk9.fi}"
 TOKEN="${PAPERCLIP_API_TOKEN:?set PAPERCLIP_API_TOKEN to a Paperclip board API key}"
 COMPANY="${PAPERCLIP_COMPANY_ID:?set PAPERCLIP_COMPANY_ID to the target company UUID}"
