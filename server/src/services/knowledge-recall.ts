@@ -144,15 +144,39 @@ export function clampLimit(limit: number | undefined): number {
 }
 
 /**
- * Build the exact `qmd vsearch` argv. Scoping lives here: only the given collections are passed.
- * We use vsearch (vector/semantic) rather than `search` (BM25) so cross-host callers get the same
- * semantic recall as the local /recall — qmd `query` (hybrid) is far too slow on CPU (~3.5 min).
+ * Build the exact qmd argv for one retrieval mode. Scoping lives here: only the given collections
+ * are passed. `vsearch` = vector/semantic (loads the embed model); `search` = BM25 keyword (no
+ * model, instant). We run BOTH and fuse (see fuseRRF) — semantic alone misses exact terms/IDs/
+ * Finnish (e.g. CT357, SAA-1307); BM25 alone misses paraphrase. qmd's own `query` hybrid is the
+ * 3.5-min LLM path and is intentionally NOT used.
  */
-export function buildQmdArgs(query: string, collections: string[], limit: number): string[] {
-  const args = ["vsearch", query];
+export function buildQmdArgs(
+  query: string,
+  collections: string[],
+  limit: number,
+  mode: "vsearch" | "search" = "vsearch",
+): string[] {
+  const args = [mode, query];
   for (const c of collections) args.push("-c", c);
   args.push("-n", String(limit), "--json");
   return args;
+}
+
+/** Reciprocal Rank Fusion of ranked result lists, deduped by source path. Scale-independent, so
+ *  it merges vsearch (cosine) and BM25 (tf-idf) ranks soundly; a doc found by both is boosted. */
+const RRF_K = 60;
+export function fuseRRF(lists: RecallSnippet[][], limit: number, k: number = RRF_K): RecallSnippet[] {
+  const keyOf = (s: RecallSnippet) => s.sourcePath || s.title || JSON.stringify(s);
+  const score = new Map<string, number>();
+  const first = new Map<string, RecallSnippet>();
+  for (const list of lists) {
+    list.forEach((s, i) => {
+      const key = keyOf(s);
+      score.set(key, (score.get(key) ?? 0) + 1 / (k + i + 1));
+      if (!first.has(key)) first.set(key, s);
+    });
+  }
+  return [...first.values()].sort((a, b) => (score.get(keyOf(b)) ?? 0) - (score.get(keyOf(a)) ?? 0)).slice(0, limit);
 }
 
 /**
@@ -285,22 +309,45 @@ export async function recallKnowledge(
     }
 
     if (collections.length > 0) {
-      // Concurrency guard: shed load instead of piling another model-loading qmd onto a busy box.
+      const allowed = new Set(collections);
+
+      // BM25 keyword pass — no model, ~instant, not concurrency-guarded. Catches exact
+      // terms/IDs/Finnish that semantic search misses. Best-effort.
+      let bm25: RecallSnippet[] = [];
+      try {
+        const r = await runQmd(buildQmdArgs(input.query, collections, limit, "search"), {
+          cwd: resolvedVaultRoot,
+          timeoutMs: QMD_LIST_TIMEOUT_MS,
+        });
+        bm25 = parseQmdJson(r.stdout, allowed);
+      } catch (error) {
+        logger.warn({ err: error }, "knowledge-recall: bm25 pass failed (continuing with vsearch)");
+      }
+
+      // Semantic vsearch pass — loads the model; concurrency-guarded. Under the cap we shed it and
+      // degrade gracefully to BM25-only (still useful + instant) rather than piling on / returning empty.
+      let vec: RecallSnippet[] = [];
       if (activeQmdRecalls >= cap) {
         busy = true;
-        logger.warn({ activeQmdRecalls, cap, companyId: input.companyId }, "knowledge-recall: at concurrency cap; shedding (busy)");
+        logger.warn({ activeQmdRecalls, cap, companyId: input.companyId }, "knowledge-recall: at concurrency cap; vsearch shed, bm25-only");
       } else {
-        const allowed = new Set(collections);
-        const args = buildQmdArgs(input.query, collections, limit);
         activeQmdRecalls++;
         try {
-          const result = await runQmd(args, { cwd: resolvedVaultRoot, timeoutMs: QMD_TIMEOUT_MS });
-          timedOut = result.timedOut;
-          snippets = parseQmdJson(result.stdout, allowed).slice(0, limit);
+          const r = await runQmd(buildQmdArgs(input.query, collections, limit, "vsearch"), {
+            cwd: resolvedVaultRoot,
+            timeoutMs: QMD_TIMEOUT_MS,
+          });
+          timedOut = r.timedOut;
+          vec = parseQmdJson(r.stdout, allowed);
+        } catch (error) {
+          logger.warn({ err: error }, "knowledge-recall: vsearch pass failed (continuing with bm25)");
         } finally {
           activeQmdRecalls--;
         }
       }
+
+      // Fuse the two ranked lists (RRF) so both semantic and keyword hits surface.
+      snippets = fuseRRF([vec, bm25], limit);
     } else {
       logger.warn({ companyId: input.companyId, slug }, "knowledge-recall: no collections in scope");
     }
