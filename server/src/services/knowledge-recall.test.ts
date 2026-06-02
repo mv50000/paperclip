@@ -6,10 +6,12 @@ import {
   candidateCollections,
   clampLimit,
   collectionFromUri,
+  fuseRRF,
   parseCollectionList,
   parseQmdJson,
   recallKnowledge,
   type QmdRunner,
+  type RecallSnippet,
 } from "./knowledge-recall.js";
 
 // recallKnowledge calls logActivity(db, ...) best-effort; a stub db that rejects is fine
@@ -58,18 +60,32 @@ describe("clampLimit", () => {
 });
 
 describe("buildQmdArgs", () => {
-  it("emits vsearch with -c per collection, -n limit, and --json", () => {
+  it("emits vsearch (default) with -c per collection, -n limit, and --json", () => {
     expect(buildQmdArgs("token use", ["rk9", "shared"], 5)).toEqual([
-      "vsearch",
-      "token use",
-      "-c",
-      "rk9",
-      "-c",
-      "shared",
-      "-n",
-      "5",
-      "--json",
+      "vsearch", "token use", "-c", "rk9", "-c", "shared", "-n", "5", "--json",
     ]);
+  });
+  it("emits BM25 search when mode=search", () => {
+    expect(buildQmdArgs("CT357", ["rk9"], 3, "search")).toEqual([
+      "search", "CT357", "-c", "rk9", "-n", "3", "--json",
+    ]);
+  });
+});
+
+describe("fuseRRF", () => {
+  const snip = (p: string, score = 0.5): RecallSnippet => ({ sourcePath: p, title: p, score, collection: "rk9", snippet: "" });
+  it("dedups by sourcePath and boosts a doc found in BOTH lists above singletons", () => {
+    const A = snip("qmd://rk9/a.md"), B = snip("qmd://rk9/b.md"), C = snip("qmd://rk9/c.md");
+    const out = fuseRRF([[A, B], [C, A]], 10); // A appears in both → highest RRF
+    expect(out[0].sourcePath).toBe("qmd://rk9/a.md");
+    expect(out.map((s) => s.sourcePath).sort()).toEqual(["qmd://rk9/a.md", "qmd://rk9/b.md", "qmd://rk9/c.md"]);
+  });
+  it("surfaces a doc that only the second (BM25) list found", () => {
+    const out = fuseRRF([[snip("qmd://rk9/semantic.md")], [snip("qmd://rk9/ct357.md")]], 10);
+    expect(out.map((s) => s.sourcePath)).toContain("qmd://rk9/ct357.md");
+  });
+  it("respects the limit", () => {
+    expect(fuseRRF([[snip("a"), snip("b"), snip("c")]], 2)).toHaveLength(2);
   });
 });
 
@@ -127,13 +143,14 @@ describe("PREFIX_TO_VAULT_SLUG", () => {
   });
 });
 
-// helper: capture the -c collection args a runQmd was called with
+// helper: capture the UNIQUE -c collection scope(s) a runQmd was called with. Hybrid runs the same
+// scope twice (BM25 `search` + `vsearch`); we record the scope once so scope assertions stay simple.
 function captureRunQmd(stdout: string): { runQmd: QmdRunner; seen: string[][] } {
   const seen: string[][] = [];
   const runQmd: QmdRunner = async (args) => {
     const cols: string[] = [];
     for (let i = 0; i < args.length; i++) if (args[i] === "-c") cols.push(args[i + 1]);
-    seen.push(cols);
+    if (!seen.some((s) => s.join(",") === cols.join(","))) seen.push(cols);
     return { stdout, timedOut: false };
   };
   return { runQmd, seen };
@@ -308,19 +325,35 @@ describe("recallKnowledge", () => {
     expect(seen).toEqual([["sunspot-docs", "shared"]]); // NOT ololla-docs, NOT rk9
   });
 
-  it("sheds load (busy=true, no qmd spawned) when the concurrency cap is hit", async () => {
-    const runQmd = vi.fn<QmdRunner>(async () => ({
-      stdout: qmdRows([{ file: "qmd://rk9/a.md", snippet: "x", score: 0.5 }]),
-      timedOut: false,
-    }));
+  it("at the concurrency cap, sheds the model-loading vsearch and serves BM25-only (busy=true)", async () => {
+    const modes: string[] = [];
+    const runQmd: QmdRunner = async (args) => {
+      modes.push(String(args[0]));
+      return { stdout: qmdRows([{ file: "qmd://rk9/a.md", snippet: "x", score: 0.5 }]), timedOut: false };
+    };
     const res = await recallKnowledge(
       stubDb,
       { query: "q", companyId: "c" },
       { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault", maxConcurrent: 0 },
     );
     expect(res.busy).toBe(true);
-    expect(runQmd).not.toHaveBeenCalled(); // never piled another model-loading qmd onto a busy box
-    expect(res.snippets).toEqual([]);
+    expect(modes).toEqual(["search"]); // BM25 ran (cheap, no model); vsearch was shed
+    expect(res.snippets).toHaveLength(1); // BM25-only results still served (graceful, not empty)
+  });
+
+  it("fuses vsearch + bm25 so a keyword-only hit surfaces alongside semantic hits", async () => {
+    const runQmd: QmdRunner = async (args) =>
+      args[0] === "vsearch"
+        ? { stdout: qmdRows([{ file: "qmd://rk9/semantic.md", title: "Sem", snippet: "", score: 0.6 }]), timedOut: false }
+        : { stdout: qmdRows([{ file: "qmd://rk9/ct357.md", title: "CT357", snippet: "", score: 0.95 }]), timedOut: false };
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "CT357", companyId: "c" },
+      { runQmd, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+    );
+    const files = res.snippets.map((s) => s.sourcePath);
+    expect(files).toContain("qmd://rk9/ct357.md"); // BM25-only hit surfaced (the whole point)
+    expect(files).toContain("qmd://rk9/semantic.md"); // semantic hit also present
   });
 
   it("is not busy on a normal call (cap not hit)", async () => {
