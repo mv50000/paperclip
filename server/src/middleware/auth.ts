@@ -5,6 +5,7 @@ import type { Db } from "@paperclipai/db";
 import { agentApiKeys, agents, companyMemberships, instanceUserRoles } from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import type { DeploymentMode } from "@paperclipai/shared";
+import { isUuidLike } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
@@ -20,7 +21,7 @@ interface ActorMiddlewareOptions {
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
-  return async (req, _res, next) => {
+  return async (req, res, next) => {
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {
@@ -33,7 +34,15 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           }
         : { type: "none", source: "none" };
 
-    const runIdHeader = req.header("x-paperclip-run-id");
+    // The run-id header is later cast to a `uuid` column (issues.checkoutRunId,
+    // activityLog.runId, agentWakeupRequests.runId, …). A malformed value would
+    // reach Postgres as `invalid input syntax for type uuid` and surface as a
+    // 500. Guard it at the edge: a present-but-non-UUID header is a client error.
+    const runIdHeader = req.header("x-paperclip-run-id")?.trim() || undefined;
+    if (runIdHeader && !isUuidLike(runIdHeader)) {
+      res.status(400).json({ error: "Invalid X-Paperclip-Run-Id header: must be a UUID" });
+      return;
+    }
 
     const authHeader = req.header("authorization");
     if (!authHeader?.toLowerCase().startsWith("bearer ")) {
