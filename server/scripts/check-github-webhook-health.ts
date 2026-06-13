@@ -35,14 +35,20 @@ const STATE_FILE =
 
 // Repos that point their webhook at paperclip.rk9.fi/api/github/webhooks.
 // Hook IDs are stable; if a hook is rotated, update here.
+// Owner is the repo's CURRENT GitHub owner. Hook ids are stable across an org
+// transfer, but the owner in the API path is not — when a repo moves from
+// mv50000 to rk9-ai its entry must be re-owned here or the monitor queries the
+// wrong owner and goes blind. quantimodo-rust, saatavilla and sunspot were
+// transferred to rk9-ai (RK9-26); alli-audit, paperclip and bk remain on
+// mv50000 as of 2026-06-13. See cicd/docs/org-transfer-fallout.md step 6.
 const MONITORED_HOOKS: Array<{ repo: string; hookId: number }> = [
   { repo: "mv50000/alli-audit", hookId: 611812560 },
   { repo: "mv50000/paperclip", hookId: 611812570 },
-  { repo: "mv50000/quantimodo-rust", hookId: 611812559 },
+  { repo: "rk9-ai/quantimodo-rust", hookId: 611812559 },
   { repo: "mv50000/bk", hookId: 611812567 },
-  { repo: "mv50000/saatavilla", hookId: 611812556 },
+  { repo: "rk9-ai/saatavilla", hookId: 611812556 },
   // mv50000/optimi archived 2026-06-13 (RK9-28) — runner removed, repo read-only.
-  { repo: "mv50000/sunspot", hookId: 623049264 },
+  { repo: "rk9-ai/sunspot", hookId: 623049264 },
 ];
 
 interface Delivery {
