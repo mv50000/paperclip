@@ -41,7 +41,7 @@ const MONITORED_HOOKS: Array<{ repo: string; hookId: number }> = [
   { repo: "mv50000/quantimodo-rust", hookId: 611812559 },
   { repo: "mv50000/bk", hookId: 611812567 },
   { repo: "mv50000/saatavilla", hookId: 611812556 },
-  { repo: "mv50000/optimi", hookId: 611812568 },
+  // mv50000/optimi archived 2026-06-13 (RK9-28) — runner removed, repo read-only.
   { repo: "mv50000/sunspot", hookId: 623049264 },
 ];
 
