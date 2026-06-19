@@ -128,10 +128,39 @@ Kun jokin näistä eventeistä tapahtuu, viesti pitäisi näkyä Slackissä:
 | Event | Mistä | Mihin kanavaan |
 |-------|-------|----------------|
 | `activity.logged` type=`budget.exceeded` | Budjetti ylittyy | `#yritys-kanava` + `#rk9-board` |
-| `agent.status` → terminated/error | Agentti kaatuu | `#yritys-kanava` |
+| `agent.status` → terminated | Agentti kaatuu (hard stop) | `#yritys-kanava` |
 | `heartbeat.run.status` failed (3+ peräkkäin) | Agent runs failavat | `#yritys-kanava` |
+| **Agent liveness — stale heartbeat** (watchdog) | Aktiiviseksi tarkoitettu agentti ei ole ajanut > N× heartbeat-väli | `#yritys-kanava` + `#rk9-board` |
 
 Risk Management -järjestelmän eventit (`risk.entry.created`, `risk.incident.created`) lisätään myöhemmässä PR:ssä, kun Risk Management -koodi on master:ssa.
+
+### Agent liveness-watchdog (pull-pohjainen)
+
+Yllä olevat hälytykset ovat **event-/push-pohjaisia**: forwarder näkee vain eventit joita agentti *aktiivisesti* emittoi. Jos floti "kuolee" niin että agentit lakkaavat olemasta schedulattuja (esim. koko scheduler jumittuu, tai agentin runeja ei rakenteellisesti enää luoda), heartbeat-runia ei synny eikä eventtiä julkaista → event-pohjainen hälytin on rakenteellisesti sokea tälle katveelle (GAP-2).
+
+**Liveness-watchdog** täydentää forwarderia. Se on server-sisäinen ajastin (käynnistyy `index.ts`:ssä heti event-forwarderin jälkeen, oletusväli 5 min) joka *pollaa* `agents`-taulun ja hälyttää kun aktiiviseksi tarkoitetun agentin `last_heartbeat_at` on vanhempi kuin `AGENT_LIVENESS_THRESHOLD_MULTIPLIER` × agentin oma heartbeat-väli (intervalSec). Käynnistyksessä loki:
+
+```
+[INFO] agent liveness watchdog started
+```
+
+Säännöt:
+
+- **Hälyttää** agentin nimellä `#yritys-kanava`-kanavalle ja `#rk9-board`-kanavalle (hiljainen agentti on koko yrityksen luotettavuussignaali).
+- **EI hälytä** `paused` / `terminated` / `pending_approval`-agenteista, heartbeat-disabloiduista agenteista, eikä company-paused-yrityksien agenteista — sama suodatin kuin heartbeat-schedulerin omassa `tickTimers`-silmukassa (hiljaisuus on näissä odotettua). `error`/`idle`/`running`-tilan agentit **ovat** seurannassa (erroriin jäänyt, ajamisen lopettanut agentti on juuri se mitä halutaan napata).
+- **Event-driven-agentit** (ei timer-heartbeatia, esim. Asiakaspalvelu: `intervalSec <= 0`) on **poissuljettu** — niitä scheduler ei koskaan herätä ajastimella, joten niitä ei voi olla "myöhässä".
+- **Once-per-episode-debounce:** hälyttää kerran per katkos, ei joka tikillä; nollautuu (re-arm) kun agentti ajaa taas (`last_heartbeat_at` tuoreutuu kynnyksen alle). Sama notify-once-malli kuin heartbeat-failure-burstissa.
+- Uudella agentilla joka ei ole vielä koskaan ajanut käytetään `created_at`-baselinea, joten sitä ei hälytetä heti luonnin jälkeen (vasta kun ensimmäinen kynnys-väli ylittyy).
+
+**Konfiguraatio (env-varit, oletukset):**
+
+| Env-var | Oletus | Selitys |
+|---------|--------|---------|
+| `AGENT_LIVENESS_WATCHDOG_ENABLED` | `true` (pois vain arvolla `"false"`) | Kytkee watchdogin päälle/pois |
+| `AGENT_LIVENESS_WATCHDOG_INTERVAL_MS` | `300000` (5 min, lattia 60 s) | Kuinka usein polli ajetaan |
+| `AGENT_LIVENESS_THRESHOLD_MULTIPLIER` | `3` (lattia 2) | Monenko heartbeat-välin yli `last_heartbeat_at` saa venyä ennen hälytystä |
+
+Debounce-tila on in-memory (prosessin elinikä) — sama kuin event-forwarderissa: serverin restart voi venyttää korkeintaan yhden toistohälytyksen agentille joka on jo katkoksessa boot-hetkellä.
 
 ## 6. Vianetsintä
 
@@ -154,6 +183,7 @@ Slack-integraatio voidaan disabloida yritykseltä yksinkertaisesti **poistamalla
 - ✅ Cross-company `#rk9-board` budjettiylityksille
 - ✅ Heartbeat-failure threshold (3 peräkkäistä failureä ennen ilmoitusta)
 - ✅ Debounce 30s sama event ei tuplaviestiä
+- ✅ Pull-pohjainen liveness-watchdog (event-katvealue GAP-2): hälyttää kun timer-agentti ei ole ajanut > N× heartbeat-väli, once-per-episode-debounce + re-arm
 
 ## Mikä Vaihe 2 toteuttaa
 

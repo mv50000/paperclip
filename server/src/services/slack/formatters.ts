@@ -121,6 +121,48 @@ export function formatHeartbeatFailureBurst(
   };
 }
 
+// Humanize a millisecond duration into a compact "2d 3h" / "4h 12m" / "5m" / "30s" form
+// for liveness alerts. Coarse on purpose — the watchdog cares about scale, not seconds.
+export function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${totalSec}s`;
+}
+
+// Pull-based liveness watchdog alert: an agent that *should* be ticking on a timer has
+// not produced a heartbeat in longer than thresholdMultiplier × its interval. Unlike the
+// event-driven formatters above this takes plain values (the watchdog reads the agent row
+// directly), so the agent name is always resolved — never "(unknown)".
+export function formatAgentLivenessStale(args: {
+  companyId: string;
+  companyName: string;
+  companyPrefix?: string | null;
+  agentName: string;
+  ageMs: number;
+  intervalSec: number;
+  thresholdMultiplier: number;
+}): FormattedMessage {
+  const { companyId, companyName, companyPrefix = null, agentName, ageMs, intervalSec, thresholdMultiplier } = args;
+  const age = formatDuration(ageMs);
+  const interval = formatDuration(intervalSec * 1000);
+  const text = `:zzz: ${agentName} has not run in ${age} — ${companyName}`;
+  return {
+    text,
+    blocks: [
+      header(":zzz: Agent liveness — stale heartbeat"),
+      section(
+        `*${agentName}* in *${companyName}* has not run in *${age}* — overdue past *${thresholdMultiplier}×* its *${interval}* heartbeat interval.\nLikely a silent outage (agent de-scheduled, adapter/auth failure, or a stalled scheduler) that the event-driven alerts can't see. Verify the agent is still scheduled and healthy.`,
+      ),
+      dashboardLink(companyId, companyPrefix, "Open agent"),
+    ],
+  };
+}
+
 const APPROVAL_TYPE_EMOJI: Record<string, string> = {
   hire_agent: ":bust_in_silhouette:",
   approve_ceo_strategy: ":compass:",
