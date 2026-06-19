@@ -41,7 +41,7 @@ import {
 import { fetchAllQuotaWindows } from "./services/quota-windows.js";
 import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
-import { startSlackEventForwarder, createSystemPauseSlackNotifier } from "./services/slack/index.js";
+import { startSlackEventForwarder, startAgentLivenessWatchdog, createSystemPauseSlackNotifier } from "./services/slack/index.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
 import { createEmailService } from "./services/email/index.js";
@@ -677,6 +677,16 @@ export async function startServer(): Promise<StartedServer> {
 
   // --- RK9 Custom: Slack, Risk, Email startup ---
   startSlackEventForwarder(db as any);
+
+  // Pull-based liveness watchdog (RK9-43): complements the event-driven forwarder above by
+  // catching agents that stop being scheduled entirely (no run, no event for the forwarder
+  // to see). Alerts when a timer-heartbeat agent's last_heartbeat_at exceeds N× its interval.
+  if (config.agentLivenessWatchdogEnabled) {
+    startAgentLivenessWatchdog(db as any, {
+      intervalMs: config.agentLivenessWatchdogIntervalMs,
+      thresholdMultiplier: config.agentLivenessThresholdMultiplier,
+    });
+  }
 
   {
     const RISK_MONITOR_INTERVAL_MS = 60 * 60 * 1000;
