@@ -1,7 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import type { LiveEvent } from "@paperclipai/shared";
 import { eq } from "drizzle-orm";
-import { approvals, companies } from "@paperclipai/db";
+import { agents, approvals, companies } from "@paperclipai/db";
 import { subscribeAllLiveEvents } from "../live-events.js";
 import { logger } from "../../middleware/logger.js";
 import { createSlackClientService, type SlackClientService } from "./client.js";
@@ -16,7 +16,6 @@ import {
 } from "./formatters.js";
 
 const HEARTBEAT_FAILURE_THRESHOLD = 3;
-const HEARTBEAT_FAILURE_WINDOW_MS = 30 * 60 * 1000;
 const DEBOUNCE_MS = 30 * 1000;
 
 interface ConsecutiveFailureState {
@@ -40,6 +39,7 @@ export const __testing__ = {
     failureCounters.clear();
     debounceCache.clear();
     companyInfoCache.clear();
+    agentInfoCache.clear();
   },
 };
 
@@ -47,6 +47,7 @@ const failureCounters = new Map<string, ConsecutiveFailureState>();
 const debounceCache = new Map<string, number>();
 interface CompanyInfo { name: string; prefix: string | null; fetchedAt: number }
 const companyInfoCache = new Map<string, CompanyInfo>();
+const agentInfoCache = new Map<string, { name: string | null; fetchedAt: number }>();
 const COMPANY_INFO_CACHE_MS = 5 * 60 * 1000;
 
 async function getCompanyInfo(db: Db, companyId: string): Promise<{ name: string; prefix: string | null }> {
@@ -65,6 +66,29 @@ async function getCompanyInfo(db: Db, companyId: string): Promise<{ name: string
   return { name, prefix };
 }
 
+// Resolve an agent's display name from its id. The live-event payloads for
+// agent.status / heartbeat.run.status carry only agentId, so without this the
+// formatters fall back to "(unknown)" in the alert. Cached + null-safe.
+async function getAgentName(db: Db, agentId: string): Promise<string | null> {
+  const cached = agentInfoCache.get(agentId);
+  if (cached && Date.now() - cached.fetchedAt < COMPANY_INFO_CACHE_MS) {
+    return cached.name;
+  }
+  let name: string | null = null;
+  try {
+    const row = await db
+      .select({ name: agents.name })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+    name = row?.name ?? null;
+  } catch (err) {
+    logger.warn({ err, agentId }, "slack: failed to resolve agent name");
+  }
+  agentInfoCache.set(agentId, { name, fetchedAt: Date.now() });
+  return name;
+}
+
 function debounceKey(companyId: string, kind: string, suffix = ""): string {
   return `${companyId}:${kind}:${suffix}`;
 }
@@ -77,25 +101,31 @@ function shouldDebounce(key: string): boolean {
   return false;
 }
 
+// Count consecutive heartbeat failures *since the last success* — deliberately with
+// NO time window. Heartbeats can be hours apart (e.g. a 4h cadence), so a window-based
+// reset meant slow agents never accumulated a streak and genuine multi-hour outages
+// were never surfaced via this path. The counter is reset only by a successful run
+// (resetHeartbeatCounter).
 function recordHeartbeatFailure(companyId: string, agentId: string): number {
   const key = `${companyId}:${agentId}`;
-  const now = Date.now();
   const state = failureCounters.get(key);
-  if (!state || now - state.lastFailureAt > HEARTBEAT_FAILURE_WINDOW_MS) {
-    failureCounters.set(key, { agentId, count: 1, lastFailureAt: now, notifiedAt: null });
+  if (!state) {
+    failureCounters.set(key, { agentId, count: 1, lastFailureAt: Date.now(), notifiedAt: null });
     return 1;
   }
   state.count += 1;
-  state.lastFailureAt = now;
+  state.lastFailureAt = Date.now();
   return state.count;
 }
 
 function shouldNotifyHeartbeat(companyId: string, agentId: string, count: number): boolean {
   if (count < HEARTBEAT_FAILURE_THRESHOLD) return false;
-  const key = `${companyId}:${agentId}`;
-  const state = failureCounters.get(key);
+  const state = failureCounters.get(`${companyId}:${agentId}`);
   if (!state) return false;
-  if (state.notifiedAt && Date.now() - state.notifiedAt < HEARTBEAT_FAILURE_WINDOW_MS) return false;
+  // Notify once per outage episode, then stay quiet until a successful run resets the
+  // counter. This stops a persistently-broken agent from re-alerting every cycle while
+  // still flagging the start of a real outage.
+  if (state.notifiedAt) return false;
   state.notifiedAt = Date.now();
   return true;
 }
@@ -104,7 +134,12 @@ function resetHeartbeatCounter(companyId: string, agentId: string) {
   failureCounters.delete(`${companyId}:${agentId}`);
 }
 
-export function classifyEvent(event: LiveEvent, companyName: string, companyPrefix: string | null = null): DispatchTarget[] {
+export function classifyEvent(
+  event: LiveEvent,
+  companyName: string,
+  companyPrefix: string | null = null,
+  agentName: string | null = null,
+): DispatchTarget[] {
   const payload = event.payload as Record<string, unknown>;
 
   switch (event.type) {
@@ -125,11 +160,16 @@ export function classifyEvent(event: LiveEvent, companyName: string, companyPref
 
     case "agent.status": {
       const status = typeof payload.status === "string" ? payload.status : null;
-      if (status === "terminated" || status === "error") {
+      // Only a hard stop (terminated) warrants a standalone alert. Transient "error"
+      // flips are intentionally suppressed: an agent that fails one heartbeat almost
+      // always recovers on the next run, so per-flip alerts were pure noise (firing
+      // every cycle). A genuinely stuck agent is surfaced via the consecutive-failure
+      // burst (heartbeat.run.status) below, which now tracks failures since last success.
+      if (status === "terminated") {
         if (shouldDebounce(debounceKey(event.companyId, "agent.status", String(payload.agentId ?? "")))) {
           return [];
         }
-        return [{ target: "company", message: formatAgentStatus(event, companyName, companyPrefix) }];
+        return [{ target: "company", message: formatAgentStatus(event, companyName, companyPrefix, agentName) }];
       }
       return [];
     }
@@ -138,14 +178,18 @@ export function classifyEvent(event: LiveEvent, companyName: string, companyPref
       const status = typeof payload.status === "string" ? payload.status : null;
       const agentId = typeof payload.agentId === "string" ? payload.agentId : null;
       if (!agentId) return [];
-      if (status === "completed") {
+      // "succeeded" is the run's success terminal status (NOT "completed" — that string
+      // is never emitted). A success ends the outage episode: clear the streak + the
+      // notify-once flag so a future outage alerts again. "cancelled" is deliberately
+      // NOT a reset — it is inconclusive and must not clear a real failure streak.
+      if (status === "succeeded") {
         resetHeartbeatCounter(event.companyId, agentId);
         return [];
       }
       if (status === "failed" || status === "error" || status === "timed_out") {
         const count = recordHeartbeatFailure(event.companyId, agentId);
         if (!shouldNotifyHeartbeat(event.companyId, agentId, count)) return [];
-        return [{ target: "company", message: formatHeartbeatFailureBurst(event, companyName, count, companyPrefix) }];
+        return [{ target: "company", message: formatHeartbeatFailureBurst(event, companyName, count, companyPrefix, agentName) }];
       }
       return [];
     }
@@ -268,7 +312,15 @@ export function startSlackEventForwarder(db: Db): SlackEventForwarder {
           await dispatchApprovalUpdate(db, client, event.companyId, approvalId, message);
           return;
         }
-        const targets = classifyEvent(event, companyName, companyPrefix);
+        // Resolve the agent name for agent/heartbeat alerts so they don't read "(unknown)".
+        let agentName: string | null = null;
+        if (event.type === "agent.status" || event.type === "heartbeat.run.status") {
+          const aid = (event.payload as Record<string, unknown>).agentId;
+          if (typeof aid === "string" && aid.length > 0) {
+            agentName = await getAgentName(db, aid);
+          }
+        }
+        const targets = classifyEvent(event, companyName, companyPrefix, agentName);
         if (targets.length === 0) return;
         const dispatched = await dispatch(client, resolver, event.companyId, targets);
         if (

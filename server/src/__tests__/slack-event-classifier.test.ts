@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import type { LiveEvent } from "@paperclipai/shared";
 import { classifyEvent, __testing__ } from "../services/slack/event-forwarder.js";
 
@@ -65,23 +65,26 @@ describe("slack event classifier", () => {
     expect(classifyEvent(b, COMPANY_NAME)).not.toEqual([]);
   });
 
-  it("forwards agent.status only for terminated and error", () => {
+  it("forwards agent.status only for terminated; transient error flips are suppressed", () => {
     expect(
       classifyEvent(makeEvent("agent.status", { status: "running", agentId: "a-1" }), COMPANY_NAME),
     ).toEqual([]);
     expect(
       classifyEvent(makeEvent("agent.status", { status: "idle", agentId: "a-1" }), COMPANY_NAME),
     ).toEqual([]);
+    // A hard stop still alerts.
     const t1 = classifyEvent(
       makeEvent("agent.status", { status: "terminated", agentId: "a-2" }),
       COMPANY_NAME,
     );
     expect(t1.map((t) => t.target)).toEqual(["company"]);
+    // A transient "error" flip is intentionally NOT a standalone alert — an agent that
+    // fails one run recovers on the next; genuine outages surface via the failure burst.
     const t2 = classifyEvent(
       makeEvent("agent.status", { status: "error", agentId: "a-3" }),
       COMPANY_NAME,
     );
-    expect(t2.map((t) => t.target)).toEqual(["company"]);
+    expect(t2).toEqual([]);
   });
 
   it("notifies heartbeat failures only after 3 consecutive failures", () => {
@@ -95,13 +98,13 @@ describe("slack event classifier", () => {
     expect(third[0].message.text).toContain("3 runs in a row");
   });
 
-  it("resets heartbeat counter on successful completion", () => {
+  it("resets heartbeat counter on a successful run", () => {
     const failed = makeEvent("heartbeat.run.status", { status: "failed", agentId: "a-1" });
-    const completed = makeEvent("heartbeat.run.status", { status: "completed", agentId: "a-1" });
+    const succeeded = makeEvent("heartbeat.run.status", { status: "succeeded", agentId: "a-1" });
 
     classifyEvent(failed, COMPANY_NAME);
     classifyEvent(failed, COMPANY_NAME);
-    classifyEvent(completed, COMPANY_NAME);
+    classifyEvent(succeeded, COMPANY_NAME);
     expect(classifyEvent(failed, COMPANY_NAME)).toEqual([]);
     expect(classifyEvent(failed, COMPANY_NAME)).toEqual([]);
     expect(classifyEvent(failed, COMPANY_NAME).map((t) => t.target)).toEqual(["company"]);
@@ -122,6 +125,55 @@ describe("slack event classifier", () => {
     );
     expect(aThird.length).toBe(1);
     expect(bThird.length).toBe(1);
+  });
+
+  it("accumulates failures across long gaps (consecutive since success, no time window)", () => {
+    // Regression guard: a 4h-cadence agent must still reach the threshold. The old
+    // 30-minute window reset the counter between spaced failures, so slow agents never
+    // triggered the burst and multi-week outages went unflagged.
+    vi.useFakeTimers();
+    try {
+      const failed = () => makeEvent("heartbeat.run.status", { status: "failed", agentId: "slow-1" });
+      vi.setSystemTime(new Date("2026-06-18T00:00:00Z"));
+      expect(classifyEvent(failed(), COMPANY_NAME)).toEqual([]);
+      vi.setSystemTime(new Date("2026-06-18T04:00:00Z"));
+      expect(classifyEvent(failed(), COMPANY_NAME)).toEqual([]);
+      vi.setSystemTime(new Date("2026-06-18T08:00:00Z"));
+      const third = classifyEvent(failed(), COMPANY_NAME);
+      expect(third.map((t) => t.target)).toEqual(["company"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("notifies once per outage episode, not on every subsequent failure", () => {
+    const failed = () => makeEvent("heartbeat.run.status", { status: "failed", agentId: "stuck-1" });
+    classifyEvent(failed(), COMPANY_NAME);
+    classifyEvent(failed(), COMPANY_NAME);
+    expect(classifyEvent(failed(), COMPANY_NAME).map((t) => t.target)).toEqual(["company"]); // 3rd: alert
+    expect(classifyEvent(failed(), COMPANY_NAME)).toEqual([]); // 4th: quiet
+    expect(classifyEvent(failed(), COMPANY_NAME)).toEqual([]); // 5th: quiet
+  });
+
+  it("re-notifies after a successful run resets the episode", () => {
+    const failed = () => makeEvent("heartbeat.run.status", { status: "failed", agentId: "x-1" });
+    const succeeded = () => makeEvent("heartbeat.run.status", { status: "succeeded", agentId: "x-1" });
+    classifyEvent(failed(), COMPANY_NAME);
+    classifyEvent(failed(), COMPANY_NAME);
+    expect(classifyEvent(failed(), COMPANY_NAME).map((t) => t.target)).toEqual(["company"]); // episode 1
+    classifyEvent(succeeded(), COMPANY_NAME); // recovery resets the streak + notified flag
+    classifyEvent(failed(), COMPANY_NAME);
+    classifyEvent(failed(), COMPANY_NAME);
+    expect(classifyEvent(failed(), COMPANY_NAME).map((t) => t.target)).toEqual(["company"]); // episode 2 alerts again
+  });
+
+  it("uses the resolved agent name in the burst alert instead of (unknown)", () => {
+    const failed = () => makeEvent("heartbeat.run.status", { status: "failed", agentId: "a-1" });
+    classifyEvent(failed(), COMPANY_NAME, null, "CTO");
+    classifyEvent(failed(), COMPANY_NAME, null, "CTO");
+    const third = classifyEvent(failed(), COMPANY_NAME, null, "CTO");
+    expect(third[0].message.text).toContain("CTO");
+    expect(JSON.stringify(third[0].message.blocks)).not.toContain("(unknown)");
   });
 
   it("ignores unhandled event types", () => {
