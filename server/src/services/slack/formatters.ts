@@ -78,10 +78,15 @@ export function formatBudgetExceeded(event: LiveEvent, companyName: string, comp
   };
 }
 
-export function formatAgentStatus(event: LiveEvent, companyName: string, companyPrefix: string | null = null): FormattedMessage {
+export function formatAgentStatus(
+  event: LiveEvent,
+  companyName: string,
+  companyPrefix: string | null = null,
+  resolvedAgentName: string | null = null,
+): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
   const status = asString(payload.status, "unknown");
-  const agentName = asString(payload.agentName ?? payload.name);
+  const agentName = resolvedAgentName ?? asString(payload.agentName ?? payload.name);
   const reason = typeof payload.pauseReason === "string" ? payload.pauseReason : null;
   const emoji = status === "terminated" ? ":no_entry:" : status === "error" ? ":warning:" : ":robot_face:";
   const text = `${emoji} ${agentName} → ${status} — ${companyName}`;
@@ -98,9 +103,10 @@ export function formatHeartbeatFailureBurst(
   companyName: string,
   consecutiveFailures: number,
   companyPrefix: string | null = null,
+  resolvedAgentName: string | null = null,
 ): FormattedMessage {
   const payload = event.payload as Record<string, unknown>;
-  const agentName = asString(payload.agentName ?? payload.name);
+  const agentName = resolvedAgentName ?? asString(payload.agentName ?? payload.name);
   const errorMsg = typeof payload.error === "string" ? payload.error : null;
   const text = `:rotating_light: ${agentName} failed ${consecutiveFailures} runs in a row — ${companyName}`;
   return {
