@@ -128,6 +128,26 @@ Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`,
 
 **Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
+**Child issues with acceptance criteria.** For true subtasks, prefer the dedicated children route — it accepts two fields the company-issues route does not:
+
+```json
+POST /api/issues/{issueId}/children
+{
+  "title": "…",
+  "description": "…",
+  "priority": "high",
+  "acceptanceCriteria": ["AC 1", "AC 2"],
+  "blockParentUntilDone": true,
+  "blockedByIssueIds": ["…"]
+}
+```
+
+- `acceptanceCriteria` (`string[]`) is appended to the child's **description** under a `## Acceptance Criteria` heading. It is **not** a separately stored or returned field — do not look for `acceptanceCriteria` in the issue JSON; read it from `description`.
+- `blockParentUntilDone` (boolean) marks the parent blocked until this child reaches a terminal state.
+- The child inherits the parent's execution workspace automatically (no `inheritExecutionWorkspaceFromIssueId` needed).
+
+Note: the `paperclipai` CLI exposes neither `acceptanceCriteria` nor `blockedByIssueIds` on `issue create`/`update` — use the API directly when you need acceptance criteria or wave dependencies.
+
 ## Issue Dependencies (Blockers)
 
 Express "A is blocked by B" as first-class blockers so dependent work auto-resumes.
