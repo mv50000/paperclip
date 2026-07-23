@@ -50,6 +50,7 @@ const MONITORED_HOOKS: Array<{ repo: string; hookId: number }> = [
   { repo: "rk9-ai/saatavilla", hookId: 611812556 },
   // mv50000/optimi archived 2026-06-13 (RK9-28) — runner removed, repo read-only.
   { repo: "rk9-ai/sunspot", hookId: 623049264 },
+  { repo: "rk9-ai/uutisvertailu", hookId: 655877295 },
 ];
 
 interface Delivery {
