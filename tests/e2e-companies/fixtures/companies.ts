@@ -51,6 +51,14 @@ export const COMPANIES: CompanyTarget[] = [
     ownerAgent: "sunspot-tech-lead",
     authRedirects: false,
   },
+  {
+    name: "uutisvertailu",
+    displayName: "Uutisvertailu",
+    baseUrl: "https://uutisvertailu-dev.rk9.fi",
+    paperclipCompany: "uutisvertailu",
+    ownerAgent: "uutisvertailu-tech-lead",
+    authRedirects: false,
+  },
 ];
 
 export function companyByName(name: string): CompanyTarget {
