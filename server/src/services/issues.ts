@@ -1836,6 +1836,22 @@ export function issueService(db: Db) {
     return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
   }
 
+  // issues.checkoutRunId/executionRunId carry an FK to heartbeat_runs. Interactive
+  // agent sessions (no scheduler-issued run) can supply a runId that never made it
+  // into heartbeat_runs — writing it straight to those columns crashes with an
+  // unhandled Postgres FK-violation (500) instead of a clean client error.
+  async function assertKnownActorRunId(runId: string | null, companyId?: string): Promise<void> {
+    if (!runId) return;
+    const run = await db
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run || (companyId && run.companyId !== companyId)) {
+      throw unprocessable("Unknown actorRunId: no matching heartbeat run", { actorRunId: runId });
+    }
+  }
+
   async function adoptStaleCheckoutRun(input: {
     issueId: string;
     actorAgentId: string;
@@ -1954,6 +1970,7 @@ export function issueService(db: Db) {
 
   return {
     clearExecutionRunIfTerminal,
+    assertKnownActorRunId,
 
     list: async (companyId: string, filters?: IssueFilters) => {
       const conditions = [eq(issues.companyId, companyId)];
@@ -2914,6 +2931,11 @@ export function issueService(db: Db) {
         throw unprocessable("Issue is blocked by unresolved blockers", { unresolvedBlockerIssueIds });
       }
 
+      // Validated last, right before checkoutRunId can reach a DB write with an FK
+      // to heartbeat_runs — earlier conflict/blocker checks (pause hold, blockers)
+      // take precedence so their more specific 409/422s aren't masked by this one.
+      await assertKnownActorRunId(checkoutRunId, issueCompany.companyId);
+
       const sameRunAssigneeCondition = checkoutRunId
         ? and(
           eq(issues.assigneeAgentId, agentId),
@@ -3039,6 +3061,7 @@ export function issueService(db: Db) {
       const current = await db
         .select({
           id: issues.id,
+          companyId: issues.companyId,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
@@ -3049,6 +3072,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!current) throw notFound("Issue not found");
+      await assertKnownActorRunId(actorRunId, current.companyId);
 
       if (
         current.status === "in_progress" &&
@@ -3362,6 +3386,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
+      await assertKnownActorRunId(actor.runId ?? null, issue.companyId);
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,

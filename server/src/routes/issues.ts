@@ -553,12 +553,15 @@ export function issueRoutes(
     throw unauthorized();
   }
 
-  function requireAgentRunId(req: Request, res: Response) {
+  // Interactive agent sessions (Claude Code worktrees, local-cli) authenticate with a
+  // long-lived agent API key and have no scheduler-issued heartbeat run — that's
+  // expected, not an error. A real heartbeat run always carries a runId (the JWT is
+  // rejected at auth time if `run_id` is missing), so returning null here only ever
+  // reflects the interactive/no-run case. Downstream code treats a null run id as
+  // "no heartbeat run" rather than requiring one.
+  function getAgentRunId(req: Request): string | null {
     if (req.actor.type !== "agent") return null;
-    const runId = req.actor.runId?.trim();
-    if (runId) return runId;
-    res.status(401).json({ error: "Agent run id required" });
-    return null;
+    return req.actor.runId?.trim() || null;
   }
 
   async function hasActiveCheckoutManagementOverride(
@@ -621,8 +624,7 @@ export function issueRoutes(
       });
       return false;
     }
-    const runId = requireAgentRunId(req, res);
-    if (!runId) return false;
+    const runId = getAgentRunId(req);
     const ownership = await svc.assertCheckoutOwner(issue.id, actorAgentId, runId);
     if (ownership.adoptedFromRunId) {
       const actor = getActorInfo(req);
@@ -2110,6 +2112,7 @@ export function issueRoutes(
     try {
       if (transition.decision && decisionId) {
         const decision = transition.decision;
+        await svc.assertKnownActorRunId(actor.runId ?? null, existing.companyId);
         issue = await db.transaction(async (tx) => {
           const updated = await svc.update(
             id,
@@ -2750,8 +2753,7 @@ export function issueRoutes(
       return;
     }
 
-    const checkoutRunId = requireAgentRunId(req, res);
-    if (req.actor.type === "agent" && !checkoutRunId) return;
+    const checkoutRunId = getAgentRunId(req);
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
 
@@ -2800,8 +2802,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
-    const actorRunId = requireAgentRunId(req, res);
-    if (req.actor.type === "agent" && !actorRunId) return;
+    const actorRunId = getAgentRunId(req);
 
     const released = await svc.release(
       id,
@@ -2935,8 +2936,7 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
-    const agentSourceRunId = req.actor.type === "agent" ? requireAgentRunId(req, res) : null;
-    if (req.actor.type === "agent" && !agentSourceRunId) return;
+    const agentSourceRunId = getAgentRunId(req);
 
     const interaction = await issueThreadInteractionService(db).create(issue, {
       ...req.body,

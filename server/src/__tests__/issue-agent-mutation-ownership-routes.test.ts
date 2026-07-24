@@ -12,6 +12,7 @@ const ownerRunId = "55555555-5555-4555-8555-555555555555";
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  checkout: vi.fn(),
   getAttachmentById: vi.fn(),
   getByIdentifier: vi.fn(),
   getById: vi.fn(),
@@ -246,6 +247,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockAgentService.resolveByReference.mockReset();
     mockIssueService.addComment.mockReset();
     mockIssueService.assertCheckoutOwner.mockReset();
+    mockIssueService.checkout.mockReset();
     mockIssueService.getAttachmentById.mockReset();
     mockIssueService.getByIdentifier.mockReset();
     mockIssueService.getById.mockReset();
@@ -460,5 +462,18 @@ describe("agent issue mutation checkout ownership", () => {
       assigneeAgentId: null,
       title: "Claimable update",
     });
+  });
+
+  it("checks out an issue for an interactive agent with no run id (RK9-76)", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: null }));
+    mockIssueService.checkout.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: peerAgentId }));
+
+    const interactiveActor = peerActor({ runId: undefined });
+    const res = await request(await createApp(interactiveActor))
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({ agentId: peerAgentId, expectedStatuses: ["todo"] });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.checkout).toHaveBeenCalledWith(issueId, peerAgentId, ["todo"], null);
   });
 });
