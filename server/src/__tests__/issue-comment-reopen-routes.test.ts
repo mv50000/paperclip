@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  assertKnownActorRunId: vi.fn(),
   update: vi.fn(),
   addComment: vi.fn(),
   getDependencyReadiness: vi.fn(),
@@ -208,6 +209,7 @@ describe.sequential("issue comment reopen routes", () => {
     vi.clearAllMocks();
     mockIssueService.getById.mockReset();
     mockIssueService.assertCheckoutOwner.mockReset();
+    mockIssueService.assertKnownActorRunId.mockReset();
     mockIssueService.update.mockReset();
     mockIssueService.addComment.mockReset();
     mockIssueService.getDependencyReadiness.mockReset();
@@ -281,6 +283,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+    mockIssueService.assertKnownActorRunId.mockResolvedValue(undefined);
     mockAccessService.canUser.mockResolvedValue(false);
     mockAccessService.hasPermission.mockResolvedValue(false);
     mockAgentService.getById.mockResolvedValue(null);

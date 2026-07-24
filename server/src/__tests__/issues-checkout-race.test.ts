@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
   companies,
   createDb,
   heartbeatRuns,
+  issueComments,
   issues,
 } from "@paperclipai/db";
 import {
@@ -41,6 +43,7 @@ describeEmbeddedPostgres("issueService.checkout concurrent 409 race", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
@@ -209,5 +212,132 @@ describeEmbeddedPostgres("issueService.checkout concurrent 409 race", () => {
     );
     expect(second.id).toBe(issueId);
     expect(second.assigneeAgentId).toBe(agentId);
+  });
+});
+
+describeEmbeddedPostgres("issueService.checkout interactive agent run handling (RK9-76)", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<
+    ReturnType<typeof startEmbeddedPostgresTestDatabase>
+  > | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase(
+      "paperclip-checkout-interactive-",
+    );
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issueComments);
+    await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedCompanyAgentAndIssue() {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "InteractiveCo",
+      issuePrefix: "INTX",
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "InteractiveAgent",
+      role: "engineer",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Interactive checkout target",
+      status: "todo",
+      priority: "medium",
+    });
+
+    return { companyId, agentId, issueId };
+  }
+
+  it("checks out successfully for an interactive agent with no heartbeat run", async () => {
+    const { agentId, issueId } = await seedCompanyAgentAndIssue();
+
+    const checkedOut = await svc.checkout(issueId, agentId, ["todo"], null);
+
+    expect(checkedOut.status).toBe("in_progress");
+    expect(checkedOut.assigneeAgentId).toBe(agentId);
+    expect(checkedOut.checkoutRunId).toBeNull();
+  });
+
+  it("rejects an actorRunId that has no matching heartbeat_runs row with a clean 4xx, not a 500", async () => {
+    const { agentId, issueId } = await seedCompanyAgentAndIssue();
+    const unknownRunId = randomUUID();
+
+    await expect(svc.checkout(issueId, agentId, ["todo"], unknownRunId)).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("Unknown actorRunId"),
+    });
+
+    // The failed write must not have partially applied.
+    const issue = await db
+      .select({ status: issues.status, checkoutRunId: issues.checkoutRunId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(issue.status).toBe("todo");
+    expect(issue.checkoutRunId).toBeNull();
+  });
+
+  it("rejects an unknown actorRunId on assertCheckoutOwner with a clean 4xx, not a 500", async () => {
+    const { agentId, issueId } = await seedCompanyAgentAndIssue();
+    await svc.checkout(issueId, agentId, ["todo"], null);
+
+    const unknownRunId = randomUUID();
+    await expect(svc.assertCheckoutOwner(issueId, agentId, unknownRunId)).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("Unknown actorRunId"),
+    });
+  });
+
+  it("adds a comment for an interactive agent with no heartbeat run", async () => {
+    const { agentId, issueId } = await seedCompanyAgentAndIssue();
+
+    const comment = await svc.addComment(issueId, "interactive comment", {
+      agentId,
+      runId: null,
+    });
+
+    expect(comment.body).toBe("interactive comment");
+    expect(comment.authorAgentId).toBe(agentId);
+  });
+
+  it("rejects a comment's unknown actorRunId with a clean 4xx, not a 500", async () => {
+    const { agentId, issueId } = await seedCompanyAgentAndIssue();
+    const unknownRunId = randomUUID();
+
+    await expect(
+      svc.addComment(issueId, "comment with bad run", { agentId, runId: unknownRunId }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("Unknown actorRunId"),
+    });
   });
 });
