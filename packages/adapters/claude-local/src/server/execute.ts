@@ -316,6 +316,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const chrome = asBoolean(config.chrome, false);
   const maxTurns = asNumber(config.maxTurnsPerRun, 0) || 1000;
   const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, true);
+  // Tool containment (RK9-83). NOTE: --allowedTools only auto-APPROVES tools —
+  // under --dangerously-skip-permissions (the headless default) it restricts
+  // nothing. --disallowedTools removes tools outright and is therefore the
+  // enforceable knob for e.g. support agents (no Write/Edit/WebFetch).
+  const disallowedTools = asStringArray(config.disallowedTools);
+  const allowedTools = asStringArray(config.allowedTools);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
   const runtimeConfig = await buildClaudeRuntimeConfig({
@@ -517,6 +523,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
     args.push("--add-dir", effectivePromptBundleAddDir);
+    if (disallowedTools.length > 0) args.push("--disallowedTools", disallowedTools.join(","));
+    if (allowedTools.length > 0) args.push("--allowedTools", allowedTools.join(","));
     if (extraArgs.length > 0) args.push(...extraArgs);
     return args;
   };
