@@ -1,7 +1,11 @@
 import { Router } from "express";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { emailMessages, emailOutboundAudit } from "@paperclipai/db";
+import {
+  emailMessages,
+  emailOutboundAudit,
+  emailRoutes as emailRoutesTable,
+} from "@paperclipai/db";
 import { createEmailService } from "../services/email/index.js";
 import { DEFAULT_CEO_EMAIL } from "../services/email/escalation.js";
 import {
@@ -10,8 +14,24 @@ import {
   removeSuppression,
 } from "../services/email/suppression.js";
 import { wrapUntrusted } from "../services/email/sanitize.js";
+import { approvalService, issueApprovalService, logActivity } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unprocessable } from "../errors.js";
+
+/** Payload stored on an `email_send` approval; the server sends from this on
+ * approve — the agent cannot alter the content after submission. */
+export interface EmailSendApprovalPayload {
+  kind: "send" | "reply";
+  routeKey: string;
+  to: string[];
+  cc?: string[];
+  subject: string;
+  bodyMarkdown: string;
+  replyTo?: string;
+  inReplyToMessageId?: string | null;
+  templateKey?: string | null;
+  agentId: string | null;
+}
 
 function sendFailureStatus(reason: string): number {
   return reason === "header_injection" || reason === "invalid_address"
@@ -30,6 +50,72 @@ function sendFailureStatus(reason: string): number {
 export function emailRoutes(db: Db) {
   const router = Router();
   const service = createEmailService(db);
+  const approvalsSvc = approvalService(db);
+  const issueApprovalsSvc = issueApprovalService(db);
+
+  async function findRouteByKey(companyId: string, routeKey: string) {
+    const [route] = await db
+      .select()
+      .from(emailRoutesTable)
+      .where(
+        and(eq(emailRoutesTable.companyId, companyId), eq(emailRoutesTable.routeKey, routeKey)),
+      )
+      .limit(1);
+    return route ?? null;
+  }
+
+  /** Park an agent-drafted send behind an `email_send` approval (trust ramp,
+   * RK9-82). Returns the 202 response body. */
+  async function createSendApproval(args: {
+    companyId: string;
+    agentId: string | null;
+    runId: string | null;
+    routeDomain: string;
+    payload: EmailSendApprovalPayload;
+    issueId?: string | null;
+  }) {
+    const approval = await approvalsSvc.create(args.companyId, {
+      type: "email_send",
+      payload: {
+        ...args.payload,
+        title: `Sähköpostivastaus: ${args.payload.subject}`,
+      },
+      requestedByAgentId: args.agentId,
+      requestedByUserId: null,
+      status: "pending",
+      decisionNote: null,
+      decidedByUserId: null,
+      decidedAt: null,
+      updatedAt: new Date(),
+    });
+    if (args.issueId) {
+      await issueApprovalsSvc.linkManyForApproval(approval.id, [args.issueId], {
+        agentId: args.agentId,
+        userId: null,
+      });
+    }
+    await db.insert(emailOutboundAudit).values({
+      companyId: args.companyId,
+      agentId: args.agentId,
+      runId: args.runId,
+      fromAddress: `${args.payload.routeKey}@${args.routeDomain}`,
+      toAddresses: args.payload.to,
+      subject: args.payload.subject,
+      templateKey: args.payload.templateKey ?? null,
+      status: "pending_approval",
+    });
+    await logActivity(db, {
+      companyId: args.companyId,
+      actorType: "agent",
+      actorId: args.agentId ?? "agent",
+      agentId: args.agentId,
+      action: "email.send_pending_approval",
+      entityType: "approval",
+      entityId: approval.id,
+      details: { routeKey: args.payload.routeKey, kind: args.payload.kind },
+    });
+    return { status: "pending_approval" as const, approvalId: approval.id };
+  }
 
   router.post("/companies/:companyId/email/send", async (req, res) => {
     const companyId = req.params.companyId as string;
@@ -41,6 +127,35 @@ export function emailRoutes(db: Db) {
     if (!Array.isArray(body.to) || body.to.length === 0) throw unprocessable("to required");
     if (typeof body.subject !== "string") throw unprocessable("subject required");
     if (typeof body.bodyMarkdown !== "string") throw unprocessable("bodyMarkdown required");
+
+    // Trust ramp: agent-initiated sends on a gated route are parked behind an
+    // approval. System/board sends (auto-reply, escalation cron, operator) pass.
+    if (actor.actorType === "agent") {
+      const route = await findRouteByKey(companyId, body.routeKey);
+      if (route?.approvalRequired) {
+        const parked = await createSendApproval({
+          companyId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          routeDomain: route.domain,
+          payload: {
+            kind: "send",
+            routeKey: body.routeKey,
+            to: body.to,
+            cc: Array.isArray(body.cc) ? body.cc : undefined,
+            subject: body.subject,
+            bodyMarkdown: body.bodyMarkdown,
+            replyTo: typeof body.replyTo === "string" ? body.replyTo : undefined,
+            inReplyToMessageId:
+              typeof body.inReplyToMessageId === "string" ? body.inReplyToMessageId : null,
+            templateKey: typeof body.templateKey === "string" ? body.templateKey : null,
+            agentId: actor.agentId,
+          },
+        });
+        res.status(202).json(parked);
+        return;
+      }
+    }
 
     const result = await service.sendEmail({
       companyId,
@@ -166,6 +281,50 @@ export function emailRoutes(db: Db) {
       throw unprocessable("inReplyToMessageId required");
     }
     if (typeof body.bodyMarkdown !== "string") throw unprocessable("bodyMarkdown required");
+
+    // Trust ramp: validate the draft cheaply now (parent exists + inbound), then
+    // park it behind an approval when the parent's route is gated.
+    if (actor.actorType === "agent") {
+      const [parent] = await db
+        .select()
+        .from(emailMessages)
+        .where(
+          and(
+            eq(emailMessages.companyId, companyId),
+            eq(emailMessages.id, body.inReplyToMessageId),
+          ),
+        );
+      if (!parent) {
+        res.status(404).json({ ok: false, reason: "parent_not_found" });
+        return;
+      }
+      if (parent.direction !== "inbound") {
+        res.status(409).json({ ok: false, reason: "parent_not_inbound" });
+        return;
+      }
+      const route = parent.routeKey ? await findRouteByKey(companyId, parent.routeKey) : null;
+      if (route?.approvalRequired) {
+        const subject = parent.subject ?? "(ei aihetta)";
+        const parked = await createSendApproval({
+          companyId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          routeDomain: route.domain,
+          payload: {
+            kind: "reply",
+            routeKey: route.routeKey,
+            to: [parent.fromAddress],
+            subject: /^re:/i.test(subject) ? subject : `Re: ${subject}`,
+            bodyMarkdown: body.bodyMarkdown,
+            inReplyToMessageId: parent.id,
+            agentId: actor.agentId,
+          },
+          issueId: parent.issueId,
+        });
+        res.status(202).json(parked);
+        return;
+      }
+    }
 
     const result = await service.replyToMessage({
       companyId,

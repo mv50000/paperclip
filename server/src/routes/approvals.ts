@@ -19,6 +19,8 @@ import {
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { createEmailService } from "../services/email/index.js";
+import type { EmailSendApprovalPayload } from "./email.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -47,6 +49,46 @@ export function approvalRoutes(
     }
     assertCompanyAccess(req, approval.companyId);
     return approval;
+  }
+
+  /** Wake the requesting agent after a negative decision. Support agents have
+   * no timer heartbeat, so without this the reject/revision drafting loop
+   * would stall forever (RK9-82). Scoped to email_send to avoid changing the
+   * lifecycle of other approval types. */
+  async function wakeRequesterOnDecision(
+    approval: { id: string; companyId: string; type: string; status: string; requestedByAgentId: string | null; decisionNote: string | null },
+    reason: "approval_rejected" | "approval_revision_requested",
+    decidedByUserId: string,
+  ) {
+    if (approval.type !== "email_send" || !approval.requestedByAgentId) return;
+    try {
+      const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+      const primaryIssueId = linkedIssues[0]?.id ?? null;
+      await heartbeat.wakeup(approval.requestedByAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason,
+        payload: {
+          approvalId: approval.id,
+          approvalStatus: approval.status,
+          decisionNote: approval.decisionNote,
+          issueId: primaryIssueId,
+        },
+        requestedByActorType: "user",
+        requestedByActorId: decidedByUserId,
+        contextSnapshot: {
+          source: `approval.${reason}`,
+          approvalId: approval.id,
+          issueId: primaryIssueId,
+          wakeReason: reason,
+        },
+      });
+    } catch (err) {
+      logger.warn(
+        { err, approvalId: approval.id, requestedByAgentId: approval.requestedByAgentId },
+        "failed to queue requester wakeup after negative decision",
+      );
+    }
   }
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
@@ -147,6 +189,65 @@ export function approvalRoutes(
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
+
+      // email_send: the server dispatches the approved draft from the stored
+      // payload — the requesting agent never touches the content post-approval
+      // (RK9-82). Rate limits and suppression still apply under the original
+      // agent id. Outcome lands as an approval comment before the requester
+      // wakeup below, so the woken agent sees it immediately.
+      if (approval.type === "email_send") {
+        const p = approval.payload as unknown as EmailSendApprovalPayload;
+        const emailSvc = createEmailService(db);
+        try {
+          const sendResult =
+            p.kind === "reply" && p.inReplyToMessageId
+              ? await emailSvc.replyToMessage({
+                  companyId: approval.companyId,
+                  agentId: p.agentId ?? approval.requestedByAgentId,
+                  runId: null,
+                  inReplyToMessageId: p.inReplyToMessageId,
+                  bodyMarkdown: p.bodyMarkdown,
+                })
+              : await emailSvc.sendEmail({
+                  companyId: approval.companyId,
+                  agentId: p.agentId ?? approval.requestedByAgentId,
+                  runId: null,
+                  routeKey: p.routeKey,
+                  to: p.to,
+                  cc: p.cc,
+                  subject: p.subject,
+                  bodyMarkdown: p.bodyMarkdown,
+                  replyTo: p.replyTo,
+                  inReplyToMessageId: p.inReplyToMessageId ?? null,
+                  templateKey: p.templateKey ?? null,
+                });
+          await svc.addComment(
+            approval.id,
+            sendResult.ok
+              ? `✅ Sähköposti lähetetty (messageId: ${sendResult.messageId}).`
+              : `⚠️ Hyväksytty, mutta lähetys epäonnistui: ${sendResult.reason}. Korjaa este (esim. rate limit / suppression) ja pyydä agenttia lähettämään uudelleen.`,
+            { userId: decidedByUserId },
+          );
+          await logActivity(db, {
+            companyId: approval.companyId,
+            actorType: "user",
+            actorId: decidedByUserId,
+            action: sendResult.ok ? "email.approved_send_dispatched" : "email.approved_send_failed",
+            entityType: "approval",
+            entityId: approval.id,
+            details: sendResult.ok
+              ? { messageId: sendResult.messageId }
+              : { reason: sendResult.reason },
+          });
+        } catch (err) {
+          logger.error({ err, approvalId: approval.id }, "approved email dispatch threw");
+          await svc.addComment(
+            approval.id,
+            `⚠️ Hyväksytty, mutta lähetys kaatui odottamattomaan virheeseen: ${err instanceof Error ? err.message : String(err)}`,
+            { userId: decidedByUserId },
+          );
+        }
+      }
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -249,6 +350,7 @@ export function approvalRoutes(
         entityId: approval.id,
         details: { type: approval.type },
       });
+      await wakeRequesterOnDecision(approval, "approval_rejected", decidedByUserId);
     }
 
     res.json(redactApprovalPayload(approval));
@@ -276,6 +378,7 @@ export function approvalRoutes(
         entityId: approval.id,
         details: { type: approval.type },
       });
+      await wakeRequesterOnDecision(approval, "approval_revision_requested", decidedByUserId);
 
       res.json(redactApprovalPayload(approval));
     },
