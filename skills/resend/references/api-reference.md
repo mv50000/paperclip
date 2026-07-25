@@ -27,6 +27,15 @@ Response (202):
 { "messageId": "uuid", "providerMessageId": "em_msg_..." }
 ```
 
+Response (202, approval-gated route — RK9-82):
+```json
+{ "status": "pending_approval", "approvalId": "uuid" }
+```
+The draft is stored and sent server-side once the operator approves. Do not
+retry. You are woken on `approval_approved` / `approval_rejected` /
+`approval_revision_requested`; revise + resubmit via
+`POST /api/approvals/{approvalId}/resubmit`.
+
 Errors:
 - 403 `{reason: "domain_not_verified"}` — DKIM/SPF/DMARC not all passing
 - 403 `{reason: "suppressed", addresses: ["..."]}` — recipient on suppression list
