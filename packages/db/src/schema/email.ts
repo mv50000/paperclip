@@ -73,6 +73,9 @@ export const emailRoutes = pgTable(
       onDelete: "set null",
     }),
     escalateAfterHours: integer("escalate_after_hours").notNull().default(24),
+    // Trust ramp: agent-initiated send/reply on this route is parked behind an
+    // `email_send` approval (RK9-82). Flip to false per route once trusted.
+    approvalRequired: boolean("approval_required").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -108,6 +111,9 @@ export const emailMessages = pgTable(
     assignedAgentId: uuid("assigned_agent_id").references(() => agents.id, { onDelete: "set null" }),
     issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
     status: text("status").notNull(),
+    // 'automated' = noreply/bulk sender (junk-guard): no auto-reply, no agent
+    // wakeup, no escalation. Null = presumed human.
+    classification: text("classification"),
     errorMessage: text("error_message"),
     receivedAt: timestamp("received_at", { withTimezone: true }),
     sentAt: timestamp("sent_at", { withTimezone: true }),

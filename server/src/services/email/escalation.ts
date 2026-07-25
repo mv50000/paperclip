@@ -68,6 +68,9 @@ async function findCandidates(db: Db): Promise<EscalationCandidate[]> {
       and(
         eq(emailMessages.direction, "inbound"),
         isNull(emailMessages.escalatedAt),
+        // Automated (noreply/bulk) mail never escalates — the Instagram-spam
+        // path that flooded the CEO inbox (RK9-81).
+        isNull(emailMessages.classification),
         // received_at + escalate_after_hours hours <= now()
         sql`${emailMessages.receivedAt} + (${emailRoutes.escalateAfterHours} * interval '1 hour') <= now()`,
       ),
@@ -82,7 +85,13 @@ async function findCandidates(db: Db): Promise<EscalationCandidate[]> {
     .filter((r) => {
       if (!r.issueId) return false; // no linked issue → noise; skip
       const status = r.issueStatus ?? "";
-      return status !== "done" && status !== "cancelled" && status !== "archived";
+      // Backlog = unrouted/catch-all triage queue; it must page nobody.
+      return (
+        status !== "done" &&
+        status !== "cancelled" &&
+        status !== "archived" &&
+        status !== "backlog"
+      );
     });
 }
 

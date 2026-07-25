@@ -144,6 +144,27 @@ describe("normalizeInbound", () => {
       references: "<orig-1@example.com> <ses-out-1@eu-north-1.amazonses.com>",
     });
   });
+
+  it("extracts allowlisted junk-signal headers for the junk guard", async () => {
+    const bulkMime = [
+      "From: Instagram <no-reply@mail.instagram.com>",
+      "To: info@sunspot.fi",
+      "Subject: New followers",
+      "Auto-Submitted: auto-generated",
+      "Precedence: bulk",
+      "List-Unsubscribe: <mailto:unsub@mail.instagram.com>",
+      "X-Tracking-Pixel: not-allowlisted",
+      "",
+      "body",
+    ].join("\r\n");
+    const event = await normalizeInbound(Buffer.from(bulkMime, "utf8"), mail);
+    expect(event.data.headers).toMatchObject({
+      "auto-submitted": "auto-generated",
+      precedence: "bulk",
+    });
+    expect(event.data.headers?.["list-unsubscribe"]).toContain("unsub@mail.instagram.com");
+    expect(event.data.headers?.["x-tracking-pixel"]).toBeUndefined();
+  });
 });
 
 describe("normalizeBounce / normalizeComplaint", () => {

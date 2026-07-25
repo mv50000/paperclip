@@ -95,6 +95,32 @@ export async function getInboundRawEmail(
   return Buffer.from(bytes);
 }
 
+/** Join all string leaves of a structured header value (e.g. `{mail, url}`). */
+function flattenStringValues(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value === null || typeof value !== "object") return undefined;
+  const parts = Object.values(value as Record<string, unknown>)
+    .map((v) => flattenStringValues(v))
+    .filter((x): x is string => !!x);
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+/** Render a mailparser header value (string | string[] | structured) to text. */
+function headerString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value.map((v) => headerString(v)).filter((x): x is string => x !== undefined);
+    return parts.length > 0 ? parts.join(" ") : undefined;
+  }
+  if (typeof value === "object") {
+    const text = (value as { text?: unknown }).text;
+    if (typeof text === "string") return text;
+    return undefined; // structured value without a text rendering
+  }
+  return String(value);
+}
+
 function firstAddress(addr: AddressObject | AddressObject[] | undefined): string | undefined {
   if (!addr) return undefined;
   const list = Array.isArray(addr) ? addr : [addr];
@@ -117,10 +143,11 @@ export async function normalizeInbound(rawMime: Buffer, mail: SesMail): Promise<
     content_type: a.contentType ?? "application/octet-stream",
     size: a.size ?? 0,
   }));
-  // Threading headers, allowlisted — never dump all MIME headers (size + PII).
-  // `message-id` lets later replies reference this message; `in-reply-to` /
-  // `references` let the inbound router link this message onto an existing
-  // issue thread instead of opening a duplicate.
+  // Allowlisted headers only — never dump all MIME headers (size + PII).
+  // Threading: `message-id` lets later replies reference this message;
+  // `in-reply-to`/`references` let the inbound router link this message onto
+  // an existing issue thread. The rest feed the junk-guard's automated-sender
+  // classification (RFC 3834 Auto-Submitted, Precedence, List-*).
   const headers: Record<string, string> = {};
   if (parsed.messageId) headers["message-id"] = parsed.messageId;
   if (parsed.inReplyTo) headers["in-reply-to"] = parsed.inReplyTo;
@@ -128,6 +155,28 @@ export async function normalizeInbound(rawMime: Buffer, mail: SesMail): Promise<
     headers["references"] = Array.isArray(parsed.references)
       ? parsed.references.join(" ")
       : parsed.references;
+  }
+  const JUNK_SIGNAL_HEADERS = [
+    "auto-submitted",
+    "precedence",
+    "x-auto-response-suppress",
+    "return-path",
+  ];
+  for (const name of JUNK_SIGNAL_HEADERS) {
+    const value = headerString(parsed.headers.get(name));
+    if (value !== undefined) headers[name] = value;
+  }
+  // mailparser groups all List-* headers under a structured `list` value
+  // ({ unsubscribe: { mail, url }, id: {...} }) — flatten the two we care
+  // about back to their conventional names.
+  const list = parsed.headers.get("list") as Record<string, unknown> | undefined;
+  if (list && typeof list === "object") {
+    for (const sub of ["unsubscribe", "id"]) {
+      if (sub in list) {
+        const flattened = headerString(list[sub]) ?? flattenStringValues(list[sub]);
+        if (flattened) headers[`list-${sub === "id" ? "id" : "unsubscribe"}`] = flattened;
+      }
+    }
   }
   return {
     type: "email.received",
