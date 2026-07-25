@@ -12,6 +12,7 @@ import express, { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { createInboundRouter, readSvixHeaders } from "../services/email/inbound-router.js";
+import { heartbeatService } from "../services/heartbeat.js";
 
 interface RawBodyRequest extends express.Request {
   rawBody?: Buffer;
@@ -19,7 +20,7 @@ interface RawBodyRequest extends express.Request {
 
 export function resendInboundRoutes(db: Db) {
   const router = Router();
-  const inbound = createInboundRouter(db);
+  const inbound = createInboundRouter(db, { heartbeat: heartbeatService(db) });
 
   router.post(
     "/webhooks/resend-inbound",

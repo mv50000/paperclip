@@ -238,6 +238,30 @@ export function createEmailService(db: Db): EmailService {
       resendApiKey = await secrets.resolveSecretValue(input.companyId, secret.id, "latest");
     }
 
+    // 6.5. Threading headers: when replying, reference the parent's MIME
+    // Message-ID so the customer's mail client threads our reply and their
+    // follow-up carries a References chain the inbound router can link back
+    // onto the same issue. The id originates from untrusted mail, so it is
+    // only forwarded when it matches the strict `<token>` shape (no
+    // whitespace ⇒ no header injection).
+    const threadingHeaders: Record<string, string> = {};
+    if (input.inReplyToMessageId) {
+      const [parentRow] = await db
+        .select({ headers: emailMessages.headers })
+        .from(emailMessages)
+        .where(
+          and(
+            eq(emailMessages.companyId, input.companyId),
+            eq(emailMessages.id, input.inReplyToMessageId),
+          ),
+        );
+      const parentMid = (parentRow?.headers as Record<string, string> | null)?.["message-id"];
+      if (parentMid && /^<[^\s<>]+>$/.test(parentMid)) {
+        threadingHeaders["In-Reply-To"] = parentMid;
+        threadingHeaders["References"] = parentMid;
+      }
+    }
+
     // 7. Send via the configured provider (config.mailProvider; default resend)
     const provider = createMailProvider(config.mailProvider, { resendApiKey });
     const sendResult = await provider.send({
@@ -251,6 +275,7 @@ export function createEmailService(db: Db): EmailService {
       headers: {
         "List-Unsubscribe": `<mailto:${input.routeKey}+unsubscribe@${config.sendingDomain}>`,
         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        ...threadingHeaders,
       },
     });
     if (!sendResult.ok) {

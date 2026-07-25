@@ -122,6 +122,27 @@ describe("normalizeInbound", () => {
     const event = await normalizeInbound(Buffer.from("Subject: x\r\n\r\nbody", "utf8"), mail);
     expect(event.data.from).toBe("customer@example.com"); // from mail.source
     expect(event.data.to).toEqual(["tuki@sunspot.fi"]); // from mail.destination
+    expect(event.data.headers).toEqual({});
+  });
+
+  it("extracts allowlisted threading headers, nothing else", async () => {
+    const withThreading = [
+      "From: Customer <customer@example.com>",
+      "To: tuki@sunspot.fi",
+      "Subject: Re: Hei",
+      "Message-ID: <orig-2@example.com>",
+      "In-Reply-To: <ses-out-1@eu-north-1.amazonses.com>",
+      "References: <orig-1@example.com> <ses-out-1@eu-north-1.amazonses.com>",
+      "X-Secret-Header: do-not-store",
+      "",
+      "body",
+    ].join("\r\n");
+    const event = await normalizeInbound(Buffer.from(withThreading, "utf8"), mail);
+    expect(event.data.headers).toEqual({
+      "message-id": "<orig-2@example.com>",
+      "in-reply-to": "<ses-out-1@eu-north-1.amazonses.com>",
+      references: "<orig-1@example.com> <ses-out-1@eu-north-1.amazonses.com>",
+    });
   });
 });
 

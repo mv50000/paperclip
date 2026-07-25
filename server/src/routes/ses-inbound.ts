@@ -16,6 +16,7 @@ import { and, eq, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companyEmailConfig } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import { heartbeatService } from "../services/heartbeat.js";
 import { createInboundRouter, type InboundRouter } from "../services/email/inbound-router.js";
 import { verifySnsSignature, type SnsMessage } from "../services/email/sns-verify.js";
 import {
@@ -59,7 +60,7 @@ async function resolveTenantByDomain(db: Db, domain: string): Promise<string | n
 
 export function sesInboundRoutes(db: Db, opts: SesInboundOptions = {}) {
   const router = Router();
-  const inbound = opts.inbound ?? createInboundRouter(db);
+  const inbound = opts.inbound ?? createInboundRouter(db, { heartbeat: heartbeatService(db) });
   const verify = opts.verify ?? verifySnsSignature;
   const confirm = opts.confirmSubscription ?? defaultConfirm;
   const adapterDeps = opts.adapterDeps ?? {};
