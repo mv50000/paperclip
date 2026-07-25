@@ -297,6 +297,103 @@ describe("inbound reply threading", () => {
   });
 });
 
+describe("junk guard integration (RK9-81)", () => {
+  const wakeup = vi.fn(async () => undefined);
+
+  beforeEach(() => {
+    wakeup.mockClear();
+    mockMaybeSendAutoReply.mockClear();
+  });
+
+  it("parks automated mail in backlog: no wakeup, no auto-reply, robot title", async () => {
+    const { db, selectQueue, inserts, insertReturning } = fakeDb();
+    selectQueue.push([config]);
+    selectQueue.push([{ ...route, autoReplyTemplateId: "tpl-1" }]);
+    insertReturning.push([{ id: "msg-1" }]);
+    insertReturning.push([{ id: "issue-1" }]);
+
+    const router = createInboundRouter(db, { heartbeat: { wakeup } });
+    const result = await router.handleEvent(
+      COMPANY,
+      inboundEvent({ from: "no-reply@mail.instagram.com" }),
+    );
+
+    expect(result).toEqual({ ok: true, status: "issue_created" });
+    const issue = inserts.find((i) => i.table === issues);
+    expect(issue?.values.status).toBe("backlog");
+    expect(String(issue?.values.title)).toContain("📧🤖");
+    const msg = inserts.find((i) => i.table === emailMessages);
+    expect(msg?.values.classification).toBe("automated");
+
+    await flushImmediates();
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(mockMaybeSendAutoReply).not.toHaveBeenCalled();
+  });
+
+  it("flags automated mail by header even from a human-looking sender", async () => {
+    const { db, selectQueue, inserts, insertReturning } = fakeDb();
+    selectQueue.push([config]);
+    selectQueue.push([route]);
+    insertReturning.push([{ id: "msg-1" }]);
+    insertReturning.push([{ id: "issue-1" }]);
+
+    const router = createInboundRouter(db, { heartbeat: { wakeup } });
+    await router.handleEvent(
+      COMPANY,
+      inboundEvent({ headers: { "auto-submitted": "auto-replied" } }),
+    );
+
+    const issue = inserts.find((i) => i.table === issues);
+    expect(issue?.values.status).toBe("backlog");
+    await flushImmediates();
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not wake the agent for an automated reply on a live thread (OOO)", async () => {
+    const { db, selectQueue, inserts, insertReturning } = fakeDb();
+    selectQueue.push([config]);
+    selectQueue.push([route]);
+    selectQueue.push([{ id: "msg-out-1", issueId: "issue-1" }]);
+    selectQueue.push([{ id: "issue-1", assigneeAgentId: AGENT, status: "in_progress" }]);
+    insertReturning.push([{ id: "msg-2" }]);
+
+    const router = createInboundRouter(db, { heartbeat: { wakeup } });
+    const result = await router.handleEvent(
+      COMPANY,
+      inboundEvent({
+        email_id: "prov-msg-3",
+        headers: {
+          "in-reply-to": "<ses-out-1@eu-north-1.amazonses.com>",
+          "auto-submitted": "auto-replied",
+        },
+      }),
+    );
+
+    expect(result).toEqual({ ok: true, status: "reply_linked" });
+    // Message still lands on the thread with a comment for the audit trail…
+    expect(inserts.some((i) => i.table === issueComments)).toBe(true);
+    await flushImmediates();
+    // …but nobody is woken and nothing is auto-replied.
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(mockMaybeSendAutoReply).not.toHaveBeenCalled();
+  });
+
+  it("never auto-replies on the catch-all route, but still wakes the assignee", async () => {
+    const { db, selectQueue, insertReturning } = fakeDb();
+    selectQueue.push([config]);
+    selectQueue.push([{ ...route, localPart: "*", autoReplyTemplateId: "tpl-1" }]);
+    insertReturning.push([{ id: "msg-1" }]);
+    insertReturning.push([{ id: "issue-1" }]);
+
+    const router = createInboundRouter(db, { heartbeat: { wakeup } });
+    await router.handleEvent(COMPANY, inboundEvent());
+
+    await flushImmediates();
+    expect(mockMaybeSendAutoReply).not.toHaveBeenCalled();
+    expect(wakeup).toHaveBeenCalledTimes(1);
+  });
+});
+
 // Sanity: the config select in the fake must stay the first query — if
 // handleReceived's query order changes, update the queues above.
 void companyEmailConfig;
