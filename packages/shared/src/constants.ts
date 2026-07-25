@@ -295,6 +295,9 @@ export const APPROVAL_TYPES = [
   "approve_ceo_strategy",
   "budget_override_required",
   "request_board_approval",
+  // Agent-drafted outbound email parked for operator approval; the server
+  // sends from the stored payload on approve (RK9-82).
+  "email_send",
 ] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 

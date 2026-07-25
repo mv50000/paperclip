@@ -1,4 +1,4 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, Mail } from "lucide-react";
 import { formatCents } from "../lib/utils";
 
 export const typeLabel: Record<string, string> = {
@@ -6,6 +6,7 @@ export const typeLabel: Record<string, string> = {
   approve_ceo_strategy: "CEO Strategy",
   budget_override_required: "Budget Override",
   request_board_approval: "Board Approval",
+  email_send: "Email Reply",
 };
 
 function firstNonEmptyString(...values: unknown[]): string | null {
@@ -41,6 +42,7 @@ export const typeIcon: Record<string, typeof UserPlus> = {
   approve_ceo_strategy: Lightbulb,
   budget_override_required: ShieldAlert,
   request_board_approval: ShieldCheck,
+  email_send: Mail,
 };
 
 export const defaultTypeIcon = ShieldCheck;
@@ -229,6 +231,32 @@ function BoardApprovalPayloadContent({ payload }: { payload: Record<string, unkn
   );
 }
 
+/** Agent-drafted outbound email awaiting operator approval (RK9-82). The
+ * operator must be able to read exactly what will be sent. */
+function EmailSendPayload({ payload }: { payload: Record<string, unknown> }) {
+  const to = Array.isArray(payload.to)
+    ? payload.to.filter((v): v is string => typeof v === "string").join(", ")
+    : null;
+  const body = typeof payload.bodyMarkdown === "string" ? payload.bodyMarkdown : null;
+  return (
+    <div className="space-y-3 text-sm">
+      <PayloadField label="To" value={to} />
+      <PayloadField label="Subject" value={payload.subject} />
+      <PayloadField label="Route" value={payload.routeKey} />
+      {body && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+            Draft to be sent
+          </p>
+          <pre className="max-h-72 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-foreground whitespace-pre-wrap">
+            {body}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ApprovalPayloadRenderer({
   type,
   payload,
@@ -243,5 +271,6 @@ export function ApprovalPayloadRenderer({
   if (type === "request_board_approval") {
     return <BoardApprovalPayload payload={payload} hideTitle={hidePrimaryTitle} />;
   }
+  if (type === "email_send") return <EmailSendPayload payload={payload} />;
   return <CeoStrategyPayload payload={payload} />;
 }
