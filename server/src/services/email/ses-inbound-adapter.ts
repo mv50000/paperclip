@@ -117,6 +117,18 @@ export async function normalizeInbound(rawMime: Buffer, mail: SesMail): Promise<
     content_type: a.contentType ?? "application/octet-stream",
     size: a.size ?? 0,
   }));
+  // Threading headers, allowlisted — never dump all MIME headers (size + PII).
+  // `message-id` lets later replies reference this message; `in-reply-to` /
+  // `references` let the inbound router link this message onto an existing
+  // issue thread instead of opening a duplicate.
+  const headers: Record<string, string> = {};
+  if (parsed.messageId) headers["message-id"] = parsed.messageId;
+  if (parsed.inReplyTo) headers["in-reply-to"] = parsed.inReplyTo;
+  if (parsed.references) {
+    headers["references"] = Array.isArray(parsed.references)
+      ? parsed.references.join(" ")
+      : parsed.references;
+  }
   return {
     type: "email.received",
     created_at: mail.timestamp ?? new Date().toISOString(),
@@ -129,6 +141,7 @@ export async function normalizeInbound(rawMime: Buffer, mail: SesMail): Promise<
       text: parsed.text ?? null,
       html: typeof parsed.html === "string" ? parsed.html : null,
       attachments,
+      headers,
     },
   };
 }
