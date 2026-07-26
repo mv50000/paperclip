@@ -1,0 +1,27 @@
+# Telegram approval gate for Paperclip email_send approvals (RK9-85).
+# Install:
+#   sudo cp server/scripts/paperclip-approval-telegram.service /etc/systemd/system/
+#   sudo install -m 600 -o root /dev/null /etc/paperclip/approval-telegram.env
+#   # fill: PAPERCLIP_API_URL, PAPERCLIP_TOKEN (board), TG_BOT_TOKEN, TG_CHAT_ID
+#   sudo install -d -o paperclip -g paperclip /var/lib/paperclip/approval-telegram
+#   sudo systemctl daemon-reload && sudo systemctl enable --now paperclip-approval-telegram
+[Unit]
+Description=Paperclip email_send approvals via Telegram inline buttons
+After=network-online.target paperclip.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paperclip
+Group=paperclip
+EnvironmentFile=/etc/paperclip/approval-telegram.env
+Environment=STATE_DIR=/var/lib/paperclip/approval-telegram
+WorkingDirectory=/opt/paperclip
+ExecStart=/usr/bin/node /opt/paperclip/server/scripts/approval-telegram-listener.mjs
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/paperclip-approval-telegram.log
+StandardError=append:/var/log/paperclip-approval-telegram.log
+
+[Install]
+WantedBy=multi-user.target
