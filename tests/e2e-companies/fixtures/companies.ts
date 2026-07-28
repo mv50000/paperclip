@@ -59,6 +59,14 @@ export const COMPANIES: CompanyTarget[] = [
     ownerAgent: "uutisvertailu-tech-lead",
     authRedirects: false,
   },
+  {
+    name: "last-shadow",
+    displayName: "Last Shadow (TLN Games)",
+    baseUrl: "https://tln-dev.rk9.fi",
+    paperclipCompany: "last-shadow",
+    ownerAgent: "last-shadow-tech-lead",
+    authRedirects: false,
+  },
 ];
 
 export function companyByName(name: string): CompanyTarget {
