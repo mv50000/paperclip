@@ -1,6 +1,6 @@
 # E2E-smoke docker.rk9.fi-yrityksille
 
-Viikoittainen selainpohjainen smoke-testaus 6 yritykselle: ololla, alli-audit, quantimodo, saatavilla, sunspot, uutisvertailu.
+Viikoittainen selainpohjainen smoke-testaus 7 yritykselle: ololla, alli-audit, quantimodo, saatavilla, sunspot, uutisvertailu, last-shadow.
 
 ## Mitä tämä on
 
@@ -18,6 +18,8 @@ pnpm test:e2e:companies --project=alli-audit
 pnpm test:e2e:companies --project=quantimodo
 pnpm test:e2e:companies --project=saatavilla
 pnpm test:e2e:companies --project=sunspot
+pnpm test:e2e:companies --project=uutisvertailu
+pnpm test:e2e:companies --project=last-shadow
 
 # Headed-moodi (näkee selaimen, debug)
 pnpm test:e2e:companies:headed
@@ -32,6 +34,8 @@ pnpm test:e2e:companies:headed
 | quantimodo | https://quantimodo-dev.rk9.fi | quantimodo-tech-lead |
 | saatavilla | https://saatavilla-dev.rk9.fi | saatavilla-tech-lead |
 | sunspot | https://sunspot-dev.rk9.fi | sunspot-tech-lead |
+| uutisvertailu | https://uutisvertailu-dev.rk9.fi | uutisvertailu-tech-lead |
+| last-shadow | https://tln-dev.rk9.fi | last-shadow-tech-lead |
 | uutisvertailu | https://uutisvertailu-dev.rk9.fi | uutisvertailu-tech-lead |
 
 URL- tai owner-muutokset: päivitä `fixtures/companies.ts`.
