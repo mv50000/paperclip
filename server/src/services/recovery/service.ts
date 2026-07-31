@@ -73,7 +73,14 @@ type RecoveryWakeup = (
 
 type LatestIssueRun = Pick<
   typeof heartbeatRuns.$inferSelect,
-  "id" | "agentId" | "status" | "error" | "errorCode" | "contextSnapshot"
+  | "id"
+  | "agentId"
+  | "status"
+  | "error"
+  | "errorCode"
+  | "contextSnapshot"
+  | "issueCommentStatus"
+  | "scheduledRetryReason"
 > | null;
 
 type WatchdogDecisionActor =
@@ -311,6 +318,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
         contextSnapshot: heartbeatRuns.contextSnapshot,
+        issueCommentStatus: heartbeatRuns.issueCommentStatus,
+        scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
       })
       .from(heartbeatRuns)
       .where(
@@ -1755,6 +1764,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         logCandidate(issue, "skipped_in_progress_no_run_reference", latestRun);
         continue;
       }
+
+      if (latestRun && latestRun.status === "succeeded") {
+        result.skipped += 1;
+        logCandidate(issue, "skipped_latest_run_succeeded", latestRun, {
+          issueCommentStatus: latestRun.issueCommentStatus,
+          scheduledRetryReason: latestRun.scheduledRetryReason,
+        });
+        continue;
+      }
+
       if (didAutomaticRecoveryFail(latestRun, "issue_continuation_needed")) {
         const failureSummary = summarizeRunFailureForIssueComment(latestRun);
         const updated = await escalateStrandedAssignedIssue({

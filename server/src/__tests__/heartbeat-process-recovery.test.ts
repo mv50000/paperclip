@@ -475,6 +475,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     activePauseHold?: boolean;
     runErrorCode?: string | null;
     runError?: string | null;
+    issueCommentStatus?: "not_applicable" | "satisfied" | "retry_queued" | "retry_exhausted";
+    scheduledRetryReason?: string | null;
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -546,6 +548,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       error: input.runStatus === "succeeded"
         ? null
         : ("runError" in input ? input.runError : "run failed before issue advanced"),
+      issueCommentStatus: input.issueCommentStatus ?? "not_applicable",
+      scheduledRetryReason: input.scheduledRetryReason ?? null,
     });
 
     await db.insert(issues).values([
@@ -2093,7 +2097,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(wakeups).toHaveLength(1);
   });
 
-  it("re-enqueues continuation when the latest automatic continuation succeeded without closing the issue", async () => {
+  it("does not re-enqueue continuation when the latest run already succeeded (RK9-87)", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "succeeded",
@@ -2102,9 +2106,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
-    expect(result.continuationRequeued).toBe(1);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
     expect(result.escalated).toBe(0);
-    expect(result.issueIds).toEqual([issueId]);
+    expect(result.issueIds).not.toContain(issueId);
 
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("in_progress");
@@ -2116,14 +2121,35 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .select()
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.agentId, agentId));
-    expect(runs).toHaveLength(2);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
+  });
 
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(retryRun?.id).toBeTruthy();
-    expect((retryRun?.contextSnapshot as Record<string, unknown>)?.retryReason).toBe("issue_continuation_needed");
-    if (retryRun) {
-      await waitForRunToSettle(heartbeat, retryRun.id);
-    }
+  it("does not re-enqueue continuation for a succeeded+satisfied run with no scheduled retry reason (RK9-87)", async () => {
+    const { agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      retryReason: "issue_continuation_needed",
+      issueCommentStatus: "satisfied",
+      scheduledRetryReason: null,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.issueIds).not.toContain(issueId);
+
+    const runs = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
+
+    // Re-running the reconciliation sweep repeatedly (simulating the 30s scheduler tick)
+    // must stay a no-op — this is the runaway-loop regression.
+    const secondResult = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(secondResult.continuationRequeued).toBe(0);
   });
 
   it("does not reconcile user-assigned work through the agent stranded-work recovery path", async () => {
