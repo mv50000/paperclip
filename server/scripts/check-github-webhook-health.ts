@@ -34,6 +34,12 @@ const execFileAsync = promisify(execFile);
 
 const ALERT_COMPANY_NAME = "SelfEvolvingClaudeCo";
 const LOOKBACK_HOURS = 24;
+// Per-repo alert throttle. When a repo is already in a known-degraded state,
+// suppress further hourly alerts unless the failure count has grown sharply.
+// Prevents spamming Slack for hours while the underlying issue (e.g. NAT/DNS
+// outage) is being investigated.
+const THROTTLE_HOURS = 6;
+const FAILURE_GROWTH_THRESHOLD = 2;
 const STATE_FILE =
   process.env.PAPERCLIP_WEBHOOK_MONITOR_STATE ??
   "/var/lib/paperclip/webhook-monitor-state.json";
@@ -414,7 +420,14 @@ async function main() {
     // Healthy — clear state so the next failure alerts immediately
     if (existsSync(STATE_FILE)) {
       try {
-        writeFileSync(STATE_FILE, JSON.stringify({ alertedDeliveryIds: [] }));
+        writeFileSync(
+          STATE_FILE,
+          JSON.stringify({
+            alertedDeliveryIds: [],
+            repoAlertedAt: {},
+            repoLastFailureCount: {},
+          }),
+        );
       } catch {
         // best-effort, fine if not writable
       }
@@ -422,17 +435,28 @@ async function main() {
     process.exit(0);
   }
 
-  // Deduplicate against previously-alerted delivery IDs so we don't spam
-  // hourly for the same failures still inside the 24h window.
+  // Deduplicate at two levels:
+  //   1. delivery_id — skip individual deliveries we already alerted for
+  //   2. repo throttle — even after dedup, if a repo is still degraded and
+  //      we already alerted within THROTTLE_HOURS, suppress unless failures
+  //      have grown >= FAILURE_GROWTH_THRESHOLD× since the last alert.
+  // The repo throttle is what stops the hourly spam when an outage persists
+  // and every run keeps finding fresh failing delivery ids.
   const seenIds = new Set<number>();
+  const repoAlertedAt: Record<string, string> = {};
+  const repoLastFailureCount: Record<string, number> = {};
   let probeAlertedAtIso: string | undefined;
   if (existsSync(STATE_FILE)) {
     try {
       const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as {
         alertedDeliveryIds?: number[];
+        repoAlertedAt?: Record<string, string>;
+        repoLastFailureCount?: Record<string, number>;
         probeFailureAlertedAt?: string;
       };
       for (const id of raw.alertedDeliveryIds ?? []) seenIds.add(id);
+      Object.assign(repoAlertedAt, raw.repoAlertedAt ?? {});
+      Object.assign(repoLastFailureCount, raw.repoLastFailureCount ?? {});
       probeAlertedAtIso = raw.probeFailureAlertedAt;
     } catch {
       // ignore corrupt state
@@ -445,18 +469,39 @@ async function main() {
     probeFailures.length > 0 &&
     (Number.isNaN(probeAlertedAtMs) ||
       probeAlertedAtMs < Date.now() - PROBE_REALERT_HOURS * 3600 * 1000);
-  const newFailureIds: number[] = [];
-  const newUnhealthy = unhealthy
+  const throttleCutoffMs = Date.now() - THROTTLE_HOURS * 3600 * 1000;
+  const dedupedUnhealthy = unhealthy
     .map((r) => ({
       ...r,
       failingDeliveries: r.failingDeliveries.filter((d) => !seenIds.has(d.id)),
     }))
     .filter((r) => r.failingDeliveries.length > 0 || r.error);
+
+  const throttledRepos: string[] = [];
+  const newUnhealthy = dedupedUnhealthy.filter((r) => {
+    // Script-level errors (e.g. GitHub API fetch fail) are not throttled —
+    // those are a different class of problem.
+    if (r.error) return true;
+    const lastAtIso = repoAlertedAt[r.repo];
+    if (!lastAtIso) return true;
+    const lastAtMs = new Date(lastAtIso).getTime();
+    if (Number.isNaN(lastAtMs) || lastAtMs < throttleCutoffMs) return true;
+    const lastCount = repoLastFailureCount[r.repo] ?? 0;
+    if (r.recentFailures >= lastCount * FAILURE_GROWTH_THRESHOLD) return true;
+    throttledRepos.push(r.repo);
+    return false;
+  });
+
+  const newFailureIds: number[] = [];
   for (const r of newUnhealthy) {
     for (const d of r.failingDeliveries) newFailureIds.push(d.id);
   }
   if (newUnhealthy.length === 0 && !shouldAlertProbe) {
-    if (unhealthy.length > 0) {
+    if (throttledRepos.length > 0) {
+      console.log(
+        `All ${unhealthy.length} degraded repo(s) throttled (alerted within ${THROTTLE_HOURS}h, no >=${FAILURE_GROWTH_THRESHOLD}x growth) — suppressing.`,
+      );
+    } else if (unhealthy.length > 0) {
       console.log(
         `All ${unhealthy.length} degraded repo(s) already alerted — suppressing.`,
       );
@@ -523,15 +568,24 @@ async function main() {
       try {
         mkdirSync(path.dirname(STATE_FILE), { recursive: true });
         const merged = Array.from(new Set([...seenIds, ...newFailureIds]));
+        const nowIso = new Date().toISOString();
+        const updatedAlertedAt = { ...repoAlertedAt };
+        const updatedFailureCount = { ...repoLastFailureCount };
+        for (const r of newUnhealthy) {
+          updatedAlertedAt[r.repo] = nowIso;
+          updatedFailureCount[r.repo] = r.recentFailures;
+        }
         writeFileSync(
           STATE_FILE,
           JSON.stringify({
             alertedDeliveryIds: merged,
+            repoAlertedAt: updatedAlertedAt,
+            repoLastFailureCount: updatedFailureCount,
             // Keep the throttle timestamp while the probe is failing so the
             // healthy path can clear it; refresh it when this alert covered
             // a probe failure.
             probeFailureAlertedAt: shouldAlertProbe
-              ? new Date().toISOString()
+              ? nowIso
               : probeAlertedAtIso,
           }),
         );
