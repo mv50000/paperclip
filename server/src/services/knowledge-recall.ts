@@ -46,6 +46,20 @@ export const PREFIX_TO_VAULT_SLUG: Readonly<Record<string, string>> = {
 };
 
 export const SHARED_COLLECTION = "shared";
+
+/**
+ * The operator's PERSONAL vault (/opt/repos/mv-knowledge → collections `personal` and
+ * `personal-sensitive`) shares the one qmd index with the business collections, so nothing but
+ * code keeps it out of this API. It must never be recallable here — not in company scope, and
+ * not in operator mode (`scope: "all"`), because this service also feeds the knowledge preamble
+ * injected into AI agents' heartbeats. The same regex gates vault-mcp, vault-mcp-public and
+ * ~/bin/qmd-recall.sh on the vault host.
+ */
+const PERSONAL_COLLECTION_RE = /^personal(-|$)/;
+
+export function isPersonalCollection(name: string): boolean {
+  return PERSONAL_COLLECTION_RE.test(name);
+}
 // vsearch (semantic) loads the embedding model; on a warm box it's ~2s, but allow headroom.
 const QMD_TIMEOUT_MS = 20_000;
 const QMD_LIST_TIMEOUT_MS = 5_000;
@@ -125,7 +139,9 @@ export interface RecallDeps {
  */
 export function candidateCollections(slug: string): string[] {
   if (slug === SHARED_COLLECTION) return [SHARED_COLLECTION];
-  return [slug, `${slug}-docs`, SHARED_COLLECTION];
+  // Second layer of the personal-vault gate: a company slug can never name a personal collection
+  // (the first layer strips them from `existing` in recallKnowledge).
+  return [slug, `${slug}-docs`, SHARED_COLLECTION].filter((c) => !isPersonalCollection(c));
 }
 
 /** Parse `qmd collection list` output ("name (qmd://name/)" lines) into collection names. */
@@ -292,14 +308,19 @@ export async function recallKnowledge(
     // List collections that actually exist — qmd errors if passed a `-c` that doesn't exist.
     let existing: string[];
     try {
-      existing = await listCollections(resolvedVaultRoot);
+      // Personal-vault gate, first and load-bearing layer: strip the operator's personal
+      // collections at the single point where the collection list enters this function, so
+      // BOTH branches below (operator mode and company scope) are personal-free by
+      // construction. Do not move this filter into one of the branches.
+      existing = (await listCollections(resolvedVaultRoot)).filter((c) => !isPersonalCollection(c));
     } catch (error) {
       logger.warn({ err: error }, "knowledge-recall: collection list failed; falling back to shared only");
       existing = [SHARED_COLLECTION];
     }
 
     if (input.allCollections) {
-      // Operator mode (instance-admin only, enforced at the route): every existing collection.
+      // Operator mode (instance-admin only, enforced at the route): every existing BUSINESS
+      // collection — `existing` has already had the personal ones stripped above.
       collections = existing;
     } else if (slug) {
       // Company scope: candidate collections ∩ existing. NEVER widens beyond the caller's company.

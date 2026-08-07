@@ -8,8 +8,10 @@ import { assertCompanyAccess, getActorInfo, isInstanceAdmin } from "./authz.js";
 const recallSchema = z.object({
   query: z.string().trim().min(1).max(1000),
   limit: z.number().int().positive().max(50).optional(),
-  // "all" = operator mode: search every collection (rk9 + shared + all <company>-docs). Only
-  // honored for instance-admins; everyone else (agents, non-admin board) stays company-scoped.
+  // "all" = operator mode: search every BUSINESS collection (rk9 + shared + all <company>-docs).
+  // Only honored for instance-admins; everyone else (agents, non-admin board) stays
+  // company-scoped. The operator's personal vault is excluded from both scopes by the service
+  // (isPersonalCollection) — do NOT add a "personal" enum value here.
   scope: z.enum(["company", "all"]).optional(),
 });
 
