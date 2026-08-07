@@ -170,6 +170,8 @@ export async function buildKnowledgeContext(
 
   let result: RecallResult;
   try {
+    // INVARIANT: no `allCollections` here — agent preambles stay company-scoped, and the recall
+    // service additionally strips the operator's personal collections. Never widen this call.
     result = await recall(db, {
       query,
       companyId: agent.companyId,

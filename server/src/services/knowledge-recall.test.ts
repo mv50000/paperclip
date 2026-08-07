@@ -299,6 +299,37 @@ describe("recallKnowledge", () => {
     expect(res.snippets).toHaveLength(1);
   });
 
+  it("operator mode NEVER returns the operator's personal collections", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([]));
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c", allCollections: true },
+      {
+        runQmd,
+        listCollections: async () => ["rk9", "shared", "personal", "personal-sensitive"],
+        resolveSlug: async () => "rk9",
+        vaultRoot: "/tmp/vault",
+      },
+    );
+    expect(seen).toEqual([["rk9", "shared"]]); // personal* never reaches qmd
+    expect(res.collections).toEqual(["rk9", "shared"]);
+  });
+
+  it("company scope never resolves a personal collection even if a slug collides", async () => {
+    const { runQmd, seen } = captureRunQmd(qmdRows([]));
+    await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      {
+        runQmd,
+        listCollections: async () => ["personal", "personal-docs", "shared"],
+        resolveSlug: async () => "personal",
+        vaultRoot: "/tmp/vault",
+      },
+    );
+    expect(seen).toEqual([["shared"]]);
+  });
+
   it("operator mode works even when the company has no slug (admin passes any company id)", async () => {
     const { runQmd, seen } = captureRunQmd(qmdRows([]));
     const all = ["rk9", "shared", "sunspot-docs"];
