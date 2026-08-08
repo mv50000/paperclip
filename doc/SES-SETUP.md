@@ -4,7 +4,7 @@ Paperclipin sähköposti kulkee provider-abstraktion läpi (`server/src/services
 Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-sarakkeen mukaan
 (default `resend`). Tämä dokumentti kuvaa SES-polun. Resend-polku: [RESEND-SETUP.md](./RESEND-SETUP.md).
 
-**Ajurit SES:lle:** GDPR/datan EU-sijainti (region eu-west-1), kustannus, ei vendor-lock-in.
+**Ajurit SES:lle:** GDPR/datan EU-sijainti (region eu-north-1), kustannus, ei vendor-lock-in.
 **Agenttinäkymä ei muutu:** agentit ja `/api/companies/:id/email/*`-API ovat provider-neutraaleja.
 
 ## Arkkitehtuuri lyhyesti
@@ -20,12 +20,12 @@ Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-s
 
 ## Esiehdot (kerran)
 
-1. AWS-tili, region **eu-west-1 (Irlanti)** — EU/GDPR + tukee sekä lähetystä että vastaanottoa.
+1. AWS-tili, region **eu-north-1 (Tukholma)** — EU/GDPR + tukee sekä lähetystä että vastaanottoa.
 2. **SES production access** (pois sandboxista) — SES-konsoli → Account dashboard → Request production
    access (~24h review). Sandbox: 200 mailia/24h, vain verifioituihin osoitteisiin.
 3. IAM-creditit appille (least-priv): `ses:SendEmail`, `ses:SendRawEmail`, `ses:GetEmailIdentity`,
    `s3:GetObject` (inbound-bucket). Aseta `paperclip.service`-env:iin (systemd drop-in, **ei gitiin**):
-   - `SES_REGION=eu-west-1`
+   - `SES_REGION=eu-north-1`
    - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (tai IAM-rooli)
 
 ## Per yritys — lähetys
@@ -33,9 +33,9 @@ Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-s
 1. **Luo SES domain identity + Easy DKIM (RSA_2048)** (konsoli tai):
    ```bash
    aws sesv2 create-email-identity --email-identity <sending-domain> \
-     --dkim-signing-attributes NextSigningKeyLength=RSA_2048 --region eu-west-1
+     --dkim-signing-attributes NextSigningKeyLength=RSA_2048 --region eu-north-1
    aws sesv2 put-email-identity-mail-from-attributes --email-identity <sending-domain> \
-     --mail-from-domain mail.<sending-domain> --behavior-on-mx-failure USE_DEFAULT_VALUE --region eu-west-1
+     --mail-from-domain mail.<sending-domain> --behavior-on-mx-failure USE_DEFAULT_VALUE --region eu-north-1
    ```
 2. **Rekisteröi config + tulosta DNS-tietueet:**
    ```bash
@@ -51,7 +51,7 @@ Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-s
    ja anna `DATABASE_URL` + `SES_REGION`/`AWS_*` env eksplisiittisesti (ks. [[reference_paperclip_deployment]]).
 3. **Julkaise DNS-tietueet** domainin **julkiseen** auktoritatiiviseen zoneen (ei sisäverkon Piholeen):
    - DKIM: 3× `CNAME` `<token>._domainkey.<domain>` → `<token>.dkim.amazonses.com`
-   - MAIL FROM: `MX mail.<domain>` → `10 feedback-smtp.eu-west-1.amazonses.com`
+   - MAIL FROM: `MX mail.<domain>` → `10 feedback-smtp.eu-north-1.amazonses.com`
    - MAIL FROM SPF: `TXT mail.<domain>` → `v=spf1 include:amazonses.com ~all`
    - DMARC: `TXT _dmarc.<domain>` → `v=DMARC1; p=none; rua=mailto:dmarc@<domain>` (kiristä myöhemmin)
 4. **Verifioi** kun DKIM näkyy SES:ssä:
@@ -65,12 +65,12 @@ Yritys ajaa joko Resendillä tai SES:llä `company_email_config.mail_provider`-s
 
 > Tee vasta kun lähetys verifioitu. Inbound-MX:n vaihto ohjaa saapuvan postin SES:iin.
 
-1. **S3-bucket** (eu-west-1) raakaa MIME:ä varten, esim. `rk9-ses-inbound`. Bucket policy: salli SES
+1. **S3-bucket** (eu-north-1) raakaa MIME:ä varten, esim. `rk9-ses-inbound`. Bucket policy: salli SES
    `s3:PutObject`.
-2. **SNS-topic** `ses-events` (eu-west-1).
+2. **SNS-topic** `ses-events` (eu-north-1).
 3. **Receipt rule set** — rule per yritys-domain → action: deliver to S3 (`rk9-ses-inbound`) + publish
    to SNS (`ses-events`). Aktivoi rule set.
-4. **Vastaanotto-MX** domainille: `MX <domain>` → `10 inbound-smtp.eu-west-1.amazonaws.com`.
+4. **Vastaanotto-MX** domainille: `MX <domain>` → `10 inbound-smtp.eu-north-1.amazonaws.com`.
 5. **Bounce/complaint:** SES configuration set → event destination → sama SNS-topic (Bounce, Complaint).
 6. **SNS HTTPS-subscription** topiciin → `https://paperclip.rk9.fi/api/webhooks/ses`. Endpoint vahvistaa
    `SubscriptionConfirmation`-handshaken automaattisesti.
