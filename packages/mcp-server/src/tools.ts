@@ -231,7 +231,7 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipInboxLite",
-      "Get the current authenticated agent inbox-lite assignment list",
+      "Get the compact list of issues assigned to the current agent (id, identifier, title, status, priority, wake hints) for heartbeat prioritization. Use this instead of paperclipListIssues at the start of a heartbeat; fall back to paperclipListIssues only when you need full issue objects. Not needed on a scoped wake that already names the issue.",
       z.object({}),
       async () => client.requestJson("GET", "/agents/me/inbox-lite"),
     ),
@@ -288,7 +288,7 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipGetHeartbeatContext",
-      "Get compact heartbeat context for an issue",
+      "Get compact context for one issue: current state, ancestor summaries, goal/project info, and comment-cursor metadata, without replaying the whole comment thread. Call this before fetching comments; then use paperclipListComments with `after` for the delta. Does not return comment bodies.",
       z.object({ issueId: issueIdSchema, wakeCommentId: z.string().uuid().optional() }),
       async ({ issueId, wakeCommentId }) => {
         const qs = wakeCommentId ? `?wakeCommentId=${encodeURIComponent(wakeCommentId)}` : "";
@@ -458,21 +458,21 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipCreateIssue",
-      "Create a new issue",
+      "Create an issue, or a subtask when parentId is set. For delegated work set parentId and goalId; child issues inherit the parent's execution workspace. Set blockedByIssueIds for dependencies so the assignee is woken automatically when all blockers reach done (cancelled blockers do not count). Set billingCode for cross-team work. Assigning to a paused or terminated agent fails with 409.",
       createIssueToolSchema,
       async ({ companyId, ...body }) =>
         client.requestJson("POST", `/companies/${client.resolveCompanyId(companyId)}/issues`, { body }),
     ),
     makeTool(
       "paperclipUpdateIssue",
-      "Patch an issue, optionally including a comment; include resume=true when intentionally requesting follow-up on resumable closed work",
+      "Update issue fields (status, title, description, priority, assignee, projectId, goalId, parentId, billingCode, blockedByIssueIds) and optionally post a comment in the same request. blockedByIssueIds replaces the whole set — send [] to clear. Status semantics: `blocked` needs the unblock owner named in the comment; `in_review` hands work to a reviewer and is not a synonym for done; on an issue in an execution review stage, `done` = approve and `in_progress` = request changes, and actors other than currentParticipant get 422. For an issue already `done`, prefer paperclipAddComment — a PATCH can reopen it. Set resume=true only when intentionally restarting follow-up on closed work.",
       updateIssueToolSchema,
       async ({ issueId, ...body }) =>
         client.requestJson("PATCH", `/issues/${encodeURIComponent(issueId)}`, { body }),
     ),
     makeTool(
       "paperclipCheckoutIssue",
-      "Checkout an issue for an agent",
+      "Claim an issue for the current agent before working on it; moves it to in_progress and links it to this run. Returns normally if this agent already holds it. Returns 409 when another agent owns it — pick different work, do not retry. expectedStatuses limits which statuses may be claimed (default todo/backlog/blocked; add in_review when addressing review feedback). On scoped wakes the harness may have already checked the issue out; call this only when switching issues or when the wake did not claim it.",
       checkoutIssueToolSchema,
       async ({ issueId, agentId, expectedStatuses }) =>
         client.requestJson("POST", `/issues/${encodeURIComponent(issueId)}/checkout`, {
@@ -490,7 +490,7 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipAddComment",
-      "Add a comment to an issue; include resume=true when intentionally requesting follow-up on resumable closed work",
+      "Post a markdown comment on an issue. Keep real newlines in the body — do not flatten markdown into one line. Link ticket ids as [PREFIX-N](/PREFIX/issues/PREFIX-N) and mention agents as [@Name](agent://<agent-id>); a mention wakes that agent and costs budget. Comments on closed issues are inert unless resume=true.",
       addCommentToolSchema,
       async ({ issueId, ...body }) =>
         client.requestJson("POST", `/issues/${encodeURIComponent(issueId)}/comments`, { body }),
@@ -521,7 +521,7 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipRequestConfirmation",
-      "Create a request_confirmation interaction on an issue",
+      "Ask the board/user for an explicit yes/no decision on an issue instead of asking in markdown. For plan approval, target the latest `plan` document revision and use idempotencyKey confirmation:{issueId}:plan:{revisionId}, then wait for acceptance before creating implementation subtasks. continuationPolicy wake_assignee resumes you only after acceptance. supersedeOnUserComment makes a later user comment invalidate the pending request.",
       createRequestConfirmationToolSchema,
       async ({ issueId, ...body }) =>
         client.requestJson("POST", `/issues/${encodeURIComponent(issueId)}/interactions`, {
@@ -609,7 +609,7 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipApiRequest",
-      "Make a JSON request to an existing Paperclip /api endpoint for unsupported operations",
+      "Escape hatch for Paperclip API endpoints that have no dedicated tool. path is relative to /api and must start with /. jsonBody is a JSON string. Prefer the dedicated tools when one exists — this tool performs no schema validation, so mistakes surface only as server errors.",
       apiRequestSchema,
       async ({ method, path, jsonBody }) => {
         if (!path.startsWith("/") || path.includes("..")) {

@@ -7,13 +7,9 @@ Run this checklist on every heartbeat. This covers both your local planning/memo
 - `GET /api/agents/me` -- confirm your id, role, budget, chainOfCommand.
 - Check wake context: `PAPERCLIP_TASK_ID`, `PAPERCLIP_WAKE_REASON`, `PAPERCLIP_WAKE_COMMENT_ID`.
 
-## 2. Local Planning Check
+## 2. Local Planning Check (when a plan exists)
 
-1. Read today's plan from `$AGENT_HOME/memory/YYYY-MM-DD.md` under "## Today's Plan".
-2. Review each planned item: what's completed, what's blocked, and what up next.
-3. For any blockers, resolve them yourself or escalate to the board.
-4. If you're ahead, start on the next highest priority.
-5. Record progress updates in the daily notes.
+If `$AGENT_HOME/memory/YYYY-MM-DD.md` has a "## Today's Plan", review it: mark what is done or blocked, resolve or escalate blockers, and record progress. If there is no plan for today, skip this section — do not create one just to satisfy the checklist.
 
 ## 3. Approval Follow-Up
 
@@ -54,12 +50,9 @@ Status quick guide:
 - Use `paperclip-create-agent` skill when hiring new agents.
 - Assign work to the right agent for the job.
 
-## 7. Fact Extraction
+## 7. Fact Extraction (when something durable was learned)
 
-1. Check for new conversations since last extraction.
-2. Extract durable facts to the relevant entity in `$AGENT_HOME/life/` (PARA).
-3. Update `$AGENT_HOME/memory/YYYY-MM-DD.md` with timeline entries.
-4. Update access metadata (timestamp, access_count) for any referenced facts.
+If this heartbeat produced a durable fact (a decision, a new entity, a changed constraint), write it to the relevant entity in `$AGENT_HOME/life/` and add a timeline entry to `$AGENT_HOME/memory/YYYY-MM-DD.md`. A heartbeat that only triaged and delegated usually has nothing to extract.
 
 ## 8. Exit
 

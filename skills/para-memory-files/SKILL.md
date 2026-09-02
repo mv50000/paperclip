@@ -90,9 +90,9 @@ Memory does not survive session restarts. Files do.
 Use `qmd` rather than grepping files:
 
 ```bash
-qmd query "what happened at Christmas"   # Semantic search with reranking
-qmd search "specific phrase"              # BM25 keyword search
-qmd vsearch "conceptual question"         # Pure vector similarity
+qmd vsearch "conceptual question"         # Vector similarity — default for recall (seconds)
+qmd search "specific phrase"              # BM25 keyword search (instant)
+qmd query "what happened at Christmas"   # Hybrid + reranking — minutes on CPU-only hosts; use only when the two above miss
 ```
 
 Index your personal folder: `qmd index $AGENT_HOME`
