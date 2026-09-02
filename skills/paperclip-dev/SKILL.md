@@ -14,7 +14,7 @@ This skill covers the day-to-day workflows for developing and operating a local 
 
 > **OPEN SOURCE HYGIENE:** This repository is public-facing. Treat anything you push to `origin` as publishable. Never commit or push secrets, API keys, tokens, private logs, PII, customer data, or machine-local configuration that should stay private. Keep git history tidy as well: avoid pushing throwaway branches, noisy checkpoint commits, or speculative work that does not need to be shared upstream.
 
-> **MANDATORY:** Before running any CLI command, building, testing, or managing worktrees, you MUST read `doc/DEVELOPING.md` in the Paperclip repo. It is the canonical reference for all `paperclipai` CLI commands, their options, build/test workflows, database operations, worktree management, and diagnostics. Do NOT guess at flags or options — read the doc first.
+> Read `doc/DEVELOPING.md` before running CLI commands, building, testing, or managing worktrees. It is the canonical reference for `paperclipai` commands, their options, build/test workflows, database operations, worktree management, and diagnostics; flags guessed from memory have destroyed worktree databases before.
 
 ## Quick Command Reference
 
@@ -151,11 +151,11 @@ git push <fork-remote> "${UPSTREAM_REMOTE}/master:master"
 
 ## Pull Requests
 
-> **MANDATORY PRE-FLIGHT:** Before creating ANY pull request, you MUST read the canonical source files listed below. Do NOT run `gh pr create` until you have read these files and verified your PR body matches every required section.
+> Before creating a pull request, read the three canonical files below and check your PR body against the section list; CI rejects PRs whose body is missing a required section.
 
 ### Step 1 — Read the canonical files
 
-You MUST read all three of these files before creating a PR:
+Read all three before creating a PR:
 
 1. **`.github/PULL_REQUEST_TEMPLATE.md`** — the required PR body structure
 2. **`CONTRIBUTING.md`** — contribution conventions, PR requirements, and thinking-path examples

@@ -21,13 +21,13 @@ Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes.
 
 Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli <agent-id-or-shortname> --company-id <company-id>` to install Paperclip skills for Claude/Codex and print/export the required `PAPERCLIP_*` environment variables for that agent identity.
 
-**Run audit trail:** You MUST include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on ALL API requests that modify issues (checkout, update, comment, create subtask, release). This links your actions to the current heartbeat run for traceability.
+**Run audit trail:** include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on every API request that modifies issues (checkout, update, comment, create subtask, release). Without it the action is not linked to this run in the audit trail.
 
 ## The Heartbeat Procedure
 
 Follow these steps every time you wake up:
 
-**Scoped-wake fast path.** If the user message includes a **"Paperclip Resume Delta"** or **"Paperclip Wake Payload"** section that names a specific issue, **skip Steps 1–4 entirely**. Go straight to **Step 5 (Checkout)** for that issue, then continue with Steps 6–9. The scoped wake already tells you which issue to work on — do NOT call `/api/agents/me`, do NOT fetch your inbox, do NOT pick work. Just checkout, read the wake context, do the work, and update.
+**Scoped-wake fast path.** If the user message includes a **"Paperclip Resume Delta"** or **"Paperclip Wake Payload"** section that names a specific issue, go straight to **Step 5 (Checkout)** for that issue and continue with Steps 6–9. Steps 1–4 (identity, approvals, inbox, picking work) are unnecessary here: the wake already names the issue, and the extra calls only spend tokens.
 
 **Step 1 — Identity.** If not already in context, `GET /api/agents/me` to get your id, companyId, role, chainOfCommand, and budget.
 
@@ -53,7 +53,7 @@ Overrides and special cases:
 - **Blocked-task dedup:** before touching a `blocked` task, check the thread. If your most recent comment was a blocked-status update and no one has replied since, skip entirely — do not checkout, do not re-comment. Only re-engage on new context (comment, status change, event wake).
 - Nothing assigned and no valid mention handoff → exit the heartbeat.
 
-**Step 5 — Checkout.** You MUST checkout before doing any work. Include the run ID header:
+**Step 5 — Checkout.** Checkout before doing any work — it is the ownership claim that keeps two agents off the same issue. Include the run ID header:
 
 ```
 POST /api/issues/{issueId}/checkout
@@ -93,7 +93,7 @@ If `currentParticipant` does not match you, do not try to advance the stage — 
 - Respect budget, pause/cancel, approval gates, execution policy stages, and company boundaries.
 
 **Step 8 — Update status and communicate.** Always include the run ID header.
-If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
+If you are blocked at any point, set the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act — otherwise nothing wakes the unblocker.
 
 When writing issue descriptions or comments, follow the ticket-linking rule in **Comment Style** below.
 
@@ -192,7 +192,7 @@ Authorized managers can install company skills independently of hiring, then ass
 - Assign skills to existing agents with `POST /api/agents/{agentId}/skills/sync`.
 - When hiring or creating an agent, include optional `desiredSkills` so the same assignment model is applied on day one.
 
-If you are asked to install a skill for the company or an agent you MUST read:
+If you are asked to install a skill for the company or an agent, read first:
 `skills/paperclip/references/company-skills.md`
 
 ## Routines
@@ -203,7 +203,7 @@ Routines are recurring tasks. Each time a routine fires it creates an execution 
 - Add triggers per routine: `schedule` (cron), `webhook`, or `api` (manual).
 - Control concurrency and catch-up behaviour with `concurrencyPolicy` and `catchUpPolicy`.
 
-If you are asked to create or manage routines you MUST read:
+If you are asked to create or manage routines, read first:
 `skills/paperclip/references/routines.md`
 
 ## Issue Workspace Runtime Controls
@@ -220,7 +220,7 @@ For commands, response fields, and MCP tools, read:
 - **Self-assign only for explicit @-mention handoff.** Requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch).
 - **Honor "send it back to me" requests from board users.** If a board/user asks for review handoff (e.g. "let me review it", "assign it back to me"), reassign to them with `assigneeAgentId: null` and `assigneeUserId: "<requesting-user-id>"`, typically setting status to `in_review` instead of `done`. Resolve the user id from the triggering comment's `authorUserId` when available, else the issue's `createdByUserId` if it matches the requester context.
 - **Start actionable work before planning-only closure.** Do concrete work in the same heartbeat unless the task asks for a plan or review only.
-- **Verify outcomes before marking `done`.** If the task involves deploying, activating, or starting a runtime artifact (a service, container, scheduled job, public URL, environment variable, secret rotation, etc.), do NOT close the issue until you have *external* evidence the artifact actually works: the public URL returns 2xx, container logs show no init errors, `systemctl status` is `active (running)`, the cron fired, the secret decrypts. "Container is up", "deploy completed", "PR merged", or "compose pulled" are NOT sufficient — the user-visible outcome must be observable. If you cannot verify externally (e.g. you lack credentials or network access), say so in your comment, leave status `in_review`, and reassign to whoever can verify. Premature `done` closures (e.g. closing while the public URL still 502s) are a recurring anti-pattern; this rule exists to stop it.
+- **Verify outcomes before marking `done`.** If the task involves deploying, activating, or starting a runtime artifact (a service, container, scheduled job, public URL, environment variable, secret rotation, etc.), close the issue only once you have *external* evidence the artifact works: the public URL returns 2xx, container logs show no init errors, `systemctl status` is `active (running)`, the cron fired, the secret decrypts. "Container is up", "deploy completed", "PR merged", or "compose pulled" are not evidence — the user-visible outcome must be observable. If you cannot verify externally (e.g. you lack credentials or network access), say so in your comment, leave status `in_review`, and reassign to whoever can verify.
 - **Leave a next action.** Every progress comment should make clear what is complete, what remains, and who owns the next step.
 - **Prefer child issues over polling.** Create bounded child issues for long or parallel delegated work and rely on Paperclip wake events or comments for completion.
 - **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace from `parentId` server-side. For non-child follow-ups on the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly.
@@ -277,7 +277,7 @@ Submitted CTO hire request and linked it for board review.
 
 ## Planning (Required when planning requested)
 
-If you're asked to make a plan, create or update the issue document with key `plan`. Do not append plans into the issue description anymore. If you're asked for plan revisions, update that same `plan` document. In both cases, leave a comment as you normally would and mention that you updated the plan document.
+If you're asked to make a plan, create or update the issue document with key `plan`; plans live there, not in the issue description. If you're asked for plan revisions, update that same `plan` document. In both cases, leave a comment as you normally would and mention that you updated the plan document.
 
 When you mention a plan or another issue document in a comment, include a direct document link using the key:
 

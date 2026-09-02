@@ -499,7 +499,7 @@ export function riskMonitorService(db: Db) {
     if (!modelEnabled && !orgEnabled) return result;
 
     const t = getThresholds(modelPolicy);
-    const allowedModels = t.allowed_models ?? ["claude-opus-4-6", "claude-opus-4-7"];
+    const allowedModels = t.allowed_models ?? ["claude-sonnet-5", "claude-opus-5", "claude-fable-5-1"];
 
     try {
       const activeAgents = await db

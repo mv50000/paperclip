@@ -28,7 +28,7 @@ export async function llmCheck(config: PaperclipConfig): Promise<CheckResult> {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-5-20250929",
+          model: "claude-opus-5",
           max_tokens: 1,
           messages: [{ role: "user", content: "hi" }],
         }),

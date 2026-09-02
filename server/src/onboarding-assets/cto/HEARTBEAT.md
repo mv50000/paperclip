@@ -40,7 +40,7 @@ Status quick guide:
 
 ## 5. Assignment Rules (hard)
 
-- **Never assign to a paused or terminated agent.** The server rejects this with HTTP 409 since 2026-05-15.
+- Never assign to a paused or terminated agent; the server rejects the assignment with HTTP 409.
 - Before assigning, verify status via `GET /api/companies/:id/agents` (paused/terminated are filtered by default).
 - For uncertain technical scope: write a brief plan-comment first, then assign to AI with the plan as guidance.
 
