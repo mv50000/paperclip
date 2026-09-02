@@ -56,6 +56,7 @@ In agent runtime settings, configure heartbeat policy:
 
 - `enabled`: allow scheduled heartbeats
 - `intervalSec`: timer interval (0 = disabled)
+- `skipWhenIdle` (default `true`): before a timer heartbeat, check the agent's inbox (assigned `todo`/`in_progress` issues, routine executions, and `blocked` issues whose blockers resolved) and skip the run when it is empty. Event wakes are unaffected.
 - `wakeOnAssignment`: wake when assigned work
 - `wakeOnOnDemand`: allow ping-style on-demand wakeups
 - `wakeOnAutomation`: allow system automation wakeups

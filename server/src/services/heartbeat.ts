@@ -3721,6 +3721,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
+  /**
+   * Mirrors what `GET /api/agents/me/inbox-lite` would show a timer-woken
+   * agent: assigned issues in todo/in_progress (plus routine executions), and
+   * blocked issues only when their blockers have resolved. A blocked issue
+   * whose blockers are still open is not actionable, so it does not justify
+   * spawning a run.
+   */
+  async function agentHasPendingTimerWork(companyId: string, agentId: string): Promise<boolean> {
+    const rows = await issuesSvc.list(companyId, {
+      assigneeAgentId: agentId,
+      status: "todo,in_progress,blocked",
+      includeRoutineExecutions: true,
+      limit: 50,
+    });
+    if (rows.length === 0) return false;
+    const actionable = rows.filter((issue) => issue.status !== "blocked");
+    if (actionable.length > 0) return true;
+    const readiness = await issuesSvc.listDependencyReadiness(
+      companyId,
+      rows.map((issue) => issue.id),
+    );
+    return rows.some((issue) => readiness.get(issue.id)?.isDependencyReady ?? true);
+  }
+
   function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
     const runtimeConfig = parseObject(agent.runtimeConfig);
     const heartbeat = parseObject(runtimeConfig.heartbeat);
@@ -3729,6 +3753,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
+      // Timer heartbeats spawn a full adapter run even when the agent has nothing
+      // assigned; those runs end with "no action taken" after a few turns. When
+      // enabled (default), the scheduler checks the agent's inbox first and skips
+      // the spawn if it is empty. Event wakes (assignment, comment, automation)
+      // are never gated by this.
+      skipWhenIdle: asBoolean(heartbeat.skipWhenIdle, true),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
     };
   }
@@ -6525,6 +6555,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (source !== "timer" && !policy.wakeOnDemand) {
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled");
       return null;
+    }
+    if (source === "timer" && policy.skipWhenIdle && !issueId) {
+      const hasPendingWork = await agentHasPendingTimerWork(agent.companyId, agentId);
+      if (!hasPendingWork) {
+        // Count the skipped check as the heartbeat so the timer waits a full
+        // interval before looking again instead of re-checking every tick.
+        await db
+          .update(agents)
+          .set({ lastHeartbeatAt: new Date(), updatedAt: new Date() })
+          .where(eq(agents.id, agentId));
+        await writeSkippedRequest("heartbeat.idle");
+        return null;
+      }
     }
 
     if (issueId) {
