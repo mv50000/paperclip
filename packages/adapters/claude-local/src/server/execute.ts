@@ -482,6 +482,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const taskContextNote = asString(context.paperclipTaskMarkdown, "").trim();
   // RK9-18 (C6): knowledge-recall preamble, injected by the server (see knowledge-injection.ts).
   const knowledgeContextNote = asString(context.paperclipKnowledgeContext, "").trim();
+  // Runs that hit --max-turns end as failures with no closing comment, and the
+  // server then re-wakes the agent to write one. Telling the agent its budget
+  // lets it land a status comment before the cap instead.
+  const configuredMaxTurns = asNumber(config.maxTurnsPerRun, 0);
+  const turnBudgetNote =
+    configuredMaxTurns > 0
+      ? `Turn budget: this run is capped at ${configuredMaxTurns} tool turns. Leave a status comment with the next action on your issue before the last two turns; a run that hits the cap loses its closing comment.`
+      : "";
   const prompt = joinPromptSections([
     renderedBootstrapPrompt,
     wakePrompt,
@@ -489,6 +497,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     taskContextNote,
     knowledgeContextNote,
     renderedPrompt,
+    turnBudgetNote,
   ]);
   const promptMetrics = {
     promptChars: prompt.length,

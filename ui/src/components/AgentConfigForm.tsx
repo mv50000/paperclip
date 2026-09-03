@@ -1013,6 +1013,16 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 )}
                 onChange={(v) => mark("heartbeat", "wakeOnDemand", v)}
               />
+              <ToggleField
+                label="Skip timer runs when idle"
+                hint={help.skipWhenIdle}
+                checked={eff(
+                  "heartbeat",
+                  "skipWhenIdle",
+                  heartbeat.skipWhenIdle !== false,
+                )}
+                onChange={(v) => mark("heartbeat", "skipWhenIdle", v)}
+              />
               <Field label="Cooldown (sec)" hint={help.cooldownSec}>
                 <DraftNumberInput
                   value={eff(
