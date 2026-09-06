@@ -1,43 +1,41 @@
 import { expect, test } from "@playwright/test";
 
-// Quantimodo on trading-API, ei web-frontend. Reitit: /health (JSON), /api/v1/*.
-// Root-path / palauttaa 404 by design — smoke testaa /health- ja API-endpointeja.
+// Quantimodo-dev: Next.js-webui vastaa julkiseen URL:iin ja proxyttaa backendin
+// (axum) reitit /api/* -polun alle. Backendin oma /health ei ole enää julkisesti
+// tavoitettavissa — sen tilalla smoke todentaa, että proxy tavoittaa backendin
+// (/api/v1/system/health vastaa 2xx tai 401, ei 5xx) ja että webui on ylhäällä
+// (/ palauttaa 200 tai 307 → /login). Vanha API-only-oletus (root 404) poistettiin
+// QUA-676/QUA-677:ssä 6.9.2026.
 
 test.describe("Quantimodo — smoke", () => {
-  test("/health vastaa 2xx + healthy JSON", async ({ request, baseURL }) => {
-    const response = await request.get(`${baseURL}/health`);
-    expect(
-      response.status(),
-      `/health palautti ${response.status()}, odotettiin 2xx`,
-    ).toBeLessThan(400);
-    const body = await response.json();
-    expect(body, "Health-vastauksen pitäisi olla JSON, jossa status-kenttä").toHaveProperty("status");
-    expect(body.status, `status-kentän odotettiin olevan healthy/ok, oli "${body.status}"`).toMatch(/^(healthy|ok)$/i);
-  });
-
-  test("/api/v1/system/health vastaa (auth ok)", async ({ request, baseURL }) => {
-    // API-endpoint vaatii bearer-tunnuksen → 401 on hyväksyttävä (todistaa että reitti on olemassa).
-    // 5xx tai connection-error olisi merkki upstream-ongelmasta.
+  test("Backend tavoitettavissa proxyn läpi (/api/v1/system/health 2xx tai 401)", async ({ request, baseURL }) => {
+    // API-endpoint vaatii bearer-tunnuksen → 401 on hyväksyttävä: se todistaa että
+    // pyyntö päätyi backendiin asti. 404 tarkoittaisi että proxy-reititys on rikki,
+    // 5xx että backend-kontti on alhaalla.
     const response = await request.get(`${baseURL}/api/v1/system/health`);
     expect(
-      response.status(),
-      `API system/health palautti ${response.status()}, odotettiin 2xx tai 401 (auth required)`,
-    ).toBeLessThan(500);
+      [200, 401].includes(response.status()),
+      `API system/health palautti ${response.status()}, odotettiin 200 tai 401 (auth required)`,
+    ).toBe(true);
+    const body = await response.json();
+    expect(body, "Vastauksen pitäisi olla JSON (status- tai error-kenttä)").toEqual(
+      expect.objectContaining(response.status() === 200 ? { status: expect.any(String) } : { error: expect.any(String) }),
+    );
   });
 
-  test("Root-path / palauttaa 404 (API-only, ei frontendia)", async ({ request, baseURL }) => {
-    const response = await request.get(`${baseURL}/`);
+  test("Webui vastaa root-pathiin (200 tai 307 → /login)", async ({ request, baseURL }) => {
+    const response = await request.get(`${baseURL}/`, { maxRedirects: 0 });
     expect(
-      response.status(),
-      `Root-pathin pitäisi palauttaa 404 (axum default unrouted) — sai ${response.status()}`,
-    ).toBe(404);
+      [200, 307].includes(response.status()),
+      `Root-pathin pitäisi palauttaa 200 tai 307 (login-redirect) — sai ${response.status()}`,
+    ).toBe(true);
   });
 
   test("Reverse proxy ei palauta 502/503/504", async ({ request, baseURL }) => {
-    const response = await request.get(`${baseURL}/health`);
+    const response = await request.get(`${baseURL}/api/v1/system/health`);
     expect(
       response.status(),
-      `nginx upstream-virhe (5xx). Container alhaalla tai port-binding väärin. Sai ${response.status()}.`,
+      `Upstream-virhe (5xx). Container alhaalla tai port-binding väärin. Sai ${response.status()}.`,
     ).toBeLessThan(500);
   });
 });
