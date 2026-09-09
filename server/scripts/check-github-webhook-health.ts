@@ -84,6 +84,7 @@ const MONITORED_HOOKS: Array<{ repo: string; hookId: number }> = [
   { repo: "rk9-ai/sunspot", hookId: 623049264 },
   { repo: "rk9-ai/uutisvertailu", hookId: 655877295 },
   { repo: "rk9-ai/last-shadow", hookId: 657998160 },
+  { repo: "rk9-ai/onni-ja-alma", hookId: 674945850 },
 ];
 
 interface Delivery {
