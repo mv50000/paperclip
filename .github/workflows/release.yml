@@ -63,7 +63,18 @@ jobs:
         run: pnpm build
 
   publish_canary:
-    if: github.event_name == 'push'
+    # Tama repo on FORK, eika @paperclipai-nimiavaruus npm:ssa ole meidan
+    # (paketin `paperclipai` yllapitaja on kolmas osapuoli). Canary-julkaisu
+    # kuuluu upstreamille. Ennen tata jokainen master-push paatyi
+    # `npm ENEEDAUTH`-virheeseen: viisi perakkaista punaista Release-ajoa,
+    # jotka opettivat sivuuttamaan punaisen CI:n. Oikea korjaus on olla
+    # julkaisematta, EI lisata NPM_TOKENia — token joko epaonnistuisi samoin
+    # tai julkaisisi vieraaseen nimiavaruuteen.
+    #
+    # `verify_canary` jaa ajoon: se on hyodyllinen build-signaali master-pushille.
+    # Jos tama fork joskus julkaisee omalla nimiavaruudellaan, vaihda ehdoksi
+    # `github.event_name == 'push'` ja lisaa julkaisuavain.
+    if: false
     needs: verify_canary
     runs-on: ubuntu-latest
     timeout-minutes: 45
