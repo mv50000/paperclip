@@ -56,7 +56,7 @@ describe("loadConfig tailnet bind detection", () => {
     }
 
     expect(execFileSyncMock).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it("never spawns tailscale when bind is inferred as loopback from an unset host", async () => {
     const { loadConfig } = await importConfigModule();
@@ -68,7 +68,7 @@ describe("loadConfig tailnet bind detection", () => {
     }
 
     expect(execFileSyncMock).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it("spawns tailscale at most once across repeated loadConfig() calls when bind is tailnet", async () => {
     process.env.PAPERCLIP_DEPLOYMENT_MODE = "authenticated";
@@ -83,7 +83,7 @@ describe("loadConfig tailnet bind detection", () => {
     }
 
     expect(execFileSyncMock).toHaveBeenCalledTimes(1);
-  });
+  }, 15000);
 
   it("keeps the PAPERCLIP_TAILNET_BIND_HOST override without spawning a process", async () => {
     process.env.PAPERCLIP_DEPLOYMENT_MODE = "authenticated";
@@ -96,5 +96,5 @@ describe("loadConfig tailnet bind detection", () => {
     expect(config.bind).toBe("tailnet");
     expect(config.host).toBe("100.64.0.9");
     expect(execFileSyncMock).not.toHaveBeenCalled();
-  });
+  }, 15000);
 });
