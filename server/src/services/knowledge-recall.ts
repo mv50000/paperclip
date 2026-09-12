@@ -1,12 +1,9 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import type { Db } from "@paperclipai/db";
 import { companies } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
-
-const execFile = promisify(execFileCallback);
 
 /** Vault checkout the qmd index lives under. Read directly from env (config.ts has no vault fields). */
 function vaultRoot(): string {
@@ -21,6 +18,13 @@ function qmdBin(): string {
 /** HOME for the qmd process — qmd loads its GGUF models from <HOME>/.cache/qmd (needed by vsearch). */
 function qmdHome(): string {
   return process.env.PAPERCLIP_QMD_HOME ?? "/var/lib/paperclip";
+}
+
+/** Grace period between SIGTERM and SIGKILL when escalating a qmd kill. Test-tunable so kill-path
+ *  tests don't have to wait out the production default (RK9-181). */
+function qmdKillGraceMs(): number {
+  const n = Number(process.env.PAPERCLIP_QMD_KILL_GRACE_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 2_000;
 }
 
 /**
@@ -93,6 +97,14 @@ export interface RecallInput {
   actorId?: string;
   agentId?: string | null;
   runId?: string | null;
+  /**
+   * Aborts the in-flight qmd process(es) if the HTTP client disconnects before we respond
+   * (route wires this to `req.on("close")`). Without it, a client that gives up early (e.g. a
+   * short `--max-time`) leaves its qmd worker running to completion as an untracked orphan
+   * (RK9-181) — same failure mode the timeout path fixes, triggered by the caller instead of
+   * the clock.
+   */
+  signal?: AbortSignal;
 }
 
 export interface RecallSnippet {
@@ -118,7 +130,10 @@ export interface QmdRunResult {
 }
 
 /** Injectable qmd runner so the service is unit-testable without the binary present. */
-export type QmdRunner = (args: string[], opts: { cwd: string; timeoutMs: number }) => Promise<QmdRunResult>;
+export type QmdRunner = (
+  args: string[],
+  opts: { cwd: string; timeoutMs: number; signal?: AbortSignal },
+) => Promise<QmdRunResult>;
 
 export interface RecallDeps {
   runQmd?: QmdRunner;
@@ -239,27 +254,143 @@ export function parseQmdJson(stdout: string, allowed: ReadonlySet<string>): Reca
   return out;
 }
 
-const defaultRunQmd: QmdRunner = async (args, opts) => {
+/**
+ * Signal qmd's ENTIRE process group, not just the pid we spawned.
+ *
+ * `@tobilu/qmd`'s `bin/qmd` launcher is itself a `spawn()`-based wrapper: it starts the real
+ * `dist/cli/qmd.js vsearch` worker as ITS OWN child rather than `exec`ing into it (see the
+ * launcher source — it relays exit via a `child.on("exit", ...)` handler). Killing only the
+ * immediate child (the launcher) therefore orphans the grandchild worker, which keeps running
+ * to completion — observed on pc01 as multi-minute `node .../qmd.js vsearch` processes at
+ * ~45% CPU / ~1.3GB RSS each, piling up until the box was overloaded and every recall timed
+ * out (RK9-181). Spawning with `detached: true` makes our child the leader of a fresh process
+ * group that the grandchild inherits, so `process.kill(-pid, …)` reaches both.
+ */
+function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
   try {
-    const { stdout } = await execFile(qmdBin(), args, {
-      cwd: opts.cwd,
-      timeout: opts.timeoutMs,
-      maxBuffer: QMD_MAX_BUFFER,
-      killSignal: "SIGKILL",
-      // qmd resolves its model cache from HOME; set it explicitly so vsearch finds the embed model
-      // regardless of how the server process inherited its environment.
-      env: { ...process.env, HOME: qmdHome() },
-    });
-    return { stdout, timedOut: false };
+    process.kill(-pid, signal);
   } catch (error) {
-    const e = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
-    if (e.killed || e.signal === "SIGTERM" || e.signal === "SIGKILL" || e.code === "ETIMEDOUT") {
-      return { stdout: "", timedOut: true };
+    const e = error as NodeJS.ErrnoException;
+    if (e.code !== "ESRCH") {
+      logger.warn({ err: error, pid, signal }, "knowledge-recall: failed to signal qmd process group");
     }
-    // ENOENT (qmd missing), non-zero exit, etc. -> graceful empty, logged by caller
-    throw error;
   }
-};
+}
+
+/** True if ANY process still belongs to process group `pgid` (`kill(-pgid, 0)` semantics: no
+ *  error means at least one member is alive; ESRCH means the whole group is gone). */
+function isGroupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+const GROUP_EXIT_POLL_MS = 20;
+const GROUP_EXIT_MAX_WAIT_MS = 5_000;
+
+/**
+ * Poll until every process in `pgid` has exited, then call `onDone`. Used ONLY after SIGKILL —
+ * unlike SIGTERM, a process can't linger past it (short of being stuck in an uninterruptible
+ * syscall), so this is confirming actual death, not waiting one out. Gives up after
+ * GROUP_EXIT_MAX_WAIT_MS (logged) since at that point more signaling from us can't help.
+ */
+function waitForGroupExit(pgid: number, onDone: () => void): void {
+  const deadline = Date.now() + GROUP_EXIT_MAX_WAIT_MS;
+  const check = () => {
+    if (!isGroupAlive(pgid)) {
+      onDone();
+      return;
+    }
+    if (Date.now() >= deadline) {
+      logger.warn({ pgid }, "knowledge-recall: qmd process group still alive after SIGKILL + wait; giving up");
+      onDone();
+      return;
+    }
+    setTimeout(check, GROUP_EXIT_POLL_MS);
+  };
+  check();
+}
+
+/** Exported for the process-group-kill test in knowledge-recall.test.ts, which needs to invoke
+ *  the real spawn/kill path (not the injectable stub) against a fixture qmd launcher. */
+export const defaultRunQmd: QmdRunner = (args, opts) =>
+  new Promise<QmdRunResult>((resolve, reject) => {
+    // Caller (HTTP client) already gone before we even started — don't spawn just to kill it.
+    if (opts.signal?.aborted) {
+      resolve({ stdout: "", timedOut: true });
+      return;
+    }
+
+    const child = spawn(qmdBin(), args, {
+      cwd: opts.cwd,
+      // qmd resolves its model cache from HOME; set it explicitly so vsearch finds the embed
+      // model regardless of how the server process inherited its environment.
+      env: { ...process.env, HOME: qmdHome() },
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true, // own process group — see killProcessGroup doc above
+    });
+
+    let stdout = "";
+    let settled = false;
+    let killing = false; // true once the timeout/abort kill escalation has started
+
+    const settle = (run: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      opts.signal?.removeEventListener("abort", onAbort);
+      run();
+    };
+
+    // SIGTERM the group, then after a grace period SIGKILL it, and resolve only once EVERY
+    // process in the group is confirmed gone. The immediate child (the qmd launcher) can die
+    // from SIGTERM well before a grandchild worker that's ignoring SIGTERM mid-inference does —
+    // resolving on our own child's "close" event alone (as an earlier version of this fix did)
+    // frees the caller's concurrency slot while that worker is still running: the exact orphan
+    // this exists to prevent (RK9-181, confirmed against a real qmd worker that outlived a 3s
+    // SIGTERM wait and needed SIGKILL).
+    const escalate = () => {
+      if (killing || !child.pid) return;
+      killing = true;
+      const pgid = child.pid;
+      killProcessGroup(pgid, "SIGTERM");
+      setTimeout(() => {
+        killProcessGroup(pgid, "SIGKILL");
+        waitForGroupExit(pgid, () => settle(() => resolve({ stdout: "", timedOut: true })));
+      }, qmdKillGraceMs());
+    };
+
+    const onAbort = () => escalate(); // client disconnected mid-request: not an error, just abandoned
+    const deadline = setTimeout(escalate, opts.timeoutMs);
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length < QMD_MAX_BUFFER) stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", () => {}); // drained (not surfaced) so a chatty stderr can't stall the pipe
+
+    child.on("error", (err) => {
+      settle(() => reject(err));
+    });
+
+    child.on("close", (code, signal) => {
+      // A kill escalation is in flight: waitForGroupExit above (not this event) decides when
+      // the promise settles, since the group may still have live members after this event.
+      if (killing) return;
+      settle(() => {
+        if (signal) {
+          resolve({ stdout: "", timedOut: true });
+        } else if (code !== 0) {
+          reject(new Error(`qmd exited with code ${code}`));
+        } else {
+          resolve({ stdout, timedOut: false });
+        }
+      });
+    });
+  });
 
 /** Default: list existing collections via the injectable runner so it shares timeout/env handling. */
 async function defaultListCollections(cwd: string): Promise<string[]> {
@@ -339,6 +470,7 @@ export async function recallKnowledge(
         const r = await runQmd(buildQmdArgs(input.query, collections, limit, "search"), {
           cwd: resolvedVaultRoot,
           timeoutMs: QMD_LIST_TIMEOUT_MS,
+          signal: input.signal,
         });
         bm25 = parseQmdJson(r.stdout, allowed);
       } catch (error) {
@@ -357,6 +489,7 @@ export async function recallKnowledge(
           const r = await runQmd(buildQmdArgs(input.query, collections, limit, "vsearch"), {
             cwd: resolvedVaultRoot,
             timeoutMs: QMD_TIMEOUT_MS,
+            signal: input.signal,
           });
           timedOut = r.timedOut;
           vec = parseQmdJson(r.stdout, allowed);

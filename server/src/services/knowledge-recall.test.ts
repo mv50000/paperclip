@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
 import {
   PREFIX_TO_VAULT_SLUG,
@@ -6,6 +10,7 @@ import {
   candidateCollections,
   clampLimit,
   collectionFromUri,
+  defaultRunQmd,
   fuseRRF,
   parseCollectionList,
   parseQmdJson,
@@ -13,6 +18,8 @@ import {
   type QmdRunner,
   type RecallSnippet,
 } from "./knowledge-recall.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // recallKnowledge calls logActivity(db, ...) best-effort; a stub db that rejects is fine
 // because the service swallows activity-log failures. We inject resolveSlug + runQmd +
@@ -397,4 +404,95 @@ describe("recallKnowledge", () => {
     expect(res.busy).toBe(false);
     expect(res.snippets).toHaveLength(1);
   });
+});
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+// Exercises the REAL spawn/kill path (defaultRunQmd), not the injectable QmdRunner stub the
+// suites above use — the bug (RK9-181) was specifically in how the immediate child is killed,
+// so it can only be caught by actually spawning and signaling processes.
+describe("defaultRunQmd — process-group kill (RK9-181)", () => {
+  const fixture = join(__dirname, "__fixtures__", "fake-qmd-launcher.mjs");
+  const originalBin = process.env.PAPERCLIP_QMD_BIN;
+  const originalGrace = process.env.PAPERCLIP_QMD_KILL_GRACE_MS;
+
+  afterEach(() => {
+    if (originalBin === undefined) delete process.env.PAPERCLIP_QMD_BIN;
+    else process.env.PAPERCLIP_QMD_BIN = originalBin;
+    if (originalGrace === undefined) delete process.env.PAPERCLIP_QMD_KILL_GRACE_MS;
+    else process.env.PAPERCLIP_QMD_KILL_GRACE_MS = originalGrace;
+  });
+
+  it("kills the whole process group on timeout — the grandchild worker dies too, not just the launcher", async () => {
+    // "qmd" launcher stand-in = node running our fixture script directly.
+    process.env.PAPERCLIP_QMD_BIN = process.execPath;
+    process.env.PAPERCLIP_QMD_KILL_GRACE_MS = "50"; // keep the test fast
+
+    const outFile = join(tmpdir(), `qmd-fixture-${process.pid}-${Date.now()}.json`);
+    try {
+      const result = await defaultRunQmd([fixture, outFile], { cwd: __dirname, timeoutMs: 200 });
+      expect(result.timedOut).toBe(true);
+
+      const { launcherPid, workerPid } = JSON.parse(readFileSync(outFile, "utf8")) as {
+        launcherPid: number;
+        workerPid: number;
+      };
+      await waitUntil(() => !isAlive(launcherPid) && !isAlive(workerPid), 8_000);
+      expect(isAlive(launcherPid)).toBe(false);
+      // The orphan RK9-181 fixes: a single-pid kill of launcherPid alone would leave this alive
+      // (the worker ignores SIGTERM, and killing only the launcher never reaches it at all).
+      expect(isAlive(workerPid)).toBe(false);
+    } finally {
+      rmSync(outFile, { force: true });
+    }
+  }, 15_000);
+
+  it("kills the process group on client-disconnect (AbortSignal), independent of the timeout", async () => {
+    process.env.PAPERCLIP_QMD_BIN = process.execPath;
+    process.env.PAPERCLIP_QMD_KILL_GRACE_MS = "50";
+
+    const outFile = join(tmpdir(), `qmd-fixture-abort-${process.pid}-${Date.now()}.json`);
+    const controller = new AbortController();
+    try {
+      const runPromise = defaultRunQmd([fixture, outFile], {
+        cwd: __dirname,
+        timeoutMs: 5_000, // long enough that only the abort — not the timeout — can resolve this
+        signal: controller.signal,
+      });
+
+      await waitUntil(() => {
+        try {
+          readFileSync(outFile, "utf8");
+          return true;
+        } catch {
+          return false;
+        }
+      }, 2_000);
+      controller.abort();
+
+      const result = await runPromise;
+      expect(result.timedOut).toBe(true);
+
+      const { workerPid } = JSON.parse(readFileSync(outFile, "utf8")) as { workerPid: number };
+      await waitUntil(() => !isAlive(workerPid), 8_000);
+      expect(isAlive(workerPid)).toBe(false);
+    } finally {
+      rmSync(outFile, { force: true });
+    }
+  }, 15_000);
 });

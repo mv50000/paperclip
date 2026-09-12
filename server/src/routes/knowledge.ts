@@ -38,18 +38,30 @@ export function knowledgeRoutes(db: Db) {
       // downgraded to company scope (never an error, never a cross-company leak for agents).
       const allCollections = req.body.scope === "all" && isInstanceAdmin(req);
 
-      const result = await recallKnowledge(db, {
-        query: req.body.query,
-        companyId,
-        limit: req.body.limit,
-        allCollections,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-      });
+      // A client that disconnects early (short --max-time, a caller-side timeout) must not
+      // leave its qmd process running to completion as an untracked orphan (RK9-181) — cancel
+      // the in-flight recall the same way a server-side timeout does.
+      const controller = new AbortController();
+      const onClose = () => controller.abort();
+      req.on("close", onClose);
 
-      res.json(result);
+      try {
+        const result = await recallKnowledge(db, {
+          query: req.body.query,
+          companyId,
+          limit: req.body.limit,
+          allCollections,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          signal: controller.signal,
+        });
+
+        if (!res.writableEnded) res.json(result);
+      } finally {
+        req.off("close", onClose);
+      }
     },
   );
 
