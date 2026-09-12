@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
 import {
   PREFIX_TO_VAULT_SLUG,
   buildQmdArgs,
@@ -15,6 +16,7 @@ import {
   parseCollectionList,
   parseQmdJson,
   recallKnowledge,
+  rowsToSnippets,
   type QmdDaemonQuery,
   type QmdRunner,
   type RecallSnippet,
@@ -140,6 +142,52 @@ describe("parseQmdJson", () => {
     expect(parseQmdJson("", allowed)).toEqual([]);
     expect(parseQmdJson("not json", allowed)).toEqual([]);
     expect(parseQmdJson("{}", allowed)).toEqual([]);
+  });
+});
+
+describe("rowsToSnippets — daemon row shape (RK9-186 follow-up)", () => {
+  const allowed = new Set(["rk9", "shared"]);
+
+  it("normalizes a prefix-less daemon `file` (real production shape) into the qmd:// form the CLI path already uses", () => {
+    // Confirmed against production 2026-09-12: the daemon's query tool answers with `file` as a
+    // bare `<collection>/<path>`, not a `qmd://` URI — this is exactly the shape that made every
+    // daemon recall silently return recall=0 before this fix.
+    const out = rowsToSnippets(
+      [
+        {
+          context: "…",
+          docid: "#2feeaf",
+          file: "rk9/resources/sunspot-hetzner-frontend-hang.md",
+          line: 12,
+          score: 0.91,
+          snippet: "hang detail",
+          title: "Sunspot Hetzner frontend hang",
+        },
+      ],
+      allowed,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      sourcePath: "qmd://rk9/resources/sunspot-hetzner-frontend-hang.md",
+      collection: "rk9",
+      title: "Sunspot Hetzner frontend hang",
+      score: 0.91,
+    });
+  });
+
+  it("still rejects a prefix-less row from an out-of-scope/personal collection — missing the qmd:// prefix is not a free pass", () => {
+    const out = rowsToSnippets([{ file: "personal/secret.md", snippet: "LEAK" }], allowed);
+    expect(out).toEqual([]);
+  });
+
+  it("leaves an already-prefixed CLI-style file untouched (no double qmd://qmd:// prefixing)", () => {
+    const out = rowsToSnippets([{ file: "qmd://rk9/a.md", snippet: "x" }], allowed);
+    expect(out[0].sourcePath).toBe("qmd://rk9/a.md");
+  });
+
+  it("treats a missing/non-string file the same as before (empty collection, rejected)", () => {
+    expect(rowsToSnippets([{ snippet: "no file field" }], allowed)).toEqual([]);
+    expect(rowsToSnippets([{ file: "", snippet: "empty file" }], allowed)).toEqual([]);
   });
 });
 
@@ -433,6 +481,76 @@ describe("recallKnowledge — qmd-mcp daemon path (RK9-186)", () => {
     // The daemon's own `query` call already runs lex+vec in one round trip — a successful daemon
     // answer means NEITHER CLI pass (BM25 `search` nor `vsearch`) is invoked at all.
     expect(runQmd).not.toHaveBeenCalled();
+  });
+
+  it("surfaces daemon results even when `file` has no qmd:// prefix — production regression: every daemon recall silently returned recall=0 until this was fixed", async () => {
+    const { runQmd } = captureRunQmd(qmdRows([]));
+    // Exact row shape verified against the real daemon in production (2026-09-12).
+    const queryDaemon: QmdDaemonQuery = async () => [
+      {
+        context: "…",
+        docid: "#2feeaf",
+        file: "rk9/resources/sunspot-hetzner-frontend-hang.md",
+        line: 12,
+        score: 0.91,
+        snippet: "hang detail",
+        title: "Sunspot Hetzner frontend hang",
+      },
+    ];
+    const res = await recallKnowledge(
+      stubDb,
+      { query: "q", companyId: "c" },
+      { runQmd, queryDaemon, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+    );
+    expect(res.snippets).toHaveLength(1);
+    expect(res.snippets[0]).toMatchObject({
+      sourcePath: "qmd://rk9/resources/sunspot-hetzner-frontend-hang.md",
+      collection: "rk9",
+      title: "Sunspot Hetzner frontend hang",
+    });
+  });
+
+  it("logs a warning when the daemon returns rows but every one is filtered out by scope (silent-empty-recall signal)", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined as never);
+    try {
+      const { runQmd } = captureRunQmd(qmdRows([]));
+      // Out of scope for an "rk9" caller, prefix-less form included — must not slip through.
+      const queryDaemon: QmdDaemonQuery = async () => [
+        { file: "ololla-docs/x.md", snippet: "x" },
+        { file: "qmd://quantimodo-docs/y.md", snippet: "y" },
+      ];
+      const res = await recallKnowledge(
+        stubDb,
+        { query: "q", companyId: "c" },
+        { runQmd, queryDaemon, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      );
+      expect(res.snippets).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ rowCount: 2 }),
+        "knowledge-recall: daemon returned rows but none matched the allowed scope after filtering",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does NOT warn when the daemon simply returns zero rows (that's a normal empty result, not a filtering anomaly)", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined as never);
+    try {
+      const { runQmd } = captureRunQmd(qmdRows([]));
+      const queryDaemon: QmdDaemonQuery = async () => [];
+      await recallKnowledge(
+        stubDb,
+        { query: "q", companyId: "c" },
+        { runQmd, queryDaemon, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      );
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.anything(),
+        "knowledge-recall: daemon returned rows but none matched the allowed scope after filtering",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("falls back to the CLI vsearch path when the daemon is unavailable, WITHOUT the concurrency cap counting it against the daemon call itself", async () => {

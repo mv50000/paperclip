@@ -107,6 +107,27 @@ afterEach(() => {
 });
 
 describe("queryQmdDaemon", () => {
+  it("passes through the daemon's real production row shape unmodified — including a `file` WITHOUT the qmd:// prefix the CLI uses (RK9-186 follow-up: this shape mismatch made every daemon recall silently return 0 results)", async () => {
+    // Verified against the real qmd-mcp daemon in production (2026-09-12): fields are
+    // context/docid/file/line/score/snippet/title, and `file` is a bare `<collection>/<path>`,
+    // NOT a `qmd://<collection>/<path>` URI. This client must NOT try to "fix" that shape itself —
+    // reconstructing the qmd:// form is knowledge-recall.ts's job (rowsToSnippets), so this test
+    // only pins that the client is a transparent passthrough of whatever the daemon returns.
+    const prodRow = {
+      context: "…surrounding text…",
+      docid: "#2feeaf",
+      file: "rk9/resources/sunspot-hetzner-frontend-hang.md",
+      line: 12,
+      score: 0.91,
+      snippet: "hang detail",
+      title: "Sunspot Hetzner frontend hang",
+    };
+    const server = fakeQmdServer({ onQuery: () => [prodRow] });
+    const rows = await queryQmdDaemon("q", ["rk9"], 5, { deps: { fetchImpl: server.fetchImpl } });
+    expect(rows).toEqual([prodRow]);
+    expect((rows as unknown as Array<{ file: string }>)[0].file.startsWith("qmd://")).toBe(false);
+  });
+
   it("never omits `collections`, always sends rerank:false, and returns the daemon's rows", async () => {
     const server = fakeQmdServer({ onQuery: () => [{ file: "qmd://rk9/a.md", score: 0.9, title: "A", snippet: "hi" }] });
     const rows = await queryQmdDaemon("query text", ["rk9", "shared"], 5, { deps: { fetchImpl: server.fetchImpl } });
