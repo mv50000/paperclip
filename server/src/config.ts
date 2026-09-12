@@ -19,6 +19,8 @@ import {
   type SecretProvider,
   type StorageProvider,
   inferBindModeFromHost,
+  isAllInterfacesHost,
+  isLoopbackHost,
   resolveRuntimeBind,
   validateConfiguredBindMode,
 } from "@paperclipai/shared";
@@ -97,23 +99,37 @@ export interface Config {
   maxGlobalConcurrentRuns: number;
 }
 
-function detectTailnetBindHost(): string | undefined {
-  const explicit = process.env.PAPERCLIP_TAILNET_BIND_HOST?.trim();
-  if (explicit) return explicit;
+// Detecting the tailnet address shells out to `tailscale ip -4`, which blocks for up to
+// TAILSCALE_DETECT_TIMEOUT_MS if the tailscaled localapi socket is unreachable (e.g. locked
+// down by RK9-179). Memoize for the process lifetime so repeated loadConfig() calls (every
+// request via getStorageService()) don't re-run the process once the bind mode is known.
+let tailnetBindHostCache: { value: string | undefined } | undefined;
 
-  try {
-    const stdout = execFileSync("tailscale", ["ip", "-4"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: TAILSCALE_DETECT_TIMEOUT_MS,
-    });
-    return stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find(Boolean);
-  } catch {
-    return undefined;
+function detectTailnetBindHost(): string | undefined {
+  if (tailnetBindHostCache) return tailnetBindHostCache.value;
+
+  const explicit = process.env.PAPERCLIP_TAILNET_BIND_HOST?.trim();
+  let value: string | undefined;
+  if (explicit) {
+    value = explicit;
+  } else {
+    try {
+      const stdout = execFileSync("tailscale", ["ip", "-4"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: TAILSCALE_DETECT_TIMEOUT_MS,
+      });
+      value = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean);
+    } catch {
+      value = undefined;
+    }
   }
+
+  tailnetBindHostCache = { value };
+  return value;
 }
 
 export function loadConfig(): Config {
@@ -192,11 +208,15 @@ export function loadConfig(): Config {
       ? (bindFromEnvRaw as BindMode)
       : null;
   const configuredHost = process.env.HOST ?? fileConfig?.server.host ?? "127.0.0.1";
-  const tailnetBindHost = detectTailnetBindHost();
-  const bind =
-    bindFromEnv ??
-    fileConfig?.server.bind ??
-    inferBindModeFromHost(configuredHost, { tailnetBindHost });
+  const explicitBind = bindFromEnv ?? fileConfig?.server.bind ?? null;
+  // Only the "tailnet" bind mode (explicit, or inferred because the configured host isn't
+  // loopback/lan) ever consults the detected tailnet address — see resolveRuntimeBind and
+  // inferBindModeFromHost. Skip the tailscale process entirely otherwise (lan/loopback/custom).
+  const needsTailnetBindHost =
+    explicitBind === "tailnet" ||
+    (explicitBind === null && !isLoopbackHost(configuredHost) && !isAllInterfacesHost(configuredHost));
+  const tailnetBindHost = needsTailnetBindHost ? detectTailnetBindHost() : undefined;
+  const bind = explicitBind ?? inferBindModeFromHost(configuredHost, { tailnetBindHost });
   const customBindHost = process.env.PAPERCLIP_BIND_HOST ?? fileConfig?.server.customBindHost;
   const authBaseUrlModeFromEnvRaw = process.env.PAPERCLIP_AUTH_BASE_URL_MODE;
   const authBaseUrlModeFromEnv =
