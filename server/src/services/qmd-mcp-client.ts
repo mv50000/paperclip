@@ -37,12 +37,13 @@ function qmdMcpUrl(): string {
   return process.env.QMD_MCP_URL ?? "http://[::1]:8181/mcp";
 }
 
-/** Deadline for one daemon call. Must leave headroom under the CLI fallback + the caller's own
- *  HTTP timeout (rk9claude's recall client budget is 30s) — kept well below the CLI's vsearch
- *  timeout so a hung daemon still leaves time to fall back. */
+/** Deadline for one daemon call. Must leave headroom under the caller's own HTTP timeout
+ *  (rk9claude's recall client budget is 30s). 15s (PR #83 review): under heavy load a cold daemon
+ *  call can exceed 8s, and the CLI fallback is slower still in that same situation (measured 23s
+ *  timeouts) — so it's worth waiting longer on the daemon before giving up on it. */
 export function qmdMcpTimeoutMs(): number {
   const n = Number(process.env.PAPERCLIP_QMD_MCP_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? n : 8_000;
+  return Number.isFinite(n) && n > 0 ? n : 15_000;
 }
 
 /** Keepwarm ping interval; 0 (the default) disables it. RK9-186 measurement (2026-09-12): with
