@@ -42,6 +42,7 @@ import { fetchAllQuotaWindows } from "./services/quota-windows.js";
 import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
 import { startSlackEventForwarder, startAgentLivenessWatchdog, createSystemPauseSlackNotifier } from "./services/slack/index.js";
+import { startQmdOrphanWatchdog } from "./services/qmd-orphan-watchdog.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
 import { createEmailService } from "./services/email/index.js";
@@ -685,6 +686,17 @@ export async function startServer(): Promise<StartedServer> {
     startAgentLivenessWatchdog(db as any, {
       intervalMs: config.agentLivenessWatchdogIntervalMs,
       thresholdMultiplier: config.agentLivenessThresholdMultiplier,
+    });
+  }
+
+  // Safety-net sweep for orphaned `qmd vsearch`/`search` workers (RK9-181). knowledge-recall.ts
+  // is the primary fix (kills its own tracked process group on timeout/client-abort); this is a
+  // backstop for gaps outside that path. Read directly from env, same convention as the qmd
+  // env vars in knowledge-recall.ts (config.ts has no vault fields).
+  if (process.env.PAPERCLIP_QMD_WATCHDOG_ENABLED !== "false") {
+    startQmdOrphanWatchdog({
+      intervalMs: Number(process.env.PAPERCLIP_QMD_WATCHDOG_INTERVAL_MS) || undefined,
+      staleSec: Number(process.env.PAPERCLIP_QMD_WATCHDOG_STALE_SEC) || undefined,
     });
   }
 
