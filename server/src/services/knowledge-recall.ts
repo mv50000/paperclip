@@ -4,6 +4,7 @@ import { companies } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
+import { queryQmdDaemon, type QmdMcpQueryRow } from "./qmd-mcp-client.js";
 
 /** Vault checkout the qmd index lives under. Read directly from env (config.ts has no vault fields). */
 function vaultRoot(): string {
@@ -65,7 +66,12 @@ export function isPersonalCollection(name: string): boolean {
   return PERSONAL_COLLECTION_RE.test(name);
 }
 // vsearch (semantic) loads the embedding model; on a warm box it's ~2s, but allow headroom.
-const QMD_TIMEOUT_MS = 20_000;
+// This is the CLI FALLBACK deadline only (the daemon path has its own, shorter, timeout —
+// see qmd-mcp-client.ts's qmdMcpTimeoutMs). Env-tunable (RK9-186 AC).
+function qmdTimeoutMs(): number {
+  const n = Number(process.env.QMD_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 20_000;
+}
 const QMD_LIST_TIMEOUT_MS = 5_000;
 const QMD_MAX_BUFFER = 16 * 1024 * 1024;
 const DEFAULT_LIMIT = 10;
@@ -135,6 +141,17 @@ export type QmdRunner = (
   opts: { cwd: string; timeoutMs: number; signal?: AbortSignal },
 ) => Promise<QmdRunResult>;
 
+/** Injectable qmd-mcp daemon query so the service is unit-testable without the daemon present.
+ *  MUST be called with the already-filtered, non-personal `collections` the caller computed —
+ *  this function must never be given the freedom to omit or widen that scope (see
+ *  qmd-mcp-client.ts's module doc). Returns `null` (never throws) to signal "fall back to CLI". */
+export type QmdDaemonQuery = (
+  query: string,
+  collections: readonly string[],
+  limit: number,
+  opts: { signal?: AbortSignal },
+) => Promise<QmdMcpQueryRow[] | null>;
+
 export interface RecallDeps {
   runQmd?: QmdRunner;
   /** Lists collection names present in the vault index; used to drop non-existent scopes. */
@@ -144,7 +161,13 @@ export interface RecallDeps {
   qmdBin?: string;
   /** Override the concurrency cap (default 2, or PAPERCLIP_RECALL_MAX_CONCURRENT). For tests. */
   maxConcurrent?: number;
+  /** Override the qmd-mcp daemon query (default: the real daemon client). For tests. */
+  queryDaemon?: QmdDaemonQuery;
 }
+
+/** Default: the real qmd-mcp daemon client. */
+const defaultQueryDaemon: QmdDaemonQuery = (query, collections, limit, opts) =>
+  queryQmdDaemon(query, collections, limit, { signal: opts.signal });
 
 /**
  * Collections an agent in `slug` MAY recall from: its own curated-facts collection (`<slug>`),
@@ -220,22 +243,14 @@ export function collectionFromUri(file: string): string {
 }
 
 /**
- * Parse `qmd vsearch --json` output: an array of
- * {docid, score, file, line, title, snippet}. There is no `path` or `collection`
- * field — the collection is the `qmd://<collection>/` prefix of `file`.
- * Filters to `allowed` collections as a belt-and-suspenders check on top of the -c flags.
+ * Shared by both the CLI (`parseQmdJson`) and the qmd-mcp daemon path: rows of shape
+ * {docid, score, file, line, title, snippet}. There is no `path` or `collection` field — the
+ * collection is the `qmd://<collection>/` prefix of `file`. Filters to `allowed` collections as
+ * a belt-and-suspenders check on top of whatever scope was requested (CLI `-c` flags / daemon
+ * `collections` arg) — so even a daemon bug that ignored scoping couldn't leak a cross-company
+ * or personal-vault doc through this function.
  */
-export function parseQmdJson(stdout: string, allowed: ReadonlySet<string>): RecallSnippet[] {
-  const trimmed = stdout.trim();
-  if (!trimmed) return [];
-  let rows: unknown;
-  try {
-    rows = JSON.parse(trimmed);
-  } catch {
-    logger.warn("knowledge-recall: qmd JSON parse failed");
-    return [];
-  }
-  if (!Array.isArray(rows)) return [];
+export function rowsToSnippets(rows: readonly unknown[], allowed: ReadonlySet<string>): RecallSnippet[] {
   const out: RecallSnippet[] = [];
   for (const r of rows) {
     if (!r || typeof r !== "object") continue;
@@ -252,6 +267,21 @@ export function parseQmdJson(stdout: string, allowed: ReadonlySet<string>): Reca
     });
   }
   return out;
+}
+
+/** Parse `qmd vsearch --json` / `qmd search --json` stdout into snippets (see rowsToSnippets). */
+export function parseQmdJson(stdout: string, allowed: ReadonlySet<string>): RecallSnippet[] {
+  const trimmed = stdout.trim();
+  if (!trimmed) return [];
+  let rows: unknown;
+  try {
+    rows = JSON.parse(trimmed);
+  } catch {
+    logger.warn("knowledge-recall: qmd JSON parse failed");
+    return [];
+  }
+  if (!Array.isArray(rows)) return [];
+  return rowsToSnippets(rows, allowed);
 }
 
 /**
@@ -424,6 +454,7 @@ export async function recallKnowledge(
   const runQmd = deps.runQmd ?? defaultRunQmd;
   const listCollections = deps.listCollections ?? defaultListCollections;
   const resolveSlug = deps.resolveSlug ?? resolveCompanyVaultSlug;
+  const queryDaemon = deps.queryDaemon ?? defaultQueryDaemon;
   const resolvedVaultRoot = deps.vaultRoot ?? vaultRoot();
   const limit = clampLimit(input.limit);
   const startedAt = Date.now();
@@ -463,45 +494,61 @@ export async function recallKnowledge(
     if (collections.length > 0) {
       const allowed = new Set(collections);
 
-      // BM25 keyword pass — no model, ~instant, not concurrency-guarded. Catches exact
-      // terms/IDs/Finnish that semantic search misses. Best-effort.
-      let bm25: RecallSnippet[] = [];
-      try {
-        const r = await runQmd(buildQmdArgs(input.query, collections, limit, "search"), {
-          cwd: resolvedVaultRoot,
-          timeoutMs: QMD_LIST_TIMEOUT_MS,
-          signal: input.signal,
-        });
-        bm25 = parseQmdJson(r.stdout, allowed);
-      } catch (error) {
-        logger.warn({ err: error }, "knowledge-recall: bm25 pass failed (continuing with vsearch)");
-      }
-
-      // Semantic vsearch pass — loads the model; concurrency-guarded. Under the cap we shed it and
-      // degrade gracefully to BM25-only (still useful + instant) rather than piling on / returning empty.
-      let vec: RecallSnippet[] = [];
-      if (activeQmdRecalls >= cap) {
-        busy = true;
-        logger.warn({ activeQmdRecalls, cap, companyId: input.companyId }, "knowledge-recall: at concurrency cap; vsearch shed, bm25-only");
+      // Try the warm qmd-mcp daemon FIRST (RK9-186): no process spawn, no cold model load, so it
+      // bypasses the CLI concurrency cap entirely and is what makes recall survive load (the
+      // whole point of this ticket). Its `query` tool call already runs BOTH a lex (BM25-like)
+      // and a vec (semantic) search in one round trip and returns one fused list — so on success
+      // we skip the CLI BM25 pass below entirely rather than re-running the same keyword search
+      // a second time for no new results (measured: ~0.5-0.7s wasted per recall, one more process).
+      // Only when the daemon is down or errors do we fall back to the CLI path, which still runs
+      // both BM25 + vsearch exactly as before.
+      const daemonRows = await queryDaemon(input.query, collections, limit, { signal: input.signal });
+      if (daemonRows !== null) {
+        snippets = fuseRRF([rowsToSnippets(daemonRows, allowed)], limit);
       } else {
-        activeQmdRecalls++;
+        // BM25 keyword pass — no model, ~instant, not concurrency-guarded. Catches exact
+        // terms/IDs/Finnish that semantic search misses. Best-effort.
+        let bm25: RecallSnippet[] = [];
         try {
-          const r = await runQmd(buildQmdArgs(input.query, collections, limit, "vsearch"), {
+          const r = await runQmd(buildQmdArgs(input.query, collections, limit, "search"), {
             cwd: resolvedVaultRoot,
-            timeoutMs: QMD_TIMEOUT_MS,
+            timeoutMs: QMD_LIST_TIMEOUT_MS,
             signal: input.signal,
           });
-          timedOut = r.timedOut;
-          vec = parseQmdJson(r.stdout, allowed);
+          bm25 = parseQmdJson(r.stdout, allowed);
         } catch (error) {
-          logger.warn({ err: error }, "knowledge-recall: vsearch pass failed (continuing with bm25)");
-        } finally {
-          activeQmdRecalls--;
+          logger.warn({ err: error }, "knowledge-recall: bm25 pass failed (continuing with vsearch)");
         }
-      }
 
-      // Fuse the two ranked lists (RRF) so both semantic and keyword hits surface.
-      snippets = fuseRRF([vec, bm25], limit);
+        // Semantic vsearch pass — loads the model; concurrency-guarded. Under the cap we shed it
+        // and degrade gracefully to BM25-only (still useful + instant) rather than piling on.
+        let vec: RecallSnippet[] = [];
+        if (activeQmdRecalls >= cap) {
+          busy = true;
+          logger.warn(
+            { activeQmdRecalls, cap, companyId: input.companyId },
+            "knowledge-recall: daemon unavailable and at concurrency cap; vsearch shed, bm25-only",
+          );
+        } else {
+          activeQmdRecalls++;
+          try {
+            const r = await runQmd(buildQmdArgs(input.query, collections, limit, "vsearch"), {
+              cwd: resolvedVaultRoot,
+              timeoutMs: qmdTimeoutMs(),
+              signal: input.signal,
+            });
+            timedOut = r.timedOut;
+            vec = parseQmdJson(r.stdout, allowed);
+          } catch (error) {
+            logger.warn({ err: error }, "knowledge-recall: vsearch pass failed (continuing with bm25)");
+          } finally {
+            activeQmdRecalls--;
+          }
+        }
+
+        // Fuse the two ranked lists (RRF) so both semantic and keyword hits surface.
+        snippets = fuseRRF([vec, bm25], limit);
+      }
     } else {
       logger.warn({ companyId: input.companyId, slug }, "knowledge-recall: no collections in scope");
     }

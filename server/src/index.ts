@@ -43,6 +43,7 @@ import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
 import { startSlackEventForwarder, startAgentLivenessWatchdog, createSystemPauseSlackNotifier } from "./services/slack/index.js";
 import { startQmdOrphanWatchdog } from "./services/qmd-orphan-watchdog.js";
+import { closeQmdMcpSession, startQmdKeepwarm } from "./services/qmd-mcp-client.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
 import { createEmailService } from "./services/email/index.js";
@@ -700,6 +701,11 @@ export async function startServer(): Promise<StartedServer> {
     });
   }
 
+  // Off by default (RK9-186 measurement: with rerank:false a cold qmd-mcp daemon query already
+  // meets the recall latency budget, so keepwarm buys nothing under normal conditions) — escape
+  // hatch via PAPERCLIP_QMD_KEEPWARM_INTERVAL_MS for an operator who wants it anyway.
+  startQmdKeepwarm();
+
   {
     const RISK_MONITOR_INTERVAL_MS = 60 * 60 * 1000;
     const riskMonitors = riskMonitorService(db as any);
@@ -1026,6 +1032,8 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "Failed to stop embedded PostgreSQL cleanly");
         }
       }
+
+      await closeQmdMcpSession();
 
       process.exit(0);
     };
