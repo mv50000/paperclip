@@ -243,19 +243,36 @@ export function collectionFromUri(file: string): string {
 }
 
 /**
+ * The CLI's `--json` output always gives `file` as a full `qmd://<collection>/<path>` URI, but
+ * the qmd-mcp daemon's `query` tool answers with the URI SCHEME STRIPPED — a bare
+ * `<collection>/<path>` (e.g. `rk9/resources/a.md`) — confirmed against production (RK9-186
+ * follow-up, 2026-09-12: every daemon recall silently returned 0 results because
+ * `collectionFromUri` only matches the `qmd://` form, so `rowsToSnippets` filtered out every
+ * single daemon row as "no collection"). Reconstruct the CLI's URI form here so both paths
+ * produce an identical `sourcePath`/`collection` and go through the exact same allowed-scope
+ * check below — a bare `personal/x.md` row is normalized to `qmd://personal/x.md` and then
+ * rejected by that check exactly like any other out-of-scope row, not given a free pass for
+ * lacking a prefix.
+ */
+function normalizeQmdFileUri(file: string): string {
+  return file && !file.startsWith("qmd://") ? `qmd://${file}` : file;
+}
+
+/**
  * Shared by both the CLI (`parseQmdJson`) and the qmd-mcp daemon path: rows of shape
  * {docid, score, file, line, title, snippet}. There is no `path` or `collection` field — the
- * collection is the `qmd://<collection>/` prefix of `file`. Filters to `allowed` collections as
- * a belt-and-suspenders check on top of whatever scope was requested (CLI `-c` flags / daemon
- * `collections` arg) — so even a daemon bug that ignored scoping couldn't leak a cross-company
- * or personal-vault doc through this function.
+ * collection is the `qmd://<collection>/` prefix of `file` (see normalizeQmdFileUri for the
+ * daemon's prefix-less variant). Filters to `allowed` collections as a belt-and-suspenders check
+ * on top of whatever scope was requested (CLI `-c` flags / daemon `collections` arg) — so even a
+ * daemon bug that ignored scoping couldn't leak a cross-company or personal-vault doc through
+ * this function.
  */
 export function rowsToSnippets(rows: readonly unknown[], allowed: ReadonlySet<string>): RecallSnippet[] {
   const out: RecallSnippet[] = [];
   for (const r of rows) {
     if (!r || typeof r !== "object") continue;
     const row = r as Record<string, unknown>;
-    const file = typeof row.file === "string" ? row.file : "";
+    const file = normalizeQmdFileUri(typeof row.file === "string" ? row.file : "");
     const collection = collectionFromUri(file);
     if (!allowed.has(collection)) continue; // never surface a doc outside the agent's scope
     out.push({
@@ -504,7 +521,18 @@ export async function recallKnowledge(
       // both BM25 + vsearch exactly as before.
       const daemonRows = await queryDaemon(input.query, collections, limit, { signal: input.signal });
       if (daemonRows !== null) {
-        snippets = fuseRRF([rowsToSnippets(daemonRows, allowed)], limit);
+        const daemonSnippets = rowsToSnippets(daemonRows, allowed);
+        if (daemonRows.length > 0 && daemonSnippets.length === 0) {
+          // The daemon answered with rows, but every single one was dropped by the allowed-scope
+          // filter — either every row was genuinely out of scope, or (as happened in production,
+          // RK9-186 follow-up) the daemon's row shape changed in a way rowsToSnippets can no
+          // longer parse. Either way this is a silent-empty-recall risk worth a loud signal.
+          logger.warn(
+            { companyId: input.companyId, collections, rowCount: daemonRows.length },
+            "knowledge-recall: daemon returned rows but none matched the allowed scope after filtering",
+          );
+        }
+        snippets = fuseRRF([daemonSnippets], limit);
       } else {
         // BM25 keyword pass — no model, ~instant, not concurrency-guarded. Catches exact
         // terms/IDs/Finnish that semantic search misses. Best-effort.
