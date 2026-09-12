@@ -36,9 +36,10 @@ export function parsePsRows(stdout: string): QmdProcessInfo[] {
 }
 
 /** A qmd vsearch/search worker (the grandchild the qmd launcher spawns — see
- *  knowledge-recall.ts's killProcessGroup doc) that has outlived the stale threshold. */
+ *  knowledge-recall.ts's killProcessGroup doc) that has outlived the stale threshold. Requires
+ *  the literal `qmd.js` entry point (not just "qmd") to avoid matching unrelated processes. */
 export function isStaleQmdWorker(proc: QmdProcessInfo, staleSec: number): boolean {
-  return proc.etimeSec > staleSec && /qmd(\.js)?\s+(vsearch|search)\b/.test(proc.command);
+  return proc.etimeSec > staleSec && /qmd\.js\s+(vsearch|search)\b/.test(proc.command);
 }
 
 export interface QmdWatchdogDeps {
@@ -46,8 +47,16 @@ export interface QmdWatchdogDeps {
   killProcess?: (pid: number) => void;
 }
 
+/** `ps` args scoped to `uid` (qmd only ever runs as this process's user) when known, falling
+ *  back to a system-wide listing only if the platform has no concept of uids. Scoping avoids
+ *  needlessly widening the blast radius and, on a shared host, hitting EPERM trying to kill
+ *  processes we don't own. Exported for a direct unit test (RK9-181 review). */
+export function buildPsArgs(uid: number | undefined): string[] {
+  return uid !== undefined ? ["-u", String(uid), "-o", "pid,etimes,args"] : ["-eo", "pid,etimes,args"];
+}
+
 const defaultListProcesses = async (): Promise<string> => {
-  const { stdout } = await execFile("ps", ["-eo", "pid,etimes,args"]);
+  const { stdout } = await execFile("ps", buildPsArgs(process.getuid?.()));
   return stdout;
 };
 

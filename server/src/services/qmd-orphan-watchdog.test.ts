@@ -1,5 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-import { isStaleQmdWorker, parsePsRows, startQmdOrphanWatchdog, type QmdProcessInfo } from "./qmd-orphan-watchdog.js";
+import {
+  buildPsArgs,
+  isStaleQmdWorker,
+  parsePsRows,
+  startQmdOrphanWatchdog,
+  type QmdProcessInfo,
+} from "./qmd-orphan-watchdog.js";
+
+describe("buildPsArgs", () => {
+  it("scopes the listing to the given uid, not every user on the box (RK9-181 review)", () => {
+    expect(buildPsArgs(1000)).toEqual(["-u", "1000", "-o", "pid,etimes,args"]);
+  });
+
+  it("falls back to a system-wide listing only when no uid is available", () => {
+    expect(buildPsArgs(undefined)).toEqual(["-eo", "pid,etimes,args"]);
+  });
+});
 
 describe("parsePsRows", () => {
   it("parses `ps -eo pid,etimes,args` rows", () => {
@@ -37,6 +53,13 @@ describe("isStaleQmdWorker", () => {
 
   it("does not flag a process younger than the threshold", () => {
     expect(isStaleQmdWorker(proc(30, "node .../dist/cli/qmd.js vsearch q -c rk9 --json"), 120)).toBe(false);
+  });
+
+  it("requires the literal qmd.js entry point, not just any 'qmd ... vsearch/search' text", () => {
+    // Tightened identifier (RK9-181 review): a bare "qmd" match was broad enough to risk
+    // flagging an unrelated process that merely mentions "vsearch"/"search" near "qmd" in its
+    // command line (e.g. a shell wrapper, a grep invocation, a differently-named tool).
+    expect(isStaleQmdWorker(proc(300, "grep -r vsearch /opt/repos/qmd-notes"), 120)).toBe(false);
   });
 
   it("does not flag an unrelated stale process (e.g. qmd collection list)", () => {
