@@ -46,8 +46,12 @@ dropping its company scope (breaking the support-desk semantics). So:
   actors (inbound e-mail is a prompt-injection surface in this repo). Agents
   may record `reply`/`bounce_soft`/`dsn`. Provider webhooks (RK9-196+) run as
   system, not as an agent.
-- Adding a suppression flips every non-terminal prospect with that e-mail —
-  in **every** company — to status `suppressed`. Draft creation and approval
+- Adding a suppression flips every *other* non-terminal prospect with that
+  e-mail — in **every** company — to status `suppressed`; the prospect whose
+  own event caused it keeps the reason-specific status (`bounced` /
+  `unsubscribed`) so bounce and opt-out stay distinguishable. The flip runs
+  after the list INSERT so an import racing it either sees the row or gets
+  flipped. `GET …/suppressions` is board-only; agents use `…/check`. Draft creation and approval
   also consult the list directly, so a prospect that is `approved` on paper
   but suppressed cannot get a message.
 - The two tables are not synchronised; a support-desk bounce does not block

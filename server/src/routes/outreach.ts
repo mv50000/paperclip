@@ -395,6 +395,9 @@ export function outreachRoutes(db: Db) {
 
   router.get("/companies/:companyId/outreach/suppressions", async (req, res) => {
     const companyId = req.params.companyId as string;
+    // Board only: the full global opt-out list is not need-to-know for agent
+    // keys — they have POST …/suppressions/check.
+    assertBoard(req);
     assertCompanyAccess(req, companyId);
     res.json(await listOutreachSuppressions(db, parseLimit(req.query.limit)));
   });

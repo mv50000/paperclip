@@ -59,6 +59,8 @@ export async function recordEvent(
       reason: effect.suppress,
       sourceCompanyId: companyId,
       note: `${input.type} event`,
+      // This prospect gets `bounced`/`unsubscribed` below, not the generic `suppressed`.
+      excludeProspectId: prospect.id,
     });
   }
   let prospectStatus = prospect.status as OutreachProspectStatus;
@@ -72,10 +74,6 @@ export async function recordEvent(
       prospect.status as OutreachProspectStatus,
     );
     const fresh = updated ?? (await getProspect(db, companyId, prospect.id));
-    prospectStatus = (fresh?.status ?? prospectStatus) as OutreachProspectStatus;
-  } else if (effect.suppress) {
-    // addOutreachSuppression may have flipped the row to `suppressed`.
-    const fresh = await getProspect(db, companyId, prospect.id);
     prospectStatus = (fresh?.status ?? prospectStatus) as OutreachProspectStatus;
   }
 

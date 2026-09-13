@@ -190,6 +190,9 @@ describe.sequential("outreach routes", () => {
     );
     expect(res.status).toBe(403);
     expect(mockOutreach.addOutreachSuppression).not.toHaveBeenCalled();
+    res = await requestApp(app, (base) => request(base).get("/api/companies/company-1/outreach/suppressions"));
+    expect(res.status).toBe(403);
+    expect(mockOutreach.listOutreachSuppressions).not.toHaveBeenCalled();
 
     for (const type of ["unsubscribe", "complaint", "bounce_hard"]) {
       res = await requestApp(app, (base) =>
