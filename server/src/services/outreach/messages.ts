@@ -61,6 +61,21 @@ export async function getMessageByUnsubscribeToken(db: Db, token: string) {
   return row ?? null;
 }
 
+/**
+ * RK9-195: the inbound relay's threading lookup — a reply/bounce only carries
+ * the RFC 5322 `Message-ID` header value (via `In-Reply-To`/`References`, or
+ * embedded in a DSN's `message/rfc822` part), not a companyId. Same
+ * company-agnostic convention as `getMessageById`/`getMessageByUnsubscribeToken`.
+ */
+export async function getMessageByRfc822Id(db: Db, rfc822MessageId: string) {
+  const [row] = await db
+    .select()
+    .from(outreachMessages)
+    .where(eq(outreachMessages.messageId, rfc822MessageId))
+    .limit(1);
+  return row ?? null;
+}
+
 export type CreateMessageResult =
   | { ok: true; message: typeof outreachMessages.$inferSelect }
   | { ok: false; reason: "prospect_not_found" | "sequence_not_found" | "prospect_not_contactable" };

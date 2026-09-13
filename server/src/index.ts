@@ -642,6 +642,7 @@ export async function startServer(): Promise<StartedServer> {
     systemPause: systemPauseSvc,
     outreachSenderApiKey: config.outreachSenderApiKey,
     outreachUnsubscribeBaseUrl: config.outreachUnsubscribeBaseUrl,
+    outreachInboundHmacSecret: config.outreachInboundHmacSecret,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 
