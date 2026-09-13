@@ -45,9 +45,10 @@ export function buildReferences(inReplyTo: string | null | undefined, priorRefer
 
 function foldHeaderValue(value: string): string {
   // Headers here are short (addresses, ids, URLs) — no folding needed, but
-  // CRLF injection via a stray newline in stored data must never reach the
-  // wire verbatim.
-  return value.replace(/\r?\n/g, " ");
+  // header/CRLF injection via a stray control character in stored data must
+  // never reach the wire verbatim. Strip CR and LF individually (not just
+  // the \r\n pair) — a bare \r survives `\r?\n`.
+  return value.replace(/[\r\n]/g, " ");
 }
 
 export interface OutreachEnvelope {

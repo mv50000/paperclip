@@ -148,4 +148,51 @@ describe("sendMail (raw SMTP dialog)", () => {
     expect(result.ok).toBe(false);
     expect(result.code).toBe(421);
   });
+
+  it("does not crash the process when the socket errors right after the final response", async () => {
+    // The server slams the connection shut (RST) the instant it replies, so
+    // the client's socket can emit a late 'error' after sendMail() has
+    // already resolved — exactly the window a per-call-only error listener
+    // would miss.
+    const fake = await startFakeSmtp({
+      onData: () => {
+        /* handled by server socket.destroy() below via the wrapping server */
+      },
+    });
+    server = fake.server;
+    server.removeAllListeners("connection");
+    server.on("connection", (socket: Socket) => {
+      socket.write("220 fake.local ESMTP\r\n");
+      socket.on("data", (chunk) => {
+        const text = chunk.toString("utf8");
+        if (/^EHLO/i.test(text)) socket.write("250 fake.local\r\n");
+        else if (/^MAIL FROM/i.test(text)) socket.write("250 OK\r\n");
+        else if (/^RCPT TO/i.test(text)) socket.write("250 OK\r\n");
+        else if (/^DATA/i.test(text)) socket.write("354 Go ahead\r\n");
+        else if (text.endsWith("\r\n.\r\n")) {
+          socket.write("250 OK\r\n");
+          socket.destroy(); // abrupt reset right after the final reply
+        }
+      });
+    });
+
+    let uncaught: unknown;
+    const onUncaught = (err: unknown) => (uncaught = err);
+    process.once("uncaughtException", onUncaught);
+    try {
+      const result = await sendMail({
+        host: "127.0.0.1",
+        port: fake.port,
+        envelopeFrom: "outreach@example.fi",
+        envelopeTo: "prospect@example.fi",
+        data: "Subject: hi\r\n\r\nHello.",
+      });
+      expect(result.ok).toBe(true);
+      // Give a queued 'error'/'close' event a tick to fire, if it's going to.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+    expect(uncaught).toBeUndefined();
+  });
 });

@@ -88,6 +88,17 @@ export interface QueueDueMessagesResult {
   rejected: number;
 }
 
+// Arbitrary but stable — Postgres advisory locks are keyed by a plain int8,
+// shared across every advisory-lock user on this DB (see plugin-database.ts
+// for the other user), so this key must not collide with another one.
+const SCHEDULER_LOCK_KEY = 0x524b39_194;
+
+async function tryAcquireSchedulerLock(tx: Db): Promise<boolean> {
+  const result = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(${SCHEDULER_LOCK_KEY}) AS locked`);
+  const rows = (result as unknown as { rows?: Array<{ locked: boolean }> }).rows;
+  return rows?.[0]?.locked === true;
+}
+
 /**
  * Runs once a minute (see `startOutreachSendCron`). For every active sequence
  * whose send window is open right now, promotes the oldest `approved`
@@ -95,8 +106,31 @@ export interface QueueDueMessagesResult {
  * A sequence past its cap is simply skipped — its remaining `approved`
  * messages stay put and are picked up on a later tick once the day rolls
  * over (or capacity frees up, which never happens mid-day by design).
+ *
+ * Wrapped in one DB transaction holding a `pg_try_advisory_xact_lock` for its
+ * whole duration: a slow tick that outlives its interval, or a second server
+ * process briefly running during a rolling deploy (the DB is shared
+ * dev/prod, so more than one process CAN be live), would otherwise both read
+ * the same "already sent today" count and jointly overshoot the daily cap.
+ * A tick that can't get the lock is a no-op, not an error — the next one
+ * will pick up whatever is still due.
  */
 export async function queueDueMessages(db: Db, now: Date = new Date()): Promise<QueueDueMessagesResult> {
+  return db.transaction(async (tx) => {
+    // A drizzle transaction handle is structurally missing `Db`'s `$client`
+    // field, which nothing here actually uses (only .select/.update/.execute
+    // are called) — cast rather than widen every service function's `db: Db`
+    // parameter (getProspect, findOutreachSuppressed, ...) just for this.
+    const txDb = tx as unknown as Db;
+    if (!(await tryAcquireSchedulerLock(txDb))) {
+      logger.info("outreach send-scheduler tick skipped: another tick already holds the lock");
+      return { queued: 0, rejected: 0 };
+    }
+    return runQueueDueMessages(txDb, now);
+  });
+}
+
+async function runQueueDueMessages(db: Db, now: Date): Promise<QueueDueMessagesResult> {
   const sequences = await db.select().from(outreachSequences).where(eq(outreachSequences.active, true));
   let queued = 0;
   let rejected = 0;

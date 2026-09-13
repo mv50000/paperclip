@@ -110,6 +110,19 @@ describe("buildRawEmail", () => {
       unsubscribe: UNSUB,
     });
     expect(raw).not.toMatch(/Subject: Hei\r\nBcc:/);
+    expect(raw).toContain("Subject: Hei  Bcc: attacker@evil.example");
+  });
+
+  it("strips a bare CR (no following LF) from header values, not just \\r\\n pairs", () => {
+    const raw = buildRawEmail({
+      from: "outreach@x.fi",
+      to: "prospect@example.fi",
+      subject: "Hei\rBcc: attacker@evil.example",
+      bodyText: "plain",
+      messageId: "<abc@x.fi>",
+      unsubscribe: UNSUB,
+    });
+    expect(raw).not.toContain("Hei\rBcc:");
     expect(raw).toContain("Subject: Hei Bcc: attacker@evil.example");
   });
 

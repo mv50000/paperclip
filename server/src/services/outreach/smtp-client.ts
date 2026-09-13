@@ -97,6 +97,13 @@ export async function sendMail(opts: SmtpSendOptions): Promise<SmtpResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const heloDomain = opts.heloDomain ?? opts.envelopeFrom.split("@")[1] ?? "localhost";
   const socket = new Socket();
+  // A permanent listener for the socket's whole lifetime: readResponse()
+  // adds/removes its own per-call 'error' listener, which leaves a window
+  // (e.g. between the last readResponse() and finish()'s socket.end()) with
+  // zero listeners — an 'error' event with no listener crashes the process.
+  // This one is always there, so that never happens; readResponse's own
+  // listener still does the real work of rejecting its promise.
+  socket.on("error", () => {});
 
   try {
     await new Promise<void>((resolve, reject) => {
