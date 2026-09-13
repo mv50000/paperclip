@@ -566,6 +566,30 @@ describe("recallKnowledge — qmd-mcp daemon path (RK9-186)", () => {
     expect(res.busy).toBe(false);
   });
 
+  it("logs no CLI-path WARNs when the caller's request was already aborted before the daemon call (RK9-199)", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined as never);
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      const runQmd = vi.fn<QmdRunner>(defaultRunQmd);
+      const queryDaemon: QmdDaemonQuery = async () => null; // daemon unavailable → CLI fallback path
+      const res = await recallKnowledge(
+        stubDb,
+        { query: "q", companyId: "c", signal: controller.signal },
+        { runQmd, queryDaemon, listCollections: async () => ["rk9", "shared"], resolveSlug: async () => "rk9", vaultRoot: "/tmp/vault" },
+      );
+      expect(res.snippets).toEqual([]);
+      // Only the (unrelated, pre-existing) best-effort activity-log warning is allowed here — no
+      // "bm25/vsearch pass failed" WARN from the CLI fallback path, since the aborted signal makes
+      // defaultRunQmd resolve immediately instead of throwing.
+      for (const call of warnSpy.mock.calls) {
+        expect(call[1]).not.toMatch(/bm25|vsearch/);
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("falls back to CLI and sheds under the concurrency cap when BOTH the daemon and the cap are unavailable", async () => {
     const runQmd = vi.fn<QmdRunner>(async (args) => ({
       stdout: args[0] === "search" ? qmdRows([{ file: "qmd://rk9/bm25.md", snippet: "x", score: 0.3 }]) : qmdRows([]),

@@ -70,6 +70,11 @@ let session: string | null = null;
 // both call qmdInit and open two sessions, only one of which anything ever remembers.
 let initPromise: Promise<string> | null = null;
 
+/** Message-only view of a caught value, for the WARN-without-stack cases below. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** Response body may be plain JSON or an SSE stream of `data: ` lines; the last `data:` line
  *  wins (final event). */
 function parseMaybeSse(text: string): any {
@@ -181,8 +186,9 @@ export async function queryQmdDaemon(
 ): Promise<QmdMcpQueryRow[] | null> {
   if (collections.length === 0) return [];
   const fetchImpl = opts.deps?.fetchImpl ?? fetch;
+  const callerSignal = opts.signal;
   const timeoutSignal = AbortSignal.timeout(opts.timeoutMs ?? qmdMcpTimeoutMs());
-  const signal = opts.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
+  const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
   try {
     const result = await qmdCall(
       "query",
@@ -209,7 +215,26 @@ export async function queryQmdDaemon(
     const rows = result?.structuredContent?.results;
     return Array.isArray(rows) ? rows : [];
   } catch (error) {
-    logger.warn({ err: error }, "knowledge-recall: qmd-mcp daemon query failed; falling back to CLI");
+    // The caller (HTTP client) disconnected — expected/abandoned, not a daemon problem. Logging
+    // this at WARN with a full stack (RK9-186 production check, 12.9.2026: `AbortError: This
+    // operation was aborted`) drowns out genuine daemon failures at the same level. `debug` keeps
+    // it visible on demand without polluting the WARN stream.
+    if (callerSignal?.aborted) {
+      logger.debug(
+        { err: errorMessage(error) },
+        "knowledge-recall: qmd-mcp daemon query aborted by caller; falling back to CLI",
+      );
+    } else if (timeoutSignal.aborted) {
+      // Our own deadline fired — the daemon being slow IS worth a WARN, but the stack trace of an
+      // AbortError points at this module, not at the daemon, so it adds nothing; keep just the
+      // message.
+      logger.warn(
+        { err: errorMessage(error) },
+        "knowledge-recall: qmd-mcp daemon query timed out; falling back to CLI",
+      );
+    } else {
+      logger.warn({ err: error }, "knowledge-recall: qmd-mcp daemon query failed; falling back to CLI");
+    }
     return null;
   }
 }
