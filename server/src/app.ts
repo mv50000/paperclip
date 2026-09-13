@@ -152,6 +152,7 @@ export async function createApp(
     outreachSenderApiKey?: string;
     outreachUnsubscribeBaseUrl?: string;
     outreachInboundHmacSecret?: string;
+    outreachInboundOwnDomains?: string[];
   },
 ) {
   const app = express();
@@ -318,7 +319,12 @@ export async function createApp(
       unsubscribeBaseUrl: opts.outreachUnsubscribeBaseUrl ?? "https://paperclip.rk9.fi",
     }),
   );
-  api.use(outreachInboundRoutes(db, { hmacSecret: opts.outreachInboundHmacSecret }));
+  api.use(
+    outreachInboundRoutes(db, {
+      hmacSecret: opts.outreachInboundHmacSecret,
+      ownDomains: opts.outreachInboundOwnDomains ?? [],
+    }),
+  );
   api.use(resendInboundRoutes(db));
   api.use(sesInboundRoutes(db));
   api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));

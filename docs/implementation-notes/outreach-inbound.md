@@ -52,15 +52,18 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
      self-loop before DSN would misclassify every real bounce as a loop. This
      was caught by `outreach-inbound-classify.test.ts`'s DSN fixture during
      development, not assumed.
-  2. **Self-loop** — sender domain matches a recipient domain on a
+  2. **Self-loop** — sender domain matches a `To`/`Cc` recipient domain on a
      *non-DSN* message. A prospect's address is never on our own domain, so
      anything else same-domain-both-sides is a misconfiguration or a genuine
      loop (the [Ololla mail-loop incident](../../RK9/issues/RK9-190),
      2026-05-12: `info@ololla.fi` → itself → auto-reply → new inbound → ∞,
      22k+ loop messages before the 24h escalation flood). Dropped and logged,
      nothing written to the DB.
-  3. **Unsubscribe** — any recipient local-part is `unsub` (matches
-     `mailto:unsub@${domain}` from `message-format.ts#buildUnsubscribeHeaders`).
+  3. **Unsubscribe** — a `To`/`Cc` local-part is `unsub` **and** its domain is
+     in `OUTREACH_INBOUND_OWN_DOMAINS` (matches `mailto:unsub@${domain}` from
+     `message-format.ts#buildUnsubscribeHeaders`). Fails closed: an
+     unconfigured/empty allowlist means this branch never fires — see
+     "Adversarial verification" below for why the domain check exists at all.
   4. **Auto-reply/OOO** — reuses `classifyInbound` from
      `../email/junk-guard.ts` verbatim (RFC 3834 `Auto-Submitted`,
      `Precedence`, `List-*`) rather than inventing a second heuristic.
@@ -80,9 +83,11 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
 - `inbound-verify.ts` — the HMAC scheme above, pure.
 - `inbound.ts` — DB orchestration. Resolves the specific prospect/message via
   `extractReferencedMessageIds` (reused from `../email/inbound-router.ts` —
-  same `In-Reply-To`/`References` parsing the CS-desk pipeline already uses)
-  against the new `getMessageByRfc822Id` lookup (`messages.ts`), then calls
-  `recordEvent` — exactly what `unsubscribe.ts` already does, and what
+  same `In-Reply-To`/`References` parsing the CS-desk pipeline already uses),
+  capped to the first 20 candidates, against a single batched
+  `getMessagesByRfc822Ids` lookup (`messages.ts`, `inArray`) — see
+  "Adversarial verification" for why this isn't one query per candidate. Then
+  calls `recordEvent` — exactly what `unsubscribe.ts` already does, and what
   actually stops the sequence: `recordEvent`'s `applyEventToProspect` flips
   the prospect to `replied`/`bounced`/`unsubscribed` (terminal or sticky per
   `logic.ts`), and every future scheduler tick skips a prospect that's no
@@ -116,15 +121,17 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
 | Env var | Purpose | Unset behavior |
 |---|---|---|
 | `OUTREACH_INBOUND_HMAC_SECRET` | Shared HMAC secret for the rk9-prod relay | Route 401s every request (fail closed) |
+| `OUTREACH_INBOUND_OWN_DOMAINS` | Comma-separated, lower-cased domains treated as "ours" for the `unsub@` classifier (e.g. `outreach.rk9.fi`) | `hasUnsubscribeRecipient` never matches (fail closed) |
 
-Plain server env var, same as `OUTREACH_SENDER_API_KEY` — **not** a
+Plain server env vars, same as `OUTREACH_SENDER_API_KEY` — **not** a
 Paperclip `company_secrets` row (there's no per-company secret model here;
 one secret speaks for the whole outreach domain), so the DB-level
 `encrypt-secret` helper (`feedback_encrypt_secret_helper` in the operator's
-vault) doesn't apply. Generate with `openssl rand -base64 32` and set it
-identically in Paperclip's server env (paperclip-01) and the rk9-prod
-receiver script's env — same two-host deployment shape as
-`OUTREACH_SENDER_API_KEY`.
+vault) doesn't apply. Generate the HMAC secret with `openssl rand -base64 32`
+and set it identically in Paperclip's server env (paperclip-01) and the
+rk9-prod receiver script's env — same two-host deployment shape as
+`OUTREACH_SENDER_API_KEY`. `OUTREACH_INBOUND_OWN_DOMAINS` only needs to exist
+on paperclip-01 (it's not part of the signed request).
 
 ## rk9-prod side (not done here)
 
@@ -161,21 +168,80 @@ Document the actual `install.sh`/`main.cf.snippet` changes in
 not here, and not executed by this PR (MTA changes were explicitly blocked
 for RK9-195).
 
+## Adversarial verification (RK9-195, sensitive-diff gate)
+
+This route accepts raw, unauthenticated (from the mail sender's point of
+view) internet content and can trigger a *global, permanent, cross-tenant*
+side effect (`outreach_suppressions` has no DELETE by design), so it was
+pre-classified sensitive and run through an independent adversarial verifier
+before merge. Findings and disposition:
+
+- **H1 (fixed in part, residual risk documented)** — the HMAC only
+  authenticates the Postfix-relay hop, not the mail's claimed sender; nothing
+  checks DKIM/DMARC/SPF/`Authentication-Results` (none of that plumbing exists
+  on the loopback-only rk9-prod Postfix yet — MTA-side, blocked for this
+  ticket). The verifier also found `hasUnsubscribeRecipient` matched
+  `unsub@` on **any** domain, not just our own, letting a forged `To:` header
+  suppress an arbitrary address regardless of what Postfix actually
+  accepted. **Fixed**: `hasUnsubscribeRecipient` now takes an `ownDomains`
+  allowlist (`OUTREACH_INBOUND_OWN_DOMAINS`) and fails closed when
+  unconfigured. **Not fixed here** (needs the MTA side): a forged `From:` on
+  a message that *is* addressed to a real `unsub@outreach.rk9.fi` can still
+  trigger a suppression-by-email for whatever address it claims — full
+  mitigation needs SPF/DKIM verification on rk9-prod's Postfix, which is
+  explicitly out of this ticket's scope ("Blokattu: MTA"). Follow-up ticket
+  needed once the rk9-prod receiver side (see above) is built.
+- **H2 (fixed)** — an attacker-controlled `References` header with tens of
+  thousands of ids drove `extractReferencedMessageIds`'s O(n²) dedup, then one
+  sequential DB query per id — measured at 14.6s of event-loop blocking and
+  60,000 queries for a 769KB body, under the 5MB cap, with the route
+  otherwise unrate-limited. Fixed with two independent caps plus a batch:
+  the raw `References` header is truncated to 2000 chars before it ever
+  reaches `extractReferencedMessageIds` (`inbound-mime.ts`), the resulting
+  candidate list is capped to 20 (`inbound.ts`), and the lookup is one
+  batched `inArray` query (`getMessagesByRfc822Ids`) instead of N sequential
+  ones.
+- **M2 (fixed)** — the self-loop and unsub guards only inspected `To`,
+  missing a `Cc`-only bypass. Both now check `To`+`Cc`.
+- **L1 (fixed)** — `recordEvent`'s `{ok:false}` result was discarded at all
+  3 call sites, silently masking a dropped write. Now logged via
+  `logIfEventNotRecorded`.
+- **L2 (fixed)** — the 401 response body echoed the specific rejection
+  reason to an unauthenticated caller. Now a generic `{error:"unauthorized"}`;
+  the reason is logged server-side only.
+- **M1** (forged-sender DSNs honored as real bounces if the attacker already
+  knows a real Message-ID), **M3** (a DSN whose original message is quoted
+  only in `text/plain`, with no `message/rfc822` attachment, is dropped as
+  unmatched rather than extracted), **L3** (413-vs-Postfix-receiver retry
+  semantics aren't coordinated yet — no receiver script exists), and **L4**
+  (no replay/idempotency window beyond the 5-minute HMAC check) are **not**
+  fixed in this PR — each either needs the not-yet-built rk9-prod receiver
+  script or is a genuine defense-in-depth nice-to-have with no immediate
+  exploit path once H1/H2 are closed. Tracked as follow-up work alongside the
+  H1 residual-risk item above, not blocking this PR.
+
 ## Tests
 
 - `outreach-inbound-classify.test.ts` — classification order (including the
-  DSN-vs-self-loop fixture above), DSN field parsing/severity, original-
-  Message-ID extraction. Real MIME fed through `mailparser`, not mocked.
+  DSN-vs-self-loop fixture above), the `ownDomains`-scoped/fail-closed
+  `hasUnsubscribeRecipient` (H1), `Cc`-only self-loop/unsub matches (M2), the
+  `References`-header truncation (H2), DSN field parsing/severity,
+  original-Message-ID extraction. Real MIME fed through `mailparser`, not
+  mocked.
 - `outreach-inbound-verify.test.ts` — HMAC accept/reject paths, fail-closed
   on missing secret, replay-window rejection.
 - `outreach-inbound-logic.test.ts` — DB orchestration with `messages.ts`/
   `events.ts`/`suppressions.ts`/`inbound-router.ts` mocked at the module
   boundary (same convention as `outreach-sender-routes.test.ts`): every
   classification branch, the CS-desk handoff failing without losing the
-  primary write, and the mail-loop guard never touching the DB.
+  primary write, the mail-loop guard never touching the DB, the threading
+  candidate cap collapsing to one batched query (H2), unsub@ on a
+  foreign/unconfigured domain never reaching `addOutreachSuppression` (H1),
+  and a discarded `recordEvent` failure getting logged (L1).
 - `outreach-inbound-route.test.ts` — HTTP layer: 401 on bad signature (before
-  any parsing), 413 over 5 MB, 200 that echoes the classifier outcome, 200
-  (never a retry-triggering 5xx) when processing throws.
+  any parsing) with a generic body (L2), 413 over 5 MB, 200 that echoes the
+  classifier outcome, 200 (never a retry-triggering 5xx) when processing
+  throws.
 
 No test exercises a live Postfix or a live rk9-prod relay — same limitation
 `outreach-sender.md` documents for the outbound side, for the same reason

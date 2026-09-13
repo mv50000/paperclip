@@ -14,9 +14,15 @@ import {
 } from "./inbound-classify.js";
 import { parseInboundMime, type ParsedInboundMail } from "./inbound-mime.js";
 import { normalizeEmail } from "./logic.js";
-import { getMessageByRfc822Id } from "./messages.js";
+import { getMessageByRfc822Id, getMessagesByRfc822Ids } from "./messages.js";
 import { recordEvent } from "./events.js";
 import { addOutreachSuppression } from "./suppressions.js";
+
+// RK9-195 verifier H2: hard cap on how many `References`/`In-Reply-To`
+// candidates we'll ever look up per inbound message, independent of the
+// (also capped, see inbound-mime.ts) header length — bounds the batched
+// query below to a single small `IN (...)`.
+const MAX_THREADING_CANDIDATES = 20;
 
 export type OutreachInboundOutcome =
   | "self_loop_dropped"
@@ -41,10 +47,15 @@ interface ThreadMatch {
   messageId: string;
 }
 
-/** Tries each referenced Message-ID (most recent first) against `outreach_messages`. */
+/** Tries each referenced Message-ID (most recent first) against `outreach_messages`, in one batched query. */
 async function resolveByThreading(db: Db, parsed: ParsedInboundMail): Promise<ThreadMatch | null> {
-  for (const candidate of extractReferencedMessageIds(parsed.headers)) {
-    const message = await getMessageByRfc822Id(db, candidate);
+  const candidates = extractReferencedMessageIds(parsed.headers).slice(0, MAX_THREADING_CANDIDATES);
+  if (candidates.length === 0) return null;
+  const rows = await getMessagesByRfc822Ids(db, candidates);
+  if (rows.length === 0) return null;
+  const byMessageId = new Map(rows.map((r) => [r.messageId, r]));
+  for (const candidate of candidates) {
+    const message = byMessageId.get(candidate);
     if (message) return { companyId: message.companyId, prospectId: message.prospectId, messageId: message.id };
   }
   return null;
@@ -79,18 +90,31 @@ async function attemptCsAgentHandoff(db: Db, companyId: string, parsed: ParsedIn
   }
 }
 
-export async function processOutreachInboundMail(db: Db, rawMime: Buffer): Promise<ProcessInboundResult> {
+/** Logs (never throws) when `recordEvent`'s side effects didn't apply — RK9-195 verifier L1: this used to be discarded silently at every call site. */
+function logIfEventNotRecorded(result: { ok: boolean; reason?: string }, context: Record<string, unknown>): void {
+  if (!result.ok) {
+    logger.warn({ ...context, reason: result.reason }, "outreach inbound: recordEvent did not apply");
+  }
+}
+
+export async function processOutreachInboundMail(
+  db: Db,
+  rawMime: Buffer,
+  opts: { ownDomains: string[] },
+): Promise<ProcessInboundResult> {
   const parsed = await parseInboundMime(rawMime);
   const kind = classifyInboundOutreachMail({
     from: parsed.from,
     to: parsed.to,
+    cc: parsed.cc,
     headers: parsed.headers,
     contentType: parsed.contentType,
+    ownDomains: opts.ownDomains,
   });
 
   switch (kind) {
     case "self_loop": {
-      logger.warn({ from: parsed.from, to: parsed.to }, "outreach inbound: dropped same-domain loop");
+      logger.warn({ from: parsed.from, to: parsed.to, cc: parsed.cc }, "outreach inbound: dropped same-domain loop");
       return { outcome: "self_loop_dropped" };
     }
 
@@ -101,17 +125,24 @@ export async function processOutreachInboundMail(db: Db, rawMime: Buffer): Promi
     case "unsubscribe": {
       const thread = await resolveByThreading(db, parsed);
       if (thread) {
-        await recordEvent(db, thread.companyId, {
+        const result = await recordEvent(db, thread.companyId, {
           prospectId: thread.prospectId,
           messageId: thread.messageId,
           type: "unsubscribe",
           payload: { via: "inbound_unsub_mailto" },
         });
+        logIfEventNotRecorded(result, { companyId: thread.companyId, messageId: thread.messageId, type: "unsubscribe" });
         return { outcome: "unsubscribed_by_thread" };
       }
       // No threading header (typical for a bare `mailto:unsub@` send) — the
       // suppression list is GLOBAL and keyed on the e-mail alone, so a
       // specific prospect/company match isn't required to honour the opt-out.
+      // Residual risk (RK9-195 verifier H1, documented in
+      // docs/implementation-notes/outreach-inbound.md): this `From` is
+      // unauthenticated mail-header content — full mitigation needs SPF/DKIM
+      // verification on the rk9-prod MTA side, out of this ticket's scope
+      // ("Blokattu: MTA"). `hasUnsubscribeRecipient`'s own-domain restriction
+      // (inbound-classify.ts) bounds the blast radius in the meantime.
       if (!parsed.from) return { outcome: "unsubscribe_skipped_no_sender" };
       await addOutreachSuppression(db, {
         email: normalizeEmail(parsed.from),
@@ -129,24 +160,26 @@ export async function processOutreachInboundMail(db: Db, rawMime: Buffer): Promi
       if (!originalMessageId) return { outcome: "dsn_unmatched", detail: { reason: "no_original_message_id" } };
       const message = await getMessageByRfc822Id(db, originalMessageId);
       if (!message) return { outcome: "dsn_unmatched", detail: { reason: "message_not_found", originalMessageId } };
-      await recordEvent(db, message.companyId, {
+      const result = await recordEvent(db, message.companyId, {
         prospectId: message.prospectId,
         messageId: message.id,
         type: severity,
         payload: { action: fields.action, status: fields.status, diagnosticCode: fields.diagnosticCode },
       });
+      logIfEventNotRecorded(result, { companyId: message.companyId, messageId: message.id, type: severity });
       return { outcome: "bounce_recorded", detail: { severity } };
     }
 
     case "reply": {
       const thread = await resolveByThreading(db, parsed);
       if (!thread) return { outcome: "reply_unmatched" };
-      await recordEvent(db, thread.companyId, {
+      const result = await recordEvent(db, thread.companyId, {
         prospectId: thread.prospectId,
         messageId: thread.messageId,
         type: "reply",
         payload: {},
       });
+      logIfEventNotRecorded(result, { companyId: thread.companyId, messageId: thread.messageId, type: "reply" });
       try {
         await attemptCsAgentHandoff(db, thread.companyId, parsed);
       } catch (err) {

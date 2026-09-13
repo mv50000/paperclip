@@ -10,6 +10,8 @@ import { simpleParser, type AddressObject } from "mailparser";
 export interface ParsedInboundMail {
   from: string;
   to: string[];
+  /** RK9-195 verifier M2: the loop/unsub guards must also see `Cc` recipients, not just `To`. */
+  cc: string[];
   subject: string;
   /** Plain-text body (mailparser also folds a `message/delivery-status` MIME part in here — see inbound-classify.ts). */
   text: string | null;
@@ -34,6 +36,13 @@ function firstAddress(addr: AddressObject | AddressObject[] | undefined): string
   return allAddresses(addr)[0];
 }
 
+// RK9-195 verifier H2: an attacker-controlled `References` header with tens of
+// thousands of message-ids drove `extractReferencedMessageIds`'s O(n^2)
+// dedup (and, downstream, one sequential DB query per id) to 14.6s of
+// event-loop blocking on a 769KB body. Truncating the raw header here (before
+// it ever reaches that function) caps the cost regardless of what calls it.
+const MAX_REFERENCES_HEADER_CHARS = 2000;
+
 const ALLOWLISTED_HEADERS = [
   "auto-submitted",
   "precedence",
@@ -43,18 +52,23 @@ const ALLOWLISTED_HEADERS = [
 
 export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundMail> {
   const parsed = await simpleParser(rawMime);
+  // Defensive: an extreme/malformed header section (e.g. a multi-megabyte
+  // `References`) has been observed to make mailparser return without a
+  // populated `headers` Map — fall back to an empty one rather than throw.
+  const rawHeaders: { get(name: string): unknown } = parsed.headers ?? new Map();
 
   const headers: Record<string, string> = {};
   if (parsed.messageId) headers["message-id"] = parsed.messageId;
   if (parsed.inReplyTo) headers["in-reply-to"] = parsed.inReplyTo;
   if (parsed.references) {
-    headers["references"] = Array.isArray(parsed.references) ? parsed.references.join(" ") : parsed.references;
+    const joined = Array.isArray(parsed.references) ? parsed.references.join(" ") : parsed.references;
+    headers["references"] = joined.slice(0, MAX_REFERENCES_HEADER_CHARS);
   }
   for (const name of ALLOWLISTED_HEADERS) {
-    const value = parsed.headers.get(name);
+    const value = rawHeaders.get(name);
     if (typeof value === "string") headers[name] = value;
   }
-  const list = parsed.headers.get("list") as Record<string, unknown> | undefined;
+  const list = rawHeaders.get("list") as Record<string, unknown> | undefined;
   if (list && typeof list === "object") {
     for (const sub of ["unsubscribe", "id"] as const) {
       const raw = (list as Record<string, unknown>)[sub];
@@ -65,7 +79,7 @@ export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundMa
     }
   }
 
-  const contentTypeHeader = parsed.headers.get("content-type") as
+  const contentTypeHeader = rawHeaders.get("content-type") as
     | { value?: string; params?: Record<string, string> }
     | string
     | undefined;
@@ -81,6 +95,7 @@ export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundMa
   return {
     from: firstAddress(parsed.from) ?? "",
     to: allAddresses(parsed.to),
+    cc: allAddresses(parsed.cc),
     subject: parsed.subject ?? "",
     text: typeof parsed.text === "string" ? parsed.text : null,
     html: typeof parsed.html === "string" ? parsed.html : null,

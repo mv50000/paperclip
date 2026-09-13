@@ -35,7 +35,7 @@ const captureRawBody: RequestHandler = (req, res, next) => {
   });
 };
 
-export function outreachInboundRoutes(db: Db, opts: { hmacSecret: string | undefined }) {
+export function outreachInboundRoutes(db: Db, opts: { hmacSecret: string | undefined; ownDomains: string[] }) {
   const router = Router();
 
   router.post("/outreach/inbound", captureRawBody, async (req, res, next) => {
@@ -47,12 +47,16 @@ export function outreachInboundRoutes(db: Db, opts: { hmacSecret: string | undef
 
     const verify = verifyOutreachInboundSignature(rawBody, readOutreachInboundHeaders(req.headers), opts.hmacSecret);
     if (!verify.ok) {
-      res.status(401).json({ error: verify.reason });
+      // RK9-195 verifier L2: don't hand an unauthenticated caller the exact
+      // rejection reason (missing_secret vs. stale_timestamp vs. bad
+      // signature) — log it server-side for triage instead.
+      logger.warn({ reason: verify.reason }, "outreach inbound: rejected signature");
+      res.status(401).json({ error: "unauthorized" });
       return;
     }
 
     try {
-      const result = await processOutreachInboundMail(db, rawBody);
+      const result = await processOutreachInboundMail(db, rawBody, { ownDomains: opts.ownDomains });
       res.status(200).json({ ok: true, outcome: result.outcome });
     } catch (err) {
       // Never let a parse/processing failure retry-loop the relay (same rule

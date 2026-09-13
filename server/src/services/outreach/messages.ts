@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachMessages } from "@paperclipai/db";
 import type {
@@ -74,6 +74,18 @@ export async function getMessageByRfc822Id(db: Db, rfc822MessageId: string) {
     .where(eq(outreachMessages.messageId, rfc822MessageId))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * RK9-195 verifier H2: `resolveByThreading` used to issue one sequential
+ * query per candidate Message-ID from an attacker-controlled `References`
+ * header (measured at 60,000 queries / 14.6s event-loop blocking for a
+ * 769KB body). One batched `inArray` lookup instead — caller still caps how
+ * many candidate ids it passes in.
+ */
+export async function getMessagesByRfc822Ids(db: Db, rfc822MessageIds: string[]) {
+  if (rfc822MessageIds.length === 0) return [];
+  return db.select().from(outreachMessages).where(inArray(outreachMessages.messageId, rfc822MessageIds));
 }
 
 export type CreateMessageResult =

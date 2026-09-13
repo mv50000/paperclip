@@ -17,7 +17,10 @@ async function createApp() {
     import("../routes/outreach-inbound.js") as Promise<typeof import("../routes/outreach-inbound.js")>,
   ]);
   const app = express();
-  app.use("/api", outreachInboundRoutes({} as any, { hmacSecret: "test-secret" }));
+  app.use(
+    "/api",
+    outreachInboundRoutes({} as any, { hmacSecret: "test-secret", ownDomains: ["outreach.rk9.fi"] }),
+  );
   app.use(errorHandler);
   return app;
 }
@@ -40,7 +43,8 @@ describe("outreach inbound relay (HMAC-signed, no board auth)", () => {
       .send(Buffer.from("From: a@b.com\r\n\r\nbody"));
 
     expect(res.status).toBe(401);
-    expect(res.body).toEqual({ error: "invalid_signature" });
+    // RK9-195 verifier L2: the specific rejection reason must not leak to the caller.
+    expect(res.body).toEqual({ error: "unauthorized" });
     expect(mockOutreach.processOutreachInboundMail).not.toHaveBeenCalled();
   });
 
@@ -57,7 +61,9 @@ describe("outreach inbound relay (HMAC-signed, no board auth)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, outcome: "reply_recorded" });
-    expect(mockOutreach.processOutreachInboundMail).toHaveBeenCalledWith({}, expect.any(Buffer));
+    expect(mockOutreach.processOutreachInboundMail).toHaveBeenCalledWith({}, expect.any(Buffer), {
+      ownDomains: ["outreach.rk9.fi"],
+    });
   });
 
   it("rejects a body over 5 MB with 413, before any signature check", async () => {

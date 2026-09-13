@@ -7,8 +7,16 @@ import { classifyInbound } from "../email/junk-guard.js";
 export interface ClassifyInboundInput {
   from: string;
   to: string[];
+  /** RK9-195 verifier M2: loop/unsub guards below must also see `Cc`, not just `To`. */
+  cc: string[];
   headers: Record<string, string>;
   contentType: { value: string; params: Record<string, string> };
+  /**
+   * Lower-cased domains this deployment actually sends outreach from.
+   * `hasUnsubscribeRecipient` is fail-closed on this: an empty list means the
+   * `unsub@` mailto fallback never fires (see `config.ts#outreachInboundOwnDomains`).
+   */
+  ownDomains: string[];
 }
 
 export type OutreachInboundKind =
@@ -34,19 +42,30 @@ function addressLocalPart(addr: string): string {
  * domain matches ANY recipient domain on this message originated from our
  * own outreach domain (e.g. a bounce-of-a-bounce, or a misconfigured
  * challenge-response reply) and must never be treated as a genuine signal.
- * Only checked against `to` because that's the domain Postfix routed this
- * message to us on — `inbound-router.ts`'s existing guard is the same shape,
- * just computed from a config row instead of the message itself.
+ * Checked against `to`+`cc` (RK9-195 verifier M2: a `Cc`-only match used to
+ * slip past this) — the domain Postfix routed this message to us on is one
+ * of them — `inbound-router.ts`'s existing guard is the same shape, just
+ * computed from a config row instead of the message itself.
  */
-export function isSelfLoop(from: string, to: string[]): boolean {
+export function isSelfLoop(from: string, recipients: string[]): boolean {
   const fromDomain = addressDomain(from);
   if (!fromDomain) return false;
-  return to.some((addr) => addressDomain(addr) === fromDomain);
+  return recipients.some((addr) => addressDomain(addr) === fromDomain);
 }
 
-/** Matches the `mailto:unsub@${domain}` convention from `message-format.ts#buildUnsubscribeHeaders`. */
-export function hasUnsubscribeRecipient(to: string[]): boolean {
-  return to.some((addr) => addressLocalPart(addr) === "unsub");
+/**
+ * Matches the `mailto:unsub@${domain}` convention from
+ * `message-format.ts#buildUnsubscribeHeaders` — restricted to `ownDomains`
+ * (RK9-195 verifier H1: `To`/`Cc` are attacker-controlled header content, not
+ * a verified envelope recipient, so matching `unsub@` on ANY domain let a
+ * forged header trigger a permanent, global, cross-tenant suppression for an
+ * arbitrary address). Fails closed: an unconfigured/empty `ownDomains` never matches.
+ */
+export function hasUnsubscribeRecipient(recipients: string[], ownDomains: string[]): boolean {
+  if (ownDomains.length === 0) return false;
+  return recipients.some(
+    (addr) => addressLocalPart(addr) === "unsub" && ownDomains.includes(addressDomain(addr)),
+  );
 }
 
 export function isDeliveryStatusNotification(contentType: ClassifyInboundInput["contentType"]): boolean {
@@ -67,9 +86,10 @@ export function isDeliveryStatusNotification(contentType: ClassifyInboundInput["
  * unsubscribe/OOO, so a would-be loop is never misread as either.
  */
 export function classifyInboundOutreachMail(input: ClassifyInboundInput): OutreachInboundKind {
+  const recipients = [...input.to, ...input.cc];
   if (isDeliveryStatusNotification(input.contentType)) return "dsn";
-  if (isSelfLoop(input.from, input.to)) return "self_loop";
-  if (hasUnsubscribeRecipient(input.to)) return "unsubscribe";
+  if (isSelfLoop(input.from, recipients)) return "self_loop";
+  if (hasUnsubscribeRecipient(recipients, input.ownDomains)) return "unsubscribe";
   if (classifyInbound({ from: input.from, headers: input.headers }).automated) return "auto_reply";
   return "reply";
 }

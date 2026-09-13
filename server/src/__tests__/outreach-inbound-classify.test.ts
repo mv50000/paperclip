@@ -14,6 +14,8 @@ function raw(lines: string[]): Buffer {
   return Buffer.from(lines.join("\r\n"), "utf8");
 }
 
+const OWN_DOMAINS = ["outreach.rk9.fi"];
+
 const dsnFixture = (action: string, status: string) =>
   raw([
     "From: MAILER-DAEMON@outreach.rk9.fi",
@@ -66,7 +68,7 @@ describe("classifyInboundOutreachMail", () => {
         "Kiinnostaa, kertokaa lisaa.",
       ]),
     );
-    expect(classifyInboundOutreachMail(parsed)).toBe("reply");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("reply");
   });
 
   it("classifies an RFC 3834 auto-reply/OOO as auto_reply, never reply", async () => {
@@ -81,7 +83,7 @@ describe("classifyInboundOutreachMail", () => {
         "I am out of office.",
       ]),
     );
-    expect(classifyInboundOutreachMail(parsed)).toBe("auto_reply");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("auto_reply");
   });
 
   it("classifies a message to unsub@ as unsubscribe even without threading headers", async () => {
@@ -95,12 +97,12 @@ describe("classifyInboundOutreachMail", () => {
         "stop",
       ]),
     );
-    expect(classifyInboundOutreachMail(parsed)).toBe("unsubscribe");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("unsubscribe");
   });
 
   it("classifies a multipart/report delivery-status message as dsn", async () => {
     const parsed = await parseInboundMime(dsnFixture("failed", "5.1.1"));
-    expect(classifyInboundOutreachMail(parsed)).toBe("dsn");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("dsn");
   });
 
   it("drops a same-domain message as self_loop before any other check (mail-loop guard)", async () => {
@@ -114,7 +116,7 @@ describe("classifyInboundOutreachMail", () => {
         "loop body",
       ]),
     );
-    expect(classifyInboundOutreachMail(parsed)).toBe("self_loop");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("self_loop");
     // Sanity: a naive implementation might see this same message as a "reply" —
     // assert directly that isSelfLoop fires so the guard can't silently regress.
     expect(isSelfLoop(parsed.from, parsed.to)).toBe(true);
@@ -127,7 +129,36 @@ describe("classifyInboundOutreachMail", () => {
     const parsed = await parseInboundMime(dsnFixture("failed", "5.1.1"));
     expect(parsed.from.endsWith("@outreach.rk9.fi")).toBe(true);
     expect(parsed.to.every((addr) => addr.endsWith("@outreach.rk9.fi"))).toBe(true);
-    expect(classifyInboundOutreachMail(parsed)).toBe("dsn");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("dsn");
+  });
+
+  it("does not classify unsub@ on a foreign domain as unsubscribe, even with a matching local-part (RK9-195 verifier H1)", async () => {
+    const parsed = await parseInboundMime(
+      raw([
+        "From: victim@example.com",
+        "To: unsub@evil-attacker-domain.example",
+        "Subject: unsubscribe",
+        "Message-ID: <forged-unsub-1@example.com>",
+        "",
+        "stop",
+      ]),
+    );
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("reply");
+  });
+
+  it("classifies unsub@ appearing only in Cc as unsubscribe (RK9-195 verifier M2)", async () => {
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: outreach-saatavilla@outreach.rk9.fi",
+        "Cc: unsub@outreach.rk9.fi",
+        "Subject: unsubscribe please",
+        "Message-ID: <unsub-cc-1@example.com>",
+        "",
+        "stop",
+      ]),
+    );
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("unsubscribe");
   });
 
   it("self-loop guard still catches a same-domain message that is not a DSN", async () => {
@@ -141,7 +172,7 @@ describe("classifyInboundOutreachMail", () => {
         "body",
       ]),
     );
-    expect(classifyInboundOutreachMail(parsed)).toBe("self_loop");
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("self_loop");
   });
 });
 
@@ -150,9 +181,47 @@ describe("isSelfLoop / hasUnsubscribeRecipient", () => {
     expect(isSelfLoop("prospect@example.com", ["outreach@outreach.rk9.fi"])).toBe(false);
   });
 
-  it("matches unsub@ case-insensitively", () => {
-    expect(hasUnsubscribeRecipient(["UNSUB@outreach.rk9.fi"])).toBe(true);
-    expect(hasUnsubscribeRecipient(["outreach@outreach.rk9.fi"])).toBe(false);
+  it("is a self-loop via Cc even when To differs (RK9-195 verifier M2)", () => {
+    expect(isSelfLoop("outreach-saatavilla@outreach.rk9.fi", ["prospect@example.com"])).toBe(false);
+    expect(
+      isSelfLoop("outreach-saatavilla@outreach.rk9.fi", ["prospect@example.com", "someone@outreach.rk9.fi"]),
+    ).toBe(true);
+  });
+
+  it("matches unsub@ case-insensitively, scoped to ownDomains", () => {
+    expect(hasUnsubscribeRecipient(["UNSUB@outreach.rk9.fi"], OWN_DOMAINS)).toBe(true);
+    expect(hasUnsubscribeRecipient(["outreach@outreach.rk9.fi"], OWN_DOMAINS)).toBe(false);
+  });
+
+  it("does NOT match unsub@ on a domain outside ownDomains (RK9-195 verifier H1)", () => {
+    expect(hasUnsubscribeRecipient(["unsub@evil-attacker-domain.example"], OWN_DOMAINS)).toBe(false);
+  });
+
+  it("fails closed: never matches when ownDomains is empty", () => {
+    expect(hasUnsubscribeRecipient(["unsub@outreach.rk9.fi"], [])).toBe(false);
+  });
+
+  it("matches unsub@ appearing only in Cc, not To (RK9-195 verifier M2)", () => {
+    expect(hasUnsubscribeRecipient(["outreach@outreach.rk9.fi", "unsub@outreach.rk9.fi"], OWN_DOMAINS)).toBe(true);
+  });
+});
+
+describe("parseInboundMime References-header capping (RK9-195 verifier H2)", () => {
+  it("truncates an oversized References header instead of retaining it in full", async () => {
+    const hostileReferences = Array.from({ length: 5000 }, (_, i) => `<c${i}@outreach.rk9.fi>`).join(" ");
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: outreach-saatavilla@outreach.rk9.fi",
+        "Subject: Re: Hei",
+        `References: ${hostileReferences}`,
+        "Message-ID: <reply-huge-refs@example.com>",
+        "",
+        "body",
+      ]),
+    );
+    expect(parsed.references).not.toBeNull();
+    expect(parsed.references!.length).toBeLessThanOrEqual(2000);
   });
 });
 

@@ -109,6 +109,15 @@ export interface Config {
   outreachUnsubscribeBaseUrl: string;
   /** RK9-195: shared HMAC secret for the rk9-prod inbound relay. Unset = `/api/outreach/inbound` 401s on every call. */
   outreachInboundHmacSecret: string | undefined;
+  /**
+   * RK9-195: lower-cased domains the inbound relay treats as "ours" for the
+   * `unsub@<domain>` classifier — an inbound message's `To`/`Cc` headers are
+   * attacker-controlled content, not a verified envelope recipient (Postfix
+   * doesn't pass that through yet — MTA-side, out of scope here), so this is
+   * fail-closed: empty = the `unsub@` mailto fallback never fires, rather than
+   * matching `unsub@` on any domain a forged header names.
+   */
+  outreachInboundOwnDomains: string[];
 }
 
 // Detecting the tailnet address shells out to `tailscale ip -4`, which blocks for up to
@@ -387,5 +396,9 @@ export function loadConfig(): Config {
     outreachUnsubscribeBaseUrl:
       process.env.OUTREACH_UNSUBSCRIBE_BASE_URL?.trim() || "https://paperclip.rk9.fi",
     outreachInboundHmacSecret: process.env.OUTREACH_INBOUND_HMAC_SECRET?.trim() || undefined,
+    outreachInboundOwnDomains: (process.env.OUTREACH_INBOUND_OWN_DOMAINS ?? "")
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean),
   };
 }
