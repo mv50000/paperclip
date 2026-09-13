@@ -48,6 +48,7 @@ import { riskRoutes } from "./routes/risk.js";
 import { emailRoutes } from "./routes/email.js";
 import { outreachRoutes } from "./routes/outreach.js";
 import { outreachSenderRoutes } from "./routes/outreach-sender.js";
+import { outreachInboundRoutes } from "./routes/outreach-inbound.js";
 import { unsubscribeRoutes } from "./routes/unsubscribe.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
 import { sesInboundRoutes } from "./routes/ses-inbound.js";
@@ -150,6 +151,8 @@ export async function createApp(
     systemPause?: SystemPauseService;
     outreachSenderApiKey?: string;
     outreachUnsubscribeBaseUrl?: string;
+    outreachInboundHmacSecret?: string;
+    outreachInboundOwnDomains?: string[];
   },
 ) {
   const app = express();
@@ -314,6 +317,12 @@ export async function createApp(
     outreachSenderRoutes(db, {
       apiKey: opts.outreachSenderApiKey,
       unsubscribeBaseUrl: opts.outreachUnsubscribeBaseUrl ?? "https://paperclip.rk9.fi",
+    }),
+  );
+  api.use(
+    outreachInboundRoutes(db, {
+      hmacSecret: opts.outreachInboundHmacSecret,
+      ownDomains: opts.outreachInboundOwnDomains ?? [],
     }),
   );
   api.use(resendInboundRoutes(db));

@@ -107,6 +107,18 @@ export interface Config {
   outreachSenderApiKey: string | undefined;
   /** Public origin serving `GET/POST /u/:token`, used in the List-Unsubscribe header. */
   outreachUnsubscribeBaseUrl: string;
+  /** RK9-195: shared HMAC secret for the rk9-prod inbound relay. Unset = `/api/outreach/inbound` 401s on every call. */
+  outreachInboundHmacSecret: string | undefined;
+  /**
+   * RK9-195: lower-cased domains the inbound relay treats as "ours" — used by
+   * BOTH the `unsub@<domain>` classifier (fail-closed: empty = the `unsub@`
+   * mailto fallback never fires, rather than matching `unsub@` on any domain
+   * a forged header names) AND the mail-loop guard (fail-OPEN to a weaker
+   * `To`-only proxy when empty — see `isSelfLoop` in inbound-classify.ts).
+   * Must list every domain/subdomain outreach mail can legitimately be sent
+   * from, or the loop guard misses a genuine loop on an unlisted own domain.
+   */
+  outreachInboundOwnDomains: string[];
 }
 
 // Detecting the tailnet address shells out to `tailscale ip -4`, which blocks for up to
@@ -384,5 +396,10 @@ export function loadConfig(): Config {
     outreachSenderApiKey: process.env.OUTREACH_SENDER_API_KEY?.trim() || undefined,
     outreachUnsubscribeBaseUrl:
       process.env.OUTREACH_UNSUBSCRIBE_BASE_URL?.trim() || "https://paperclip.rk9.fi",
+    outreachInboundHmacSecret: process.env.OUTREACH_INBOUND_HMAC_SECRET?.trim() || undefined,
+    outreachInboundOwnDomains: (process.env.OUTREACH_INBOUND_OWN_DOMAINS ?? "")
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean),
   };
 }

@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachMessages } from "@paperclipai/db";
 import type {
@@ -59,6 +59,33 @@ export async function getMessageByUnsubscribeToken(db: Db, token: string) {
     .where(eq(outreachMessages.unsubscribeToken, token))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * RK9-195: the inbound relay's threading lookup — a reply/bounce only carries
+ * the RFC 5322 `Message-ID` header value (via `In-Reply-To`/`References`, or
+ * embedded in a DSN's `message/rfc822` part), not a companyId. Same
+ * company-agnostic convention as `getMessageById`/`getMessageByUnsubscribeToken`.
+ */
+export async function getMessageByRfc822Id(db: Db, rfc822MessageId: string) {
+  const [row] = await db
+    .select()
+    .from(outreachMessages)
+    .where(eq(outreachMessages.messageId, rfc822MessageId))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * RK9-195 verifier H2: `resolveByThreading` used to issue one sequential
+ * query per candidate Message-ID from an attacker-controlled `References`
+ * header (measured at 60,000 queries / 14.6s event-loop blocking for a
+ * 769KB body). One batched `inArray` lookup instead — caller still caps how
+ * many candidate ids it passes in.
+ */
+export async function getMessagesByRfc822Ids(db: Db, rfc822MessageIds: string[]) {
+  if (rfc822MessageIds.length === 0) return [];
+  return db.select().from(outreachMessages).where(inArray(outreachMessages.messageId, rfc822MessageIds));
 }
 
 export type CreateMessageResult =
