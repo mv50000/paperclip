@@ -15,9 +15,13 @@ describe("outreach quality gate (RK9-196)", () => {
     });
   });
 
-  it("detects bracket and template-literal placeholder text", () => {
+  it("detects bracket and template-literal placeholder text, including common leftover-template variants", () => {
     expect(containsPlaceholderText("Hei [yritys], ...")).toBe(true);
     expect(containsPlaceholderText("Hei {{orgName}}, ...")).toBe(true);
+    expect(containsPlaceholderText("Hei [COMPANY_NAME], ...")).toBe(true);
+    expect(containsPlaceholderText("Hei [client-name], ...")).toBe(true);
+    expect(containsPlaceholderText("Hei {company}, ...")).toBe(true);
+    expect(containsPlaceholderText("Ref [123], ...")).toBe(true);
     expect(containsPlaceholderText("Hei Acme Oy, ...")).toBe(false);
   });
 

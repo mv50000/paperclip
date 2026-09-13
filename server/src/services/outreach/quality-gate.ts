@@ -16,8 +16,9 @@ export type QualityGateReason =
 export type QualityGateVerdict = { ok: true } | { ok: false; reason: QualityGateReason };
 
 // Bracketed/braced template leftovers a careless prompt can leak into the
-// body, e.g. "[yritys]", "[company]", "{{orgName}}".
-const PLACEHOLDER_RE = /\[[a-zäöå ]{1,40}\]|\{\{[^}]{1,60}\}\}/i;
+// body, e.g. "[yritys]", "[COMPANY_NAME]", "[client-name]", "{company}",
+// "{{orgName}}". Local part may contain letters, digits, spaces, "_" or "-".
+const PLACEHOLDER_RE = /\[[a-zäöå0-9_ -]{1,40}\]|\{\{[a-zäöå0-9_ -]{1,60}\}\}|\{[a-zäöå0-9_ -]{1,60}\}/i;
 
 export function containsPlaceholderText(text: string): boolean {
   return PLACEHOLDER_RE.test(text);

@@ -43,8 +43,12 @@ mapped in `updateProspect`'s unique-violation catch).
    `~/.claude/skills/prh-prospector`'s own SPA note) for `prospect.sourceUrl`,
    stores a short plain-text excerpt at `enrichment.website.snippet`, and —
    only when `prospect.email` is still null — looks for a *generic/role*
-   address (`info@`, `myynti@`, `firstname.lastname@`, ...; never a named
-   person found by chance, and never a private/free domain). `runFirecrawlScrape`
+   address (`info@`, `myynti@`, `sales@`, ...; never a `firstname.lastname@`
+   or other name-shaped local part, and never a private/free domain — an
+   independent adversarial review of this PR flagged an earlier version that
+   also accepted `firstname.lastname@` as a GDPR violation, since it is a
+   named individual's address by construction; fixed before merge).
+   `runFirecrawlScrape`
    is the only network/exec boundary; every other function in this module is
    pure and unit-tested without it (`server/src/__tests__/outreach-enrichment-logic.test.ts`).
 3. **Draft** (`POST .../messages/draft`, batch; `paperclipai outreach draft

@@ -33,9 +33,6 @@ const ROLE_LOCAL_PARTS = [
   "kontakti",
 ];
 
-/** `etunimi.sukunimi@yritys.fi` — two word-ish tokens joined by a dot. */
-const FIRSTNAME_LASTNAME_RE = /^[a-zäöå]{2,}\.[a-zäöå]{2,}$/i;
-
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 
 /**
@@ -74,7 +71,7 @@ export function extractGenericEmail(markdown: string): string | null {
     seen.add(email);
     if (isPrivateEmailDomain(email)) continue;
     const localPart = email.slice(0, email.indexOf("@"));
-    if (ROLE_LOCAL_PARTS.includes(localPart) || FIRSTNAME_LASTNAME_RE.test(localPart)) {
+    if (ROLE_LOCAL_PARTS.includes(localPart)) {
       return email;
     }
   }

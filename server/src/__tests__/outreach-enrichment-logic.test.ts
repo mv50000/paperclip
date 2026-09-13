@@ -13,14 +13,15 @@ Johtaja Matti Meikäläinen (matti.meikalainen@gmail.com) vastaa mielellään.
     expect(extractGenericEmail(markdown)).toBe("info@acme.fi");
   });
 
-  it("accepts a firstname.lastname address from a role page as a fallback", () => {
+  it("never returns a firstname.lastname address — that is a named person's inbox, not a role address (GDPR)", () => {
     const markdown = "Yhteystiedot\n\nliisa.virtanen@acme.fi";
-    expect(extractGenericEmail(markdown)).toBe("liisa.virtanen@acme.fi");
+    expect(extractGenericEmail(markdown)).toBeNull();
   });
 
   it("returns null when no eligible address is present", () => {
     expect(extractGenericEmail("Ei sähköposteja tällä sivulla.")).toBeNull();
     expect(extractGenericEmail("random@gmail.com only")).toBeNull();
+    expect(extractGenericEmail("Johtaja Matti Meikäläinen, matti.meikalainen@acme.fi")).toBeNull();
   });
 
   it("strips markdown noise into a short plain-text snippet", () => {
