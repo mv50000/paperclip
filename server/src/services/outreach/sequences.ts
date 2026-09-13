@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachSequences } from "@paperclipai/db";
 import type { CreateOutreachSequence, UpdateOutreachSequence } from "@paperclipai/shared";
@@ -23,7 +23,7 @@ export async function getSequence(db: Db, companyId: string, id: string) {
 export async function createSequence(db: Db, companyId: string, input: CreateOutreachSequence) {
   const [row] = await db
     .insert(outreachSequences)
-    .values({ companyId, ...input })
+    .values({ companyId, ...input, activatedAt: input.active ? new Date() : null })
     .onConflictDoNothing({ target: [outreachSequences.companyId, outreachSequences.name] })
     .returning();
   return row ?? null;
@@ -35,9 +35,17 @@ export async function updateSequence(
   id: string,
   patch: UpdateOutreachSequence,
 ) {
+  const setClause: Record<string, unknown> = { ...patch, updatedAt: new Date() };
+  // RK9-194: the warm-up ramp counts days since activation, not since
+  // creation. Restart it on every false→true transition (checked against the
+  // row's own current value in this same statement, so it's race-free), but
+  // leave it untouched while already active or already inactive.
+  if (patch.active === true) {
+    setClause.activatedAt = sql`CASE WHEN ${outreachSequences.active} = false THEN now() ELSE ${outreachSequences.activatedAt} END`;
+  }
   const [row] = await db
     .update(outreachSequences)
-    .set({ ...patch, updatedAt: new Date() })
+    .set(setClause)
     .where(and(eq(outreachSequences.companyId, companyId), eq(outreachSequences.id, id)))
     .returning();
   return row ?? null;

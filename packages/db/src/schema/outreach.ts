@@ -9,6 +9,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 
 // RK9-193: outreach data model. Company-scoped prospects/sequences/messages/
@@ -78,6 +79,12 @@ export const outreachSequences = pgTable(
     /** [{ fromDay, dailyCap }] warm-up ramp. */
     rampSchedule: jsonb("ramp_schedule").notNull().default([]),
     active: boolean("active").notNull().default(false),
+    /**
+     * RK9-194: set (and reset) whenever `active` flips false → true. The
+     * warm-up ramp's `fromDay` counts days since this timestamp, not since
+     * the sequence was created — pausing and reactivating restarts the ramp.
+     */
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -120,6 +127,21 @@ export const outreachMessages = pgTable(
     /** RFC 5322 Message-ID assigned at send time. */
     messageId: text("message_id"),
     inReplyTo: text("in_reply_to"),
+    // RK9-194: scheduler/sender bookkeeping.
+    /** Set when the scheduler promotes `approved` → `queued`. Anchors the daily-cap window. */
+    queuedAt: timestamp("queued_at", { withTimezone: true }),
+    /** SMTP 4xx retries so far (max 3 — see `MAX_SEND_ATTEMPTS`). */
+    attempts: integer("attempts").notNull().default(0),
+    /** Last SMTP failure response, for operator triage. */
+    lastError: text("last_error"),
+    /** Backoff target for a `queued` message that failed with a retryable (4xx) response. */
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    /**
+     * One-click unsubscribe token (RFC 8058). Assigned lazily by the
+     * scheduler when a message is first queued, not at draft time — so
+     * messages drafted before this ticket shipped still get one.
+     */
+    unsubscribeToken: text("unsubscribe_token"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -131,6 +153,14 @@ export const outreachMessages = pgTable(
     prospectIdx: index("outreach_messages_prospect_idx").on(table.prospectId),
     sequenceIdx: index("outreach_messages_sequence_idx").on(table.sequenceId),
     messageIdIdx: index("outreach_messages_message_id_idx").on(table.messageId),
+    // RK9-194: the scheduler orders/filters the send queue by this.
+    statusNextRetryIdx: index("outreach_messages_status_next_retry_idx").on(
+      table.status,
+      table.nextRetryAt,
+    ),
+    unsubscribeTokenUq: uniqueIndex("outreach_messages_unsubscribe_token_unique_idx")
+      .on(table.unsubscribeToken)
+      .where(sql`${table.unsubscribeToken} IS NOT NULL`),
   }),
 );
 

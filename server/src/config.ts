@@ -97,6 +97,16 @@ export interface Config {
   systemPauseCheckIntervalMs: number;
   systemPauseThresholdPct: number;
   maxGlobalConcurrentRuns: number;
+  // RK9-194: outreach send scheduler. Off by default — this promotes
+  // `approved` messages to `queued` for the rk9-prod sender daemon to pick
+  // up, so it must stay off on any instance that isn't meant to run the
+  // pilot (see docs/implementation-notes/outreach-sender.md).
+  outreachSenderEnabled: boolean;
+  outreachSenderIntervalMs: number;
+  /** Shared bearer secret for the rk9-prod daemon's machine API. Unset = that API 401s on every call. */
+  outreachSenderApiKey: string | undefined;
+  /** Public origin serving `GET/POST /u/:token`, used in the List-Unsubscribe header. */
+  outreachUnsubscribeBaseUrl: string;
 }
 
 // Detecting the tailnet address shells out to `tailscale ip -4`, which blocks for up to
@@ -369,5 +379,10 @@ export function loadConfig(): Config {
     systemPauseCheckIntervalMs: Math.max(60000, Number(process.env.SYSTEM_PAUSE_CHECK_INTERVAL_MS) || 300_000),
     systemPauseThresholdPct: Math.min(100, Math.max(50, Number(process.env.SYSTEM_PAUSE_THRESHOLD_PCT) || 90)),
     maxGlobalConcurrentRuns: Math.min(100, Math.max(1, Number(process.env.PAPERCLIP_MAX_GLOBAL_CONCURRENT_RUNS) || 5)),
+    outreachSenderEnabled: process.env.OUTREACH_SENDER_ENABLED === "true",
+    outreachSenderIntervalMs: Math.max(10_000, Number(process.env.OUTREACH_SENDER_INTERVAL_MS) || 60_000),
+    outreachSenderApiKey: process.env.OUTREACH_SENDER_API_KEY?.trim() || undefined,
+    outreachUnsubscribeBaseUrl:
+      process.env.OUTREACH_UNSUBSCRIBE_BASE_URL?.trim() || "https://paperclip.rk9.fi",
   };
 }

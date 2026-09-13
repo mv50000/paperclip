@@ -38,6 +38,29 @@ export async function getMessage(db: Db, companyId: string, id: string) {
   return row ?? null;
 }
 
+/**
+ * Company-agnostic lookup for the scheduler and the sender/report machine
+ * routes, which only have a message id (the daemon doesn't know companyId).
+ * Never expose this behind a company-scoped or agent-scoped route.
+ */
+export async function getMessageById(db: Db, id: string) {
+  const [row] = await db.select().from(outreachMessages).where(eq(outreachMessages.id, id)).limit(1);
+  return row ?? null;
+}
+
+/**
+ * RK9-194: the public `/u/:token` unsubscribe route's only lookup — a token
+ * is unguessable (24 random bytes) so no further scoping is needed.
+ */
+export async function getMessageByUnsubscribeToken(db: Db, token: string) {
+  const [row] = await db
+    .select()
+    .from(outreachMessages)
+    .where(eq(outreachMessages.unsubscribeToken, token))
+    .limit(1);
+  return row ?? null;
+}
+
 export type CreateMessageResult =
   | { ok: true; message: typeof outreachMessages.$inferSelect }
   | { ok: false; reason: "prospect_not_found" | "sequence_not_found" | "prospect_not_contactable" };

@@ -47,6 +47,8 @@ import { adapterRoutes } from "./routes/adapters.js";
 import { riskRoutes } from "./routes/risk.js";
 import { emailRoutes } from "./routes/email.js";
 import { outreachRoutes } from "./routes/outreach.js";
+import { outreachSenderRoutes } from "./routes/outreach-sender.js";
+import { unsubscribeRoutes } from "./routes/unsubscribe.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
 import { sesInboundRoutes } from "./routes/ses-inbound.js";
 import { slackInteractionsRoutes } from "./routes/slack-interactions.js";
@@ -146,6 +148,8 @@ export async function createApp(
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
     slackSigningSecret?: string;
     systemPause?: SystemPauseService;
+    outreachSenderApiKey?: string;
+    outreachUnsubscribeBaseUrl?: string;
   },
 ) {
   const app = express();
@@ -183,6 +187,9 @@ export async function createApp(
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
+  // RK9-194: public, no company/`/api` scoping — a prospect who never signed
+  // in must be able to reach `/u/:token` with one click.
+  app.use(unsubscribeRoutes(db));
   app.use(llmRoutes(db));
 
   const hostServicesDisposers = new Map<string, () => void>();
@@ -303,6 +310,12 @@ export async function createApp(
   api.use(riskRoutes(db));
   api.use(emailRoutes(db));
   api.use(outreachRoutes(db));
+  api.use(
+    outreachSenderRoutes(db, {
+      apiKey: opts.outreachSenderApiKey,
+      unsubscribeBaseUrl: opts.outreachUnsubscribeBaseUrl ?? "https://paperclip.rk9.fi",
+    }),
+  );
   api.use(resendInboundRoutes(db));
   api.use(sesInboundRoutes(db));
   api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));
