@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachProspects } from "@paperclipai/db";
 import type {
@@ -6,7 +6,7 @@ import type {
   OutreachProspectStatus,
   UpdateOutreachProspect,
 } from "@paperclipai/shared";
-import { classifyImport, type ImportRejection } from "./logic.js";
+import { PROSPECT_TERMINAL_STATUSES, classifyImport, type ImportRejection } from "./logic.js";
 import { findOutreachSuppressed } from "./suppressions.js";
 
 export async function listProspects(
@@ -98,34 +98,64 @@ export async function importProspects(
 
 export async function createProspect(db: Db, companyId: string, input: CreateOutreachProspect) {
   const result = await importProspects(db, companyId, [input]);
-  if (result.imported === 1) return { ok: true as const, prospect: await getProspect(db, companyId, result.ids[0]) };
+  if (result.imported === 1) {
+    const prospect = await getProspect(db, companyId, result.ids[0]);
+    if (prospect) return { ok: true as const, prospect };
+  }
   return { ok: false as const, reason: result.rejected[0]?.reason ?? "duplicate_existing" };
 }
 
+/**
+ * Field edits. A `status` edit is only applied while the row is still in the
+ * manual-review states (`new`/`approved`) — checked in the WHERE clause so a
+ * concurrent bounce/unsubscribe cannot be overwritten. Returns
+ * `invalid_transition` when the guard rejects it.
+ */
 export async function updateProspect(
   db: Db,
   companyId: string,
   id: string,
   patch: UpdateOutreachProspect,
-) {
+): Promise<
+  | { ok: true; prospect: typeof outreachProspects.$inferSelect }
+  | { ok: false; reason: "not_found" | "invalid_transition" }
+> {
+  const conditions = [eq(outreachProspects.companyId, companyId), eq(outreachProspects.id, id)];
+  if (patch.status) conditions.push(inArray(outreachProspects.status, ["new", "approved"]));
   const [row] = await db
     .update(outreachProspects)
     .set({ ...patch, updatedAt: new Date() })
-    .where(and(eq(outreachProspects.companyId, companyId), eq(outreachProspects.id, id)))
+    .where(and(...conditions))
     .returning();
-  return row ?? null;
+  if (row) return { ok: true, prospect: row };
+  const existing = await getProspect(db, companyId, id);
+  return { ok: false, reason: existing ? "invalid_transition" : "not_found" };
 }
 
+/**
+ * Event-driven status change. `expectedStatus` is re-checked in the WHERE so
+ * two concurrent events (e.g. unsubscribe + auto-reply) cannot both win; a
+ * terminal status is additionally never overwritten. Returns null when the
+ * guard rejected the update.
+ */
 export async function setProspectStatus(
   db: Db,
   companyId: string,
   id: string,
   status: OutreachProspectStatus,
+  expectedStatus: OutreachProspectStatus,
 ) {
   const [row] = await db
     .update(outreachProspects)
     .set({ status, updatedAt: new Date() })
-    .where(and(eq(outreachProspects.companyId, companyId), eq(outreachProspects.id, id)))
+    .where(
+      and(
+        eq(outreachProspects.companyId, companyId),
+        eq(outreachProspects.id, id),
+        eq(outreachProspects.status, expectedStatus),
+        notInArray(outreachProspects.status, [...PROSPECT_TERMINAL_STATUSES]),
+      ),
+    )
     .returning();
   return row ?? null;
 }

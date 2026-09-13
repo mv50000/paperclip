@@ -74,7 +74,12 @@ export const outreachSendWindowSchema = z
   .object({
     tz: z.string().trim().min(1).max(64).default("Europe/Helsinki"),
     /** ISO weekday numbers, 1 = Monday … 7 = Sunday. */
-    days: z.array(z.number().int().min(1).max(7)).min(1).max(7).default([1, 2, 3, 4, 5]),
+    days: z
+      .array(z.number().int().min(1).max(7))
+      .min(1)
+      .max(7)
+      .default([1, 2, 3, 4, 5])
+      .transform((days) => Array.from(new Set(days)).sort((a, b) => a - b)),
     startHour: z.number().int().min(0).max(23).default(8),
     endHour: z.number().int().min(1).max(24).default(16),
   })
@@ -139,7 +144,13 @@ export const createOutreachEventSchema = z.object({
   messageId: z.string().uuid().optional().nullable(),
   type: z.enum(OUTREACH_EVENT_TYPES),
   payload: z.record(z.unknown()).default({}),
-  occurredAt: z.coerce.date().optional(),
+  occurredAt: z
+    .coerce.date()
+    .refine(
+      (d) => d.getTime() > Date.UTC(2020, 0, 1) && d.getTime() < Date.now() + 24 * 3600 * 1000,
+      "occurredAt out of range",
+    )
+    .optional(),
 });
 export type CreateOutreachEvent = z.infer<typeof createOutreachEventSchema>;
 

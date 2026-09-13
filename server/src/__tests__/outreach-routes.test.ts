@@ -182,6 +182,76 @@ describe.sequential("outreach routes", () => {
     expect(mockOutreach.rejectMessage).not.toHaveBeenCalled();
   });
 
+  it("agents cannot write the global suppression list directly nor via opt-out events", async () => {
+    const agent = { type: "agent", agentId: "agent-1", companyId: "company-1" };
+    const app = await createApp(agent);
+    let res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/suppressions").send({ email: "a@b.fi" }),
+    );
+    expect(res.status).toBe(403);
+    expect(mockOutreach.addOutreachSuppression).not.toHaveBeenCalled();
+
+    for (const type of ["unsubscribe", "complaint", "bounce_hard"]) {
+      res = await requestApp(app, (base) =>
+        request(base)
+          .post("/api/companies/company-1/outreach/events")
+          .send({ prospectId: "11111111-1111-1111-1111-111111111111", type }),
+      );
+      expect(res.status).toBe(403);
+    }
+    expect(mockOutreach.recordEvent).not.toHaveBeenCalled();
+
+    // Informational events are fine for agents.
+    mockOutreach.recordEvent.mockResolvedValue({
+      ok: true,
+      event: { id: "e1", type: "reply", prospectId: "11111111-1111-1111-1111-111111111111" },
+      prospectStatus: "replied",
+      suppressed: false,
+    });
+    res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/events")
+        .send({ prospectId: "11111111-1111-1111-1111-111111111111", type: "reply" }),
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("board actors can record opt-out events", async () => {
+    mockOutreach.recordEvent.mockResolvedValue({
+      ok: true,
+      event: { id: "e2", type: "unsubscribe", prospectId: "11111111-1111-1111-1111-111111111111" },
+      prospectStatus: "unsubscribed",
+      suppressed: true,
+    });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/events")
+        .send({ prospectId: "11111111-1111-1111-1111-111111111111", type: "unsubscribe" }),
+    );
+    expect(res.status).toBe(201);
+    expect(res.body.suppressed).toBe(true);
+  });
+
+  it("malformed path ids are 404, not 500", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (base) => request(base).get("/api/companies/company-1/outreach/prospects/not-a-uuid"));
+    expect(res.status).toBe(404);
+    expect(mockOutreach.getProspect).not.toHaveBeenCalled();
+  });
+
+  it("prospect PATCH maps the service's invalid_transition to 409", async () => {
+    mockOutreach.updateProspect.mockResolvedValueOnce({ ok: false, reason: "invalid_transition" });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .patch("/api/companies/company-1/outreach/prospects/11111111-1111-1111-1111-111111111111")
+        .send({ status: "approved" }),
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("invalid_transition");
+  });
+
   it("suppression add is idempotent (201 on create, 200 on existing) and has no DELETE route", async () => {
     mockOutreach.addOutreachSuppression
       .mockResolvedValueOnce({ created: true, entry: { id: "s1", email: "a@b.fi", reason: "manual" } })

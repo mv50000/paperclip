@@ -48,6 +48,37 @@ export async function recordEvent(
     if (!message || message.prospectId !== prospect.id) return { ok: false, reason: "message_not_found" };
   }
 
+  const effect = applyEventToProspect(prospect.status as OutreachProspectStatus, input.type);
+
+  // Order matters (no transaction across these autocommit statements): the
+  // legally important write — the global suppression row — goes first, so a
+  // failure later leaves the opt-out recorded and a retry is harmless.
+  if (effect.suppress) {
+    await addOutreachSuppression(db, {
+      email: prospect.email,
+      reason: effect.suppress,
+      sourceCompanyId: companyId,
+      note: `${input.type} event`,
+    });
+  }
+  let prospectStatus = prospect.status as OutreachProspectStatus;
+  if (effect.prospectStatus) {
+    // Guarded on the status we read: a concurrent event wins or loses cleanly.
+    const updated = await setProspectStatus(
+      db,
+      companyId,
+      prospect.id,
+      effect.prospectStatus,
+      prospect.status as OutreachProspectStatus,
+    );
+    const fresh = updated ?? (await getProspect(db, companyId, prospect.id));
+    prospectStatus = (fresh?.status ?? prospectStatus) as OutreachProspectStatus;
+  } else if (effect.suppress) {
+    // addOutreachSuppression may have flipped the row to `suppressed`.
+    const fresh = await getProspect(db, companyId, prospect.id);
+    prospectStatus = (fresh?.status ?? prospectStatus) as OutreachProspectStatus;
+  }
+
   const [event] = await db
     .insert(outreachEvents)
     .values({
@@ -59,20 +90,5 @@ export async function recordEvent(
       occurredAt: input.occurredAt ?? new Date(),
     })
     .returning();
-
-  const effect = applyEventToProspect(prospect.status as OutreachProspectStatus, input.type);
-  let prospectStatus = prospect.status as OutreachProspectStatus;
-  if (effect.prospectStatus) {
-    const updated = await setProspectStatus(db, companyId, prospect.id, effect.prospectStatus);
-    prospectStatus = (updated?.status ?? effect.prospectStatus) as OutreachProspectStatus;
-  }
-  if (effect.suppress) {
-    await addOutreachSuppression(db, {
-      email: prospect.email,
-      reason: effect.suppress,
-      sourceCompanyId: companyId,
-      note: `event ${event.id}`,
-    });
-  }
   return { ok: true, event, prospectStatus, suppressed: effect.suppress !== null };
 }

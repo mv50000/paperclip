@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS "outreach_messages" (
 	"status" text DEFAULT 'draft' NOT NULL,
 	"approved_by" text,
 	"approved_at" timestamp with time zone,
+	"rejected_by" text,
+	"rejected_at" timestamp with time zone,
 	"reject_reason" text,
 	"sent_at" timestamp with time zone,
 	"message_id" text,

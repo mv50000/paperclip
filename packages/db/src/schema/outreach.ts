@@ -108,6 +108,8 @@ export const outreachMessages = pgTable(
     /** Actor id (user or agent) that approved/rejected. */
     approvedBy: text("approved_by"),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
+    rejectedBy: text("rejected_by"),
+    rejectedAt: timestamp("rejected_at", { withTimezone: true }),
     // Reserved for RK9-196 review flow.
     rejectReason: text("reject_reason"),
     sentAt: timestamp("sent_at", { withTimezone: true }),

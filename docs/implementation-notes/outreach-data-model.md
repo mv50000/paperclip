@@ -40,6 +40,16 @@ dropping its company scope (breaking the support-desk semantics). So:
 - `outreach_suppressions` has **no `company_id`**. `source_company_id` is
   informational only (who recorded it) and is not used for filtering.
 - There is **no DELETE** route or service function. Entries are permanent.
+- Because a single write is permanent and cross-company, **agent keys cannot
+  write the list**: `POST …/suppressions` is board-only (`assertBoard`), and
+  `POST …/events` refuses `unsubscribe`/`complaint`/`bounce_hard` from agent
+  actors (inbound e-mail is a prompt-injection surface in this repo). Agents
+  may record `reply`/`bounce_soft`/`dsn`. Provider webhooks (RK9-196+) run as
+  system, not as an agent.
+- Adding a suppression flips every non-terminal prospect with that e-mail —
+  in **every** company — to status `suppressed`. Draft creation and approval
+  also consult the list directly, so a prospect that is `approved` on paper
+  but suppressed cannot get a message.
 - The two tables are not synchronised; a support-desk bounce does not block
   outreach and vice versa. If that ever becomes desirable it should be an
   explicit copy job, not a shared table.
@@ -57,13 +67,23 @@ new ──(manual review)──▶ approved ──(sender, RK9-196)──▶ in_
    (suppressed = imported while already on the list; import rejects these instead)
 ```
 
-- Only `new → approved` (and back) is editable through the API. Event-driven
-  transitions come from `POST …/outreach/events`.
+- Only `new → approved` (and back) is editable through the API, and the
+  UPDATE re-checks `status IN ('new','approved')` in its WHERE clause so a
+  concurrent bounce or unsubscribe is never overwritten (409
+  `invalid_transition`). Event-driven transitions come from
+  `POST …/outreach/events` and are guarded the same way on the status that
+  was read, so unsubscribe + auto-reply arriving together resolve cleanly.
+- `suppressed` is set when an e-mail lands on the global list while the
+  prospect is still non-terminal (manual add, or an event from another
+  company); import rejects already-suppressed addresses instead.
 - `bounced`, `unsubscribed`, `suppressed` are **terminal and sticky**: a later
   reply does not resurrect the prospect. An opt-out on an already-terminal
   prospect still writes the suppression row.
 - `bounce_soft` and `dsn` are recorded but change nothing; repeated soft
   bounces are a policy question for the sender ticket.
+- `recordEvent` is three autocommit statements; the suppression row is
+  written **first**, then the status, then the event row, so a failure
+  mid-way never loses the opt-out and a retry is harmless.
 - Only `approved` and `in_sequence` prospects are contactable; approving a
   message for any other prospect status returns `409 prospect_not_contactable`.
 
@@ -78,7 +98,11 @@ draft ──▶ approved ──▶ queued ──▶ sent
 `approved`/`rejected` are the only transitions this ticket exposes
 (`POST …/messages/:id/approve|reject`). The UPDATE re-checks the current
 status in its WHERE clause so two concurrent reviewers cannot both win.
-`queued/sent/failed` belong to the sender.
+Approval also requires the prospect to be contactable **and** absent from the
+global suppression list. `approved_by/approved_at` and
+`rejected_by/rejected_at` are separate columns so rejecting an approved
+message keeps the original approver on the row. `queued/sent/failed` belong
+to the sender.
 
 ## GDPR fields and rules
 
@@ -116,11 +140,20 @@ read-only). Every write goes through `validate(schema)` from
 | GET | `messages/:id` | |
 | POST | `messages/:id/approve` | 404 / 409 `invalid_transition` / 409 `prospect_not_contactable` |
 | POST | `messages/:id/reject` | body `{reason}` (stored in `reject_reason`) |
-| GET/POST | `events` | POST records the event and applies the state machine + suppression; returns `{event, prospectStatus, suppressed}` |
-| GET/POST | `suppressions` | POST is idempotent: 201 created / 200 already present |
+| GET/POST | `events` | POST records the event and applies the state machine + suppression; returns `{event, prospectStatus, suppressed}`. Agents: informational types only (403 otherwise) |
+| GET/POST | `suppressions` | POST is **board-only**, idempotent: 201 created / 200 already present |
 | POST | `suppressions/check` | `{emails[]}` → `{suppressed[]}` |
 
+Malformed path ids return 404 (guarded before the query). List `limit` is
+clamped to 1..1000 everywhere, including the global suppression list.
+
 Deliberately absent: `DELETE suppressions/:id`, any send/queue endpoint.
+
+**Independent verifier (13.9.2026, pre-merge):** first pass returned FAIL
+with one High (agent keys could permanently poison the global list) and four
+Mediums (approval ignored the list, unguarded status races, unclamped
+suppression limit, event write ordering). All were fixed as described above
+before the PR left draft.
 
 ## Migration
 

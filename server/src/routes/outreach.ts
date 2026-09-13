@@ -20,6 +20,7 @@ import {
   type OutreachProspectStatus,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
+import { forbidden, notFound } from "../errors.js";
 import { logActivity } from "../services/index.js";
 import {
   addOutreachSuppression,
@@ -44,7 +45,7 @@ import {
   updateProspect,
   updateSequence,
 } from "../services/outreach/index.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 // RK9-193: outreach API. Company-scoped except the suppression list, which is
 // GLOBAL (routes still live under /companies/:companyId for access control and
@@ -61,9 +62,25 @@ function parseLimit(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function parseUuid(value: unknown): string | undefined {
-  return typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value) ? value : undefined;
+  return typeof value === "string" && UUID_RE.test(value) ? value : undefined;
 }
+
+/** Path ids hit `uuid` columns; a malformed id is a 404, not a Postgres 22P02 → 500. */
+function pathId(value: unknown): string {
+  const id = parseUuid(value);
+  if (!id) throw notFound();
+  return id;
+}
+
+/** Event types whose side effect is a permanent GLOBAL suppression entry. */
+const SUPPRESSING_EVENT_TYPES: ReadonlySet<OutreachEventType> = new Set([
+  "unsubscribe",
+  "complaint",
+  "bounce_hard",
+]);
 
 export function outreachRoutes(db: Db) {
   const router = Router();
@@ -113,7 +130,7 @@ export function outreachRoutes(db: Db) {
         res.status(409).json({ error: result.reason });
         return;
       }
-      await audit(req, companyId, "outreach.prospect.created", "outreach_prospect", result.prospect!.id, {
+      await audit(req, companyId, "outreach.prospect.created", "outreach_prospect", result.prospect.id, {
         source: req.body.source,
       });
       res.status(201).json(result.prospect);
@@ -139,7 +156,7 @@ export function outreachRoutes(db: Db) {
   router.get("/companies/:companyId/outreach/prospects/:prospectId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const row = await getProspect(db, companyId, req.params.prospectId as string);
+    const row = await getProspect(db, companyId, pathId(req.params.prospectId));
     if (!row) {
       res.status(404).json({ error: "not_found" });
       return;
@@ -153,29 +170,25 @@ export function outreachRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
-      const id = req.params.prospectId as string;
-      const existing = await getProspect(db, companyId, id);
-      if (!existing) {
-        res.status(404).json({ error: "not_found" });
+      const id = pathId(req.params.prospectId);
+      // Manual status edits are limited to the review step (new ⇄ approved);
+      // the service enforces it in the UPDATE's WHERE so terminal states stay sticky.
+      const result = await updateProspect(db, companyId, id, req.body);
+      if (!result.ok) {
+        res.status(result.reason === "not_found" ? 404 : 409).json({ error: result.reason });
         return;
       }
-      // Manual status edits are limited to the review step; terminal states are sticky.
-      if (req.body.status && existing.status !== "new" && existing.status !== "approved") {
-        res.status(409).json({ error: "invalid_transition", status: existing.status });
-        return;
-      }
-      const row = await updateProspect(db, companyId, id, req.body);
       await audit(req, companyId, "outreach.prospect.updated", "outreach_prospect", id, {
         fields: Object.keys(req.body),
       });
-      res.json(row);
+      res.json(result.prospect);
     },
   );
 
   router.delete("/companies/:companyId/outreach/prospects/:prospectId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const id = req.params.prospectId as string;
+    const id = pathId(req.params.prospectId);
     const removed = await deleteProspect(db, companyId, id);
     if (!removed) {
       res.status(404).json({ error: "not_found" });
@@ -214,7 +227,7 @@ export function outreachRoutes(db: Db) {
   router.get("/companies/:companyId/outreach/sequences/:sequenceId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const row = await getSequence(db, companyId, req.params.sequenceId as string);
+    const row = await getSequence(db, companyId, pathId(req.params.sequenceId));
     if (!row) {
       res.status(404).json({ error: "not_found" });
       return;
@@ -228,7 +241,7 @@ export function outreachRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
-      const id = req.params.sequenceId as string;
+      const id = pathId(req.params.sequenceId);
       const row = await updateSequence(db, companyId, id, req.body);
       if (!row) {
         res.status(404).json({ error: "not_found" });
@@ -244,7 +257,7 @@ export function outreachRoutes(db: Db) {
   router.delete("/companies/:companyId/outreach/sequences/:sequenceId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const id = req.params.sequenceId as string;
+    const id = pathId(req.params.sequenceId);
     const removed = await deleteSequence(db, companyId, id);
     if (!removed) {
       res.status(404).json({ error: "not_found" });
@@ -291,7 +304,7 @@ export function outreachRoutes(db: Db) {
   router.get("/companies/:companyId/outreach/messages/:messageId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const row = await getMessage(db, companyId, req.params.messageId as string);
+    const row = await getMessage(db, companyId, pathId(req.params.messageId));
     if (!row) {
       res.status(404).json({ error: "not_found" });
       return;
@@ -306,7 +319,7 @@ export function outreachRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
       const actor = getActorInfo(req);
-      const id = req.params.messageId as string;
+      const id = pathId(req.params.messageId);
       const result = await approveMessage(db, companyId, id, actor.actorId);
       if (!result.ok) {
         res.status(result.reason === "not_found" ? 404 : 409).json({ error: result.reason, status: result.status });
@@ -324,7 +337,7 @@ export function outreachRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
       const actor = getActorInfo(req);
-      const id = req.params.messageId as string;
+      const id = pathId(req.params.messageId);
       const result = await rejectMessage(db, companyId, id, actor.actorId, req.body.reason);
       if (!result.ok) {
         res.status(result.reason === "not_found" ? 404 : 409).json({ error: result.reason, status: result.status });
@@ -356,6 +369,13 @@ export function outreachRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
+      // Opt-out / hard-bounce events write a permanent GLOBAL suppression row
+      // that crosses company boundaries. Agent keys (a prompt-injection
+      // surface) may only record informational events; the rest is board/
+      // system only until provider webhooks land (RK9-196+).
+      if (req.actor.type === "agent" && SUPPRESSING_EVENT_TYPES.has(req.body.type)) {
+        throw forbidden("Suppressing outreach events are restricted to board actors");
+      }
       const result = await recordEvent(db, companyId, req.body);
       if (!result.ok) {
         res.status(404).json({ error: result.reason });
@@ -384,6 +404,8 @@ export function outreachRoutes(db: Db) {
     validate(addOutreachSuppressionSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
+      // Board only: the list is global and permanent, so no agent key may write it directly.
+      assertBoard(req);
       assertCompanyAccess(req, companyId);
       const result = await addOutreachSuppression(db, {
         email: req.body.email,

@@ -1,18 +1,18 @@
-import { desc, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { outreachSuppressions } from "@paperclipai/db";
+import { outreachProspects, outreachSuppressions } from "@paperclipai/db";
 import type { OutreachSuppressionReason } from "@paperclipai/shared";
-import { normalizeEmail } from "./logic.js";
+import { PROSPECT_TERMINAL_STATUSES, normalizeEmail } from "./logic.js";
 
 // GLOBAL list (no company scope) — see docs/implementation-notes/outreach-data-model.md.
 // There is intentionally no delete function: entries are permanent.
 
-export async function listOutreachSuppressions(db: Db, limit = 500) {
+export async function listOutreachSuppressions(db: Db, limit?: number) {
   return db
     .select()
     .from(outreachSuppressions)
     .orderBy(desc(outreachSuppressions.createdAt))
-    .limit(limit);
+    .limit(Math.max(1, Math.min(1000, limit ?? 500)));
 }
 
 /** Returns the subset of `emails` (lower-cased) that are suppressed. */
@@ -36,6 +36,18 @@ export async function addOutreachSuppression(
   },
 ) {
   const email = normalizeEmail(args.email);
+  // Suppression is global: every company's non-terminal prospect with this
+  // e-mail becomes `suppressed` so the human review gate and the sender both
+  // see it without a second lookup. Terminal states are left as they are.
+  await db
+    .update(outreachProspects)
+    .set({ status: "suppressed", updatedAt: new Date() })
+    .where(
+      and(
+        eq(outreachProspects.email, email),
+        notInArray(outreachProspects.status, [...PROSPECT_TERMINAL_STATUSES]),
+      ),
+    );
   const [inserted] = await db
     .insert(outreachSuppressions)
     .values({

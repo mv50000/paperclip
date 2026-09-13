@@ -5,6 +5,8 @@ import type { CreateOutreachMessage, OutreachMessageStatus, OutreachProspectStat
 import { canApproveMessage, canTransitionMessage } from "./logic.js";
 import { getProspect } from "./prospects.js";
 import { getSequence } from "./sequences.js";
+import { findOutreachSuppressed } from "./suppressions.js";
+import { PROSPECT_TERMINAL_STATUSES } from "./logic.js";
 
 export async function listMessages(
   db: Db,
@@ -44,9 +46,8 @@ export async function createDraftMessage(
   const prospect = await getProspect(db, companyId, input.prospectId);
   if (!prospect) return { ok: false, reason: "prospect_not_found" };
   if (
-    prospect.status === "bounced" ||
-    prospect.status === "unsubscribed" ||
-    prospect.status === "suppressed"
+    PROSPECT_TERMINAL_STATUSES.has(prospect.status as OutreachProspectStatus) ||
+    (await findOutreachSuppressed(db, [prospect.email])).size > 0
   ) {
     return { ok: false, reason: "prospect_not_contactable" };
   }
@@ -93,6 +94,10 @@ export async function approveMessage(
     (prospect?.status ?? "suppressed") as OutreachProspectStatus,
   );
   if (!verdict.ok) return { ok: false, reason: verdict.reason, status: message.status as OutreachMessageStatus };
+  // The global suppression list is the last word, whatever the prospect status says.
+  if (prospect && (await findOutreachSuppressed(db, [prospect.email])).size > 0) {
+    return { ok: false, reason: "prospect_not_contactable", status: message.status as OutreachMessageStatus };
+  }
   const now = new Date();
   const [updated] = await db
     .update(outreachMessages)
@@ -125,7 +130,7 @@ export async function rejectMessage(
   const now = new Date();
   const [updated] = await db
     .update(outreachMessages)
-    .set({ status: "rejected", approvedBy: actorId, approvedAt: now, rejectReason: reason, updatedAt: now })
+    .set({ status: "rejected", rejectedBy: actorId, rejectedAt: now, rejectReason: reason, updatedAt: now })
     .where(
       and(
         eq(outreachMessages.companyId, companyId),
