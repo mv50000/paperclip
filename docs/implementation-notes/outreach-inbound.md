@@ -124,7 +124,7 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
 | Env var | Purpose | Unset behavior |
 |---|---|---|
 | `OUTREACH_INBOUND_HMAC_SECRET` | Shared HMAC secret for the rk9-prod relay | Route 401s every request (fail closed) |
-| `OUTREACH_INBOUND_OWN_DOMAINS` | Comma-separated, lower-cased domains treated as "ours" for the `unsub@` classifier (e.g. `outreach.rk9.fi`) | `hasUnsubscribeRecipient` never matches (fail closed) |
+| `OUTREACH_INBOUND_OWN_DOMAINS` | Comma-separated, lower-cased domains treated as "ours" — drives BOTH the `unsub@` classifier and the mail-loop guard (e.g. `outreach.rk9.fi`) | `hasUnsubscribeRecipient` never matches (fail closed); `isSelfLoop` falls back to a weaker `To`-only proxy (fail open on an unlisted domain) |
 
 Plain server env vars, same as `OUTREACH_SENDER_API_KEY` — **not** a
 Paperclip `company_secrets` row (there's no per-company secret model here;
@@ -134,7 +134,11 @@ vault) doesn't apply. Generate the HMAC secret with `openssl rand -base64 32`
 and set it identically in Paperclip's server env (paperclip-01) and the
 rk9-prod receiver script's env — same two-host deployment shape as
 `OUTREACH_SENDER_API_KEY`. `OUTREACH_INBOUND_OWN_DOMAINS` only needs to exist
-on paperclip-01 (it's not part of the signed request).
+on paperclip-01 (it's not part of the signed request). **Operational
+requirement**: list every domain and subdomain outreach mail can legitimately
+be sent from (not just the primary one) — an unlisted own domain makes the
+mail-loop guard fall back to a weaker `To`-only heuristic for messages
+claiming that domain (see "Adversarial verification" below).
 
 ## rk9-prod side (not done here)
 
@@ -222,6 +226,15 @@ before merge. Findings and disposition:
 - **L2 (fixed)** — the 401 response body echoed the specific rejection
   reason to an unauthenticated caller. Now a generic `{error:"unauthorized"}`;
   the reason is logged server-side only.
+- **Third-round Medium (documented, not fixed)** — with `ownDomains`
+  configured but incomplete, the loop guard's fallback proxy is gone for
+  listed domains, so a genuine loop between two addresses on an own domain
+  that ISN'T listed slips through as a normal reply. Not fixable by
+  restoring the old `To`-domain-matching proxy alongside the `ownDomains`
+  check (that reintroduces H3 on listed domains) — the correct fix is
+  operational: `OUTREACH_INBOUND_OWN_DOMAINS` must enumerate every domain and
+  subdomain outreach mail can be sent from. Documented above and in
+  `config.ts`'s JSDoc.
 - **M1** (forged-sender DSNs honored as real bounces if the attacker already
   knows a real Message-ID), **M3** (a DSN whose original message is quoted
   only in `text/plain`, with no `message/rfc822` attachment, is dropped as

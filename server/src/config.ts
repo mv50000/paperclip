@@ -110,12 +110,13 @@ export interface Config {
   /** RK9-195: shared HMAC secret for the rk9-prod inbound relay. Unset = `/api/outreach/inbound` 401s on every call. */
   outreachInboundHmacSecret: string | undefined;
   /**
-   * RK9-195: lower-cased domains the inbound relay treats as "ours" for the
-   * `unsub@<domain>` classifier — an inbound message's `To`/`Cc` headers are
-   * attacker-controlled content, not a verified envelope recipient (Postfix
-   * doesn't pass that through yet — MTA-side, out of scope here), so this is
-   * fail-closed: empty = the `unsub@` mailto fallback never fires, rather than
-   * matching `unsub@` on any domain a forged header names.
+   * RK9-195: lower-cased domains the inbound relay treats as "ours" — used by
+   * BOTH the `unsub@<domain>` classifier (fail-closed: empty = the `unsub@`
+   * mailto fallback never fires, rather than matching `unsub@` on any domain
+   * a forged header names) AND the mail-loop guard (fail-OPEN to a weaker
+   * `To`-only proxy when empty — see `isSelfLoop` in inbound-classify.ts).
+   * Must list every domain/subdomain outreach mail can legitimately be sent
+   * from, or the loop guard misses a genuine loop on an unlisted own domain.
    */
   outreachInboundOwnDomains: string[];
 }
