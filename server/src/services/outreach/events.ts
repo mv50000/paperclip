@@ -53,7 +53,10 @@ export async function recordEvent(
   // Order matters (no transaction across these autocommit statements): the
   // legally important write — the global suppression row — goes first, so a
   // failure later leaves the opt-out recorded and a retry is harmless.
-  if (effect.suppress) {
+  // RK9-196: a prospect with no e-mail yet was never sent anything, so there
+  // is nothing to add to the suppression list — the status transition below
+  // still applies.
+  if (effect.suppress && prospect.email) {
     await addOutreachSuppression(db, {
       email: prospect.email,
       reason: effect.suppress,

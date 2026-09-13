@@ -4,6 +4,7 @@ import {
   OUTREACH_LEGAL_BASES,
   OUTREACH_PROSPECT_SOURCES,
   OUTREACH_SUPPRESSION_REASONS,
+  OUTREACH_TEMPLATE_COMPANIES,
 } from "../constants.js";
 
 // RK9-193: outreach module validators. Every write route in
@@ -34,7 +35,10 @@ const businessIdSchema = z
 export const createOutreachProspectSchema = z.object({
   orgName: z.string().trim().min(1).max(300),
   businessId: businessIdSchema,
-  email: outreachEmailSchema,
+  // RK9-196: a PRH import may land before any address is known — enrichment
+  // or manual review fills it in later via PATCH. `null`/omitted both mean
+  // "no address yet"; the row stays `status: "new"` until one is set.
+  email: outreachEmailSchema.nullable().default(null),
   contactName: optionalText(200),
   role: optionalText(200),
   source: z.enum(OUTREACH_PROSPECT_SOURCES),
@@ -48,6 +52,9 @@ export const updateOutreachProspectSchema = z
   .object({
     orgName: z.string().trim().min(1).max(300),
     businessId: businessIdSchema,
+    // RK9-196: enrichment (Firecrawl) or manual review sets the address once
+    // it is found; the service maps a unique-constraint hit to 409 `duplicate_email`.
+    email: outreachEmailSchema.nullable(),
     contactName: optionalText(200),
     role: optionalText(200),
     sourceUrl: z.string().trim().url().max(2000).nullable(),
@@ -138,6 +145,32 @@ export const rejectOutreachMessageSchema = z.object({
   reason: z.string().trim().min(1).max(2000),
 });
 export type RejectOutreachMessage = z.infer<typeof rejectOutreachMessageSchema>;
+
+// RK9-196: edit a still-`draft` message before approving/rejecting it (the
+// review tool's `e` action). Service re-checks `status = 'draft'` in the WHERE.
+export const updateOutreachMessageSchema = z
+  .object({
+    subject: z.string().trim().min(1).max(998),
+    bodyText: z.string().min(1).max(100_000),
+    bodyHtml: z.string().max(500_000).nullable(),
+  })
+  .partial()
+  .refine((value) => Object.keys(value).length > 0, { message: "no fields to update" });
+export type UpdateOutreachMessage = z.infer<typeof updateOutreachMessageSchema>;
+
+// RK9-196: batch enrichment / drafting requests from the CLI. Bounded well
+// below the 1000-row import cap — these calls do real network/LLM work.
+export const enrichOutreachProspectsSchema = z.object({
+  prospectIds: z.array(z.string().uuid()).min(1).max(200),
+});
+export type EnrichOutreachProspects = z.infer<typeof enrichOutreachProspectsSchema>;
+
+export const draftOutreachMessagesSchema = z.object({
+  prospectIds: z.array(z.string().uuid()).min(1).max(200),
+  company: z.enum(OUTREACH_TEMPLATE_COMPANIES),
+  maxCostUsd: z.number().positive().max(100).default(1),
+});
+export type DraftOutreachMessages = z.infer<typeof draftOutreachMessagesSchema>;
 
 export const createOutreachEventSchema = z.object({
   prospectId: z.string().uuid(),

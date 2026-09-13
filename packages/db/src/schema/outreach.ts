@@ -22,8 +22,12 @@ export const outreachProspects = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     orgName: text("org_name").notNull(),
     businessId: text("business_id"),
-    /** Always stored lower-cased; unique per company. */
-    email: text("email").notNull(),
+    /**
+     * Always stored lower-cased; unique per company. Nullable (RK9-196):
+     * a PRH import may land before any address is known — the row stays
+     * `status: "new"` until enrichment or manual review finds one.
+     */
+    email: text("email"),
     contactName: text("contact_name"),
     role: text("role"),
     source: text("source").notNull(),

@@ -3,7 +3,10 @@ import {
   addOutreachSuppressionSchema,
   createOutreachProspectSchema,
   createOutreachSequenceSchema,
+  draftOutreachMessagesSchema,
+  enrichOutreachProspectsSchema,
   importOutreachProspectsSchema,
+  updateOutreachMessageSchema,
   updateOutreachProspectSchema,
 } from "./outreach.js";
 
@@ -47,8 +50,19 @@ describe("outreach validators", () => {
   it("limits manual prospect status edits to new/approved and rejects empty patches", () => {
     expect(updateOutreachProspectSchema.parse({ status: "approved" }).status).toBe("approved");
     expect(() => updateOutreachProspectSchema.parse({ status: "unsubscribed" })).toThrow();
-    expect(() => updateOutreachProspectSchema.parse({ email: "new@x.fi" } as never)).toThrow();
     expect(() => updateOutreachProspectSchema.parse({})).toThrow();
+  });
+
+  it("RK9-196: an update may set/clear the discovered e-mail once enrichment finds one", () => {
+    expect(updateOutreachProspectSchema.parse({ email: "New@X.fi" }).email).toBe("new@x.fi");
+    expect(updateOutreachProspectSchema.parse({ email: null }).email).toBeNull();
+    expect(() => updateOutreachProspectSchema.parse({ email: "not-an-email" })).toThrow();
+  });
+
+  it("RK9-196: prospect e-mail is optional on create/import — a PRH import can land before an address is known", () => {
+    const parsed = createOutreachProspectSchema.parse({ orgName: "X", source: "prh" });
+    expect(parsed.email).toBeNull();
+    expect(createOutreachProspectSchema.parse({ orgName: "X", source: "prh", email: null }).email).toBeNull();
   });
 
   it("fills sequence defaults (Europe/Helsinki, Mon–Fri 08–16, cap 20, inactive)", () => {
@@ -69,5 +83,28 @@ describe("outreach validators", () => {
   it("normalizes suppression e-mails and defaults the reason to manual", () => {
     const s = addOutreachSuppressionSchema.parse({ email: "NoMore@Example.fi" });
     expect(s).toEqual({ email: "nomore@example.fi", reason: "manual" });
+  });
+
+  it("RK9-196: the review tool's edit action requires at least one field", () => {
+    expect(updateOutreachMessageSchema.parse({ subject: "New subject" })).toEqual({ subject: "New subject" });
+    expect(() => updateOutreachMessageSchema.parse({})).toThrow();
+  });
+
+  it("RK9-196: batch enrichment/drafting requests are bounded well below the import cap", () => {
+    expect(() => enrichOutreachProspectsSchema.parse({ prospectIds: [] })).toThrow();
+    const ids = Array.from({ length: 201 }, () => "11111111-1111-1111-1111-111111111111");
+    expect(() => enrichOutreachProspectsSchema.parse({ prospectIds: ids })).toThrow();
+    expect(
+      enrichOutreachProspectsSchema.parse({ prospectIds: ids.slice(0, 200) }).prospectIds,
+    ).toHaveLength(200);
+
+    expect(() =>
+      draftOutreachMessagesSchema.parse({ prospectIds: ["11111111-1111-1111-1111-111111111111"], company: "unknown" }),
+    ).toThrow();
+    const drafted = draftOutreachMessagesSchema.parse({
+      prospectIds: ["11111111-1111-1111-1111-111111111111"],
+      company: "saatavilla",
+    });
+    expect(drafted.maxCostUsd).toBe(1);
   });
 });
