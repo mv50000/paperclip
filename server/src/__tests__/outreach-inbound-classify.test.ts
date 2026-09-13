@@ -223,6 +223,22 @@ describe("parseInboundMime References-header capping (RK9-195 verifier H2)", () 
     expect(parsed.references).not.toBeNull();
     expect(parsed.references!.length).toBeLessThanOrEqual(2000);
   });
+
+  it("also truncates an oversized In-Reply-To header (same O(n^2) sink via extractReferencedMessageIds)", async () => {
+    const hostileInReplyTo = Array.from({ length: 5000 }, (_, i) => `<c${i}@outreach.rk9.fi>`).join(" ");
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: outreach-saatavilla@outreach.rk9.fi",
+        "Subject: Re: Hei",
+        `In-Reply-To: ${hostileInReplyTo}`,
+        "Message-ID: <reply-huge-irt@example.com>",
+        "",
+        "body",
+      ]),
+    );
+    expect(parsed.headers["in-reply-to"]?.length ?? 0).toBeLessThanOrEqual(2000);
+  });
 });
 
 describe("isDeliveryStatusNotification", () => {

@@ -41,7 +41,10 @@ function firstAddress(addr: AddressObject | AddressObject[] | undefined): string
 // dedup (and, downstream, one sequential DB query per id) to 14.6s of
 // event-loop blocking on a 769KB body. Truncating the raw header here (before
 // it ever reaches that function) caps the cost regardless of what calls it.
+// `In-Reply-To` feeds the same function and is capped for the same reason,
+// even though it's conventionally a single id.
 const MAX_REFERENCES_HEADER_CHARS = 2000;
+const MAX_IN_REPLY_TO_HEADER_CHARS = 2000;
 
 const ALLOWLISTED_HEADERS = [
   "auto-submitted",
@@ -59,7 +62,10 @@ export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundMa
 
   const headers: Record<string, string> = {};
   if (parsed.messageId) headers["message-id"] = parsed.messageId;
-  if (parsed.inReplyTo) headers["in-reply-to"] = parsed.inReplyTo;
+  if (parsed.inReplyTo) {
+    const inReplyTo = Array.isArray(parsed.inReplyTo) ? parsed.inReplyTo.join(" ") : parsed.inReplyTo;
+    headers["in-reply-to"] = inReplyTo.slice(0, MAX_IN_REPLY_TO_HEADER_CHARS);
+  }
   if (parsed.references) {
     const joined = Array.isArray(parsed.references) ? parsed.references.join(" ") : parsed.references;
     headers["references"] = joined.slice(0, MAX_REFERENCES_HEADER_CHARS);
