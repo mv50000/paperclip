@@ -46,6 +46,7 @@ import { adapterRoutes } from "./routes/adapters.js";
 // --- RK9 Custom ---
 import { riskRoutes } from "./routes/risk.js";
 import { emailRoutes } from "./routes/email.js";
+import { outreachRoutes } from "./routes/outreach.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
 import { sesInboundRoutes } from "./routes/ses-inbound.js";
 import { slackInteractionsRoutes } from "./routes/slack-interactions.js";
@@ -301,6 +302,7 @@ export async function createApp(
   // --- RK9 Custom ---
   api.use(riskRoutes(db));
   api.use(emailRoutes(db));
+  api.use(outreachRoutes(db));
   api.use(resendInboundRoutes(db));
   api.use(sesInboundRoutes(db));
   api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));

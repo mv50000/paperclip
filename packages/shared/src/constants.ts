@@ -976,3 +976,53 @@ export const RISK_AUTO_ACTIONS = [
   "create_approval",
 ] as const;
 export type RiskAutoAction = (typeof RISK_AUTO_ACTIONS)[number];
+
+// --- RK9 outreach (RK9-193) ---
+export const OUTREACH_PROSPECT_SOURCES = ["prh", "web", "manual"] as const;
+export type OutreachProspectSource = (typeof OUTREACH_PROSPECT_SOURCES)[number];
+
+export const OUTREACH_LEGAL_BASES = ["b2b_legitimate_interest"] as const;
+export type OutreachLegalBasis = (typeof OUTREACH_LEGAL_BASES)[number];
+
+export const OUTREACH_PROSPECT_STATUSES = [
+  "new",
+  "approved",
+  "in_sequence",
+  "replied",
+  "bounced",
+  "unsubscribed",
+  "suppressed",
+] as const;
+export type OutreachProspectStatus = (typeof OUTREACH_PROSPECT_STATUSES)[number];
+
+export const OUTREACH_MESSAGE_STATUSES = [
+  "draft",
+  "approved",
+  "rejected",
+  "queued",
+  "sent",
+  "failed",
+] as const;
+export type OutreachMessageStatus = (typeof OUTREACH_MESSAGE_STATUSES)[number];
+
+export const OUTREACH_EVENT_TYPES = [
+  "bounce_hard",
+  "bounce_soft",
+  "reply",
+  "unsubscribe",
+  "complaint",
+  "dsn",
+] as const;
+export type OutreachEventType = (typeof OUTREACH_EVENT_TYPES)[number];
+
+export const OUTREACH_SUPPRESSION_REASONS = [
+  "unsubscribe",
+  "complaint",
+  "bounce_hard",
+  "manual",
+  "legal_request",
+] as const;
+export type OutreachSuppressionReason = (typeof OUTREACH_SUPPRESSION_REASONS)[number];
+
+/** GDPR retention rule: `new` prospects never contacted are purged after this many days. */
+export const OUTREACH_PROSPECT_RETENTION_DAYS = 180;
