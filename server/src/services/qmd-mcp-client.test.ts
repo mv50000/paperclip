@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../middleware/logger.js";
 import {
   _resetQmdMcpSessionForTests,
   closeQmdMcpSession,
@@ -191,6 +192,57 @@ describe("queryQmdDaemon", () => {
     const pending = queryQmdDaemon("q", ["rk9"], 5, { signal: controller.signal, deps: { fetchImpl } });
     controller.abort();
     await expect(pending).resolves.toBeNull();
+  });
+
+  it("does not log a WARN when the CALLER's signal aborts the call — expected client disconnect, not a daemon failure (RK9-199)", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined as never);
+    const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => undefined as never);
+    try {
+      const fetchImpl = ((_url: unknown, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init.signal as AbortSignal;
+          const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) return onAbort();
+          signal.addEventListener("abort", onAbort, { once: true });
+        })) as unknown as typeof fetch;
+
+      const controller = new AbortController();
+      const pending = queryQmdDaemon("q", ["rk9"], 5, { signal: controller.signal, deps: { fetchImpl } });
+      controller.abort();
+      await expect(pending).resolves.toBeNull();
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(String) }),
+        "knowledge-recall: qmd-mcp daemon query aborted by caller; falling back to CLI",
+      );
+    } finally {
+      warnSpy.mockRestore();
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("logs exactly one WARN WITHOUT a stack trace when the daemon's own deadline fires (no caller signal involved)", async () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined as never);
+    try {
+      const fetchImpl = ((_url: unknown, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init.signal as AbortSignal;
+          const onAbort = () => reject(new DOMException("Aborted", "TimeoutError"));
+          if (signal.aborted) return onAbort();
+          signal.addEventListener("abort", onAbort, { once: true });
+        })) as unknown as typeof fetch;
+
+      const rows = await queryQmdDaemon("q", ["rk9"], 5, { timeoutMs: 1, deps: { fetchImpl } });
+      expect(rows).toBeNull();
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [payload, message] = warnSpy.mock.calls[0];
+      expect(message).toBe("knowledge-recall: qmd-mcp daemon query timed out; falling back to CLI");
+      expect(payload).toEqual({ err: expect.any(String) }); // message-only — no stack-carrying Error object
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("returns null when initialize never yields a session id", async () => {
