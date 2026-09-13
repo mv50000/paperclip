@@ -45,6 +45,17 @@ describe("outreach import classification", () => {
   it("normalizes e-mails by trimming and lower-casing", () => {
     expect(normalizeEmail("  Foo@Bar.FI ")).toBe("foo@bar.fi");
   });
+
+  it("RK9-196: rows with no e-mail yet always pass through, even alongside each other", () => {
+    const rows = [
+      { orgName: "No address yet", email: null },
+      { orgName: "Also no address", email: undefined },
+      { orgName: "Has one", email: "contact@example.fi" },
+    ];
+    const result = classifyImport(rows, [], []);
+    expect(result.rejected).toHaveLength(0);
+    expect(result.accepted.map((a) => a.index)).toEqual([0, 1, 2]);
+  });
 });
 
 describe("outreach prospect state machine", () => {

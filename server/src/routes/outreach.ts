@@ -11,8 +11,11 @@ import {
   createOutreachMessageSchema,
   createOutreachProspectSchema,
   createOutreachSequenceSchema,
+  draftOutreachMessagesSchema,
+  enrichOutreachProspectsSchema,
   importOutreachProspectsSchema,
   rejectOutreachMessageSchema,
+  updateOutreachMessageSchema,
   updateOutreachProspectSchema,
   updateOutreachSequenceSchema,
   type OutreachEventType,
@@ -30,6 +33,8 @@ import {
   createSequence,
   deleteProspect,
   deleteSequence,
+  draftMessages,
+  enrichProspects,
   findOutreachSuppressed,
   getMessage,
   getProspect,
@@ -42,6 +47,7 @@ import {
   listSequences,
   recordEvent,
   rejectMessage,
+  updateDraftMessage,
   updateProspect,
   updateSequence,
 } from "../services/outreach/index.js";
@@ -150,6 +156,24 @@ export function outreachRoutes(db: Db) {
         rejected: result.rejected.length,
       });
       res.status(result.imported > 0 ? 201 : 200).json(result);
+    },
+  );
+
+  // RK9-196: batch website enrichment (Firecrawl keyless scrape + generic
+  // e-mail discovery). Registered before the `:prospectId` GET so "enrich"
+  // is never captured as a prospect id.
+  router.post(
+    "/companies/:companyId/outreach/prospects/enrich",
+    validate(enrichOutreachProspectsSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const results = await enrichProspects(db, companyId, req.body.prospectIds);
+      await audit(req, companyId, "outreach.prospects.enriched", "outreach_prospect", companyId, {
+        requested: req.body.prospectIds.length,
+        succeeded: results.filter((r) => r.ok).length,
+      });
+      res.json({ results });
     },
   );
 
@@ -301,6 +325,33 @@ export function outreachRoutes(db: Db) {
     },
   );
 
+  // RK9-196: AI batch drafting. Registered before the `:messageId` GET so
+  // "draft" is never captured as a message id.
+  router.post(
+    "/companies/:companyId/outreach/messages/draft",
+    validate(draftOutreachMessagesSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const outcome = await draftMessages(
+        db,
+        companyId,
+        req.body.company,
+        req.body.prospectIds,
+        req.body.maxCostUsd,
+      );
+      await audit(req, companyId, "outreach.messages.ai_drafted", "outreach_message", companyId, {
+        requested: req.body.prospectIds.length,
+        drafted: outcome.drafted,
+        gateRejected: outcome.gateRejected,
+        failed: outcome.failed.length,
+        totalCostUsd: outcome.totalCostUsd,
+        stoppedForBudget: outcome.stoppedForBudget,
+      });
+      res.json(outcome);
+    },
+  );
+
   router.get("/companies/:companyId/outreach/messages/:messageId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -311,6 +362,26 @@ export function outreachRoutes(db: Db) {
     }
     res.json(row);
   });
+
+  // RK9-196: review tool's "edit" action — rewrite a still-`draft` message.
+  router.patch(
+    "/companies/:companyId/outreach/messages/:messageId",
+    validate(updateOutreachMessageSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      const id = pathId(req.params.messageId);
+      const result = await updateDraftMessage(db, companyId, id, req.body);
+      if (!result.ok) {
+        res.status(result.reason === "not_found" ? 404 : 409).json({ error: result.reason });
+        return;
+      }
+      await audit(req, companyId, "outreach.message.edited", "outreach_message", id, {
+        fields: Object.keys(req.body),
+      });
+      res.json(result.message);
+    },
+  );
 
   router.post(
     "/companies/:companyId/outreach/messages/:messageId/approve",

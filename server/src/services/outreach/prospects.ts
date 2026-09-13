@@ -50,17 +50,21 @@ export async function importProspects(
   companyId: string,
   rows: CreateOutreachProspect[],
 ): Promise<ImportResult> {
-  const emails = rows.map((r) => r.email);
+  // RK9-196: rows may have no e-mail yet (filled in later by enrichment or
+  // manual review) — they have nothing to dedupe/suppress-check against.
+  const emails = rows.map((r) => r.email).filter((e): e is string => !!e);
   const [suppressed, existingRows] = await Promise.all([
     findOutreachSuppressed(db, emails),
-    db
-      .select({ email: outreachProspects.email })
-      .from(outreachProspects)
-      .where(and(eq(outreachProspects.companyId, companyId), inArray(outreachProspects.email, emails))),
+    emails.length === 0
+      ? Promise.resolve([] as Array<{ email: string | null }>)
+      : db
+          .select({ email: outreachProspects.email })
+          .from(outreachProspects)
+          .where(and(eq(outreachProspects.companyId, companyId), inArray(outreachProspects.email, emails))),
   ]);
   const { accepted, rejected } = classifyImport(
     rows,
-    existingRows.map((r) => r.email),
+    existingRows.map((r) => r.email).filter((e): e is string => e !== null),
     suppressed,
   );
   if (accepted.length === 0) return { imported: 0, rejected, ids: [] };
@@ -72,7 +76,7 @@ export async function importProspects(
         companyId,
         orgName: row.orgName,
         businessId: row.businessId ?? null,
-        email: row.email,
+        email: row.email ?? null,
         contactName: row.contactName ?? null,
         role: row.role ?? null,
         source: row.source,
@@ -85,9 +89,11 @@ export async function importProspects(
     .returning({ id: outreachProspects.id, email: outreachProspects.email });
 
   const insertedEmails = new Set(inserted.map((r) => r.email));
+  // Only a non-null e-mail is unique-constrained; a null-email row never
+  // conflicts (Postgres treats every NULL as distinct) so it never races.
   const raced = accepted
-    .filter(({ row }) => !insertedEmails.has(row.email))
-    .map(({ index, row }) => ({ index, email: row.email, reason: "duplicate_existing" as const }));
+    .filter(({ row }) => row.email && !insertedEmails.has(row.email))
+    .map(({ index, row }) => ({ index, email: row.email as string, reason: "duplicate_existing" as const }));
 
   return {
     imported: inserted.length,
@@ -111,6 +117,10 @@ export async function createProspect(db: Db, companyId: string, input: CreateOut
  * concurrent bounce/unsubscribe cannot be overwritten. Returns
  * `invalid_transition` when the guard rejects it.
  */
+function isUniqueViolation(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "23505";
+}
+
 export async function updateProspect(
   db: Db,
   companyId: string,
@@ -118,15 +128,24 @@ export async function updateProspect(
   patch: UpdateOutreachProspect,
 ): Promise<
   | { ok: true; prospect: typeof outreachProspects.$inferSelect }
-  | { ok: false; reason: "not_found" | "invalid_transition" }
+  | { ok: false; reason: "not_found" | "invalid_transition" | "duplicate_email" }
 > {
   const conditions = [eq(outreachProspects.companyId, companyId), eq(outreachProspects.id, id)];
   if (patch.status) conditions.push(inArray(outreachProspects.status, ["new", "approved"]));
-  const [row] = await db
-    .update(outreachProspects)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(and(...conditions))
-    .returning();
+  let row: typeof outreachProspects.$inferSelect | undefined;
+  try {
+    [row] = await db
+      .update(outreachProspects)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(and(...conditions))
+      .returning();
+  } catch (error) {
+    // RK9-196: enrichment/manual review can set `email` to an address another
+    // prospect of this company already has — the (company_id, email) unique
+    // index rejects it rather than silently merging two prospects.
+    if (isUniqueViolation(error)) return { ok: false, reason: "duplicate_email" };
+    throw error;
+  }
   if (row) return { ok: true, prospect: row };
   const existing = await getProspect(db, companyId, id);
   return { ok: false, reason: existing ? "invalid_transition" : "not_found" };

@@ -1,7 +1,12 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachMessages } from "@paperclipai/db";
-import type { CreateOutreachMessage, OutreachMessageStatus, OutreachProspectStatus } from "@paperclipai/shared";
+import type {
+  CreateOutreachMessage,
+  OutreachMessageStatus,
+  OutreachProspectStatus,
+  UpdateOutreachMessage,
+} from "@paperclipai/shared";
 import { canApproveMessage, canTransitionMessage } from "./logic.js";
 import { getProspect } from "./prospects.js";
 import { getSequence } from "./sequences.js";
@@ -47,7 +52,7 @@ export async function createDraftMessage(
   if (!prospect) return { ok: false, reason: "prospect_not_found" };
   if (
     PROSPECT_TERMINAL_STATUSES.has(prospect.status as OutreachProspectStatus) ||
-    (await findOutreachSuppressed(db, [prospect.email])).size > 0
+    (prospect.email && (await findOutreachSuppressed(db, [prospect.email])).size > 0)
   ) {
     return { ok: false, reason: "prospect_not_contactable" };
   }
@@ -70,6 +75,31 @@ export async function createDraftMessage(
     })
     .returning();
   return { ok: true, message };
+}
+
+export type UpdateDraftResult =
+  | { ok: true; message: typeof outreachMessages.$inferSelect }
+  | { ok: false; reason: "not_found" | "not_a_draft" };
+
+/**
+ * Review-tool "edit" action (RK9-196): rewrite a still-`draft` message before
+ * approving/rejecting it. Re-checks `status = 'draft'` in the WHERE so an
+ * edit racing an approve/reject cannot resurrect a decided message.
+ */
+export async function updateDraftMessage(
+  db: Db,
+  companyId: string,
+  id: string,
+  patch: UpdateOutreachMessage,
+): Promise<UpdateDraftResult> {
+  const [updated] = await db
+    .update(outreachMessages)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(outreachMessages.companyId, companyId), eq(outreachMessages.id, id), eq(outreachMessages.status, "draft")))
+    .returning();
+  if (updated) return { ok: true, message: updated };
+  const existing = await getMessage(db, companyId, id);
+  return { ok: false, reason: existing ? "not_a_draft" : "not_found" };
 }
 
 export type ReviewResult =
@@ -95,7 +125,7 @@ export async function approveMessage(
   );
   if (!verdict.ok) return { ok: false, reason: verdict.reason, status: message.status as OutreachMessageStatus };
   // The global suppression list is the last word, whatever the prospect status says.
-  if (prospect && (await findOutreachSuppressed(db, [prospect.email])).size > 0) {
+  if (prospect?.email && (await findOutreachSuppressed(db, [prospect.email])).size > 0) {
     return { ok: false, reason: "prospect_not_contactable", status: message.status as OutreachMessageStatus };
   }
   const now = new Date();

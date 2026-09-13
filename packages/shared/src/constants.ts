@@ -1026,3 +1026,14 @@ export type OutreachSuppressionReason = (typeof OUTREACH_SUPPRESSION_REASONS)[nu
 
 /** GDPR retention rule: `new` prospects never contacted are purged after this many days. */
 export const OUTREACH_PROSPECT_RETENTION_DAYS = 180;
+
+// --- RK9 outreach personalization (RK9-196) ---
+/** Slugs of `docs/outreach/templates/<slug>.md` — the per-company draft prompt/voice. */
+export const OUTREACH_TEMPLATE_COMPANIES = ["saatavilla", "alli-audit", "ololla"] as const;
+export type OutreachTemplateCompany = (typeof OUTREACH_TEMPLATE_COMPANIES)[number];
+
+/** First-step draft body word cap enforced by the quality gate (AC, RK9-196). */
+export const OUTREACH_DRAFT_MAX_WORDS = 120;
+
+/** Free/personal e-mail domains the quality gate auto-rejects (AC, RK9-196). */
+export const OUTREACH_PRIVATE_EMAIL_DOMAINS = ["gmail.com", "hotmail.com", "outlook.com", "icloud.com"] as const;

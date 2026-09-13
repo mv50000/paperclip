@@ -30,8 +30,12 @@ export interface ImportClassification<T> {
  * validated (so emails are lower-cased and well-formed). Order of checks per
  * row: suppressed → already exists for this company → duplicate within batch.
  * The first occurrence of an e-mail in the batch wins.
+ *
+ * RK9-196: `email` may be `null`/absent — a PRH import can land before any
+ * address is known. Such rows have nothing to deduplicate on (the DB's unique
+ * index treats every NULL as distinct) so they always pass straight through.
  */
-export function classifyImport<T extends { email: string }>(
+export function classifyImport<T extends { email?: string | null }>(
   rows: T[],
   existingEmails: Iterable<string>,
   suppressedEmails: Iterable<string>,
@@ -43,6 +47,10 @@ export function classifyImport<T extends { email: string }>(
   const rejected: ImportRejection[] = [];
 
   rows.forEach((row, index) => {
+    if (!row.email) {
+      accepted.push({ index, row });
+      return;
+    }
     const email = normalizeEmail(row.email);
     if (suppressed.has(email)) {
       rejected.push({ index, email, reason: "suppressed" });

@@ -24,6 +24,9 @@ const mockOutreach = vi.hoisted(() => ({
   listOutreachSuppressions: vi.fn(),
   addOutreachSuppression: vi.fn(),
   findOutreachSuppressed: vi.fn(),
+  updateDraftMessage: vi.fn(),
+  enrichProspects: vi.fn(),
+  draftMessages: vi.fn(),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
@@ -294,5 +297,102 @@ describe.sequential("outreach routes", () => {
     );
     expect(res.status).toBe(200);
     expect(mockOutreach.listProspects).toHaveBeenCalledWith(expect.anything(), "company-1", { status: undefined, limit: 10 });
+  });
+
+  // --- RK9-196 ---------------------------------------------------------
+
+  it("message PATCH edits a draft and audits it, but 409s once it's no longer a draft", async () => {
+    mockOutreach.updateDraftMessage.mockResolvedValueOnce({ ok: true, message: { id: "m1", subject: "New" } });
+    const app = await createApp();
+    let res = await requestApp(app, (base) =>
+      request(base)
+        .patch("/api/companies/company-1/outreach/messages/11111111-1111-1111-1111-111111111111")
+        .send({ subject: "New" }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "outreach.message.edited" }));
+
+    mockOutreach.updateDraftMessage.mockResolvedValueOnce({ ok: false, reason: "not_a_draft" });
+    res = await requestApp(app, (base) =>
+      request(base)
+        .patch("/api/companies/company-1/outreach/messages/11111111-1111-1111-1111-111111111111")
+        .send({ subject: "New" }),
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("not_a_draft");
+  });
+
+  it("message PATCH rejects an empty body with 400 before touching the service", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base).patch("/api/companies/company-1/outreach/messages/11111111-1111-1111-1111-111111111111").send({}),
+    );
+    expect(res.status).toBe(400);
+    expect(mockOutreach.updateDraftMessage).not.toHaveBeenCalled();
+  });
+
+  it("prospect enrich batches ids and audits the outcome", async () => {
+    mockOutreach.enrichProspects.mockResolvedValueOnce([
+      { prospectId: "11111111-1111-1111-1111-111111111111", ok: true },
+      { prospectId: "22222222-2222-2222-2222-222222222222", ok: false, reason: "scrape_failed" },
+    ]);
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/prospects/enrich")
+        .send({ prospectIds: ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"] }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(2);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "outreach.prospects.enriched", details: expect.objectContaining({ requested: 2, succeeded: 1 }) }),
+    );
+  });
+
+  it("prospect enrich rejects an empty id list with 400", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/prospects/enrich").send({ prospectIds: [] }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockOutreach.enrichProspects).not.toHaveBeenCalled();
+  });
+
+  it("message draft batch defaults maxCostUsd to 1 and audits the run", async () => {
+    mockOutreach.draftMessages.mockResolvedValueOnce({
+      drafted: 1,
+      gateRejected: 1,
+      failed: [],
+      totalCostUsd: 0.01,
+      stoppedForBudget: false,
+    });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/messages/draft")
+        .send({ prospectIds: ["11111111-1111-1111-1111-111111111111"], company: "saatavilla" }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.drafted).toBe(1);
+    expect(mockOutreach.draftMessages).toHaveBeenCalledWith(
+      expect.anything(),
+      "company-1",
+      "saatavilla",
+      ["11111111-1111-1111-1111-111111111111"],
+      1,
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "outreach.messages.ai_drafted" }));
+  });
+
+  it("message draft batch rejects an unknown template company with 400", async () => {
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/messages/draft")
+        .send({ prospectIds: ["11111111-1111-1111-1111-111111111111"], company: "unknown" }),
+    );
+    expect(res.status).toBe(400);
+    expect(mockOutreach.draftMessages).not.toHaveBeenCalled();
   });
 });
