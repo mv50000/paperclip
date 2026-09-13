@@ -87,3 +87,10 @@ export {
   emailSuppressionList,
   emailRateLimits,
 } from "./email.js";
+export {
+  outreachProspects,
+  outreachSequences,
+  outreachMessages,
+  outreachEvents,
+  outreachSuppressions,
+} from "./outreach.js";
