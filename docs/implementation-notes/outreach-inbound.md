@@ -52,9 +52,12 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
      self-loop before DSN would misclassify every real bounce as a loop. This
      was caught by `outreach-inbound-classify.test.ts`'s DSN fixture during
      development, not assumed.
-  2. **Self-loop** — sender domain matches a `To`/`Cc` recipient domain on a
-     *non-DSN* message. A prospect's address is never on our own domain, so
-     anything else same-domain-both-sides is a misconfiguration or a genuine
+  2. **Self-loop** — sender domain is one of `OUTREACH_INBOUND_OWN_DOMAINS`
+     on a *non-DSN* message (see "Adversarial verification" below for why
+     this checks the sender's domain directly rather than any recipient
+     header — an earlier version that compared against `To`+`Cc` broke on a
+     prospect CCing a colleague at their own, unrelated company). Anything
+     genuinely from our own domain here is a misconfiguration or a genuine
      loop (the [Ololla mail-loop incident](../../RK9/issues/RK9-190),
      2026-05-12: `info@ololla.fi` → itself → auto-reply → new inbound → ∞,
      22k+ loop messages before the 24h escalation flood). Dropped and logged,
@@ -202,7 +205,17 @@ before merge. Findings and disposition:
   batched `inArray` query (`getMessagesByRfc822Ids`) instead of N sequential
   ones.
 - **M2 (fixed)** — the self-loop and unsub guards only inspected `To`,
-  missing a `Cc`-only bypass. Both now check `To`+`Cc`.
+  missing a `Cc`-only bypass. The unsub guard now checks `To`+`Cc`.
+- **H3 (new — introduced by the first M2 fix attempt, caught on
+  re-verification, now fixed)** — the first attempt at M2 also extended the
+  *self-loop* guard to `To`+`Cc`, which broke on a prospect who reply-alls
+  and CCs a colleague at their own company: the sender and that Cc share a
+  domain unrelated to us, but the old recipient-domain-matching proxy
+  matched anyway and silently dropped the reply (and, worse, a genuine
+  `unsub@` opt-out CC'd the same way). Fixed by giving `isSelfLoop` direct
+  access to `ownDomains` and checking the sender's domain against it
+  directly — no recipient header involved at all — with the pre-M2
+  `to`-only proxy kept as a fallback for when `ownDomains` is unconfigured.
 - **L1 (fixed)** — `recordEvent`'s `{ok:false}` result was discarded at all
   3 call sites, silently masking a dropped write. Now logged via
   `logIfEventNotRecorded`.

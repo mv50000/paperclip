@@ -39,18 +39,28 @@ function addressLocalPart(addr: string): string {
 /**
  * Mail-loop guard (Ololla incident, 2026-05-12 — see
  * docs/implementation-notes/outreach-inbound.md): a message whose sender
- * domain matches ANY recipient domain on this message originated from our
- * own outreach domain (e.g. a bounce-of-a-bounce, or a misconfigured
- * challenge-response reply) and must never be treated as a genuine signal.
- * Checked against `to`+`cc` (RK9-195 verifier M2: a `Cc`-only match used to
- * slip past this) — the domain Postfix routed this message to us on is one
- * of them — `inbound-router.ts`'s existing guard is the same shape, just
- * computed from a config row instead of the message itself.
+ * domain is one of OUR OWN outreach domains must never be treated as a
+ * genuine signal (e.g. a bounce-of-a-bounce, or a misconfigured
+ * challenge-response reply).
+ *
+ * When `ownDomains` is configured, checked directly against it — no
+ * recipient header involved at all. RK9-195 verifier H3 (a regression from
+ * the M2 fix below): an earlier version proxied "from our own domain" as
+ * "sender domain matches ANY `to`+`cc` recipient domain", which broke on a
+ * prospect who reply-alls and CCs a colleague AT THEIR OWN COMPANY — the
+ * sender and that Cc share a domain that has nothing to do with us, but the
+ * proxy matched anyway and silently dropped a genuine reply/opt-out.
+ *
+ * Fallback when `ownDomains` is unconfigured: the original `to`-only proxy
+ * (Postfix only routes a message to us because `to` names our domain, so
+ * same-domain-both-sides on `to` alone is still a reasonable loop signal) —
+ * deliberately NOT extended to `cc` for the same reason above.
  */
-export function isSelfLoop(from: string, recipients: string[]): boolean {
+export function isSelfLoop(from: string, to: string[], ownDomains: string[]): boolean {
   const fromDomain = addressDomain(from);
   if (!fromDomain) return false;
-  return recipients.some((addr) => addressDomain(addr) === fromDomain);
+  if (ownDomains.length > 0) return ownDomains.includes(fromDomain);
+  return to.some((addr) => addressDomain(addr) === fromDomain);
 }
 
 /**
@@ -86,10 +96,9 @@ export function isDeliveryStatusNotification(contentType: ClassifyInboundInput["
  * unsubscribe/OOO, so a would-be loop is never misread as either.
  */
 export function classifyInboundOutreachMail(input: ClassifyInboundInput): OutreachInboundKind {
-  const recipients = [...input.to, ...input.cc];
   if (isDeliveryStatusNotification(input.contentType)) return "dsn";
-  if (isSelfLoop(input.from, recipients)) return "self_loop";
-  if (hasUnsubscribeRecipient(recipients, input.ownDomains)) return "unsubscribe";
+  if (isSelfLoop(input.from, input.to, input.ownDomains)) return "self_loop";
+  if (hasUnsubscribeRecipient([...input.to, ...input.cc], input.ownDomains)) return "unsubscribe";
   if (classifyInbound({ from: input.from, headers: input.headers }).automated) return "auto_reply";
   return "reply";
 }

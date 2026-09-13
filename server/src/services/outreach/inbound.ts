@@ -139,10 +139,14 @@ export async function processOutreachInboundMail(
       // specific prospect/company match isn't required to honour the opt-out.
       // Residual risk (RK9-195 verifier H1, documented in
       // docs/implementation-notes/outreach-inbound.md): this `From` is
-      // unauthenticated mail-header content — full mitigation needs SPF/DKIM
-      // verification on the rk9-prod MTA side, out of this ticket's scope
-      // ("Blokattu: MTA"). `hasUnsubscribeRecipient`'s own-domain restriction
-      // (inbound-classify.ts) bounds the blast radius in the meantime.
+      // unauthenticated mail-header content — anyone who can mail
+      // `unsub@<our domain>` (a public address, published in every outgoing
+      // message's `List-Unsubscribe` header) can suppress an arbitrary
+      // address by forging `From`. `hasUnsubscribeRecipient`'s own-domain
+      // restriction (inbound-classify.ts) only closes the "unsub@ on ANY
+      // domain" amplification (H1's other half) — it does NOT authenticate
+      // this `From`. Full mitigation needs SPF/DKIM verification on the
+      // rk9-prod MTA side, out of this ticket's scope ("Blokattu: MTA").
       if (!parsed.from) return { outcome: "unsubscribe_skipped_no_sender" };
       await addOutreachSuppression(db, {
         email: normalizeEmail(parsed.from),

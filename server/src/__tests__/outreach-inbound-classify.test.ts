@@ -119,7 +119,7 @@ describe("classifyInboundOutreachMail", () => {
     expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("self_loop");
     // Sanity: a naive implementation might see this same message as a "reply" —
     // assert directly that isSelfLoop fires so the guard can't silently regress.
-    expect(isSelfLoop(parsed.from, parsed.to)).toBe(true);
+    expect(isSelfLoop(parsed.from, parsed.to, OWN_DOMAINS)).toBe(true);
   });
 
   it("a real DSN is same-domain-both-sides by construction and must still classify as dsn, not self_loop", async () => {
@@ -174,18 +174,59 @@ describe("classifyInboundOutreachMail", () => {
     );
     expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("self_loop");
   });
+
+  it("does NOT flag a genuine reply as self_loop just because the prospect CC'd a colleague at their own company (RK9-195 verifier H3)", async () => {
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: outreach-saatavilla@outreach.rk9.fi",
+        "Cc: colleague@example.com",
+        "Subject: Re: Hei",
+        "In-Reply-To: <orig-1@outreach.rk9.fi>",
+        "Message-ID: <reply-cc-1@example.com>",
+        "",
+        "Kiinnostaa.",
+      ]),
+    );
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("reply");
+  });
+
+  it("does NOT drop a genuine unsub@ opt-out as self_loop just because the sender CC'd a colleague at their own company (RK9-195 verifier H3)", async () => {
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: unsub@outreach.rk9.fi",
+        "Cc: legal@example.com",
+        "Subject: unsubscribe",
+        "Message-ID: <unsub-h3-1@example.com>",
+        "",
+        "stop",
+      ]),
+    );
+    expect(classifyInboundOutreachMail({ ...parsed, ownDomains: OWN_DOMAINS })).toBe("unsubscribe");
+  });
 });
 
 describe("isSelfLoop / hasUnsubscribeRecipient", () => {
-  it("is not a self-loop when sender and recipient domains differ", () => {
-    expect(isSelfLoop("prospect@example.com", ["outreach@outreach.rk9.fi"])).toBe(false);
+  it("is not a self-loop when the sender's domain isn't one of ownDomains", () => {
+    expect(isSelfLoop("prospect@example.com", ["outreach@outreach.rk9.fi"], OWN_DOMAINS)).toBe(false);
   });
 
-  it("is a self-loop via Cc even when To differs (RK9-195 verifier M2)", () => {
-    expect(isSelfLoop("outreach-saatavilla@outreach.rk9.fi", ["prospect@example.com"])).toBe(false);
-    expect(
-      isSelfLoop("outreach-saatavilla@outreach.rk9.fi", ["prospect@example.com", "someone@outreach.rk9.fi"]),
-    ).toBe(true);
+  it("is a self-loop when the sender's domain IS one of ownDomains, regardless of recipients", () => {
+    expect(isSelfLoop("outreach-saatavilla@outreach.rk9.fi", ["someone@example.com"], OWN_DOMAINS)).toBe(true);
+  });
+
+  it("is NOT a self-loop just because a recipient (e.g. a Cc) happens to share the sender's domain (RK9-195 verifier H3)", () => {
+    // prospect@example.com CCs a colleague also @example.com — that domain has
+    // nothing to do with `ownDomains`, so this must not be flagged as a loop.
+    expect(isSelfLoop("prospect@example.com", ["outreach@outreach.rk9.fi", "colleague@example.com"], OWN_DOMAINS)).toBe(
+      false,
+    );
+  });
+
+  it("falls back to the to-only domain-matching proxy when ownDomains is unconfigured", () => {
+    expect(isSelfLoop("outreach-saatavilla@outreach.rk9.fi", ["outreach-saatavilla@outreach.rk9.fi"], [])).toBe(true);
+    expect(isSelfLoop("prospect@example.com", ["outreach@outreach.rk9.fi"], [])).toBe(false);
   });
 
   it("matches unsub@ case-insensitively, scoped to ownDomains", () => {
