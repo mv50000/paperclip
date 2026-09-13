@@ -198,3 +198,19 @@ export const checkOutreachSuppressionSchema = z.object({
   emails: z.array(outreachEmailSchema).min(1).max(1000),
 });
 export type CheckOutreachSuppression = z.infer<typeof checkOutreachSuppressionSchema>;
+
+// RK9-194: the rk9-prod sender daemon's report-back payload after dialing
+// Postfix for one queued message. `smtpCode`/`response` are required on a
+// failure so the scheduler can classify 4xx (retry) vs 5xx (bounce+suppress).
+export const reportOutreachSendResultSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("sent"),
+    sentAt: z.coerce.date().optional(),
+  }),
+  z.object({
+    outcome: z.literal("failed"),
+    smtpCode: z.number().int().min(400).max(599),
+    response: z.string().trim().min(1).max(2000),
+  }),
+]);
+export type ReportOutreachSendResult = z.infer<typeof reportOutreachSendResultSchema>;

@@ -46,6 +46,7 @@ import { startQmdOrphanWatchdog } from "./services/qmd-orphan-watchdog.js";
 import { closeQmdMcpSession, startQmdKeepwarm } from "./services/qmd-mcp-client.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
+import { startOutreachSendCron } from "./services/outreach/scheduler.js";
 import { createEmailService } from "./services/email/index.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
@@ -639,6 +640,8 @@ export async function startServer(): Promise<StartedServer> {
     pluginWorkerManager,
     slackSigningSecret: config.slackSigningSecret,
     systemPause: systemPauseSvc,
+    outreachSenderApiKey: config.outreachSenderApiKey,
+    outreachUnsubscribeBaseUrl: config.outreachUnsubscribeBaseUrl,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 
@@ -749,6 +752,9 @@ export async function startServer(): Promise<StartedServer> {
     const emailSvc = createEmailService(db as any);
     startEmailEscalationCron(db as any, emailSvc);
     startDeliverabilityMonitor(db as any, emailSvc);
+  }
+  if (config.outreachSenderEnabled) {
+    startOutreachSendCron(db as any, { intervalMs: config.outreachSenderIntervalMs });
   }
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)

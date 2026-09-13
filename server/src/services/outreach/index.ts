@@ -7,3 +7,7 @@ export * from "./suppressions.js";
 export * from "./quality-gate.js";
 export * from "./enrich.js";
 export * from "./draft.js";
+export * from "./scheduler-logic.js";
+export * from "./message-format.js";
+export * from "./smtp-client.js";
+export * from "./scheduler.js";

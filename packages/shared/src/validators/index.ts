@@ -409,6 +409,7 @@ export {
   updateOutreachMessageSchema,
   enrichOutreachProspectsSchema,
   draftOutreachMessagesSchema,
+  reportOutreachSendResultSchema,
   type CreateOutreachProspect,
   type UpdateOutreachProspect,
   type ImportOutreachProspects,
@@ -423,4 +424,5 @@ export {
   type UpdateOutreachMessage,
   type EnrichOutreachProspects,
   type DraftOutreachMessages,
+  type ReportOutreachSendResult,
 } from "./outreach.js";
