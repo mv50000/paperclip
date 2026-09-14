@@ -107,6 +107,7 @@ export interface Config {
   outreachSenderApiKey: string | undefined;
   /** Public origin serving `GET/POST /u/:token`, used in the List-Unsubscribe header. */
   outreachUnsubscribeBaseUrl: string;
+  outreachPrivacyUrl: string;
   /** RK9-195: shared HMAC secret for the rk9-prod inbound relay. Unset = `/api/outreach/inbound` 401s on every call. */
   outreachInboundHmacSecret: string | undefined;
   /**
@@ -412,6 +413,7 @@ export function loadConfig(): Config {
     outreachSenderApiKey: process.env.OUTREACH_SENDER_API_KEY?.trim() || undefined,
     outreachUnsubscribeBaseUrl:
       process.env.OUTREACH_UNSUBSCRIBE_BASE_URL?.trim() || "https://paperclip.rk9.fi",
+    outreachPrivacyUrl: process.env.OUTREACH_PRIVACY_URL?.trim() || "https://rk9.fi/tietosuoja#outreach",
     outreachInboundHmacSecret: process.env.OUTREACH_INBOUND_HMAC_SECRET?.trim() || undefined,
     outreachInboundOwnDomains: (process.env.OUTREACH_INBOUND_OWN_DOMAINS ?? "")
       .split(",")

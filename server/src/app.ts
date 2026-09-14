@@ -152,6 +152,7 @@ export async function createApp(
     systemPause?: SystemPauseService;
     outreachSenderApiKey?: string;
     outreachUnsubscribeBaseUrl?: string;
+    outreachPrivacyUrl?: string;
     outreachInboundHmacSecret?: string;
     outreachInboundOwnDomains?: string[];
     outreachMetricsApiKey?: string;
@@ -323,6 +324,7 @@ export async function createApp(
     outreachSenderRoutes(db, {
       apiKey: opts.outreachSenderApiKey,
       unsubscribeBaseUrl: opts.outreachUnsubscribeBaseUrl ?? "https://paperclip.rk9.fi",
+      privacyUrl: opts.outreachPrivacyUrl,
     }),
   );
   api.use(

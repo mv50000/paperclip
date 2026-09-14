@@ -644,6 +644,7 @@ export async function startServer(): Promise<StartedServer> {
     systemPause: systemPauseSvc,
     outreachSenderApiKey: config.outreachSenderApiKey,
     outreachUnsubscribeBaseUrl: config.outreachUnsubscribeBaseUrl,
+    outreachPrivacyUrl: config.outreachPrivacyUrl,
     outreachInboundHmacSecret: config.outreachInboundHmacSecret,
     outreachInboundOwnDomains: config.outreachInboundOwnDomains,
     outreachMetricsApiKey: config.outreachMetricsApiKey,

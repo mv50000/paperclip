@@ -24,9 +24,12 @@ import {
   type OutreachSendWindow,
 } from "./scheduler-logic.js";
 import {
+  appendComplianceFooter,
   buildRawEmail,
   buildReferences,
   buildUnsubscribeHeaders,
+  buildUnsubscribeUrl,
+  DEFAULT_OUTREACH_PRIVACY_URL,
   generateMessageId,
   generateUnsubscribeToken,
 } from "./message-format.js";
@@ -220,7 +223,7 @@ export interface SendQueueItem {
  */
 export async function listSendQueue(
   db: Db,
-  opts: { limit?: number; unsubscribeBaseUrl: string },
+  opts: { limit?: number; unsubscribeBaseUrl: string; privacyUrl?: string },
 ): Promise<SendQueueItem[]> {
   const now = new Date();
   // RK9-197: a message can already be `queued` (from before a pause tripped)
@@ -270,6 +273,11 @@ export async function listSendQueue(
       await db.update(outreachMessages).set({ ...patch, updatedAt: now }).where(eq(outreachMessages.id, row.message.id));
     }
 
+    // RK9-198: opt-out link + privacy pointer in the body itself, per message.
+    const body = appendComplianceFooter(row.message.bodyText, row.message.bodyHtml, {
+      unsubscribeUrl: buildUnsubscribeUrl(opts.unsubscribeBaseUrl, unsubscribeToken),
+      privacyUrl: opts.privacyUrl ?? DEFAULT_OUTREACH_PRIVACY_URL,
+    });
     items.push({
       id: row.message.id,
       envelopeFrom: row.senderIdentity,
@@ -278,8 +286,8 @@ export async function listSendQueue(
         from: row.senderIdentity,
         to: row.prospectEmail,
         subject: row.message.subject,
-        bodyText: row.message.bodyText,
-        bodyHtml: row.message.bodyHtml,
+        bodyText: body.bodyText,
+        bodyHtml: body.bodyHtml,
         messageId,
         inReplyTo: row.message.inReplyTo,
         references: buildReferences(row.message.inReplyTo, null),

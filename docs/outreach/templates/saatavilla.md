@@ -35,7 +35,14 @@ puhelinsoittoa. Vähentää peruuttamattomia poissaoloja ja puhelintyötä.
   "{{...}}" — käytä aina käyttäjäviestissä annettua oikeaa yrityksen nimeä.
 - Päätä viesti selkeään kieltomahdollisuuteen, esim.: "Jos et halua
   enempää viestejä, vastaa tähän 'ei kiitos' — poistan yhteystiedon."
+  Älä mainitse linkkiä: järjestelmä lisää lähetyshetkellä viestin loppuun
+  yhden klikkauksen lopetuslinkin ja tietosuojaviitteen (RK9-198).
 - Sävy: asiallinen, lyhyt, ei ylimyyvä. Ei huutomerkkejä.
+- Allekirjoitus rungon loppuun täsmälleen näin (lähettäjän tunnistetiedot,
+  SVPL 200 §; ei lasketa 120 sanan rajaan):
+
+  Mikko-Ville Lahti
+  RK9 AI Oy (Saatavilla) · Y-tunnus 3612536-6 · Forssa
 
 ## Tulostusmuoto
 
