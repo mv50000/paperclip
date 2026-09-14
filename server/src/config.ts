@@ -119,6 +119,22 @@ export interface Config {
    * from, or the loop guard misses a genuine loop on an unlisted own domain.
    */
   outreachInboundOwnDomains: string[];
+  /** RK9-197: shared bearer secret for `/metrics` and `/api/outreach/digest`. Unset = both 401 on every call. */
+  outreachMetricsApiKey: string | undefined;
+  /**
+   * RK9-197: auto-pause safety check. Defaults ON — unlike
+   * `outreachSenderEnabled` (which defaults OFF to avoid an accidental real
+   * send), this only reads and, if a rule trips, writes a pause row; running
+   * it even when sending itself is off is harmless and keeps the gauges/pause
+   * history meaningful once sending is turned on.
+   */
+  outreachAutoPauseEnabled: boolean;
+  outreachAutoPauseIntervalMs: number;
+  /** RK9-197: same default-ON reasoning as auto-pause — a daily DNS lookup is harmless with sending off. */
+  outreachDnsblEnabled: boolean;
+  /** The outreach sending IP (rk9-prod's outbound address) to check for real DNSBL listings. Unset skips the reputation check but the canary self-test still runs. */
+  outreachDnsblCheckIp: string | undefined;
+  outreachDnsblLists: string[];
 }
 
 // Detecting the tailnet address shells out to `tailscale ip -4`, which blocks for up to
@@ -400,6 +416,15 @@ export function loadConfig(): Config {
     outreachInboundOwnDomains: (process.env.OUTREACH_INBOUND_OWN_DOMAINS ?? "")
       .split(",")
       .map((d) => d.trim().toLowerCase())
+      .filter(Boolean),
+    outreachMetricsApiKey: process.env.OUTREACH_METRICS_API_KEY?.trim() || undefined,
+    outreachAutoPauseEnabled: process.env.OUTREACH_AUTO_PAUSE_ENABLED !== "false",
+    outreachAutoPauseIntervalMs: Math.max(10_000, Number(process.env.OUTREACH_AUTO_PAUSE_INTERVAL_MS) || 60_000),
+    outreachDnsblEnabled: process.env.OUTREACH_DNSBL_ENABLED !== "false",
+    outreachDnsblCheckIp: process.env.OUTREACH_DNSBL_CHECK_IP?.trim() || undefined,
+    outreachDnsblLists: (process.env.OUTREACH_DNSBL_LISTS ?? "zen.spamhaus.org,bl.spamcop.net,b.barracudacentral.org")
+      .split(",")
+      .map((l) => l.trim())
       .filter(Boolean),
   };
 }

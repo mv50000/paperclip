@@ -11,6 +11,7 @@ import { isProspectContactable } from "./logic.js";
 import { getProspect } from "./prospects.js";
 import { findOutreachSuppressed } from "./suppressions.js";
 import { recordEvent } from "./events.js";
+import { listActivePauses } from "./sender-pauses.js";
 import {
   MAX_SEND_ATTEMPTS,
   classifySmtpCode,
@@ -137,8 +138,13 @@ async function runQueueDueMessages(db: Db, now: Date): Promise<QueueDueMessagesR
   // Multiple active sequences can share one sender identity; track what this
   // tick has already reserved for it so they don't jointly overshoot the cap.
   const reservedThisTick = new Map<string, number>();
+  // RK9-197: auto-pause gate. Fetched once per tick rather than per sequence
+  // — a handful of active sequences, one extra query either way, but this
+  // keeps the common (nothing paused) case to a single round trip.
+  const pausedIdentities = new Set((await listActivePauses(db)).map((p) => p.senderIdentity));
 
   for (const seq of sequences) {
+    if (pausedIdentities.has(seq.senderIdentity)) continue;
     const window = sendWindowOf(seq);
     if (!isWithinSendWindow(window, now)) continue;
 

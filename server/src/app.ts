@@ -49,6 +49,7 @@ import { emailRoutes } from "./routes/email.js";
 import { outreachRoutes } from "./routes/outreach.js";
 import { outreachSenderRoutes } from "./routes/outreach-sender.js";
 import { outreachInboundRoutes } from "./routes/outreach-inbound.js";
+import { outreachPrometheusMetricsRoutes, outreachDigestRoutes } from "./routes/outreach-metrics.js";
 import { unsubscribeRoutes } from "./routes/unsubscribe.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
 import { sesInboundRoutes } from "./routes/ses-inbound.js";
@@ -153,6 +154,7 @@ export async function createApp(
     outreachUnsubscribeBaseUrl?: string;
     outreachInboundHmacSecret?: string;
     outreachInboundOwnDomains?: string[];
+    outreachMetricsApiKey?: string;
   },
 ) {
   const app = express();
@@ -194,6 +196,10 @@ export async function createApp(
   // in must be able to reach `/u/:token` with one click.
   app.use(unsubscribeRoutes(db));
   app.use(llmRoutes(db));
+  // RK9-197: `/metrics` at the root, not under `/api` — the conventional
+  // path a Prometheus scrape target lives at. Bearer-gated (see
+  // outreach-metrics.ts), not a Paperclip board/agent actor route.
+  app.use(outreachPrometheusMetricsRoutes(db, { apiKey: opts.outreachMetricsApiKey }));
 
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
@@ -325,6 +331,7 @@ export async function createApp(
       ownDomains: opts.outreachInboundOwnDomains ?? [],
     }),
   );
+  api.use(outreachDigestRoutes(db, { apiKey: opts.outreachMetricsApiKey }));
   api.use(resendInboundRoutes(db));
   api.use(sesInboundRoutes(db));
   api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));

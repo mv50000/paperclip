@@ -27,6 +27,10 @@ const mockOutreach = vi.hoisted(() => ({
   updateDraftMessage: vi.fn(),
   enrichProspects: vi.fn(),
   draftMessages: vi.fn(),
+  listActivePauses: vi.fn(),
+  listPauseHistory: vi.fn(),
+  pauseSender: vi.fn(),
+  resumeSender: vi.fn(),
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
@@ -394,5 +398,74 @@ describe.sequential("outreach routes", () => {
     );
     expect(res.status).toBe(400);
     expect(mockOutreach.draftMessages).not.toHaveBeenCalled();
+  });
+
+  it("agents cannot list, pause or resume sender identities", async () => {
+    const agent = { type: "agent", agentId: "agent-1", companyId: "company-1" };
+    const app = await createApp(agent);
+    let res = await requestApp(app, (base) => request(base).get("/api/companies/company-1/outreach/senders/pauses"));
+    expect(res.status).toBe(403);
+    res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/senders/a%40b.fi/pause").send({}),
+    );
+    expect(res.status).toBe(403);
+    res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/senders/a%40b.fi/resume").send({}),
+    );
+    expect(res.status).toBe(403);
+    expect(mockOutreach.listActivePauses).not.toHaveBeenCalled();
+    expect(mockOutreach.pauseSender).not.toHaveBeenCalled();
+    expect(mockOutreach.resumeSender).not.toHaveBeenCalled();
+  });
+
+  it("board actors can list active pauses", async () => {
+    mockOutreach.listActivePauses.mockResolvedValueOnce([{ id: "p1", senderIdentity: "a@b.fi", reason: "hard_bounce_rate" }]);
+    const app = await createApp();
+    const res = await requestApp(app, (base) => request(base).get("/api/companies/company-1/outreach/senders/pauses"));
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
+
+  it("a manual pause defaults reason to 'manual' and is idempotent (201 on create, 200 on already-paused)", async () => {
+    mockOutreach.pauseSender
+      .mockResolvedValueOnce({ created: true, pause: { id: "p1", senderIdentity: "a@b.fi", reason: "manual" } })
+      .mockResolvedValueOnce({ created: false, pause: { id: "p1", senderIdentity: "a@b.fi", reason: "manual" } });
+    const app = await createApp();
+    let res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/senders/a%40b.fi/pause").send({}),
+    );
+    expect(res.status).toBe(201);
+    expect(mockOutreach.pauseSender).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ senderIdentity: "a@b.fi", reason: "manual" }),
+    );
+    res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/senders/a%40b.fi/pause").send({}),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("resume requires an explicit human (board) action and 409s when not currently paused", async () => {
+    mockOutreach.resumeSender.mockResolvedValueOnce({ ok: false, reason: "not_paused" });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/senders/a%40b.fi/resume").send({}),
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("not_paused");
+  });
+
+  it("resume succeeds and audits the resuming actor", async () => {
+    mockOutreach.resumeSender.mockResolvedValueOnce({
+      ok: true,
+      pause: { id: "p1", senderIdentity: "a@b.fi", resumedAt: new Date().toISOString() },
+    });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base).post("/api/companies/company-1/outreach/senders/a%40b.fi/resume").send({}),
+    );
+    expect(res.status).toBe(200);
+    expect(mockOutreach.resumeSender).toHaveBeenCalledWith(expect.anything(), "a@b.fi", "user-1");
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "outreach.sender.resumed" }));
   });
 });

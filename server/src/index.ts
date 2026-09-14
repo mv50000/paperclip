@@ -47,6 +47,8 @@ import { closeQmdMcpSession, startQmdKeepwarm } from "./services/qmd-mcp-client.
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
 import { startOutreachSendCron } from "./services/outreach/scheduler.js";
+import { startOutreachAutoPauseCron } from "./services/outreach/auto-pause.js";
+import { startOutreachDnsblCron } from "./services/outreach/dnsbl.js";
 import { createEmailService } from "./services/email/index.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
@@ -644,6 +646,7 @@ export async function startServer(): Promise<StartedServer> {
     outreachUnsubscribeBaseUrl: config.outreachUnsubscribeBaseUrl,
     outreachInboundHmacSecret: config.outreachInboundHmacSecret,
     outreachInboundOwnDomains: config.outreachInboundOwnDomains,
+    outreachMetricsApiKey: config.outreachMetricsApiKey,
   });
   const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
 
@@ -757,6 +760,12 @@ export async function startServer(): Promise<StartedServer> {
   }
   if (config.outreachSenderEnabled) {
     startOutreachSendCron(db as any, { intervalMs: config.outreachSenderIntervalMs });
+  }
+  if (config.outreachAutoPauseEnabled) {
+    startOutreachAutoPauseCron(db as any, { intervalMs: config.outreachAutoPauseIntervalMs });
+  }
+  if (config.outreachDnsblEnabled) {
+    startOutreachDnsblCron({ lists: config.outreachDnsblLists, productionIp: config.outreachDnsblCheckIp });
   }
 
   void reconcilePersistedRuntimeServicesOnStartup(db as any)

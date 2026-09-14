@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   OUTREACH_EVENT_TYPES,
   OUTREACH_LEGAL_BASES,
+  OUTREACH_PAUSE_REASONS,
   OUTREACH_PROSPECT_SOURCES,
   OUTREACH_SUPPRESSION_REASONS,
   OUTREACH_TEMPLATE_COMPANIES,
@@ -214,3 +215,15 @@ export const reportOutreachSendResultSchema = z.discriminatedUnion("outcome", [
   }),
 ]);
 export type ReportOutreachSendResult = z.infer<typeof reportOutreachSendResultSchema>;
+
+// RK9-197: auto-pause. `pauseOutreachSenderSchema` is for a board-triggered
+// manual pause outside the three automatic rules; the automatic rules call
+// the service function directly, not this route/schema.
+export const pauseOutreachSenderSchema = z.object({
+  reason: z.enum(OUTREACH_PAUSE_REASONS).default("manual"),
+  note: z.string().trim().max(1000).optional().nullable(),
+});
+export type PauseOutreachSender = z.infer<typeof pauseOutreachSenderSchema>;
+
+export const resumeOutreachSenderSchema = z.object({}).passthrough().optional();
+export type ResumeOutreachSender = z.infer<typeof resumeOutreachSenderSchema>;

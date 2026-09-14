@@ -14,7 +14,9 @@ import {
   draftOutreachMessagesSchema,
   enrichOutreachProspectsSchema,
   importOutreachProspectsSchema,
+  pauseOutreachSenderSchema,
   rejectOutreachMessageSchema,
+  resumeOutreachSenderSchema,
   updateOutreachMessageSchema,
   updateOutreachProspectSchema,
   updateOutreachSequenceSchema,
@@ -45,8 +47,12 @@ import {
   listOutreachSuppressions,
   listProspects,
   listSequences,
+  listActivePauses,
+  listPauseHistory,
+  pauseSender,
   recordEvent,
   rejectMessage,
+  resumeSender,
   updateDraftMessage,
   updateProspect,
   updateSequence,
@@ -510,6 +516,67 @@ export function outreachRoutes(db: Db) {
   );
 
   // No DELETE for suppressions: entries are permanent (GDPR objection right).
+
+  // --- Sender pauses (RK9-197; GLOBAL by sender identity — company path only
+  // for access control, same convention as suppressions above) -------------
+
+  router.get("/companies/:companyId/outreach/senders/pauses", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+    res.json(await listActivePauses(db));
+  });
+
+  router.get("/companies/:companyId/outreach/senders/:senderIdentity/pauses", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+    res.json(await listPauseHistory(db, decodeURIComponent(req.params.senderIdentity as string)));
+  });
+
+  // Board-only, not agent-callable: a manual pause outside the three
+  // automatic rules (agent keys are a prompt-injection surface — same
+  // reasoning as the `SUPPRESSING_EVENT_TYPES` restriction above).
+  router.post(
+    "/companies/:companyId/outreach/senders/:senderIdentity/pause",
+    validate(pauseOutreachSenderSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+      const senderIdentity = decodeURIComponent(req.params.senderIdentity as string);
+      const result = await pauseSender(db, { senderIdentity, reason: req.body.reason, detail: req.body.note ? { note: req.body.note } : {} });
+      await audit(req, companyId, "outreach.sender.paused", "outreach_sender_pause", result.pause.id, {
+        senderIdentity,
+        reason: req.body.reason,
+        alreadyPaused: !result.created,
+      });
+      res.status(result.created ? 201 : 200).json(result.pause);
+    },
+  );
+
+  // The AC requires resume to be an explicit human action, never a timeout —
+  // board-only (agent keys cannot resume a paused sender).
+  router.post(
+    "/companies/:companyId/outreach/senders/:senderIdentity/resume",
+    validate(resumeOutreachSenderSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+      const senderIdentity = decodeURIComponent(req.params.senderIdentity as string);
+      const actor = getActorInfo(req);
+      const result = await resumeSender(db, senderIdentity, actor.actorId);
+      if (!result.ok) {
+        res.status(409).json({ error: result.reason });
+        return;
+      }
+      await audit(req, companyId, "outreach.sender.resumed", "outreach_sender_pause", result.pause.id, {
+        senderIdentity,
+      });
+      res.json(result.pause);
+    },
+  );
 
   return router;
 }

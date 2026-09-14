@@ -93,4 +93,5 @@ export {
   outreachMessages,
   outreachEvents,
   outreachSuppressions,
+  outreachSenderPauses,
 } from "./outreach.js";
