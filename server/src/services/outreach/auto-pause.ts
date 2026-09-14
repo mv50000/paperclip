@@ -125,30 +125,38 @@ export async function runOutreachAutoPauseCheck(db: Db, now: Date = new Date()):
   const outcomes: OutreachAutoPauseOutcome[] = [];
 
   for (const senderIdentity of identities) {
-    const activePause = await getActivePause(db, senderIdentity);
-    if (activePause) {
-      outcomes.push({
-        senderIdentity,
-        decision: { shouldPause: true, reason: activePause.reason as OutreachAutoPauseDecision["reason"], detail: {} },
-        newlyPaused: false,
-      });
-      continue;
-    }
-
-    const counts = await windowCounts(db, senderIdentity, now);
-    const decision = evaluateAutoPause(counts);
-    let newlyPaused = false;
-    if (decision.shouldPause && decision.reason) {
-      const result = await pauseSender(db, { senderIdentity, reason: decision.reason, detail: decision.detail });
-      newlyPaused = result.created;
-      if (result.created) {
-        logger.warn(
-          { senderIdentity, reason: decision.reason, detail: decision.detail },
-          "outreach auto-pause triggered",
-        );
+    // One identity's query/insert failure must never abort the whole tick —
+    // a safety check whose reliability depends on every identity succeeding,
+    // and on iteration order, could silently mask a real pause condition on
+    // a later identity for as long as the failure persists.
+    try {
+      const activePause = await getActivePause(db, senderIdentity);
+      if (activePause) {
+        outcomes.push({
+          senderIdentity,
+          decision: { shouldPause: true, reason: activePause.reason as OutreachAutoPauseDecision["reason"], detail: {} },
+          newlyPaused: false,
+        });
+        continue;
       }
+
+      const counts = await windowCounts(db, senderIdentity, now);
+      const decision = evaluateAutoPause(counts);
+      let newlyPaused = false;
+      if (decision.shouldPause && decision.reason) {
+        const result = await pauseSender(db, { senderIdentity, reason: decision.reason, detail: decision.detail });
+        newlyPaused = result.created;
+        if (result.created) {
+          logger.warn(
+            { senderIdentity, reason: decision.reason, detail: decision.detail },
+            "outreach auto-pause triggered",
+          );
+        }
+      }
+      outcomes.push({ senderIdentity, decision, newlyPaused });
+    } catch (err) {
+      logger.error({ err, senderIdentity }, "outreach auto-pause check failed for one sender identity");
     }
-    outcomes.push({ senderIdentity, decision, newlyPaused });
   }
   return outcomes;
 }

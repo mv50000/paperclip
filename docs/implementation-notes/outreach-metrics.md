@@ -106,10 +106,19 @@ comfortably inside the AC's "<5 min" requirement. Runs whenever
 unlike `OUTREACH_SENDER_ENABLED` which defaults off — a read-mostly safety
 check is harmless to run even before sending is turned on).
 
-**Gate:** `runQueueDueMessages` fetches all active pauses once per tick
-(`listActivePauses`) and skips any sequence whose `senderIdentity` is
-currently paused — before the send-window/cap checks, so a paused identity
-never even counts against its own daily cap while paused.
+**Gate — two places, not one.** `runQueueDueMessages` fetches all active
+pauses once per tick (`listActivePauses`) and skips any sequence whose
+`senderIdentity` is currently paused — before the send-window/cap checks, so
+a paused identity never even counts against its own daily cap while paused.
+That alone isn't enough: a message can already be `status='queued'` (from a
+tick *before* the pause tripped) when the pause lands, and `listSendQueue` —
+what `GET /outreach/send-queue` hands the rk9-prod sender daemon — is a
+separate query with its own gate, excluding any paused identity's rows in
+the `WHERE` clause (not filtered after the `LIMIT`, which would otherwise let
+one paused identity's backlog starve every other identity's newer messages
+out of the daemon's next poll). A message caught mid-queue by a pause simply
+waits there — it's still valid, not rejected — and gets served again once
+the identity is resumed.
 
 **Resume is always an explicit human action.** `outreach_sender_pauses` has
 no expiry column and nothing in this codebase ever sets `resumedAt` except
@@ -160,6 +169,27 @@ groups:
         annotations:
           summary: "Outreach DNSBL checker's canary self-test is failing — results below are not trustworthy"
 ```
+
+## Side-fix: the scheduler's advisory lock never actually locked
+
+While building the first real-Postgres test this codebase has had for
+`queueDueMessages`/`listSendQueue`
+(`server/src/__tests__/outreach-scheduler-pause-gate.test.ts`), the pause
+gate appeared to work — but so did a fully-unpaused control case, which it
+shouldn't have. Root cause, pre-dating this PR (RK9-194):
+`tryAcquireSchedulerLock` read `(result as { rows? }).rows?.[0]?.locked`, but
+`@paperclipai/db`'s client is `drizzle-orm/postgres-js`, whose `execute()`
+returns the row array directly — there is no `.rows` wrapper (that shape is
+node-postgres's, a different driver). `rows` was always `undefined`, so the
+lock check always returned `false`, and every tick logged "already holds the
+lock" and skipped — the scheduler has never promoted a single message to
+`queued` in this environment. Fixed as a one-line result-parsing correction
+(`server/src/services/outreach/scheduler.ts`, `tryAcquireSchedulerLock`); no
+send-decision policy (window/cap/ramp/retry) changed. Flagged prominently
+here and in the PR because it means RK9-194's scheduler has been silently
+non-functional since it shipped, invisible until now because
+`OUTREACH_SENDER_ENABLED` defaults off and no prior test exercised it
+against a real database.
 
 ## DNSBL check
 

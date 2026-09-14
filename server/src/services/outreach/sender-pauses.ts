@@ -58,12 +58,16 @@ export async function pauseSender(
       .values({ senderIdentity: args.senderIdentity, reason: args.reason, detail: args.detail ?? {} })
       .returning();
     return { created: true, pause: row };
-  } catch {
-    // Lost the race to a concurrent tick that inserted first — the unique
-    // index rejected ours. Return the winner's row instead of throwing.
+  } catch (err) {
+    // Postgres unique_violation (23505) — lost the race to a concurrent tick
+    // that inserted first. Anything else (a bad `detail` payload, a dropped
+    // connection, ...) is a real failure and must propagate, not be silently
+    // swallowed as "someone else already paused it".
+    const code = (err as { code?: string } | null)?.code;
+    if (code !== "23505") throw err;
     const winner = await getActivePause(db, args.senderIdentity);
     if (winner) return { created: false, pause: winner };
-    throw new Error(`pauseSender: insert failed and no active pause found for ${args.senderIdentity}`);
+    throw new Error(`pauseSender: unique_violation but no active pause found for ${args.senderIdentity}`, { cause: err });
   }
 }
 
