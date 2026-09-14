@@ -1008,6 +1008,7 @@ export {
   OUTREACH_TEMPLATE_COMPANIES,
   OUTREACH_DRAFT_MAX_WORDS,
   OUTREACH_PRIVATE_EMAIL_DOMAINS,
+  OUTREACH_PAUSE_REASONS,
   type OutreachProspectSource,
   type OutreachLegalBasis,
   type OutreachProspectStatus,
@@ -1015,6 +1016,7 @@ export {
   type OutreachEventType,
   type OutreachSuppressionReason,
   type OutreachTemplateCompany,
+  type OutreachPauseReason,
 } from "./constants.js";
 export {
   outreachEmailSchema,
@@ -1036,6 +1038,8 @@ export {
   enrichOutreachProspectsSchema,
   draftOutreachMessagesSchema,
   reportOutreachSendResultSchema,
+  pauseOutreachSenderSchema,
+  resumeOutreachSenderSchema,
   type CreateOutreachProspect,
   type UpdateOutreachProspect,
   type ImportOutreachProspects,
@@ -1051,4 +1055,6 @@ export {
   type EnrichOutreachProspects,
   type DraftOutreachMessages,
   type ReportOutreachSendResult,
+  type PauseOutreachSender,
+  type ResumeOutreachSender,
 } from "./validators/index.js";

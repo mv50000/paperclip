@@ -212,3 +212,39 @@ export const outreachSuppressions = pgTable(
     emailUq: uniqueIndex("outreach_suppressions_email_unique_idx").on(table.email),
   }),
 );
+
+/**
+ * RK9-197: auto-pause state, one row per pause episode. GLOBAL — no
+ * company_id — same reasoning as `outreachSuppressions`: `senderIdentity` is
+ * shared free text and can be used by sequences across companies (see
+ * outreach-sender.md's "daily cap is per sender identity, not per
+ * sequence"), so a pause has to gate every company using that identity, not
+ * just one. At most one row per `senderIdentity` may have `resumedAt IS
+ * NULL` at a time (the active pause) — enforced by the partial unique index
+ * below, not by application logic alone. Resuming never deletes the row (a
+ * pause history), it just sets `resumedAt`/`resumedBy`.
+ */
+export const outreachSenderPauses = pgTable(
+  "outreach_sender_pauses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    senderIdentity: text("sender_identity").notNull(),
+    /** One of `OUTREACH_PAUSE_REASONS` — kept as free text (not an enum) so a manual/board pause can use its own reason. */
+    reason: text("reason").notNull(),
+    /** Rule snapshot at pause time (rates, counts) — for operator triage, not machine-read again. */
+    detail: jsonb("detail").notNull().default({}),
+    pausedAt: timestamp("paused_at", { withTimezone: true }).notNull().defaultNow(),
+    /** NULL while the pause is active. Resume always requires an explicit human action (see routes/outreach.ts) — never set by a timeout. */
+    resumedAt: timestamp("resumed_at", { withTimezone: true }),
+    /** Actor id of whoever resumed it. */
+    resumedBy: text("resumed_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    activeIdentityUq: uniqueIndex("outreach_sender_pauses_active_identity_unique_idx")
+      .on(table.senderIdentity)
+      .where(sql`${table.resumedAt} IS NULL`),
+    identityIdx: index("outreach_sender_pauses_identity_idx").on(table.senderIdentity),
+  }),
+);

@@ -1027,6 +1027,23 @@ export type OutreachSuppressionReason = (typeof OUTREACH_SUPPRESSION_REASONS)[nu
 /** GDPR retention rule: `new` prospects never contacted are purged after this many days. */
 export const OUTREACH_PROSPECT_RETENTION_DAYS = 180;
 
+// --- RK9 outreach metrics / auto-pause (RK9-197) ---
+/**
+ * Why an identity gets auto-paused. `hard_bounce_rate`/`spam_complaint`/
+ * `delivery_error_rate` are the three automatic rules; `manual` covers a
+ * board-triggered pause outside those rules. Kept as a plain string column
+ * in the DB (see `outreachSenderPauses`), not a Postgres enum, so a future
+ * rule doesn't need a migration — this list is the application-level source
+ * of truth for the API/validators.
+ */
+export const OUTREACH_PAUSE_REASONS = [
+  "hard_bounce_rate",
+  "spam_complaint",
+  "delivery_error_rate",
+  "manual",
+] as const;
+export type OutreachPauseReason = (typeof OUTREACH_PAUSE_REASONS)[number];
+
 // --- RK9 outreach personalization (RK9-196) ---
 /** Slugs of `docs/outreach/templates/<slug>.md` — the per-company draft prompt/voice. */
 export const OUTREACH_TEMPLATE_COMPANIES = ["saatavilla", "alli-audit", "ololla"] as const;

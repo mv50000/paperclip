@@ -2,7 +2,7 @@
 // decisions (window, cap, ramp, retry, SMTP classification) live in
 // `scheduler-logic.ts` and are unit-tested there without a database.
 
-import { and, asc, eq, gte, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachMessages, outreachProspects, outreachSequences } from "@paperclipai/db";
 import type { OutreachProspectStatus } from "@paperclipai/shared";
@@ -11,6 +11,7 @@ import { isProspectContactable } from "./logic.js";
 import { getProspect } from "./prospects.js";
 import { findOutreachSuppressed } from "./suppressions.js";
 import { recordEvent } from "./events.js";
+import { listActivePauses } from "./sender-pauses.js";
 import {
   MAX_SEND_ATTEMPTS,
   classifySmtpCode,
@@ -95,7 +96,18 @@ const SCHEDULER_LOCK_KEY = 0x524b39_194;
 
 async function tryAcquireSchedulerLock(tx: Db): Promise<boolean> {
   const result = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(${SCHEDULER_LOCK_KEY}) AS locked`);
-  const rows = (result as unknown as { rows?: Array<{ locked: boolean }> }).rows;
+  // RK9-197 fix (pre-existing bug, unrelated to auto-pause): this project's
+  // `@paperclipai/db` client is drizzle-orm/postgres-js, whose `execute()`
+  // returns the row array directly — there is no `.rows` wrapper (that shape
+  // is node-postgres's). The old `(result as { rows? }).rows?.[0]` was
+  // always `undefined`, so this always returned `false`: every
+  // `queueDueMessages` tick logged "already holds the lock" and skipped,
+  // meaning the scheduler never promoted a single message in practice.
+  // Caught by server/src/__tests__/outreach-scheduler-pause-gate.test.ts (the
+  // first real-Postgres test this function has ever had) while verifying
+  // the new auto-pause gate — fixed here because an untestable, non-functional
+  // gate defeats the point of adding one.
+  const rows = result as unknown as Array<{ locked: boolean }>;
   return rows?.[0]?.locked === true;
 }
 
@@ -137,8 +149,13 @@ async function runQueueDueMessages(db: Db, now: Date): Promise<QueueDueMessagesR
   // Multiple active sequences can share one sender identity; track what this
   // tick has already reserved for it so they don't jointly overshoot the cap.
   const reservedThisTick = new Map<string, number>();
+  // RK9-197: auto-pause gate. Fetched once per tick rather than per sequence
+  // — a handful of active sequences, one extra query either way, but this
+  // keeps the common (nothing paused) case to a single round trip.
+  const pausedIdentities = new Set((await listActivePauses(db)).map((p) => p.senderIdentity));
 
   for (const seq of sequences) {
+    if (pausedIdentities.has(seq.senderIdentity)) continue;
     const window = sendWindowOf(seq);
     if (!isWithinSendWindow(window, now)) continue;
 
@@ -206,6 +223,14 @@ export async function listSendQueue(
   opts: { limit?: number; unsubscribeBaseUrl: string },
 ): Promise<SendQueueItem[]> {
   const now = new Date();
+  // RK9-197: a message can already be `queued` (from before a pause tripped)
+  // when its sender identity gets auto-paused — `runQueueDueMessages`'s gate
+  // only stops *new* approved→queued promotions, so this is the last chance
+  // to actually stop it leaving the building. Filtered in the WHERE, not
+  // post-query: otherwise a paused identity with many old queued messages
+  // would fill up `limit` and starve every other identity's newer messages
+  // out of every poll.
+  const pausedIdentities = [...new Set((await listActivePauses(db)).map((p) => p.senderIdentity))];
   const rows = await db
     .select({
       message: outreachMessages,
@@ -220,6 +245,7 @@ export async function listSendQueue(
       and(
         eq(outreachMessages.status, "queued"),
         or(isNull(outreachMessages.nextRetryAt), lte(outreachMessages.nextRetryAt, now)),
+        pausedIdentities.length > 0 ? notInArray(outreachSequences.senderIdentity, pausedIdentities) : undefined,
       ),
     )
     .orderBy(asc(outreachMessages.queuedAt))
