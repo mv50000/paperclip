@@ -5,6 +5,7 @@ import {
   classifyInboundOutreachMail,
   extractOriginalMessageId,
   hasUnsubscribeRecipient,
+  hasVerifiedAuthentication,
   isDeliveryStatusNotification,
   isSelfLoop,
   parseDeliveryStatusFields,
@@ -247,6 +248,56 @@ describe("isSelfLoop / hasUnsubscribeRecipient", () => {
   });
 });
 
+describe("hasVerifiedAuthentication (RK9-206)", () => {
+  it("passes when the Authentication-Results header shows both spf=pass and dkim=pass", () => {
+    expect(
+      hasVerifiedAuthentication({
+        "authentication-results": "mail.outreach.rk9.fi; dkim=pass header.i=@example.com; spf=pass smtp.mailfrom=example.com",
+      }),
+    ).toBe(true);
+  });
+
+  it("is order-independent and case-insensitive", () => {
+    expect(
+      hasVerifiedAuthentication({
+        "authentication-results": "mail.outreach.rk9.fi; SPF=Pass smtp.mailfrom=example.com; DKIM=PASS header.i=@example.com",
+      }),
+    ).toBe(true);
+  });
+
+  it("fails closed when the header is missing entirely", () => {
+    expect(hasVerifiedAuthentication({})).toBe(false);
+  });
+
+  it("fails when only SPF passes", () => {
+    expect(
+      hasVerifiedAuthentication({
+        "authentication-results": "mail.outreach.rk9.fi; spf=pass smtp.mailfrom=example.com; dkim=fail",
+      }),
+    ).toBe(false);
+  });
+
+  it("fails when only DKIM passes", () => {
+    expect(
+      hasVerifiedAuthentication({
+        "authentication-results": "mail.outreach.rk9.fi; spf=fail; dkim=pass header.i=@example.com",
+      }),
+    ).toBe(false);
+  });
+
+  it("handles two separate Authentication-Results headers (one per filter, joined by parseInboundMime)", () => {
+    expect(
+      hasVerifiedAuthentication({
+        "authentication-results": "mail.outreach.rk9.fi; dkim=pass header.i=@example.com | mail.outreach.rk9.fi; spf=pass smtp.mailfrom=example.com",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match a substring like dkim=passed or spf=passthrough", () => {
+    expect(hasVerifiedAuthentication({ "authentication-results": "dkim=passed; spf=passthrough" })).toBe(false);
+  });
+});
+
 describe("parseInboundMime References-header capping (RK9-195 verifier H2)", () => {
   it("truncates an oversized References header instead of retaining it in full", async () => {
     const hostileReferences = Array.from({ length: 5000 }, (_, i) => `<c${i}@outreach.rk9.fi>`).join(" ");
@@ -279,6 +330,48 @@ describe("parseInboundMime References-header capping (RK9-195 verifier H2)", () 
       ]),
     );
     expect(parsed.headers["in-reply-to"]?.length ?? 0).toBeLessThanOrEqual(2000);
+  });
+});
+
+describe("parseInboundMime Authentication-Results extraction (RK9-206)", () => {
+  it("captures a single Authentication-Results header", async () => {
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: unsub@outreach.rk9.fi",
+        "Subject: unsubscribe",
+        "Authentication-Results: mail.outreach.rk9.fi; dkim=pass header.i=@example.com; spf=pass smtp.mailfrom=example.com",
+        "Message-ID: <x@example.com>",
+        "",
+        "stop",
+      ]),
+    );
+    expect(parsed.headers["authentication-results"]).toContain("dkim=pass");
+    expect(parsed.headers["authentication-results"]).toContain("spf=pass");
+  });
+
+  it("joins two separate Authentication-Results headers (one per verifying filter) instead of keeping only the last", async () => {
+    const parsed = await parseInboundMime(
+      raw([
+        "From: prospect@example.com",
+        "To: unsub@outreach.rk9.fi",
+        "Subject: unsubscribe",
+        "Authentication-Results: mail.outreach.rk9.fi; dkim=pass header.i=@example.com",
+        "Authentication-Results: mail.outreach.rk9.fi; spf=pass smtp.mailfrom=example.com",
+        "Message-ID: <x2@example.com>",
+        "",
+        "stop",
+      ]),
+    );
+    expect(parsed.headers["authentication-results"]).toContain("dkim=pass");
+    expect(parsed.headers["authentication-results"]).toContain("spf=pass");
+  });
+
+  it("omits the header entirely when absent", async () => {
+    const parsed = await parseInboundMime(
+      raw(["From: prospect@example.com", "To: unsub@outreach.rk9.fi", "Subject: unsubscribe", "Message-ID: <x3@example.com>", "", "stop"]),
+    );
+    expect(parsed.headers["authentication-results"]).toBeUndefined();
   });
 });
 

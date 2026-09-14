@@ -45,6 +45,12 @@ function firstAddress(addr: AddressObject | AddressObject[] | undefined): string
 // even though it's conventionally a single id.
 const MAX_REFERENCES_HEADER_CHARS = 2000;
 const MAX_IN_REPLY_TO_HEADER_CHARS = 2000;
+// RK9-206: rk9-prod's Postfix now runs an SPF policy service and OpenDKIM in
+// verify mode, each prepending its own `Authentication-Results:` header
+// before the message is piped to us — same defensive-cap rationale as
+// References/In-Reply-To above, sized generously since a real result is a
+// couple hundred chars.
+const MAX_AUTH_RESULTS_HEADER_CHARS = 2000;
 
 const ALLOWLISTED_HEADERS = [
   "auto-submitted",
@@ -73,6 +79,20 @@ export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundMa
   for (const name of ALLOWLISTED_HEADERS) {
     const value = rawHeaders.get(name);
     if (typeof value === "string") headers[name] = value;
+  }
+  // `Authentication-Results` legitimately repeats (one per verifying filter —
+  // OpenDKIM and the SPF policy service each add their own), unlike the
+  // single-occurrence headers above — mailparser returns an array once a
+  // header key repeats. Join every occurrence so the fail-closed pass check
+  // in inbound-classify.ts sees results from all filters, not just the last.
+  const authResults = rawHeaders.get("authentication-results");
+  const authResultsValues = Array.isArray(authResults)
+    ? authResults.filter((v): v is string => typeof v === "string")
+    : typeof authResults === "string"
+      ? [authResults]
+      : [];
+  if (authResultsValues.length > 0) {
+    headers["authentication-results"] = authResultsValues.join(" | ").slice(0, MAX_AUTH_RESULTS_HEADER_CHARS);
   }
   const list = rawHeaders.get("list") as Record<string, unknown> | undefined;
   if (list && typeof list === "object") {

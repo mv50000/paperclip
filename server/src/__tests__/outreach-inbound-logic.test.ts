@@ -59,6 +59,29 @@ const UNSUB_RAW = rawMime([
   "stop",
 ]);
 
+// RK9-206: the address-based (no-threading) unsub@ fallback requires a
+// passing Authentication-Results header — this fixture carries one so the
+// "falls back to a global suppression" test below still exercises that path.
+const UNSUB_AUTHENTICATED_RAW = rawMime([
+  "From: prospect@example.com",
+  "To: unsub@outreach.rk9.fi",
+  "Subject: unsubscribe",
+  "Message-ID: <unsub-2@example.com>",
+  "Authentication-Results: mail.outreach.rk9.fi; dkim=pass header.i=@example.com; spf=pass smtp.mailfrom=example.com",
+  "",
+  "stop",
+]);
+
+const UNSUB_FAILED_AUTH_RAW = rawMime([
+  "From: prospect@example.com",
+  "To: unsub@outreach.rk9.fi",
+  "Subject: unsubscribe",
+  "Message-ID: <unsub-3@example.com>",
+  "Authentication-Results: mail.outreach.rk9.fi; dkim=fail; spf=pass smtp.mailfrom=example.com",
+  "",
+  "stop",
+]);
+
 const dsnRaw = (action: string, status: string) =>
   rawMime([
     "From: MAILER-DAEMON@outreach.rk9.fi",
@@ -201,11 +224,11 @@ describe("processOutreachInboundMail", () => {
     expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
   });
 
-  it("falls back to a global suppression-by-email when unsub@ has no threading header", async () => {
+  it("falls back to a global suppression-by-email when unsub@ has no threading header and SPF+DKIM both pass", async () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
     mockSuppressions.addOutreachSuppression.mockResolvedValue({ entry: {}, created: true });
 
-    const result = await processOutreachInboundMail({} as any, UNSUB_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail({} as any, UNSUB_AUTHENTICATED_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("unsubscribed_by_email");
     expect(mockSuppressions.addOutreachSuppression).toHaveBeenCalledWith(
@@ -213,6 +236,28 @@ describe("processOutreachInboundMail", () => {
       expect.objectContaining({ email: "prospect@example.com", reason: "unsubscribe" }),
     );
     expect(mockEvents.recordEvent).not.toHaveBeenCalled();
+  });
+
+  it("skips the address-based suppression when Authentication-Results is missing entirely (RK9-206, fail closed)", async () => {
+    mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
+
+    const result = await processOutreachInboundMail({} as any, UNSUB_RAW, OWN_DOMAINS);
+
+    expect(result.outcome).toBe("unsubscribe_skipped_unauthenticated");
+    expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
+    expect(mockLogger.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ from: "prospect@example.com" }),
+      expect.stringContaining("SPF/DKIM did not both pass"),
+    );
+  });
+
+  it("skips the address-based suppression when only one of SPF/DKIM passes (RK9-206, fail closed)", async () => {
+    mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
+
+    const result = await processOutreachInboundMail({} as any, UNSUB_FAILED_AUTH_RAW, OWN_DOMAINS);
+
+    expect(result.outcome).toBe("unsubscribe_skipped_unauthenticated");
+    expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
   });
 
   it("does NOT honor unsub@ on a domain outside ownDomains (RK9-195 verifier H1: forged To: on any domain)", async () => {
