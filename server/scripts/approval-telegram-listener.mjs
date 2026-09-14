@@ -1,11 +1,23 @@
 // approval-telegram-listener.mjs — Telegram approval gate for Paperclip
-// email_send approvals (RK9-85). Mirrors the sunspot-ig-listen pattern:
-// pending approvals are posted to the operator's Telegram chat with inline
-// buttons, and a tap approves/rejects within ~1s via a getUpdates long-poll.
+// email_send approvals (RK9-85) and outreach drafts (RK9-222). Mirrors the
+// sunspot-ig-listen pattern: pending items are posted to the operator's
+// Telegram chat with inline buttons, and a tap approves/rejects within ~1s
+// via a getUpdates long-poll.
 //
+// email_send approvals (callback prefix `pa:`):
 //   ✅ Hyväksy   → POST /api/approvals/:id/approve, outcome edited into the msg
 //   ❌ Hylkää    → ForceReply prompt; the reply text becomes decisionNote
 //   ✏️ Revisio   → ForceReply prompt; the reply text becomes decisionNote
+//
+// outreach drafts (RK9-222, callback prefix `po:`, `outreach_messages.status = draft`):
+//   ✅ Hyväksy   → POST /api/companies/:cid/outreach/messages/:id/approve; a 409
+//                  prospect_not_contactable promotes the prospect new→approved
+//                  first and retries (same rule as `paperclipai outreach review`)
+//   ❌ Hylkää    → ForceReply prompt; the reply text becomes reject_reason
+//   (no ✏️ — editing a body on a phone is clumsy; use the CLI review for that)
+//   At most OUTREACH_TG_MAX_OPEN (default 5) draft cards are open at a time so a
+//   20-draft batch does not flood the chat; the next card is posted once one is
+//   decided. Set OUTREACH_TG_ENABLED=0 to turn the outreach source off.
 //
 // Deliberately a standalone .mjs with ZERO repo imports (plain `node` — the
 // tsx/import path under /opt is known to hang, see vault
@@ -21,6 +33,8 @@
 //   TG_BOT_TOKEN        BotFather token for the dedicated approvals bot
 //   TG_CHAT_ID          operator's chat id (only this chat may tap buttons)
 //   STATE_DIR           default /var/lib/paperclip/approval-telegram
+//   OUTREACH_TG_ENABLED default 1; "0" disables the outreach draft source
+//   OUTREACH_TG_MAX_OPEN default 5; open outreach draft cards at a time
 //
 //   node approval-telegram-listener.mjs            # long-poll listener (systemd)
 //   node approval-telegram-listener.mjs --once     # one scan+drain, then exit (smoke)
@@ -35,22 +49,30 @@ const TG_CHAT = String(process.env.TG_CHAT_ID ?? "");
 const STATE_DIR = process.env.STATE_DIR ?? "/var/lib/paperclip/approval-telegram";
 const SCAN_MIN_INTERVAL_MS = 20_000;
 const NOTE_PROMPT_TTL_MS = 30 * 60_000;
+const OUTREACH_ENABLED = (process.env.OUTREACH_TG_ENABLED ?? "1") !== "0";
+const OUTREACH_MAX_OPEN = Math.max(1, Number.parseInt(process.env.OUTREACH_TG_MAX_OPEN ?? "5", 10) || 5);
 
 if (!PCP_TOKEN || !TG_TOKEN || !TG_CHAT) {
   console.error("Missing PAPERCLIP_TOKEN / TG_BOT_TOKEN / TG_CHAT_ID");
   process.exit(1);
 }
 
-const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`;
+// TG_API_BASE is only overridden by the test harness (points both APIs at a mock server).
+const TG_API = `${(process.env.TG_API_BASE ?? "https://api.telegram.org").replace(/\/$/, "")}/bot${TG_TOKEN}`;
 const STATE_PATH = join(STATE_DIR, "state.json");
 
 // ── state: posted approvals + tg offset + open ForceReply note prompts ────────
 function loadState() {
+  let state;
   try {
-    return JSON.parse(readFileSync(STATE_PATH, "utf8"));
+    state = JSON.parse(readFileSync(STATE_PATH, "utf8"));
   } catch {
-    return { offset: 0, posted: {}, notePrompts: {} };
+    state = { offset: 0, posted: {}, notePrompts: {} };
   }
+  // RK9-222: outreach draft cards live in their own map, keyed by
+  // outreach_messages.id; a pre-RK9-222 state.json simply lacks the key.
+  state.postedOutreach ??= {};
+  return state;
 }
 function saveState(state) {
   mkdirSync(STATE_DIR, { recursive: true });
@@ -115,6 +137,32 @@ const buildMarkup = (approvalId) => ({
   ],
 });
 
+// RK9-222: one outreach draft card. `prospect` may be null when the lookup
+// failed — the card still renders so the operator can act on the message.
+function renderOutreachDraft(companyName, message, prospect, waiting) {
+  const who = prospect ? `${prospect.orgName ?? "?"} <${prospect.email ?? "?"}>` : "(prospekti ei saatavilla)";
+  let body = typeof message.bodyText === "string" ? message.bodyText : "(ei runkoa)";
+  if (body.length > 3000) body = body.slice(0, 2997) + "…";
+  const lines = [
+    `✉️ Outreach-luonnos — ${companyName}`,
+    `Prospekti: ${who}`,
+    `Aihe: ${message.subject ?? "?"}`,
+    "──────────",
+    body,
+  ];
+  if (waiting > 0) lines.push("──────────", `Jonossa vielä ${waiting} luonnosta.`);
+  return lines.join("\n");
+}
+
+const buildOutreachMarkup = (messageId) => ({
+  inline_keyboard: [
+    [
+      { text: "✅ Hyväksy", callback_data: `po:a:${messageId}` },
+      { text: "❌ Hylkää", callback_data: `po:r:${messageId}` },
+    ],
+  ],
+});
+
 async function editDone(messageId, text) {
   await tg("editMessageText", {
     chat_id: TG_CHAT,
@@ -137,6 +185,13 @@ async function listCompanies() {
 
 async function scan() {
   const companies = await listCompanies();
+  if (OUTREACH_ENABLED) {
+    try {
+      await scanOutreach(companies);
+    } catch (e) {
+      console.error("scanOutreach:", e.message);
+    }
+  }
   const pendingIds = new Set();
 
   for (const company of companies) {
@@ -172,6 +227,111 @@ async function scan() {
       saveState(state);
     }
   }
+}
+
+// ── RK9-222: outreach drafts — post up to OUTREACH_MAX_OPEN cards, close decided ones
+// Parked cards (a failed decision, already shown as ⚠️) stay in the map so the
+// draft is not re-posted every scan, but they do not hold an open slot.
+const openOutreachCount = () => Object.values(state.postedOutreach).filter((e) => !e.parked).length;
+
+async function scanOutreach(companies) {
+  const draftIds = new Set();
+  const backlog = []; // { company, message } oldest first, not yet posted
+
+  for (const company of companies) {
+    const res = await pcp("GET", `/companies/${company.id}/outreach/messages?status=draft&limit=200`);
+    if (!res.ok || !Array.isArray(res.json)) continue;
+    // API returns newest first; review oldest first so a batch keeps its order.
+    for (const message of [...res.json].reverse()) {
+      draftIds.add(message.id);
+      if (!state.postedOutreach[message.id]) backlog.push({ company, message });
+    }
+  }
+
+  // decided elsewhere (CLI review / UI) → close the Telegram card too
+  for (const [messageId, entry] of Object.entries(state.postedOutreach)) {
+    if (draftIds.has(messageId) || entry.handling) continue;
+    const res = await pcp("GET", `/companies/${entry.companyId}/outreach/messages/${messageId}`);
+    const status = res.json?.status;
+    if (res.status === 404 || (status && status !== "draft")) {
+      await editDone(entry.messageId, `☑️ Käsitelty muualla (${status ?? "poistettu"}).`);
+      delete state.postedOutreach[messageId];
+      saveState(state);
+    }
+  }
+
+  let remaining = backlog.length;
+  for (const { company, message } of backlog) {
+    if (openOutreachCount() >= OUTREACH_MAX_OPEN) break;
+    remaining -= 1;
+    const prospectRes = await pcp("GET", `/companies/${company.id}/outreach/prospects/${message.prospectId}`);
+    const prospect = prospectRes.ok ? prospectRes.json : null;
+    const msg = await tg("sendMessage", {
+      chat_id: TG_CHAT,
+      text: renderOutreachDraft(company.name, message, prospect, remaining),
+      reply_markup: buildOutreachMarkup(message.id),
+    });
+    if (msg?.ok) {
+      state.postedOutreach[message.id] = {
+        messageId: msg.result.message_id,
+        companyId: company.id,
+        prospectId: message.prospectId,
+        label: prospect ? `${prospect.orgName ?? "?"} <${prospect.email ?? "?"}>` : message.prospectId,
+        at: Date.now(),
+      };
+      saveState(state);
+      console.log(`posted outreach draft ${message.id} (${company.name})`);
+    } else {
+      console.error("sendMessage (outreach) failed:", msg?.description);
+      break; // Telegram unhappy — retry next scan rather than hammer it
+    }
+  }
+}
+
+async function doOutreachApprove(messageId, entry) {
+  const base = `/companies/${entry.companyId}/outreach`;
+  let res = await pcp("POST", `${base}/messages/${messageId}/approve`, {});
+  if (res.status === 409 && res.json?.error === "prospect_not_contactable") {
+    // A prospect still `new` cannot receive an approved message; approving this
+    // draft IS the human decision that the prospect is worth contacting.
+    const promoted = await pcp("PATCH", `${base}/prospects/${entry.prospectId}`, { status: "approved" });
+    if (promoted.ok) res = await pcp("POST", `${base}/messages/${messageId}/approve`, {});
+  }
+  if (!res.ok) {
+    const why = res.json?.error ? ` — ${res.json.error}` : "";
+    await editDone(
+      entry.messageId,
+      `⚠️ Hyväksyntä epäonnistui (HTTP ${res.status}${why}). Käsittele CLI:llä: paperclipai outreach review\n${entry.label ?? ""}`,
+    );
+    parkOutreach(messageId, entry);
+    return;
+  }
+  await editDone(entry.messageId, `✅ Hyväksytty — lähtee lähetysikkunassa rampin mukaan.\n${entry.label ?? ""}`);
+  delete state.postedOutreach[messageId];
+  saveState(state);
+}
+
+function parkOutreach(messageId, entry) {
+  delete entry.handling;
+  entry.parked = true;
+  state.postedOutreach[messageId] = entry;
+  saveState(state);
+}
+
+async function doOutreachReject(messageId, entry, reason) {
+  const res = await pcp("POST", `/companies/${entry.companyId}/outreach/messages/${messageId}/reject`, { reason });
+  if (!res.ok) {
+    const why = res.json?.error ? ` — ${res.json.error}` : "";
+    await editDone(
+      entry.messageId,
+      `⚠️ Hylkäys epäonnistui (HTTP ${res.status}${why}). Käsittele CLI:llä: paperclipai outreach review\n${entry.label ?? ""}`,
+    );
+    parkOutreach(messageId, entry);
+    return;
+  }
+  await editDone(entry.messageId, `❌ Hylätty. Perustelu tallennettu (reject_reason):\n${reason}\n${entry.label ?? ""}`);
+  delete state.postedOutreach[messageId];
+  saveState(state);
 }
 
 // ── decisions ─────────────────────────────────────────────────────────────────
@@ -223,6 +383,11 @@ async function handleCallback(cq) {
     await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Ei oikeutta." });
     return;
   }
+  const mo = /^po:([ar]):([0-9a-f-]{36})$/.exec(cq.data ?? "");
+  if (mo) {
+    await handleOutreachCallback(cq, mo[1], mo[2]);
+    return;
+  }
   const m = /^pa:([arv]):([0-9a-f-]{36})$/.exec(cq.data ?? "");
   if (!m) {
     await tg("answerCallbackQuery", { callback_query_id: cq.id });
@@ -261,6 +426,41 @@ async function handleCallback(cq) {
   }
 }
 
+// RK9-222: outreach card taps. The card's companyId/prospectId live only in
+// state.json (callback_data is capped at 64 bytes), so a card whose state was
+// lost cannot be acted on from Telegram — say so instead of guessing.
+async function handleOutreachCallback(cq, action, messageId) {
+  const entry = state.postedOutreach[messageId];
+  if (!entry) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Kortti vanhentunut — käytä CLI:tä." });
+    await editDone(cq.message.message_id, "⚠️ Kortti vanhentunut (tila hävinnyt). Käsittele CLI:llä: paperclipai outreach review");
+    return;
+  }
+  if (action === "a") {
+    entry.handling = true;
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Hyväksytään…" });
+    await editDone(entry.messageId, "⏳ Hyväksytään…");
+    await doOutreachApprove(messageId, entry);
+    return;
+  }
+  await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Kirjoita hylkäyssyy vastauksena." });
+  const prompt = await tg("sendMessage", {
+    chat_id: TG_CHAT,
+    text: `❌ Hylkäys — vastaa TÄHÄN viestiin syyllä (tallentuu reject_reason-sarakkeeseen, ohjaa promptin parannusta).`,
+    reply_markup: { force_reply: true },
+  });
+  if (prompt?.ok) {
+    state.notePrompts[String(prompt.result.message_id)] = {
+      kind: "outreach",
+      action: "r",
+      outreachMessageId: messageId,
+      at: Date.now(),
+    };
+    entry.handling = true;
+    saveState(state);
+  }
+}
+
 async function handleMessage(msg) {
   if (String(msg.chat?.id ?? "") !== TG_CHAT) return;
   const repliedTo = msg.reply_to_message?.message_id;
@@ -269,6 +469,15 @@ async function handleMessage(msg) {
   if (!prompt) return;
   const note = (msg.text ?? "").trim() || "(ei perustelua)";
   delete state.notePrompts[String(repliedTo)];
+  if (prompt.kind === "outreach") {
+    const entry = state.postedOutreach[prompt.outreachMessageId];
+    if (!entry) {
+      saveState(state);
+      return; // card closed meanwhile (decided elsewhere) — nothing to reject
+    }
+    await doOutreachReject(prompt.outreachMessageId, entry, note);
+    return;
+  }
   const entry = state.posted[prompt.approvalId] ?? { messageId: prompt.origMessageId };
   await doDecline(prompt.action, prompt.approvalId, entry, note);
 }
@@ -278,7 +487,11 @@ function pruneNotePrompts() {
   for (const [key, p] of Object.entries(state.notePrompts)) {
     if (p.at < cutoff) {
       delete state.notePrompts[key];
-      if (state.posted[p.approvalId]) delete state.posted[p.approvalId].handling;
+      if (p.kind === "outreach") {
+        if (state.postedOutreach[p.outreachMessageId]) delete state.postedOutreach[p.outreachMessageId].handling;
+      } else if (state.posted[p.approvalId]) {
+        delete state.posted[p.approvalId].handling;
+      }
     }
   }
 }
