@@ -9,9 +9,37 @@ import { normalizeEmail } from "./logic.js";
 export type QualityGateReason =
   | "missing_email"
   | "placeholder_text"
+  | "disallowed_link"
   | "private_email_domain"
   | "suppressed"
   | "too_long";
+
+// RK9-223: the body may carry at most ONE link, and only to saatavilla.fi or
+// a subdomain (segment demo tenants). Anything else (a hallucinated URL, a
+// competitor page, a bare "www.") is rejected verbatim as `disallowed_link`.
+export const OUTREACH_ALLOWED_LINK_HOST_SUFFIX = "saatavilla.fi";
+const LINK_RE = /\bhttps?:\/\/[^\s<>()"']+|\bwww\.[a-z0-9-]+\.[a-z0-9.-]+[^\s<>()"']*/gi;
+
+export function findLinks(text: string): string[] {
+  return (text.match(LINK_RE) ?? []).map((l) => l.replace(/[.,;:!?)]+$/, ""));
+}
+
+function linkHost(link: string): string | null {
+  try {
+    return new URL(link.startsWith("http") ? link : `https://${link}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+export function hasDisallowedLink(text: string): boolean {
+  const links = findLinks(text);
+  if (links.length > 1) return true;
+  return links.some((l) => {
+    const host = linkHost(l);
+    return !host || !(host === OUTREACH_ALLOWED_LINK_HOST_SUFFIX || host.endsWith(`.${OUTREACH_ALLOWED_LINK_HOST_SUFFIX}`));
+  });
+}
 
 export type QualityGateVerdict = { ok: true } | { ok: false; reason: QualityGateReason };
 
@@ -49,13 +77,14 @@ export interface QualityGateInput {
 
 /**
  * Runs the AC-mandated checks in order: missing address, placeholder text,
- * private/free e-mail domain, global suppression, word count. The first
+ * disallowed link (RK9-223), private/free e-mail domain, global suppression, word count. The first
  * failure wins — callers store it verbatim as the message's `reject_reason`
  * so prompt iteration has a concrete signal (RK9-196 AC).
  */
 export function runQualityGate(input: QualityGateInput): QualityGateVerdict {
   if (!input.email) return { ok: false, reason: "missing_email" };
   if (containsPlaceholderText(input.bodyText)) return { ok: false, reason: "placeholder_text" };
+  if (hasDisallowedLink(input.bodyText)) return { ok: false, reason: "disallowed_link" };
   if (isPrivateEmailDomain(input.email)) return { ok: false, reason: "private_email_domain" };
   if (input.suppressed) return { ok: false, reason: "suppressed" };
   if (countWords(input.bodyText) > OUTREACH_DRAFT_MAX_WORDS) return { ok: false, reason: "too_long" };
