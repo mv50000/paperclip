@@ -34,7 +34,8 @@
 //   TG_CHAT_ID          operator's chat id (only this chat may tap buttons)
 //   STATE_DIR           default /var/lib/paperclip/approval-telegram
 //   OUTREACH_TG_ENABLED default 1; "0" disables the outreach draft source
-//   OUTREACH_TG_MAX_OPEN default 5; open outreach draft cards at a time
+//   OUTREACH_TG_MAX_OPEN default 5; open outreach draft cards at a time (≥ 1; use
+//                       OUTREACH_TG_ENABLED=0 to turn the source off, not 0 here)
 //
 //   node approval-telegram-listener.mjs            # long-poll listener (systemd)
 //   node approval-telegram-listener.mjs --once     # one scan+drain, then exit (smoke)
@@ -185,13 +186,6 @@ async function listCompanies() {
 
 async function scan() {
   const companies = await listCompanies();
-  if (OUTREACH_ENABLED) {
-    try {
-      await scanOutreach(companies);
-    } catch (e) {
-      console.error("scanOutreach:", e.message);
-    }
-  }
   const pendingIds = new Set();
 
   for (const company of companies) {
@@ -227,6 +221,14 @@ async function scan() {
       saveState(state);
     }
   }
+
+  if (OUTREACH_ENABLED) {
+    try {
+      await scanOutreach(companies);
+    } catch (e) {
+      console.error("scanOutreach:", e.message);
+    }
+  }
 }
 
 // ── RK9-222: outreach drafts — post up to OUTREACH_MAX_OPEN cards, close decided ones
@@ -248,8 +250,11 @@ async function scanOutreach(companies) {
     }
   }
 
-  // decided elsewhere (CLI review / UI) → close the Telegram card too
+  // decided elsewhere (CLI review / UI) → close the Telegram card too. A card
+  // stuck in `handling` longer than a note prompt may live is treated as free.
+  const handlingCutoff = Date.now() - NOTE_PROMPT_TTL_MS;
   for (const [messageId, entry] of Object.entries(state.postedOutreach)) {
+    if (entry.handling && (entry.at ?? 0) < handlingCutoff) delete entry.handling;
     if (draftIds.has(messageId) || entry.handling) continue;
     const res = await pcp("GET", `/companies/${entry.companyId}/outreach/messages/${messageId}`);
     const status = res.json?.status;
@@ -309,6 +314,21 @@ async function doOutreachApprove(messageId, entry) {
   await editDone(entry.messageId, `✅ Hyväksytty — lähtee lähetysikkunassa rampin mukaan.\n${entry.label ?? ""}`);
   delete state.postedOutreach[messageId];
   saveState(state);
+}
+
+// A decision that throws (API restart, timeout) must not leave the card in
+// `handling` forever — that would hold a cap slot and skip cleanup for good.
+async function guardOutreachDecision(messageId, entry, run) {
+  try {
+    await run();
+  } catch (e) {
+    console.error("outreach decision:", e.message);
+    await editDone(
+      entry.messageId,
+      `⚠️ Yhteysvirhe (${e.message}). Päätöstä ei kirjattu — käsittele CLI:llä: paperclipai outreach review\n${entry.label ?? ""}`,
+    );
+    parkOutreach(messageId, entry);
+  }
 }
 
 function parkOutreach(messageId, entry) {
@@ -433,14 +453,18 @@ async function handleOutreachCallback(cq, action, messageId) {
   const entry = state.postedOutreach[messageId];
   if (!entry) {
     await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Kortti vanhentunut — käytä CLI:tä." });
-    await editDone(cq.message.message_id, "⚠️ Kortti vanhentunut (tila hävinnyt). Käsittele CLI:llä: paperclipai outreach review");
+    // Only rewrite the card if it still shows buttons; a double tap on an
+    // already-decided card must not overwrite its "✅ Hyväksytty" outcome.
+    if (cq.message?.reply_markup?.inline_keyboard?.length) {
+      await editDone(cq.message.message_id, "⚠️ Kortti vanhentunut (tila hävinnyt). Käsittele CLI:llä: paperclipai outreach review");
+    }
     return;
   }
   if (action === "a") {
     entry.handling = true;
     await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Hyväksytään…" });
     await editDone(entry.messageId, "⏳ Hyväksytään…");
-    await doOutreachApprove(messageId, entry);
+    await guardOutreachDecision(messageId, entry, () => doOutreachApprove(messageId, entry));
     return;
   }
   await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Kirjoita hylkäyssyy vastauksena." });
@@ -475,7 +499,11 @@ async function handleMessage(msg) {
       saveState(state);
       return; // card closed meanwhile (decided elsewhere) — nothing to reject
     }
-    await doOutreachReject(prompt.outreachMessageId, entry, note);
+    // The server caps reject reason at 2000 chars (zod); a longer Telegram
+    // reply must not turn into a 400 that discards the operator's text.
+    await guardOutreachDecision(prompt.outreachMessageId, entry, () =>
+      doOutreachReject(prompt.outreachMessageId, entry, note.slice(0, 2000)),
+    );
     return;
   }
   const entry = state.posted[prompt.approvalId] ?? { messageId: prompt.origMessageId };

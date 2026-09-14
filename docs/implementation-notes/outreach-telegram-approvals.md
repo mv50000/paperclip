@@ -30,8 +30,11 @@ Same process, same bot, same `state.json` — one bot token allows exactly one
    (feeds prompt iteration, see `docs/outreach/templates/*.md`).
 5. A draft decided elsewhere (CLI review, UI) is closed on Telegram at the
    next scan ("☑️ Käsitelty muualla"). A decision that fails (HTTP error,
-   un-promotable prospect) edits the card to ⚠️ and **parks** it: it stays in
-   state so it is not re-posted every 20 s, but no longer holds a slot.
+   un-promotable prospect) **or throws** (API restart mid-tap, timeout) edits
+   the card to ⚠️ and **parks** it: it stays in state so it is not re-posted
+   every 20 s, but no longer holds a slot. A card left in `handling` longer
+   than 30 min is treated as free again. The reject reason is cut to the
+   server's 2000-char cap so a long Telegram reply cannot turn into a 400.
 6. No `✏️` for outreach: editing a body on a phone is clumsy; use the CLI
    review's `e` action. `pa:` (email_send) handling is untouched.
 

@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("../../scripts/approval-telegram-listener.mjs", import.meta.url));
 const COMPANY = { id: "c1", name: "Saatavilla" };
@@ -52,6 +52,8 @@ let baseUrl = "";
 let stateDir = "";
 
 beforeAll(async () => {
+  // each step spawns the script 1–3 times (~1–2 s each on a loaded host)
+  vi.setConfig({ testTimeout: 60_000 });
   stateDir = mkdtempSync(join(tmpdir(), "tg-listener-"));
   server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
@@ -289,12 +291,70 @@ describe("approval-telegram-listener — outreach drafts (RK9-222)", () => {
     expect(sentCards()).toHaveLength(cardsBefore); // not re-posted
   });
 
-  it("stale card (state lost) answers with guidance instead of guessing a company", async () => {
-    updatesQueue.push([callback(`po:a:${uuid(3)}`, 502)]);
+  it("stale card (state lost) answers with guidance and leaves a decided card's text alone", async () => {
+    updatesQueue.push([callback(`po:a:${uuid(3)}`, 502)]); // no keyboard on the tapped message → outcome kept
     const before = apiCalls.length;
+    const editsBefore = tgCalls.filter((c) => c.method === "editMessageText").length;
     const run = await runOnce();
     expect(run.code, run.out).toBe(0);
     expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").at(-1)?.body.text).toMatch(/vanhentunut/);
     expect(apiCalls.slice(before).some((c) => c.url.includes("/approve"))).toBe(false);
+    expect(tgCalls.filter((c) => c.method === "editMessageText").length).toBe(editsBefore);
+
+    // same tap on a card that still shows buttons → the card is rewritten
+    const update = callback(`po:a:${uuid(3)}`, 502);
+    (update.callback_query.message as any).reply_markup = { inline_keyboard: [[{ text: "x", callback_data: "y" }]] };
+    updatesQueue.push([update]);
+    const run2 = await runOnce();
+    expect(run2.code, run2.out).toBe(0);
+    expect(tgCalls.filter((c) => c.method === "editMessageText").at(-1)?.body.text).toMatch(/^⚠️ Kortti vanhentunut/);
+  });
+
+  it("a decision that throws (API down mid-tap) parks the card instead of locking a slot", async () => {
+    // fresh draft 5 gets posted; its approve endpoint drops the connection
+    prospects.set(uuid(105), { id: uuid(105), orgName: "Hoitola 5", email: "info@hoitola5.fi", status: "approved" });
+    drafts.push({ id: uuid(5), prospectId: uuid(105), subject: "Aihe 5", bodyText: "Runko 5", status: "draft", createdAt: new Date().toISOString() });
+    const inner = server.listeners("request")[0] as any;
+    server.removeAllListeners("request");
+    server.on("request", (req, res) => {
+      if (req.method === "POST" && req.url?.includes(`${uuid(5)}/approve`)) {
+        req.socket.destroy();
+        return;
+      }
+      inner(req, res);
+    });
+    const run = await runOnce(); // posts card 5
+    expect(run.code, run.out).toBe(0);
+    const card5 = readState().postedOutreach[uuid(5)].messageId as number;
+
+    updatesQueue.push([callback(`po:a:${uuid(5)}`, card5)]);
+    const run2 = await runOnce();
+    expect(run2.code, run2.out).toBe(0);
+    const entry = readState().postedOutreach[uuid(5)];
+    expect(entry).toMatchObject({ parked: true });
+    expect(entry.handling).toBeUndefined();
+    expect(tgCalls.filter((c) => c.method === "editMessageText" && c.body.message_id === card5).at(-1)?.body.text).toMatch(
+      /^⚠️ Yhteysvirhe/,
+    );
+    expect(drafts.find((d) => d.id === uuid(5))?.status).toBe("draft");
+  });
+
+  it("truncates an over-long reject reason to the server's 2000-char cap", async () => {
+    prospects.set(uuid(106), { id: uuid(106), orgName: "Hoitola 6", email: "info@hoitola6.fi", status: "new" });
+    drafts.push({ id: uuid(6), prospectId: uuid(106), subject: "Aihe 6", bodyText: "Runko 6", status: "draft", createdAt: new Date().toISOString() });
+    const run = await runOnce();
+    expect(run.code, run.out).toBe(0);
+    const card6 = readState().postedOutreach[uuid(6)].messageId as number;
+    updatesQueue.push([callback(`po:r:${uuid(6)}`, card6)]);
+    const run2 = await runOnce();
+    expect(run2.code, run2.out).toBe(0);
+    const promptId = nextTgMessageId - 1;
+    updatesQueue.push([
+      { update_id: 3000, message: { chat: { id: Number(CHAT) }, text: "x".repeat(2500), reply_to_message: { message_id: promptId } } },
+    ]);
+    const run3 = await runOnce();
+    expect(run3.code, run3.out).toBe(0);
+    expect(rejectReasons[uuid(6)]).toHaveLength(2000);
+    expect(drafts.find((d) => d.id === uuid(6))?.status).toBe("rejected");
   });
 });
