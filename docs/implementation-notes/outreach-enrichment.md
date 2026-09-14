@@ -65,7 +65,8 @@ mapped in `updateProspect`'s unique-violation catch).
    running Anthropic spend estimate reaches `maxCostUsd` (default $1): a
    budget check only means something between requests, not across
    in-flight ones.
-4. **Review** (`paperclipai outreach review`) — lists `status: draft`
+4. **Review** (`paperclipai outreach review`, or ✅/❌ from Telegram — RK9-222,
+   `outreach-telegram-approvals.md`) — lists `status: draft`
    messages and lets the operator **a**pprove / **e**dit / **r**eject
    (reason required) / **s**kip / **q**uit, reusing the RK9-193 endpoints
    (`.../messages/:id/approve|reject`) plus two additions this ticket needed:
