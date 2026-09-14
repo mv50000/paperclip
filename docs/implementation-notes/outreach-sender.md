@@ -128,3 +128,19 @@ unsubscribe without ever visiting the link.
 
 No test exercises a live Postfix, a live rk9-prod daemon, or sends a real
 e-mail.
+
+## RK9-205 addendum: constant-time key check + rk9-prod deployment
+
+`requireSenderKey` originally compared the bearer header with plain `!==`,
+a non-constant-time string comparison. Fixed to use `node:crypto`'s
+`timingSafeEqual` (length-checked first, since it throws on mismatched
+buffer lengths) — see `routes/outreach-sender.ts`. Same fail-closed behavior
+when `OUTREACH_SENDER_API_KEY` is unset.
+
+The daemon is now actually deployed on rk9-prod: bundled with esbuild
+(`--bundle --platform=node --format=esm --target=node22`) into one dependency-free
+`.mjs` file — no new dependency was added here since `esbuild` is already a
+root devDependency and the daemon's own dependency chain (`smtp-client.ts`,
+`scheduler-logic.ts`) has no native modules or dynamic `require`. Deployment
+scripts, the systemd unit, and the env-file convention live in
+`~/.claude/hosts/rk9-prod/outreach-sender/` per the pointer above.

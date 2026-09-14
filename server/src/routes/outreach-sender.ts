@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { reportOutreachSendResultSchema } from "@paperclipai/shared";
@@ -12,12 +13,21 @@ import { getMessageById } from "../services/outreach/messages.js";
 // actor: authenticated with one shared bearer secret, `OUTREACH_SENDER_API_KEY`,
 // checked here rather than via `req.actor`. Fails closed when unconfigured.
 
+// RK9-205: constant-time comparison. timingSafeEqual throws on mismatched
+// buffer lengths, so the length check must happen first (and unequal length
+// is itself a routine, expected case here — not a bug to fix, just reject).
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+}
+
 export function outreachSenderRoutes(db: Db, opts: { apiKey: string | undefined; unsubscribeBaseUrl: string }) {
   const router = Router();
 
   const requireSenderKey: RequestHandler = (req, _res, next) => {
     const provided = req.header("authorization");
-    if (!opts.apiKey || provided !== `Bearer ${opts.apiKey}`) {
+    if (!opts.apiKey || !provided || !safeEqual(provided, `Bearer ${opts.apiKey}`)) {
       next(unauthorized());
       return;
     }

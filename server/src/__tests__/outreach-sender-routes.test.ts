@@ -55,6 +55,34 @@ describe("outreach sender machine API", () => {
     expect(res.status).toBe(401);
   });
 
+  it("401s a same-length wrong key (RK9-205: timingSafeEqual path, not just length check)", async () => {
+    // Same length as `Bearer ${API_KEY}` ("Bearer test-secret") but wrong content.
+    const wrongSameLength = "Bearer test-decoyx";
+    expect(wrongSameLength.length).toBe(`Bearer ${API_KEY}`.length);
+    const app = await createApp();
+    const res = await request(app)
+      .get("/api/outreach/send-queue")
+      .set("authorization", wrongSameLength);
+    expect(res.status).toBe(401);
+    expect(mockScheduler.listSendQueue).not.toHaveBeenCalled();
+  });
+
+  it("401s a shorter key without throwing (timingSafeEqual length guard)", async () => {
+    const app = await createApp();
+    const res = await request(app)
+      .get("/api/outreach/send-queue")
+      .set("authorization", "Bearer short");
+    expect(res.status).toBe(401);
+  });
+
+  it("401s a longer key without throwing (timingSafeEqual length guard)", async () => {
+    const app = await createApp();
+    const res = await request(app)
+      .get("/api/outreach/send-queue")
+      .set("authorization", `Bearer ${API_KEY}-and-then-some-extra-characters`);
+    expect(res.status).toBe(401);
+  });
+
   it("returns the queue with a valid bearer secret", async () => {
     mockScheduler.listSendQueue.mockResolvedValue([{ id: "m1", envelopeFrom: "a@x.fi", envelopeTo: "b@y.fi", raw: "..." }]);
     const app = await createApp();
