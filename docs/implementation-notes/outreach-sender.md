@@ -144,3 +144,17 @@ root devDependency and the daemon's own dependency chain (`smtp-client.ts`,
 `scheduler-logic.ts`) has no native modules or dynamic `require`. Deployment
 scripts, the systemd unit, and the env-file convention live in
 `~/.claude/hosts/rk9-prod/outreach-sender/` per the pointer above.
+
+## RK9-198 addendum: compliance footer at compose time
+
+Every queued message now gets a footer appended to `bodyText` (and to
+`bodyHtml` before `</body>` when there is one) in `listSendQueue`:
+the per-message one-click URL (`/u/<token>` — same target as the
+`List-Unsubscribe` header, via `buildUnsubscribeUrl`), the "vastaa 'ei kiitos'"
+reply opt-out, and a link to the privacy notice (`OUTREACH_PRIVACY_URL`,
+default `https://rk9.fi/tietosuoja#outreach`). Done here rather than in the
+drafting template because the template forbids links and the token does not
+exist before queueing. The sender's identity block (name, company, business
+id, town — SVPL 200 §) stays in the template as reviewed prose. Pure helpers
+`buildComplianceFooter` / `appendComplianceFooter` in `message-format.ts`, tests
+in `outreach-message-format.test.ts`.

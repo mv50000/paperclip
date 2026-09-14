@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendComplianceFooter,
+  buildComplianceFooter,
   buildRawEmail,
   buildReferences,
   buildUnsubscribeHeaders,
+  buildUnsubscribeUrl,
   generateMessageId,
   generateUnsubscribeToken,
 } from "../services/outreach/message-format.js";
@@ -137,5 +140,51 @@ describe("buildRawEmail", () => {
       unsubscribe: UNSUB,
     });
     expect(raw).not.toContain("<img");
+  });
+});
+
+describe("compliance footer (RK9-198)", () => {
+  const input = { unsubscribeUrl: buildUnsubscribeUrl("https://paperclip.rk9.fi/", "tok123"), privacyUrl: "https://rk9.fi/tietosuoja#outreach" };
+
+  it("buildUnsubscribeUrl matches the List-Unsubscribe https target", () => {
+    expect(input.unsubscribeUrl).toBe("https://paperclip.rk9.fi/u/tok123");
+    expect(buildUnsubscribeHeaders("outreach.rk9.fi", "https://paperclip.rk9.fi/", "tok123").listUnsubscribe).toContain(input.unsubscribeUrl);
+  });
+
+  it("puts the one-click URL, the reply opt-out and the privacy URL in the text body", () => {
+    const out = appendComplianceFooter("Hei,\n\nrunko.\n\n", null, input);
+    expect(out.bodyText).toBe(
+      'Hei,\n\nrunko.\n\n--\nJos et halua enempää viestejä, lopeta yhdellä klikkauksella: https://paperclip.rk9.fi/u/tok123\ntai vastaa tähän "ei kiitos". Tietosuoja: https://rk9.fi/tietosuoja#outreach\n',
+    );
+    expect(out.bodyHtml).toBeNull();
+  });
+
+  it("inserts the HTML footer before </body> when present, else appends", () => {
+    const withBody = appendComplianceFooter("x", "<html><body><p>runko</p></body></html>", input);
+    expect(withBody.bodyHtml).toMatch(/<p>runko<\/p><p [^>]*>Jos et halua.*<\/p><\/body><\/html>$/s);
+    expect(withBody.bodyHtml).toContain('href="https://paperclip.rk9.fi/u/tok123"');
+    const fragment = appendComplianceFooter("x", "<p>runko</p>", input);
+    expect(fragment.bodyHtml!.startsWith("<p>runko</p><p ")).toBe(true);
+  });
+
+  it("escapes attribute-breaking characters in URLs", () => {
+    const { html } = buildComplianceFooter({ unsubscribeUrl: 'https://x/u/a"b&c', privacyUrl: "https://p" });
+    expect(html).toContain('href="https://x/u/a&quot;b&amp;c"');
+    expect(html).not.toContain('a"b');
+  });
+
+  it("is idempotent on the raw message: footer text lands inside the DATA body, not headers", () => {
+    const body = appendComplianceFooter("runko", null, input);
+    const raw = buildRawEmail({
+      from: "saatavilla@outreach.rk9.fi",
+      to: "info@example.fi",
+      subject: "t",
+      bodyText: body.bodyText,
+      messageId: "<id@outreach.rk9.fi>",
+      unsubscribe: buildUnsubscribeHeaders("outreach.rk9.fi", "https://paperclip.rk9.fi", "tok123"),
+    });
+    const [headers, ...rest] = raw.split("\r\n\r\n");
+    expect(headers).not.toContain("Jos et halua");
+    expect(rest.join("\r\n\r\n")).toContain("lopeta yhdellä klikkauksella: https://paperclip.rk9.fi/u/tok123");
   });
 });

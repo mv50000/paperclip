@@ -22,7 +22,10 @@ function safeEqual(a: string, b: string): boolean {
   return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
 }
 
-export function outreachSenderRoutes(db: Db, opts: { apiKey: string | undefined; unsubscribeBaseUrl: string }) {
+export function outreachSenderRoutes(
+  db: Db,
+  opts: { apiKey: string | undefined; unsubscribeBaseUrl: string; privacyUrl?: string },
+) {
   const router = Router();
 
   const requireSenderKey: RequestHandler = (req, _res, next) => {
@@ -39,6 +42,7 @@ export function outreachSenderRoutes(db: Db, opts: { apiKey: string | undefined;
     const items = await listSendQueue(db, {
       limit: Number.isFinite(limit) ? limit : undefined,
       unsubscribeBaseUrl: opts.unsubscribeBaseUrl,
+      privacyUrl: opts.privacyUrl,
     });
     res.json({ items });
   });

@@ -25,16 +25,68 @@ export interface UnsubscribeHeaders {
  * rk9-prod); `domain` is the sender identity's own domain, used for the
  * `mailto:` fallback most clients show alongside the link.
  */
+export function buildUnsubscribeUrl(unsubscribeBaseUrl: string, token: string): string {
+  return `${unsubscribeBaseUrl.replace(/\/+$/, "")}/u/${token}`;
+}
+
 export function buildUnsubscribeHeaders(
   domain: string,
   unsubscribeBaseUrl: string,
   token: string,
 ): UnsubscribeHeaders {
-  const url = `${unsubscribeBaseUrl.replace(/\/+$/, "")}/u/${token}`;
+  const url = buildUnsubscribeUrl(unsubscribeBaseUrl, token);
   return {
     listUnsubscribe: `<mailto:unsub@${domain}>, <${url}>`,
     listUnsubscribePost: "List-Unsubscribe=One-Click",
   };
+}
+
+/**
+ * RK9-198 compliance footer, appended at compose time (not by the drafting
+ * model — the template forbids links, and the per-message `/u/<token>` URL
+ * only exists once the message is queued). Gives every outgoing message the
+ * SVPL 200 § opt-out in the *body* as well as in the `List-Unsubscribe`
+ * headers (many clients hide those), plus a pointer to the privacy notice.
+ * The signature block (sender name, company, business id, address) is the
+ * template's job — it is prose the operator reviews, not per-message data.
+ */
+export const DEFAULT_OUTREACH_PRIVACY_URL = "https://rk9.fi/tietosuoja#outreach";
+
+export interface ComplianceFooterInput {
+  unsubscribeUrl: string;
+  privacyUrl: string;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+export function buildComplianceFooter(input: ComplianceFooterInput): { text: string; html: string } {
+  const text = [
+    "",
+    "--",
+    `Jos et halua enempää viestejä, lopeta yhdellä klikkauksella: ${input.unsubscribeUrl}`,
+    `tai vastaa tähän "ei kiitos". Tietosuoja: ${input.privacyUrl}`,
+  ].join("\n");
+  const html =
+    `<p style="margin-top:1.5em;font-size:0.9em;color:#555">Jos et halua enempää viestejä, ` +
+    `<a href="${escapeHtml(input.unsubscribeUrl)}">lopeta yhdellä klikkauksella</a> tai vastaa tähän &quot;ei kiitos&quot;. ` +
+    `<a href="${escapeHtml(input.privacyUrl)}">Tietosuoja</a></p>`;
+  return { text, html };
+}
+
+/** Appends the footer to both body variants; the HTML footer goes before `</body>` when there is one. */
+export function appendComplianceFooter(
+  bodyText: string,
+  bodyHtml: string | null | undefined,
+  input: ComplianceFooterInput,
+): { bodyText: string; bodyHtml: string | null | undefined } {
+  const footer = buildComplianceFooter(input);
+  const text = bodyText.replace(/\s+$/, "") + "\n" + footer.text + "\n";
+  if (!bodyHtml) return { bodyText: text, bodyHtml };
+  const closing = bodyHtml.search(/<\/body>/i);
+  const html = closing >= 0 ? bodyHtml.slice(0, closing) + footer.html + bodyHtml.slice(closing) : bodyHtml + footer.html;
+  return { bodyText: text, bodyHtml: html };
 }
 
 /** Threads a follow-up into the same conversation (RFC 5322 §3.6.4). */
