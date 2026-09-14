@@ -10,6 +10,7 @@ import {
   classifyInboundOutreachMail,
   classifyDsnSeverity,
   extractOriginalMessageId,
+  hasVerifiedAuthentication,
   parseDeliveryStatusFields,
 } from "./inbound-classify.js";
 import { parseInboundMime, type ParsedInboundMail } from "./inbound-mime.js";
@@ -30,6 +31,7 @@ export type OutreachInboundOutcome =
   | "unsubscribed_by_thread"
   | "unsubscribed_by_email"
   | "unsubscribe_skipped_no_sender"
+  | "unsubscribe_skipped_unauthenticated"
   | "bounce_recorded"
   | "dsn_ignored_not_a_bounce"
   | "dsn_unmatched"
@@ -137,17 +139,22 @@ export async function processOutreachInboundMail(
       // No threading header (typical for a bare `mailto:unsub@` send) — the
       // suppression list is GLOBAL and keyed on the e-mail alone, so a
       // specific prospect/company match isn't required to honour the opt-out.
-      // Residual risk (RK9-195 verifier H1, documented in
-      // docs/implementation-notes/outreach-inbound.md): this `From` is
-      // unauthenticated mail-header content — anyone who can mail
-      // `unsub@<our domain>` (a public address, published in every outgoing
-      // message's `List-Unsubscribe` header) can suppress an arbitrary
-      // address by forging `From`. `hasUnsubscribeRecipient`'s own-domain
-      // restriction (inbound-classify.ts) only closes the "unsub@ on ANY
-      // domain" amplification (H1's other half) — it does NOT authenticate
-      // this `From`. Full mitigation needs SPF/DKIM verification on the
-      // rk9-prod MTA side, out of this ticket's scope ("Blokattu: MTA").
+      // This `From` is unauthenticated mail-header content — anyone who can
+      // mail `unsub@<our domain>` (a public address, published in every
+      // outgoing message's `List-Unsubscribe` header) could otherwise suppress
+      // an arbitrary address by forging `From` (RK9-195 verifier H1).
+      // `hasUnsubscribeRecipient`'s own-domain restriction only closed the
+      // "unsub@ on ANY domain" amplification (H1's other half) — RK9-206
+      // closes the rest by requiring SPF+DKIM pass from rk9-prod's Postfix
+      // (`hasVerifiedAuthentication`, fail closed on a missing/failed result).
       if (!parsed.from) return { outcome: "unsubscribe_skipped_no_sender" };
+      if (!hasVerifiedAuthentication(parsed.headers)) {
+        logger.warn(
+          { from: parsed.from, to: parsed.to, cc: parsed.cc },
+          "outreach inbound: skipped unsub@ suppression-by-email, SPF/DKIM did not both pass",
+        );
+        return { outcome: "unsubscribe_skipped_unauthenticated" };
+      }
       await addOutreachSuppression(db, {
         email: normalizeEmail(parsed.from),
         reason: "unsubscribe",

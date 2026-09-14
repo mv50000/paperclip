@@ -140,40 +140,41 @@ be sent from (not just the primary one) — an unlisted own domain makes the
 mail-loop guard fall back to a weaker `To`-only heuristic for messages
 claiming that domain (see "Adversarial verification" below).
 
-## rk9-prod side (not done here)
+## rk9-prod side (RK9-206, done)
 
-Turning on inbound for `outreach.rk9.fi` needs, on rk9-prod:
+RK9-206 turned on inbound for `outreach.rk9.fi` on rk9-prod. Summary (full
+detail in `~/.claude/hosts/rk9-prod/outreach-mta/README.md`):
 
-1. **Hetzner Cloud Firewall `rk9-prod-edge`**: allow `25/tcp` inbound — safe
-   only once MX actually points here (it already does,
-   `outreach-mta/README.md`).
-2. **Postfix**: widen `mydestination` from `localhost` to include
-   `outreach.rk9.fi` (currently deliberately narrow — see the comment in
-   `outreach-mta/postfix/main.cf.snippet`), and add a `transport_maps`/
-   `virtual_alias_maps` entry routing `outreach.rk9.fi` to a `pipe` transport
-   invoking a small receiver script (same daemon convention as
-   `outreach-sender.ts`'s counterpart — either extend that daemon or add a
-   sibling one), which reads the piped raw MIME from stdin and does:
+1. **Hetzner Cloud Firewall `rk9-prod-edge`**: `25/tcp` inbound allowed.
+2. **Postfix**: `inet_interfaces = all`, `mydestination` widened to include
+   `outreach.rk9.fi`, `transport_maps` routes that domain to a `pipe`
+   transport invoking `outreach-inbound-receiver.sh`, which reads the piped
+   raw MIME from stdin and does:
    ```
-   POST https://paperclip.rk9.fi/api/outreach/inbound
+   POST http://paperclip-01.rk9.fi:3100/api/outreach/inbound
    Content-Type: message/rfc822
    X-Outreach-Timestamp: <unix seconds>
    X-Outreach-Signature: sha256=<hex hmac-sha256("$timestamp.$rawBody", secret)>
 
    <raw MIME bytes>
    ```
+   (`paperclip-01.rk9.fi`, not `paperclip.rk9.fi` or a bare tailnet IP — see
+   `outreach-sender/README.md`'s routing note, same host, same constraint.)
    `smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination`
-   (already set) stays in place unchanged — it blocks open-relay abuse, not
-   inbound delivery to `mydestination`, so accepting inbound for
-   `outreach.rk9.fi` doesn't reopen the relay.
-3. The shared secret (`OUTREACH_INBOUND_HMAC_SECRET`) needs to exist in both
-   places: the receiver script's environment on rk9-prod, and Paperclip's
-   server env on paperclip-01.
-
-Document the actual `install.sh`/`main.cf.snippet` changes in
-`~/.claude/hosts/rk9-prod/outreach-mta/` when that follow-up ticket lands —
-not here, and not executed by this PR (MTA changes were explicitly blocked
-for RK9-195).
+   stays in place unchanged — it blocks open-relay abuse, not inbound delivery
+   to `mydestination`, so accepting inbound for `outreach.rk9.fi` doesn't
+   reopen the relay.
+3. The shared secret (`OUTREACH_INBOUND_HMAC_SECRET`) exists in both places:
+   the receiver script's environment on rk9-prod, and Paperclip's server env
+   on paperclip-01.
+4. **SPF + DKIM verification**: OpenDKIM runs in `Mode sv` (sign outbound,
+   verify inbound) and `postfix-policyd-spf-python` runs as an
+   `smtpd_recipient_restrictions` policy service — each prepends its own
+   `Authentication-Results:` header. A `smtpd_header_checks` rule strips any
+   `Authentication-Results:` header already present on an incoming message
+   *before* those two run, so only our own trusted rk9-prod filters can ever
+   write one — an attacker can't forge a pre-baked `spf=pass dkim=pass` header
+   into the raw MIME to fake authentication. This closes H1 below.
 
 ## Adversarial verification (RK9-195, sensitive-diff gate)
 
@@ -183,21 +184,26 @@ side effect (`outreach_suppressions` has no DELETE by design), so it was
 pre-classified sensitive and run through an independent adversarial verifier
 before merge. Findings and disposition:
 
-- **H1 (fixed in part, residual risk documented)** — the HMAC only
-  authenticates the Postfix-relay hop, not the mail's claimed sender; nothing
-  checks DKIM/DMARC/SPF/`Authentication-Results` (none of that plumbing exists
-  on the loopback-only rk9-prod Postfix yet — MTA-side, blocked for this
-  ticket). The verifier also found `hasUnsubscribeRecipient` matched
-  `unsub@` on **any** domain, not just our own, letting a forged `To:` header
-  suppress an arbitrary address regardless of what Postfix actually
-  accepted. **Fixed**: `hasUnsubscribeRecipient` now takes an `ownDomains`
-  allowlist (`OUTREACH_INBOUND_OWN_DOMAINS`) and fails closed when
-  unconfigured. **Not fixed here** (needs the MTA side): a forged `From:` on
-  a message that *is* addressed to a real `unsub@outreach.rk9.fi` can still
-  trigger a suppression-by-email for whatever address it claims — full
-  mitigation needs SPF/DKIM verification on rk9-prod's Postfix, which is
-  explicitly out of this ticket's scope ("Blokattu: MTA"). Follow-up ticket
-  needed once the rk9-prod receiver side (see above) is built.
+- **H1 (fixed)** — the HMAC only authenticates the Postfix-relay hop, not the
+  mail's claimed sender; nothing checked DKIM/DMARC/SPF/`Authentication-Results`
+  (none of that plumbing existed on the loopback-only rk9-prod Postfix at the
+  time — MTA-side, blocked for RK9-195). The verifier also found
+  `hasUnsubscribeRecipient` matched `unsub@` on **any** domain, not just our
+  own, letting a forged `To:` header suppress an arbitrary address regardless
+  of what Postfix actually accepted. **Fixed (RK9-195)**:
+  `hasUnsubscribeRecipient` now takes an `ownDomains` allowlist
+  (`OUTREACH_INBOUND_OWN_DOMAINS`) and fails closed when unconfigured.
+  **Fixed (RK9-206)**: the other half — a forged `From:` on a message
+  addressed to a real `unsub@outreach.rk9.fi` could still trigger a
+  suppression-by-email for whatever address it claims — is now closed by
+  `hasVerifiedAuthentication` (`inbound-classify.ts`), which requires both
+  `spf=pass` and `dkim=pass` in the `Authentication-Results` header rk9-prod's
+  Postfix now adds (see "rk9-prod side" above), gating the address-based
+  (no-threading) `unsub@` fallback in `inbound.ts` and failing closed
+  (`unsubscribe_skipped_unauthenticated`) when the header is missing or either
+  check fails. The threaded `unsub@` path isn't gated the same way — it never
+  derives its suppression target from the forgeable `From:` header, it
+  requires guessing a real Message-ID already sent to that specific prospect.
 - **H2 (fixed)** — an attacker-controlled `References` header with tens of
   thousands of ids drove `extractReferencedMessageIds`'s O(n²) dedup, then one
   sequential DB query per id — measured at 14.6s of event-loop blocking and
@@ -238,13 +244,13 @@ before merge. Findings and disposition:
 - **M1** (forged-sender DSNs honored as real bounces if the attacker already
   knows a real Message-ID), **M3** (a DSN whose original message is quoted
   only in `text/plain`, with no `message/rfc822` attachment, is dropped as
-  unmatched rather than extracted), **L3** (413-vs-Postfix-receiver retry
-  semantics aren't coordinated yet — no receiver script exists), and **L4**
-  (no replay/idempotency window beyond the 5-minute HMAC check) are **not**
-  fixed in this PR — each either needs the not-yet-built rk9-prod receiver
-  script or is a genuine defense-in-depth nice-to-have with no immediate
-  exploit path once H1/H2 are closed. Tracked as follow-up work alongside the
-  H1 residual-risk item above, not blocking this PR.
+  unmatched rather than extracted), **L3** (the rk9-prod receiver script
+  built in RK9-206 treats any non-2xx response, including a 413, as
+  `EX_TEMPFAIL` and lets Postfix's own queue retry/backoff handle it — this
+  wasn't re-verified against a live Postfix queue), and **L4** (no
+  replay/idempotency window beyond the 5-minute HMAC check) are **not** fixed.
+  Each is a genuine defense-in-depth nice-to-have with no immediate exploit
+  path once H1/H2 are closed — tracked as follow-up work, not blocking.
 
 ## Tests
 
@@ -252,8 +258,10 @@ before merge. Findings and disposition:
   DSN-vs-self-loop fixture above), the `ownDomains`-scoped/fail-closed
   `hasUnsubscribeRecipient` (H1), `Cc`-only self-loop/unsub matches (M2), the
   `References`-header truncation (H2), DSN field parsing/severity,
-  original-Message-ID extraction. Real MIME fed through `mailparser`, not
-  mocked.
+  original-Message-ID extraction, `hasVerifiedAuthentication`'s pass/fail/
+  missing-header cases and its two-separate-headers join (RK9-206), and
+  `parseInboundMime`'s `Authentication-Results` extraction (RK9-206). Real
+  MIME fed through `mailparser`, not mocked.
 - `outreach-inbound-verify.test.ts` — HMAC accept/reject paths, fail-closed
   on missing secret, replay-window rejection.
 - `outreach-inbound-logic.test.ts` — DB orchestration with `messages.ts`/
@@ -263,7 +271,9 @@ before merge. Findings and disposition:
   primary write, the mail-loop guard never touching the DB, the threading
   candidate cap collapsing to one batched query (H2), unsub@ on a
   foreign/unconfigured domain never reaching `addOutreachSuppression` (H1),
-  and a discarded `recordEvent` failure getting logged (L1).
+  a discarded `recordEvent` failure getting logged (L1), and the
+  address-based unsub@ fallback skipping `addOutreachSuppression` when
+  `Authentication-Results` is missing or SPF/DKIM don't both pass (RK9-206).
 - `outreach-inbound-route.test.ts` — HTTP layer: 401 on bad signature (before
   any parsing) with a generic body (L2), 413 over 5 MB, 200 that echoes the
   classifier outcome, 200 (never a retry-triggering 5xx) when processing

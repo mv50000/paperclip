@@ -78,6 +78,34 @@ export function hasUnsubscribeRecipient(recipients: string[], ownDomains: string
   );
 }
 
+const SPF_PASS_RE = /\bspf=pass\b/i;
+const DKIM_PASS_RE = /\bdkim=pass\b/i;
+
+/**
+ * RK9-206: gates the address-based `unsub@` fallback (no threading header —
+ * see `processOutreachInboundMail`'s "unsubscribe" case), which is the one
+ * place an unauthenticated `From:` value drives a permanent, global,
+ * cross-tenant suppression for whatever address it claims (documented as
+ * residual risk H1 in docs/implementation-notes/outreach-inbound.md — closed
+ * here now that rk9-prod's Postfix runs SPF + DKIM verification, RK9-206).
+ * The threaded path isn't gated: it never derives its target from `From`, it
+ * requires guessing a real Message-ID already sent to that prospect.
+ *
+ * Fails closed: no `Authentication-Results` header at all (SPF/DKIM not
+ * deployed, or a filter outage) means "not authenticated", same fail-closed
+ * posture as `hasUnsubscribeRecipient`'s `ownDomains` check. Matches literal
+ * `spf=pass`/`dkim=pass` per RFC 8601 — both filters are our own trusted
+ * rk9-prod Postfix add-ons, not attacker-supplied (any pre-existing
+ * `Authentication-Results` header from the wire is stripped by
+ * `smtpd_header_checks` before either filter runs — see
+ * `~/.claude/hosts/rk9-prod/outreach-mta/README.md`).
+ */
+export function hasVerifiedAuthentication(headers: Record<string, string>): boolean {
+  const authResults = headers["authentication-results"];
+  if (!authResults) return false;
+  return SPF_PASS_RE.test(authResults) && DKIM_PASS_RE.test(authResults);
+}
+
 export function isDeliveryStatusNotification(contentType: ClassifyInboundInput["contentType"]): boolean {
   if (contentType.value !== "multipart/report") return false;
   const reportType = (contentType.params["report-type"] ?? contentType.params["report_type"] ?? "").toLowerCase();
