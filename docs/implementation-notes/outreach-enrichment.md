@@ -65,6 +65,18 @@ mapped in `updateProspect`'s unique-violation catch).
    running Anthropic spend estimate reaches `maxCostUsd` (default $1): a
    budget check only means something between requests, not across
    in-flight ones.
+   **RK9-223 (14.9.2026):** the user turn also carries the PRH scan's
+   `enrichment.providers` (Timma, Slotti, …) and `seg`. A detected system
+   makes the template write a *switch* message that names the tool and sells
+   the difference (19 €/kk flat, 0 % commission, reminders included); no
+   system → the original *start* message. The first 20-draft batch was
+   rejected wholesale because 16/20 prospects already had online booking and
+   every draft still sold "book without a phone call". The turn also names
+   the one link the model may use — the segment demo tenant
+   (`hieroja-/jooga-/pt-demo.saatavilla.fi`, beauty → hieroja) or
+   `saatavilla.fi` — and the template asks for a checkable observation plus a
+   concrete next step instead of "olisiko ajankohtaista".
+
 4. **Review** (`paperclipai outreach review`, or ✅/❌ from Telegram — RK9-222,
    `outreach-telegram-approvals.md`) — lists `status: draft`
    messages and lets the operator **a**pprove / **e**dit / **r**eject
@@ -83,9 +95,10 @@ mapped in `updateProspect`'s unique-violation catch).
 
 Pure, DB-free, checked in this order (first failure wins, stored verbatim as
 `reject_reason`): `missing_email` → `placeholder_text` (`[yritys]`,
-`{{...}}`) → `private_email_domain` (gmail/hotmail/outlook/icloud, per AC) →
-`suppressed` (global list) → `too_long` (>120 words,
-`OUTREACH_DRAFT_MAX_WORDS`). Runs once per draft in `draftMessageForProspect`;
+`{{...}}`) → `disallowed_link` (RK9-223: more than one link, or any link
+outside `saatavilla.fi`/its subdomains) → `private_email_domain`
+(gmail/hotmail/outlook/icloud, per AC) → `suppressed` (global list) →
+`too_long` (>120 words, `OUTREACH_DRAFT_MAX_WORDS`). Runs once per draft in `draftMessageForProspect`;
 the CLI's `review` command does not re-run it — a gate-passed draft reaching
 review is assumed clean, and an edited draft is re-approved by the operator,
 not re-gated automatically (a human just read it).

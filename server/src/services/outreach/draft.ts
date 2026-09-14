@@ -51,6 +51,60 @@ export interface DraftProspectFacts {
   orgName: string;
   /** A short factual snippet from enrichment (e.g. `enrichment.website.snippet`) to ground "one concrete observation". */
   observation: string | null;
+  /**
+   * RK9-223: booking providers the PRH scan detected on the prospect's site
+   * (`enrichment.providers`, e.g. ["timma"]). Decides the template branch:
+   * a known system -> "switch" message naming it; none -> "start" message.
+   */
+  providers?: string[];
+  /** RK9-223: the one link the model may use (segment demo tenant or the marketing site). */
+  demoUrl?: string;
+}
+
+/** Human-readable names for the provider slugs the PRH scan emits (`skills/prh-prospector`). */
+const PROVIDER_LABELS: Record<string, string> = {
+  timma: "Timma",
+  vello: "Vello",
+  slotti: "Slotti",
+  varaaheti: "VaraaHeti",
+  nettiaika: "Nettiaika",
+  ajas: "Ajas",
+  phorest: "Phorest",
+  booksalon: "Booksalon",
+  avoinna24: "Avoinna24",
+  fresha: "Fresha",
+  bookly: "Bookly",
+  simplybook: "SimplyBook",
+  setmore: "Setmore",
+};
+
+/** `enrichment.providers` is a `|`-joined slug string from the PRH scan (or absent). */
+export function parseProviders(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map(String).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (typeof raw !== "string") return [];
+  return raw
+    .split("|")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export function providerLabel(slug: string): string {
+  return PROVIDER_LABELS[slug] ?? slug.charAt(0).toUpperCase() + slug.slice(1);
+}
+
+// Live demo tenants (saatavilla docs/runbooks/demo-tenants.md): hieroja / jooga / pt.
+// Beauty prospects get the massage demo (closest live booking flow); anything
+// else falls back to the marketing site, which carries its own 90 s demo.
+const DEMO_URL_BY_SEGMENT: Record<string, string> = {
+  hieroja: "https://hieroja-demo.saatavilla.fi",
+  kosmetologi: "https://hieroja-demo.saatavilla.fi",
+  jooga: "https://jooga-demo.saatavilla.fi",
+  pt: "https://pt-demo.saatavilla.fi",
+};
+export const DEFAULT_DEMO_URL = "https://saatavilla.fi";
+
+export function demoUrlForSegment(segment: string | null | undefined): string {
+  return (segment && DEMO_URL_BY_SEGMENT[segment.toLowerCase()]) || DEFAULT_DEMO_URL;
 }
 
 /**
@@ -61,11 +115,19 @@ export interface DraftProspectFacts {
  */
 export function buildDraftUserMessage(facts: DraftProspectFacts): string {
   const observationLine = facts.observation
-    ? `Yksi havainto heidän verkkosivultaan, jota voit käyttää: "${facts.observation}"`
+    ? `Ote heidän verkkosivultaan (käytä siitä VAIN tarkistettavaa faktaa, älä kerro sivua uudelleen): "${facts.observation}"`
     : "Ei tietoa verkkosivusta — älä keksi havaintoa, pidäydy yleisessä arvolupauksessa.";
+  const providers = facts.providers ?? [];
+  const providerLine =
+    providers.length > 0
+      ? `Nykyinen ajanvarausjärjestelmä (tunnistettu sivulta): ${providers.map(providerLabel).join(" / ")}. → Kirjoita VAIHTOVIESTI (template, kohta B).`
+      : "Sivulta ei tunnistettu online-ajanvarausjärjestelmää. → Kirjoita ALOITUSVIESTI (template, kohta A).";
+  const demoLine = `Ainoa sallittu linkki viestissä: ${facts.demoUrl ?? DEFAULT_DEMO_URL}`;
   return [
     `Yrityksen nimi: ${facts.orgName}`,
+    providerLine,
     observationLine,
+    demoLine,
     "",
     "Vastaa TÄSMÄLLEEN tässä muodossa, ei muuta tekstiä ennen tai jälkeen:",
     "SUBJECT: <otsikko>",
@@ -156,11 +218,15 @@ export async function draftMessageForProspect(
   if (!prospect) return { ok: false, reason: "prospect_not_found", costUsd: 0 };
   if (!prospect.email) return { ok: false, reason: "missing_email", costUsd: 0 };
 
-  const enrichment = prospect.enrichment as { website?: { snippet?: string } } | null;
+  const enrichment = prospect.enrichment as
+    | { website?: { snippet?: string }; providers?: unknown; seg?: string }
+    | null;
   const system = loadTemplate(company);
   const user = buildDraftUserMessage({
     orgName: prospect.orgName,
     observation: enrichment?.website?.snippet ?? null,
+    providers: parseProviders(enrichment?.providers),
+    demoUrl: demoUrlForSegment(enrichment?.seg),
   });
 
   let call: ClaudeDraftCall;
