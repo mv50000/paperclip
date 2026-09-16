@@ -139,3 +139,19 @@ rough starting template is a safe default, not a shipped claim.
 No test exercises Firecrawl, Claude, or a real database — the AC's "50
 prospects imported/enriched/drafted" numbers are meant to be verified live
 by the operator after merge, not reproduced in CI at real API cost.
+
+## Drafting API key
+
+`callClaudeForDraft` reads **`OUTREACH_ANTHROPIC_API_KEY`**, falling back to
+`ANTHROPIC_API_KEY`.
+
+The feature-specific name is not cosmetic. Drafting is the reason a generic
+`ANTHROPIC_API_KEY` was first added to the Paperclip server environment, and at
+the time the `claude_local` adapter inherited the server environment wholesale —
+so every heartbeat agent switched from subscription auth to metered API credit
+and the deployment's credit ran out a day later (RK9-228).
+
+The adapter no longer inherits that variable, but drafting should not be the
+reason the generic name is present at all. Set `OUTREACH_ANTHROPIC_API_KEY` in
+`/etc/paperclip/paperclip-server.env` and leave `ANTHROPIC_API_KEY` unset unless
+something else genuinely needs it.

@@ -171,9 +171,23 @@ interface AnthropicMessagesResponse {
  * change outside `chore/refresh-lockfile*` branches, so a feature branch
  * cannot add a new dependency. See docs/implementation-notes/outreach-enrichment.md.
  */
+/**
+ * Feature-specific variable name on purpose. A bare `ANTHROPIC_API_KEY` in the
+ * server environment is not free: the `claude_local` adapter used to inherit it
+ * and every heartbeat agent silently switched from subscription billing to
+ * metered API credit (RK9-228). The adapter no longer inherits it, but drafting
+ * should not be the reason the generic name is present at all.
+ *
+ * `ANTHROPIC_API_KEY` stays as a fallback so an existing deployment keeps
+ * working until the operator renames the variable.
+ */
+export function outreachAnthropicApiKey(): string | undefined {
+  return process.env.OUTREACH_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
+}
+
 async function callClaudeForDraft(system: string, user: string): Promise<ClaudeDraftCall> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
+  const apiKey = outreachAnthropicApiKey();
+  if (!apiKey) throw new Error("OUTREACH_ANTHROPIC_API_KEY is not set");
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",

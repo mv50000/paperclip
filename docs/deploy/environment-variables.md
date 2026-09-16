@@ -50,5 +50,6 @@ These are set automatically by the server when invoking agents:
 
 | Variable | Description |
 |----------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (for Claude Local adapter) |
+| `ANTHROPIC_API_KEY` | Anthropic API key. **Not inherited by `claude_local` agents** — set it in the agent's adapter config `env`, or set `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY=1` to inherit it deployment-wide |
+| `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY` | `1`/`true`/`yes` lets every `claude_local` agent inherit the host `ANTHROPIC_API_KEY`. Off by default: a server-wide key moves the whole fleet from subscription billing to metered API credit |
 | `OPENAI_API_KEY` | OpenAI API key (for Codex Local adapter) |

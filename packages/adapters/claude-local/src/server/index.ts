@@ -1,4 +1,10 @@
-export { execute, runClaudeLogin } from "./execute.js";
+export { execute, runClaudeLogin, resolveClaudeBillingTypeForEnv } from "./execute.js";
+export {
+  inheritableHostEnv,
+  resolveClaudeEffectiveEnv,
+  inheritsHostAnthropicApiKey,
+  INHERIT_OPT_IN_ENV_KEY,
+} from "./host-env.js";
 export { listClaudeSkills, syncClaudeSkills } from "./skills.js";
 export { listClaudeModels } from "./models.js";
 export { testEnvironment } from "./test.js";
