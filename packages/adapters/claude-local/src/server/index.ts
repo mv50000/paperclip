@@ -1,6 +1,7 @@
 export { execute, runClaudeLogin, resolveClaudeBillingTypeForEnv } from "./execute.js";
 export {
   inheritableHostEnv,
+  hostEnvKeysNotInherited,
   resolveClaudeEffectiveEnv,
   inheritsHostAnthropicApiKey,
   INHERIT_OPT_IN_ENV_KEY,

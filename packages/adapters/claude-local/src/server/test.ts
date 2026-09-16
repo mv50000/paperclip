@@ -18,6 +18,7 @@ import path from "node:path";
 import { detectClaudeLoginRequired, parseClaudeStreamJson } from "./parse.js";
 import {
   INHERIT_OPT_IN_ENV_KEY,
+  hostEnvKeysNotInherited,
   inheritableHostEnv,
   inheritsHostAnthropicApiKey,
 } from "./host-env.js";
@@ -207,6 +208,7 @@ export async function testEnvironment(
         {
           cwd,
           env,
+          doNotInheritEnvKeys: hostEnvKeysNotInherited(),
           timeoutSec: 45,
           graceSec: 5,
           stdin: "Respond with hello.",
