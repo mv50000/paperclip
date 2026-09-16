@@ -3727,6 +3727,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
    * blocked issues only when their blockers have resolved. A blocked issue
    * whose blockers are still open is not actionable, so it does not justify
    * spawning a run.
+   *
+   * "Blockers have resolved" requires that blockers were recorded in the first
+   * place. `listDependencyReadiness` seeds every requested issue with
+   * `isDependencyReady: true`, so an issue blocked by hand -- no `blocks`
+   * relation naming what would unblock it -- reads as ready and used to keep
+   * its agent permanently non-idle: one stale blocked issue was enough to spawn
+   * a full "no action taken" run on every timer tick (RK9-231). Nothing can be
+   * done about such an issue until a human moves it, and that move wakes the
+   * agent through the ungated status-change path, so it is not pending work.
    */
   async function agentHasPendingTimerWork(companyId: string, agentId: string): Promise<boolean> {
     const rows = await issuesSvc.list(companyId, {
@@ -3742,7 +3751,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       companyId,
       rows.map((issue) => issue.id),
     );
-    return rows.some((issue) => readiness.get(issue.id)?.isDependencyReady ?? true);
+    return rows.some((issue) => {
+      const entry = readiness.get(issue.id);
+      if (!entry || entry.blockerIssueIds.length === 0) return false;
+      return entry.isDependencyReady;
+    });
   }
 
   function parseHeartbeatPolicy(agent: typeof agents.$inferSelect) {
