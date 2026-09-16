@@ -12,7 +12,7 @@ import type { Db } from "@paperclipai/db";
 import { outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
 import { listActivePauses } from "./sender-pauses.js";
-import { getOutreachDnsblState } from "./dnsbl.js";
+import { getOutreachDnsblState, isDnsblListTrustworthy, type OutreachDnsblState } from "./dnsbl.js";
 
 // --- Prometheus /metrics -----------------------------------------------------
 
@@ -133,10 +133,25 @@ export function renderOutreachPrometheusText(metrics: OutreachPrometheusMetrics)
     lines.push(metricLine("outreach_sender_paused", { sender: r.senderIdentity }, r.paused));
   }
 
-  lines.push("# HELP outreach_ip_listed Whether the outreach sending IP is listed on a DNSBL (1=listed).");
+  // RK9-225: only a list we can currently trust gets to publish a verdict. A
+  // refused or failed lookup publishes nothing here — `outreach_dnsbl_list_ok`
+  // below is what makes that blindness visible, so a blind list can never look
+  // like a clean one (and can never fire `OutreachIpListed` either).
+  lines.push("# HELP outreach_ip_listed Whether the outreach sending IP is listed on a DNSBL (1=listed). Only lists whose canary self-test and reputation lookup both succeeded are reported.");
   lines.push("# TYPE outreach_ip_listed gauge");
   for (const r of dnsbl.results) {
+    if (!isDnsblListTrustworthy(dnsbl, r.list)) continue;
     lines.push(metricLine("outreach_ip_listed", { list: r.list }, r.listed ? 1 : 0));
+  }
+
+  if (dnsbl.selfTests.length > 0) {
+    lines.push(
+      "# HELP outreach_dnsbl_list_ok Whether this DNSBL can be trusted right now (1=canary self-test and reputation lookup both succeeded, 0=we are blind to this list).",
+    );
+    lines.push("# TYPE outreach_dnsbl_list_ok gauge");
+    for (const r of dnsbl.selfTests) {
+      lines.push(metricLine("outreach_dnsbl_list_ok", { list: r.list }, isDnsblListTrustworthy(dnsbl, r.list) ? 1 : 0));
+    }
   }
 
   if (dnsbl.selfTest.ok !== null) {
@@ -208,9 +223,34 @@ async function countTodayByIdentity(
   return Number(rows[0]?.count ?? 0);
 }
 
-function formatDigestText(date: string, senders: OutreachDigestSenderSummary[]): string {
+/**
+ * RK9-225: listings and blind lists are reported separately — "emme tiedä" is
+ * not "puhdas". Returns `null` when every list is clean and trustworthy, so a
+ * quiet day's digest stays as short as it was before.
+ */
+function formatDnsblDigestLine(dnsbl: OutreachDnsblState): string | null {
+  const listed = dnsbl.results.filter((r) => r.listed && isDnsblListTrustworthy(dnsbl, r.list));
+  const blind = dnsbl.selfTests.filter((r) => !isDnsblListTrustworthy(dnsbl, r.list));
+  const parts: string[] = [];
+  if (listed.length > 0) {
+    parts.push(`LISTATTU ${listed.map((r) => `${r.list} (${r.codes.join(",")})`).join(", ")}`);
+  }
+  if (blind.length > 0) {
+    const detail = blind.map((r) => {
+      const result = dnsbl.results.find((x) => x.list === r.list);
+      return `${r.list} (${r.error ?? result?.error ?? "canary ei listattu"})`;
+    });
+    parts.push(`kysely ei onnistunut: ${detail.join(", ")}`);
+  }
+  if (parts.length === 0) return null;
+  const ip = dnsbl.productionIp ? ` ${dnsbl.productionIp}` : "";
+  return `DNSBL${ip}: ${parts.join(" | ")}`;
+}
+
+function formatDigestText(date: string, senders: OutreachDigestSenderSummary[], dnsblLine: string | null): string {
   if (senders.length === 0) {
-    return `Outreach-digest ${date}: ei aktiivisia lähettäjiä.`;
+    const empty = `Outreach-digest ${date}: ei aktiivisia lähettäjiä.`;
+    return dnsblLine ? `${empty}\n${dnsblLine}` : empty;
   }
   const lines = [`Outreach-digest ${date}:`];
   for (const s of senders) {
@@ -220,6 +260,7 @@ function formatDigestText(date: string, senders: OutreachDigestSenderSummary[]):
       `${s.senderIdentity}${status}: lähetetty ${s.sentToday}, bounce ${s.bounceHardToday + s.bounceSoftToday} (${s.bounceHardToday} hard), vastauksia ${s.repliesToday}, unsub ${s.unsubscribesToday}${cap}`,
     );
   }
+  if (dnsblLine) lines.push(dnsblLine);
   return lines.join("\n");
 }
 
@@ -279,5 +320,5 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
   );
   senders.sort((a, b) => a.senderIdentity.localeCompare(b.senderIdentity));
 
-  return { date, senders, text: formatDigestText(date, senders) };
+  return { date, senders, text: formatDigestText(date, senders, formatDnsblDigestLine(getOutreachDnsblState())) };
 }

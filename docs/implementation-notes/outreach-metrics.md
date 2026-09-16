@@ -34,8 +34,9 @@ Gauges/counters exposed:
 | `outreach_unsubscribe_total` | counter | — | Unsubscribe events recorded. |
 | `outreach_queue_depth` | gauge | — | Messages currently `status='queued'`. |
 | `outreach_sender_paused` | gauge | `sender` | 1 if that identity is currently auto/manually paused. |
-| `outreach_ip_listed` | gauge | `list` | 1 if the configured sending IP is listed on that DNSBL. |
-| `outreach_dnsbl_selftest_ok` | gauge | — | 1 if the daily canary self-test (127.0.0.2) succeeded; omitted entirely until the first check has run. |
+| `outreach_ip_listed` | gauge | `list` | 1 if the configured sending IP is listed on that DNSBL. **Only exported for a list we can currently query** (RK9-225) — a blind list exports nothing here. |
+| `outreach_dnsbl_list_ok` | gauge | `list` | 1 if that list answered both the canary self-test and the reputation lookup; 0 = we are blind to it, so its `outreach_ip_listed` is absent by design. |
+| `outreach_dnsbl_selftest_ok` | gauge | — | 1 if the daily canary self-test (127.0.0.2) succeeded on **every** configured list; omitted entirely until the first check has run. |
 
 ### PromQL examples (AC: "vähintään PromQL-esimerkit runbookissa")
 
@@ -52,6 +53,9 @@ outreach_ip_listed == 1
 
 # The DNSBL checker itself has stopped working (canary should always be listed)
 outreach_dnsbl_selftest_ok == 0
+
+# We are blind to a specific list (refused query, DNS failure) — unknown, not clean
+outreach_dnsbl_list_ok == 0
 
 # Queue backing up (nothing is draining it — sender daemon down, or everything paused)
 outreach_queue_depth > 50
@@ -168,7 +172,17 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Outreach DNSBL checker's canary self-test is failing — results below are not trustworthy"
+      - alert: OutreachDnsblListBlind
+        expr: outreach_dnsbl_list_ok == 0
+        for: 6h
+        labels: { severity: warning }
+        annotations:
+          summary: "Outreach DNSBL {{ $labels.list }} cannot be queried — that list's reputation is unknown, not clean"
 ```
+
+`OutreachIpListed` stays a bare `outreach_ip_listed == 1` because the exporter
+already refuses to publish an untrustworthy verdict (see below) — the alert
+rule needs no gating expression.
 
 ## Side-fix: the scheduler's advisory lock never actually locked
 
@@ -195,7 +209,8 @@ against a real database.
 
 `services/outreach/dnsbl.ts`. Pure `node:dns/promises` — no dependency.
 Queries `<reversed-octets>.<list>` (e.g. `2.0.0.127.zen.spamhaus.org`); an
-A-record response means "listed". Runs daily
+A-record **inside `127.0.0.0/8` but outside `127.255.255.0/24`** means
+"listed" (see "Error codes are not listings" below). Runs daily
 (`OUTREACH_DNSBL_ENABLED`, default on) plus once ~60s after boot so the
 gauges aren't empty for up to a day after a fresh deploy.
 
@@ -207,6 +222,41 @@ the check mechanism itself is broken (DNS egress, wrong query construction),
 surfaced as `outreach_dnsbl_selftest_ok`. The real reputation check
 (`outreach_ip_listed`) only runs when `OUTREACH_DNSBL_CHECK_IP` (rk9-prod's
 outbound address) is configured.
+
+### Error codes are not listings (RK9-225)
+
+A DNSBL answers *query errors* with an A-record too, in the reserved
+`127.255.255.0/24` range: `127.255.255.254` = "open resolver",
+`127.255.255.255` = rate-limited, `127.255.255.252/.253` = malformed query or
+missing DQS key. paperclip-01 resolves through a public resolver, so **every**
+Spamhaus query — including the `127.0.0.2` canary — came back
+`127.255.255.254`. The original code read any A-record as a listing, so the
+daily check fired the critical `OutreachIpListed` alert every day from 14.9. to
+16.9.2026 while the authoritative answer was "not listed", and
+`outreach_dnsbl_selftest_ok` read `1` because the canary "was listed" too. The
+self-test was structurally unable to catch the failure it exists to catch.
+
+Three rules now hold:
+
+1. **Classification.** `127.255.255.x` → `error: "query_refused:<code>"`,
+   `listed: false`. Anything outside `127.0.0.0/8` (captive portal, wildcard
+   DNS) → `error: "unexpected_answer:<codes>"`. Only a genuine `127.0.0.x`
+   answer is a listing.
+2. **Authoritative retry.** A refused query is retried once against the list's
+   own nameservers (`resolveNs` → `Resolver.setServers`), resolved once per
+   process. Spamhaus answers us directly there, so zen works again today
+   without a DQS key. If that path is ever blocked too, the documented fix is a
+   free Spamhaus DQS key and querying `<key>.zen.dq.spamhaus.net` — the list
+   names are already env-configurable (`OUTREACH_DNSBL_LISTS`).
+3. **Blind is not clean.** The canary runs against **every** configured list,
+   not just the first. A list whose canary failed, or whose reputation lookup
+   was refused, exports no `outreach_ip_listed` at all and exports
+   `outreach_dnsbl_list_ok 0`. An unanswerable list can therefore never look
+   healthy and can never fire a listing alert; it fires `OutreachDnsblListBlind`
+   instead.
+
+The daily digest reports listings and blind lists on separate parts of one
+`DNSBL …` line, and the line is omitted entirely when everything is clean.
 
 State is **in-process, not persisted** — a server restart means the gauges
 read as momentarily stale/unknown until the next tick (≤24h), which is an
