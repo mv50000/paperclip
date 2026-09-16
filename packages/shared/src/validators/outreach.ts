@@ -169,6 +169,10 @@ export type EnrichOutreachProspects = z.infer<typeof enrichOutreachProspectsSche
 export const draftOutreachMessagesSchema = z.object({
   prospectIds: z.array(z.string().uuid()).min(1).max(200),
   company: z.enum(OUTREACH_TEMPLATE_COMPANIES),
+  // RK9-224: if omitted, the service resolves it to the company's one active
+  // sequence whose first step targets this template — 422 `sequence_required`
+  // if that isn't unique. A draft is never created without a sequence.
+  sequenceId: z.string().uuid().optional(),
   maxCostUsd: z.number().positive().max(100).default(1),
 });
 export type DraftOutreachMessages = z.infer<typeof draftOutreachMessagesSchema>;

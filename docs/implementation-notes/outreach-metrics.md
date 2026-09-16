@@ -34,6 +34,7 @@ Gauges/counters exposed:
 | `outreach_unsubscribe_total` | counter | — | Unsubscribe events recorded. |
 | `outreach_queue_depth` | gauge | — | Messages currently `status='queued'`. |
 | `outreach_sender_paused` | gauge | `sender` | 1 if that identity is currently auto/manually paused. |
+| `outreach_approved_without_sequence` | gauge | `company` | RK9-224: `approved` messages with `sequence_id IS NULL` — the scheduler (`outreach-sender.md`) can never promote these. Should always read 0; drafting resolves a sequence at creation time now, so a nonzero value means a direct `POST .../messages` call bypassed that. |
 | `outreach_ip_listed` | gauge | `list` | 1 if the configured sending IP is listed on that DNSBL. **Only exported for a list we can currently query** (RK9-225) — a blind list exports nothing here. |
 | `outreach_dnsbl_list_ok` | gauge | `list` | 1 if that list answered both the canary self-test and the reputation lookup; 0 = we are blind to it, so its `outreach_ip_listed` is absent by design. |
 | `outreach_dnsbl_selftest_ok` | gauge | — | 1 if the daily canary self-test (127.0.0.2) succeeded on **every** configured list; omitted entirely until the first check has run. |
@@ -59,6 +60,9 @@ outreach_dnsbl_list_ok == 0
 
 # Queue backing up (nothing is draining it — sender daemon down, or everything paused)
 outreach_queue_depth > 50
+
+# An approved draft the scheduler can never send (RK9-224 — should never fire)
+outreach_approved_without_sequence > 0
 ```
 
 A Grafana panel is one query away from any of the above — no dashboard JSON
@@ -269,7 +273,10 @@ sending).
 `GET /api/outreach/digest` (bearer-gated, same `OUTREACH_METRICS_API_KEY` as
 `/metrics`) returns per-sender-identity counts for the current Europe/Helsinki
 calendar day (sent/bounce/replies/unsubscribes/effective ramp cap/paused) plus
-a ready-to-send Finnish `text` field.
+a ready-to-send Finnish `text` field. RK9-224: also `approvedWithoutSequenceTotal`
+(the same count as `outreach_approved_without_sequence`, summed across
+companies) — nonzero adds a `⚠️ N hyväksyttyä viestiä ilman sekvenssiä` line
+to `text`, omitted entirely on a quiet day.
 
 **This repo does not call the Telegram API.** The issue text explicitly names
 `rk9_telegram_send`/`bin/rk9-telegram.lib.sh` — a host-level bash helper that

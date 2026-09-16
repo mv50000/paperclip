@@ -15,6 +15,7 @@ import { findOutreachSuppressed } from "./suppressions.js";
 import { getProspect } from "./prospects.js";
 import { createDraftMessage, rejectMessage } from "./messages.js";
 import { runQualityGate } from "./quality-gate.js";
+import { getSequence, listActiveSequencesForTemplate } from "./sequences.js";
 
 const CLAUDE_MODEL = "claude-sonnet-5";
 const MAX_TOKENS = 600;
@@ -227,6 +228,7 @@ export async function draftMessageForProspect(
   companyId: string,
   company: OutreachTemplateCompany,
   prospectId: string,
+  sequenceId: string,
 ): Promise<DraftOutcome> {
   const prospect = await getProspect(db, companyId, prospectId);
   if (!prospect) return { ok: false, reason: "prospect_not_found", costUsd: 0 };
@@ -256,6 +258,7 @@ export async function draftMessageForProspect(
 
   const created = await createDraftMessage(db, companyId, {
     prospectId,
+    sequenceId,
     step: 0,
     subject: parsed.subject,
     bodyText: parsed.bodyText,
@@ -279,11 +282,46 @@ export interface DraftBatchOutcome {
   stoppedForBudget: boolean;
 }
 
+export type ResolveSequenceResult =
+  | { ok: true; sequenceId: string }
+  | { ok: false; reason: "sequence_not_found" | "sequence_required" };
+
+/**
+ * RK9-224: resolves the sequence a batch of AI drafts attaches to.
+ * - `sequenceId` given: it must belong to this company (404 `sequence_not_found` otherwise).
+ * - omitted: the company's one active sequence whose first step targets this
+ *   `company` template. Zero or several candidates is ambiguous — 422
+ *   `sequence_required` rather than guessing (see docs/implementation-notes/outreach-sender.md).
+ */
+export async function resolveDraftSequence(
+  db: Db,
+  companyId: string,
+  company: OutreachTemplateCompany,
+  sequenceId: string | undefined,
+): Promise<ResolveSequenceResult> {
+  if (sequenceId) {
+    const sequence = await getSequence(db, companyId, sequenceId);
+    if (!sequence) return { ok: false, reason: "sequence_not_found" };
+    return { ok: true, sequenceId: sequence.id };
+  }
+  const candidates = await listActiveSequencesForTemplate(db, companyId, company);
+  if (candidates.length !== 1) return { ok: false, reason: "sequence_required" };
+  return { ok: true, sequenceId: candidates[0].id };
+}
+
+export type DraftMessagesResult =
+  | ({ ok: true } & DraftBatchOutcome)
+  | { ok: false; reason: "sequence_not_found" | "sequence_required" };
+
 /**
  * Drafts each prospect in turn, stopping once the running cost would exceed
  * `maxCostUsd` (AC: cost cap per run, default $1). Sequential, not
  * parallel — a budget cap on concurrent requests would race past the limit
  * before any response comes back to check it against.
+ *
+ * RK9-224: resolves the target sequence once, up front, for the whole batch —
+ * an approved draft with no sequence never leaves `approved` (the scheduler
+ * only promotes messages it can reach via an active sequence's join).
  */
 export async function draftMessages(
   db: Db,
@@ -291,7 +329,11 @@ export async function draftMessages(
   company: OutreachTemplateCompany,
   prospectIds: string[],
   maxCostUsd: number,
-): Promise<DraftBatchOutcome> {
+  sequenceId?: string,
+): Promise<DraftMessagesResult> {
+  const resolved = await resolveDraftSequence(db, companyId, company, sequenceId);
+  if (!resolved.ok) return resolved;
+
   const outcome: DraftBatchOutcome = {
     drafted: 0,
     gateRejected: 0,
@@ -304,7 +346,7 @@ export async function draftMessages(
       outcome.stoppedForBudget = true;
       break;
     }
-    const result = await draftMessageForProspect(db, companyId, company, prospectId);
+    const result = await draftMessageForProspect(db, companyId, company, prospectId, resolved.sequenceId);
     outcome.totalCostUsd += result.costUsd;
     if (!result.ok) {
       outcome.failed.push({ prospectId, reason: result.reason });
@@ -313,5 +355,5 @@ export async function draftMessages(
     if (result.gate === "passed") outcome.drafted += 1;
     else outcome.gateRejected += 1;
   }
-  return outcome;
+  return { ok: true, ...outcome };
 }

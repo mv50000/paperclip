@@ -20,6 +20,24 @@ export async function getSequence(db: Db, companyId: string, id: string) {
   return row ?? null;
 }
 
+/**
+ * RK9-224: candidate sequences for an AI-drafted message that didn't name a
+ * `sequenceId` — active sequences whose first step targets `templateId`
+ * (the `company` template slug the draft call requested). Multiple active
+ * sequences per company are allowed (unenforced, see scheduler.ts), so the
+ * caller must still treat anything but exactly one candidate as ambiguous.
+ */
+export async function listActiveSequencesForTemplate(db: Db, companyId: string, templateId: string) {
+  const rows = await db
+    .select()
+    .from(outreachSequences)
+    .where(and(eq(outreachSequences.companyId, companyId), eq(outreachSequences.active, true)));
+  return rows.filter((row) => {
+    const steps = row.steps as Array<{ dayOffset: number; templateId: string }> | null;
+    return Array.isArray(steps) && steps.length > 0 && steps[0].templateId === templateId;
+  });
+}
+
 export async function createSequence(db: Db, companyId: string, input: CreateOutreachSequence) {
   const [row] = await db
     .insert(outreachSequences)

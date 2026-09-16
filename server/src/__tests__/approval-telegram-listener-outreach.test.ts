@@ -15,7 +15,17 @@ const COMPANY = { id: "c1", name: "Saatavilla" };
 const TG_TOKEN = "tok";
 const CHAT = "42";
 
-type Draft = { id: string; prospectId: string; subject: string; bodyText: string; status: string; createdAt: string };
+type Draft = {
+  id: string;
+  prospectId: string;
+  subject: string;
+  bodyText: string;
+  status: string;
+  createdAt: string;
+  // RK9-224: null models the pre-fix bug (an approved message the scheduler
+  // could never reach) — the card must make that visible, not hide it.
+  sequenceName: string | null;
+};
 type Prospect = { id: string; orgName: string; email: string; status: string };
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -31,6 +41,7 @@ for (let i = 1; i <= 4; i += 1) {
     bodyText: `Runko ${i}\n\nMikko-Ville Lahti`,
     status: "draft",
     createdAt: new Date(2026, 8, 14, 12, i).toISOString(),
+    sequenceName: i === 1 ? null : `saatavilla-pilot`,
   });
 }
 
@@ -163,6 +174,8 @@ describe("approval-telegram-listener — outreach drafts (RK9-222)", () => {
     const cards = sentCards();
     expect(cards).toHaveLength(2);
     expect(cards[0].body.text).toContain("Hoitola 1 <info@hoitola1.fi>");
+    // RK9-224: draft 1 has no sequence in the fixture — the card must say so visibly.
+    expect(cards[0].body.text).toContain("Sekvenssi: ⚠️ ei sekvenssiä");
     expect(cards[0].body.text).toContain("Aihe: Aihe 1");
     expect(cards[0].body.text).toContain("Runko 1");
     expect(cards[0].body.text).toContain("Jonossa vielä 3 luonnosta.");
@@ -171,6 +184,7 @@ describe("approval-telegram-listener — outreach drafts (RK9-222)", () => {
       `po:r:${uuid(1)}`,
     ]);
     expect(cards[1].body.text).toContain("Hoitola 2");
+    expect(cards[1].body.text).toContain("Sekvenssi: saatavilla-pilot");
 
     const state = readState();
     expect(Object.keys(state.postedOutreach)).toEqual([uuid(1), uuid(2)]);

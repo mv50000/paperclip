@@ -339,13 +339,19 @@ export function outreachRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
-      const outcome = await draftMessages(
+      const result = await draftMessages(
         db,
         companyId,
         req.body.company,
         req.body.prospectIds,
         req.body.maxCostUsd,
+        req.body.sequenceId,
       );
+      if (!result.ok) {
+        res.status(result.reason === "sequence_not_found" ? 404 : 422).json({ error: result.reason });
+        return;
+      }
+      const { ok: _ok, ...outcome } = result;
       await audit(req, companyId, "outreach.messages.ai_drafted", "outreach_message", companyId, {
         requested: req.body.prospectIds.length,
         drafted: outcome.drafted,

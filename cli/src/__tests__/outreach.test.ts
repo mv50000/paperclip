@@ -16,6 +16,16 @@ describe("registerOutreachCommands", () => {
     expect(outreach).toBeDefined();
     expect(outreach?.commands.map((c) => c.name())).toEqual(["import", "enrich", "draft", "review"]);
   });
+
+  // RK9-224: --sequence is the only way to hand the server an explicit
+  // sequenceId from the CLI (omitting it makes the server resolve the
+  // company's one active sequence, or 422 sequence_required).
+  it("registers --sequence on the draft command", () => {
+    const program = new Command();
+    registerOutreachCommands(program);
+    const draft = program.commands.find((c) => c.name() === "outreach")?.commands.find((c) => c.name() === "draft");
+    expect(draft?.options.map((o) => o.long)).toContain("--sequence");
+  });
 });
 
 describe("mapPrhRecordToProspect", () => {
@@ -92,5 +102,16 @@ describe("formatMessageForReview", () => {
     expect(text).toContain("info@acme.fi");
     expect(text).toContain("Nopea kysymys");
     expect(text).toContain("kiitos.");
+  });
+
+  // RK9-224: a draft that never landed on a sequence is exactly the failure
+  // mode this issue closes — surface it instead of hiding it.
+  it("shows the sequence name, or a visible marker when none is attached", () => {
+    const base = { id: "m1", prospectId: "p1", subject: "S", bodyText: "B", status: "draft" };
+    const withSequence = formatMessageForReview({ ...base, sequenceName: "saatavilla-pilot" }, undefined);
+    expect(withSequence).toContain("saatavilla-pilot");
+
+    const withoutSequence = formatMessageForReview({ ...base, sequenceName: null }, undefined);
+    expect(withoutSequence).toContain("(none)");
   });
 });

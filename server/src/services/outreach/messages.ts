@@ -1,6 +1,6 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { outreachMessages } from "@paperclipai/db";
+import { outreachMessages, outreachSequences } from "@paperclipai/db";
 import type {
   CreateOutreachMessage,
   OutreachMessageStatus,
@@ -13,6 +13,12 @@ import { getSequence } from "./sequences.js";
 import { findOutreachSuppressed } from "./suppressions.js";
 import { PROSPECT_TERMINAL_STATUSES } from "./logic.js";
 
+/**
+ * RK9-224: includes `sequenceName` (null for the increasingly rare message
+ * with no sequence) so the CLI review tool and the Telegram approval card
+ * (server/scripts/approval-telegram-listener.mjs) can show which sequence a
+ * draft belongs to without a second round-trip.
+ */
 export async function listMessages(
   db: Db,
   companyId: string,
@@ -22,8 +28,9 @@ export async function listMessages(
   if (opts.status) conditions.push(eq(outreachMessages.status, opts.status));
   if (opts.prospectId) conditions.push(eq(outreachMessages.prospectId, opts.prospectId));
   return db
-    .select()
+    .select({ ...getTableColumns(outreachMessages), sequenceName: outreachSequences.name })
     .from(outreachMessages)
+    .leftJoin(outreachSequences, eq(outreachMessages.sequenceId, outreachSequences.id))
     .where(and(...conditions))
     .orderBy(desc(outreachMessages.createdAt))
     .limit(Math.max(1, Math.min(1000, opts.limit ?? 200)));

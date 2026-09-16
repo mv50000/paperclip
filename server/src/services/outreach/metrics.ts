@@ -7,7 +7,7 @@
 // change on a feature branch — same reasoning `outreach-sender.md` gives for
 // hand-rolling the SMTP client instead of pulling in nodemailer) — the text
 // format is a handful of lines, so it's built by hand below.
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
@@ -32,6 +32,11 @@ interface SenderPausedGauge {
   paused: 0 | 1;
 }
 
+interface ApprovedWithoutSequenceByCompany {
+  companyId: string;
+  count: number;
+}
+
 export interface OutreachPrometheusMetrics {
   sent: SentByCompanySender[];
   bounce: BounceByType[];
@@ -39,6 +44,11 @@ export interface OutreachPrometheusMetrics {
   unsubscribeTotal: number;
   queueDepth: number;
   senderPaused: SenderPausedGauge[];
+  // RK9-224: an `approved` message the scheduler can never reach — it only
+  // promotes messages via an active sequence's join (server/src/services/outreach/scheduler.ts).
+  // Should stay at 0 now that drafting always resolves a sequence; a nonzero
+  // value here means something bypassed that (a direct `POST .../messages` call).
+  approvedWithoutSequence: ApprovedWithoutSequenceByCompany[];
 }
 
 async function countEventsByType(db: Db, types: string[]) {
@@ -50,7 +60,7 @@ async function countEventsByType(db: Db, types: string[]) {
 }
 
 export async function collectOutreachPrometheusMetrics(db: Db): Promise<OutreachPrometheusMetrics> {
-  const [sentRows, bounceRows, replyRows, unsubscribeRows, queueDepthRows, activePauses, identityRows] =
+  const [sentRows, bounceRows, replyRows, unsubscribeRows, queueDepthRows, activePauses, identityRows, approvedWithoutSequenceRows] =
     await Promise.all([
       db
         .select({
@@ -71,6 +81,11 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
       db.select({ count: sql<number>`count(*)` }).from(outreachMessages).where(eq(outreachMessages.status, "queued")),
       listActivePauses(db),
       db.selectDistinct({ senderIdentity: outreachSequences.senderIdentity }).from(outreachSequences),
+      db
+        .select({ companyId: outreachMessages.companyId, count: sql<number>`count(*)` })
+        .from(outreachMessages)
+        .where(and(eq(outreachMessages.status, "approved"), isNull(outreachMessages.sequenceId)))
+        .groupBy(outreachMessages.companyId),
     ]);
 
   const pausedIdentities = new Set(activePauses.map((p) => p.senderIdentity));
@@ -85,6 +100,7 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
       senderIdentity: r.senderIdentity,
       paused: pausedIdentities.has(r.senderIdentity) ? 1 : 0,
     })),
+    approvedWithoutSequence: approvedWithoutSequenceRows.map((r) => ({ companyId: r.companyId, count: Number(r.count) })),
   };
 }
 
@@ -131,6 +147,13 @@ export function renderOutreachPrometheusText(metrics: OutreachPrometheusMetrics)
   lines.push("# TYPE outreach_sender_paused gauge");
   for (const r of metrics.senderPaused) {
     lines.push(metricLine("outreach_sender_paused", { sender: r.senderIdentity }, r.paused));
+  }
+
+  // RK9-224: should stay at 0 — see OutreachPrometheusMetrics.approvedWithoutSequence.
+  lines.push("# HELP outreach_approved_without_sequence Approved outreach messages with no sequence attached — the scheduler can never promote these to queued.");
+  lines.push("# TYPE outreach_approved_without_sequence gauge");
+  for (const r of metrics.approvedWithoutSequence) {
+    lines.push(metricLine("outreach_approved_without_sequence", { company: r.companyId }, r.count));
   }
 
   // RK9-225: only a list we can currently trust gets to publish a verdict. A
@@ -182,6 +205,8 @@ export interface OutreachDigest {
   /** Europe/Helsinki calendar date the digest covers, `YYYY-MM-DD`. */
   date: string;
   senders: OutreachDigestSenderSummary[];
+  /** RK9-224: total `approved` messages with no sequence, across all companies — see `outreach_approved_without_sequence`. */
+  approvedWithoutSequenceTotal: number;
   /** Ready-to-send Finnish message text — the host cron script's only job is `rk9_telegram_send "$(curl ... | jq -r .text)"`. */
   text: string;
 }
@@ -247,10 +272,29 @@ function formatDnsblDigestLine(dnsbl: OutreachDnsblState): string | null {
   return `DNSBL${ip}: ${parts.join(" | ")}`;
 }
 
-function formatDigestText(date: string, senders: OutreachDigestSenderSummary[], dnsblLine: string | null): string {
+/** RK9-224: total `approved` messages with `sequence_id IS NULL`, across all companies — see `outreach_approved_without_sequence`. */
+async function countApprovedWithoutSequence(db: Db): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(outreachMessages)
+    .where(and(eq(outreachMessages.status, "approved"), isNull(outreachMessages.sequenceId)));
+  return Number(row?.count ?? 0);
+}
+
+function formatDigestText(
+  date: string,
+  senders: OutreachDigestSenderSummary[],
+  dnsblLine: string | null,
+  approvedWithoutSequenceTotal: number,
+): string {
+  const warningLine =
+    approvedWithoutSequenceTotal > 0
+      ? `⚠️ ${approvedWithoutSequenceTotal} hyväksyttyä viestiä ilman sekvenssiä — scheduler ei koskaan lähetä niitä (RK9-224).`
+      : null;
   if (senders.length === 0) {
     const empty = `Outreach-digest ${date}: ei aktiivisia lähettäjiä.`;
-    return dnsblLine ? `${empty}\n${dnsblLine}` : empty;
+    const lines = [empty, dnsblLine, warningLine].filter((l): l is string => l !== null);
+    return lines.join("\n");
   }
   const lines = [`Outreach-digest ${date}:`];
   for (const s of senders) {
@@ -261,6 +305,7 @@ function formatDigestText(date: string, senders: OutreachDigestSenderSummary[], 
     );
   }
   if (dnsblLine) lines.push(dnsblLine);
+  if (warningLine) lines.push(warningLine);
   return lines.join("\n");
 }
 
@@ -293,6 +338,7 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
   const sequenceRows = await digestSenderIdentities(db);
   const activePauses = await listActivePauses(db);
   const pausedIdentities = new Set(activePauses.map((p) => p.senderIdentity));
+  const approvedWithoutSequenceTotal = await countApprovedWithoutSequence(db);
 
   const senders: OutreachDigestSenderSummary[] = await Promise.all(
     sequenceRows.map(async (seq) => {
@@ -320,5 +366,10 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
   );
   senders.sort((a, b) => a.senderIdentity.localeCompare(b.senderIdentity));
 
-  return { date, senders, text: formatDigestText(date, senders, formatDnsblDigestLine(getOutreachDnsblState())) };
+  return {
+    date,
+    senders,
+    approvedWithoutSequenceTotal,
+    text: formatDigestText(date, senders, formatDnsblDigestLine(getOutreachDnsblState()), approvedWithoutSequenceTotal),
+  };
 }
