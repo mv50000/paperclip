@@ -8,7 +8,9 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 ## Prerequisites
 
 - Claude Code CLI installed (`claude` command available)
-- `ANTHROPIC_API_KEY` set in the environment or agent config
+- Claude logged in with a subscription, **or** `ANTHROPIC_API_KEY` set in the agent's adapter config `env`
+
+A bare `ANTHROPIC_API_KEY` in the host environment is deliberately **not** passed to agents — see [API key inheritance](#api-key-inheritance).
 
 ## Configuration Fields
 
@@ -61,5 +63,32 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
 
 - Claude CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
-- API key/auth mode hints (`ANTHROPIC_API_KEY` vs subscription login)
+- API key/auth mode hints (`ANTHROPIC_API_KEY` vs subscription login, and whether a host key is inherited)
 - A live hello probe (`claude --print - --output-format stream-json --verbose` with prompt `Respond with hello.`) to verify CLI readiness
+
+## API key inheritance
+
+`claude_local` runs the Claude CLI as a child process. The child inherits the
+Paperclip server's environment, minus `ANTHROPIC_API_KEY`.
+
+That one exclusion exists because the CLI treats a present `ANTHROPIC_API_KEY`
+as "use API-key auth", which bills metered API credit rather than a Claude
+subscription. A key added to the server environment for some unrelated
+feature would therefore move **every** agent onto metered billing silently. In
+September 2026 that is exactly what happened to this project's own fleet: a key
+added for one feature ran the whole deployment's credit down in 31 hours and
+every company's agents stopped (RK9-228).
+
+So the choice is per agent:
+
+| Where the key is set | What the agent uses |
+|---|---|
+| Agent's adapter config `env` | API-key auth (metered) |
+| Host environment only | Subscription auth; the key is ignored |
+| Host environment + `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY=1` | API-key auth for every agent |
+
+Use the opt-in when there is no interactive subscription login to use — a
+container started with `-e ANTHROPIC_API_KEY=...` is the usual case. It is a
+deployment-wide switch, so write down why it is on.
+
+The "Test Environment" check reports which of the three cases applies.

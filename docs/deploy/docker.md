@@ -69,3 +69,9 @@ docker run --name paperclip \
 ```
 
 Without API keys, the app runs normally — adapter environment checks will surface missing prerequisites.
+
+> **`ANTHROPIC_API_KEY` in a container:** `claude_local` agents do not inherit a
+> host-level key by default — it would switch every agent from subscription to
+> metered billing at once. In a container, where there is no interactive login,
+> also set `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY=1`, or set the key in each
+> agent's adapter config `env`. See `docs/adapters/claude-local.md`.
