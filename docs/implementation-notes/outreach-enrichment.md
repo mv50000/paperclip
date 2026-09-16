@@ -76,6 +76,20 @@ mapped in `updateProspect`'s unique-violation catch).
    (`hieroja-/jooga-/pt-demo.saatavilla.fi`, beauty → hieroja) or
    `saatavilla.fi` — and the template asks for a checkable observation plus a
    concrete next step instead of "olisiko ajankohtaista".
+   **RK9-224 (16.9.2026):** every draft the batch creates now gets a
+   `sequence_id` at creation time — an `approved` message with none never
+   left `approved`, since the scheduler (`outreach-sender.md`) only reaches
+   messages via an active sequence's join. `POST .../messages/draft` takes an
+   optional `sequenceId`; if it belongs to the company, drafts attach to it.
+   Omitted, `resolveDraftSequence` (`draft.ts`) picks the company's one
+   *active* sequence whose `steps[0].templateId` equals the requested
+   `company` template — zero or more than one match is ambiguous, so the
+   batch 422s `sequence_required` rather than guessing. An explicit
+   `sequenceId` from an unrelated company 404s `sequence_not_found`. CLI:
+   `paperclipai outreach draft --company <slug> --sequence <id>` (optional).
+   The review tool and the Telegram approval card
+   (`outreach-telegram-approvals.md`) both show the attached sequence's name,
+   or a visible `⚠️ ei sekvenssiä` marker if somehow still missing.
 
 4. **Review** (`paperclipai outreach review`, or ✅/❌ from Telegram — RK9-222,
    `outreach-telegram-approvals.md`) — lists `status: draft`
@@ -135,7 +149,16 @@ rough starting template is a safe default, not a shipped claim.
   nullable/settable e-mail and the three new schemas.
 - `cli/src/__tests__/outreach.test.ts` — the PRH-record mapper, the review
   tool's pure formatting/parsing helpers, and command registration.
+- `server/src/__tests__/outreach-draft-sequence.test.ts` (RK9-224, real
+  Postgres — see `outreach-scheduler-pause-gate.test.ts` for the embedded-PG
+  pattern this follows) — `resolveDraftSequence`'s single/zero/many-match
+  cases, `createDraftMessage` persisting the resolved id, and the regression
+  this whole issue is about: an `approved` message with `sequence_id = null`
+  is never promoted by `queueDueMessages`.
 
-No test exercises Firecrawl, Claude, or a real database — the AC's "50
-prospects imported/enriched/drafted" numbers are meant to be verified live
-by the operator after merge, not reproduced in CI at real API cost.
+No test exercises Firecrawl or Claude — those calls' cost/nondeterminism keep
+them out of CI; the AC's "50 prospects imported/enriched/drafted" numbers are
+meant to be verified live by the operator after merge. `outreach-draft-sequence.test.ts`
+and `outreach-metrics-approved-without-sequence.test.ts` are the exceptions
+that do use a real (embedded, ephemeral) Postgres, skipped automatically on a
+host without embedded-PG support.

@@ -158,3 +158,29 @@ exist before queueing. The sender's identity block (name, company, business
 id, town — SVPL 200 §) stays in the template as reviewed prose. Pure helpers
 `buildComplianceFooter` / `appendComplianceFooter` in `message-format.ts`, tests
 in `outreach-message-format.test.ts`.
+
+## RK9-224 addendum: a message without a sequence never reaches this scheduler
+
+`runQueueDueMessages` (above) and `listSendQueue` both start from
+`outreach_sequences` and join `outreach_messages` onto it — neither ever
+queries "all approved messages" directly. Before this ticket,
+`POST .../messages/draft` (`outreach-enrichment.md`'s Draft step) created
+every AI draft with `sequence_id = null`, since `createDraftMessage` accepted
+but never required one. A `null`-sequence message could be approved by the
+review tool or the Telegram card and would then sit in `approved` forever —
+invisible to both functions above, since there is no sequence row to join it
+through. This is exactly what happened on 2026-09-14: 7 Telegram-approved
+messages needed a manual `UPDATE outreach_messages SET sequence_id = ...`.
+
+The fix is entirely on the write side (`server/src/services/outreach/draft.ts#resolveDraftSequence`,
+detailed in `outreach-enrichment.md`) — this scheduler file is unchanged.
+`outreach_approved_without_sequence` (`outreach-metrics.md`) is the safety
+net: it should read 0 now that drafting always resolves a sequence, and a
+nonzero value means some other write path (a direct `POST .../messages` call)
+created an orphan.
+
+Multiple `active` sequences per company remain allowed and unenforced (no DB
+constraint, see `packages/db/src/migrations/9006_rk9_outreach.sql`) — this is
+exactly why `resolveDraftSequence` 422s `sequence_required` instead of
+picking one when a company's active sequences for a template aren't unique;
+guessing which one an approver meant would be worse than asking.

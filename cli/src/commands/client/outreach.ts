@@ -30,6 +30,7 @@ interface OutreachMessage {
   subject: string;
   bodyText: string;
   status: string;
+  sequenceName?: string | null;
 }
 
 // --- import ------------------------------------------------------------
@@ -97,6 +98,7 @@ export function formatProspectLine(prospect: OutreachProspect): string {
 export function formatMessageForReview(message: OutreachMessage, prospect: OutreachProspect | undefined): string {
   const lines = [
     formatProspectLine(prospect ?? { id: message.prospectId, orgName: "(tuntematon)", email: null, status: "?", sourceUrl: null }),
+    `${pc.dim("Sequence:")} ${message.sequenceName ?? pc.yellow("(none)")}`,
     `${pc.dim("Subject:")} ${message.subject}`,
     "",
     message.bodyText,
@@ -128,6 +130,7 @@ interface CompanyOption extends BaseClientOptions {
   limit?: string;
   company?: string;
   maxCost?: string;
+  sequence?: string;
 }
 
 export function registerOutreachCommands(program: Command): void {
@@ -188,6 +191,10 @@ export function registerOutreachCommands(program: Command): void {
       .option("--status <status>", "Prospect status to target", "new")
       .option("--limit <n>", "Max prospects to draft in this run", "50")
       .option("--max-cost <usd>", "Stop once estimated Claude spend reaches this many dollars", "1")
+      // RK9-224: without this, the server resolves the company's one active
+      // sequence for --company's template, or 422s `sequence_required` if
+      // that isn't unique — it never guesses.
+      .option("--sequence <id>", "Sequence to attach the drafts to (defaults to the company's one active sequence for --company)")
       .action(async (opts: CompanyOption) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
@@ -206,6 +213,7 @@ export function registerOutreachCommands(program: Command): void {
           const result = await ctx.api.post(`/api/companies/${ctx.companyId}/outreach/messages/draft`, {
             prospectIds: candidateIds,
             company,
+            sequenceId: opts.sequence,
             maxCostUsd: Number(opts.maxCost ?? 1),
           });
           printOutput(result, { json: ctx.json });

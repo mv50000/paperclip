@@ -147,6 +147,7 @@ function renderOutreachDraft(companyName, message, prospect, waiting) {
   const lines = [
     `✉️ Outreach-luonnos — ${companyName}`,
     `Prospekti: ${who}`,
+    `Sekvenssi: ${message.sequenceName ?? "⚠️ ei sekvenssiä"}`,
     `Aihe: ${message.subject ?? "?"}`,
     "──────────",
     body,

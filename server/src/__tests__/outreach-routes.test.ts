@@ -365,6 +365,7 @@ describe.sequential("outreach routes", () => {
 
   it("message draft batch defaults maxCostUsd to 1 and audits the run", async () => {
     mockOutreach.draftMessages.mockResolvedValueOnce({
+      ok: true,
       drafted: 1,
       gateRejected: 1,
       failed: [],
@@ -379,12 +380,14 @@ describe.sequential("outreach routes", () => {
     );
     expect(res.status).toBe(200);
     expect(res.body.drafted).toBe(1);
+    expect(res.body.ok).toBeUndefined();
     expect(mockOutreach.draftMessages).toHaveBeenCalledWith(
       expect.anything(),
       "company-1",
       "saatavilla",
       ["11111111-1111-1111-1111-111111111111"],
       1,
+      undefined,
     );
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "outreach.messages.ai_drafted" }));
   });
@@ -398,6 +401,68 @@ describe.sequential("outreach routes", () => {
     );
     expect(res.status).toBe(400);
     expect(mockOutreach.draftMessages).not.toHaveBeenCalled();
+  });
+
+  // RK9-224: a draft call never creates a message without a sequence.
+  it("message draft batch forwards an explicit sequenceId", async () => {
+    mockOutreach.draftMessages.mockResolvedValueOnce({
+      ok: true,
+      drafted: 1,
+      gateRejected: 0,
+      failed: [],
+      totalCostUsd: 0.01,
+      stoppedForBudget: false,
+    });
+    const app = await createApp();
+    const sequenceId = "22222222-2222-2222-2222-222222222222";
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/messages/draft")
+        .send({
+          prospectIds: ["11111111-1111-1111-1111-111111111111"],
+          company: "saatavilla",
+          sequenceId,
+        }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockOutreach.draftMessages).toHaveBeenCalledWith(
+      expect.anything(),
+      "company-1",
+      "saatavilla",
+      ["11111111-1111-1111-1111-111111111111"],
+      1,
+      sequenceId,
+    );
+  });
+
+  it("message draft batch 404s an explicit sequenceId that doesn't belong to the company", async () => {
+    mockOutreach.draftMessages.mockResolvedValueOnce({ ok: false, reason: "sequence_not_found" });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/messages/draft")
+        .send({
+          prospectIds: ["11111111-1111-1111-1111-111111111111"],
+          company: "saatavilla",
+          sequenceId: "22222222-2222-2222-2222-222222222222",
+        }),
+    );
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "sequence_not_found" });
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("message draft batch 422s when no sequenceId is given and the active-sequence match isn't unique", async () => {
+    mockOutreach.draftMessages.mockResolvedValueOnce({ ok: false, reason: "sequence_required" });
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base)
+        .post("/api/companies/company-1/outreach/messages/draft")
+        .send({ prospectIds: ["11111111-1111-1111-1111-111111111111"], company: "saatavilla" }),
+    );
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: "sequence_required" });
+    expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
   it("agents cannot list, pause or resume sender identities", async () => {

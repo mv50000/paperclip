@@ -11,7 +11,7 @@ and enrichment arrive in later tickets (RK9-196+).
 |-------|-------|---------|
 | `outreach_prospects` | company | One row per (company, e-mail). Carries the GDPR fields `source`, `source_url`, `legal_basis`. `enrichment jsonb` is reserved for RK9-196. |
 | `outreach_sequences` | company | Named campaign: `sender_identity`, `steps [{dayOffset, templateId}]`, `daily_cap`, `send_window {tz, days, startHour, endHour}`, `ramp_schedule [{fromDay, dailyCap}]`, `active`. Unique name per company. |
-| `outreach_messages` | company (denormalised `company_id`) | A drafted/approved/sent e-mail to one prospect. `approved_by` + `approved_at` record the reviewer; `reject_reason` is reserved for RK9-196; `message_id` is the RFC 5322 id assigned at send time. |
+| `outreach_messages` | company (denormalised `company_id`) | A drafted/approved/sent e-mail to one prospect. `sequence_id` (nullable, `ON DELETE SET NULL`) links it to its `outreach_sequences` row — RK9-224: `POST .../messages/draft` always resolves one at creation time now, since the scheduler only ever reaches a message through a sequence's join (`outreach-sender.md`). `approved_by` + `approved_at` record the reviewer; `reject_reason` is reserved for RK9-196; `message_id` is the RFC 5322 id assigned at send time. |
 | `outreach_events` | company | Inbound signals: `bounce_hard`, `bounce_soft`, `reply`, `unsubscribe`, `complaint`, `dsn`. Payload is the raw provider object. |
 | `outreach_suppressions` | **GLOBAL** | Permanent opt-out list keyed on lower-cased e-mail. Never deleted. |
 

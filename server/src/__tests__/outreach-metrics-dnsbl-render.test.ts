@@ -27,6 +27,7 @@ const EMPTY_METRICS: OutreachPrometheusMetrics = {
   unsubscribeTotal: 0,
   queueDepth: 0,
   senderPaused: [],
+  approvedWithoutSequence: [],
 };
 
 const LISTS = ["zen.spamhaus.org", "bl.spamcop.net"];

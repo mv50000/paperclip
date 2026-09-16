@@ -106,5 +106,23 @@ describe("outreach validators", () => {
       company: "saatavilla",
     });
     expect(drafted.maxCostUsd).toBe(1);
+    expect(drafted.sequenceId).toBeUndefined();
+  });
+
+  it("RK9-224: draft batch accepts an optional sequenceId and rejects a malformed one", () => {
+    const drafted = draftOutreachMessagesSchema.parse({
+      prospectIds: ["11111111-1111-1111-1111-111111111111"],
+      company: "saatavilla",
+      sequenceId: "22222222-2222-2222-2222-222222222222",
+    });
+    expect(drafted.sequenceId).toBe("22222222-2222-2222-2222-222222222222");
+
+    expect(() =>
+      draftOutreachMessagesSchema.parse({
+        prospectIds: ["11111111-1111-1111-1111-111111111111"],
+        company: "saatavilla",
+        sequenceId: "not-a-uuid",
+      }),
+    ).toThrow();
   });
 });
