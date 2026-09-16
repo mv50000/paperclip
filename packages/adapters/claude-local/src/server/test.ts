@@ -16,6 +16,11 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import path from "node:path";
 import { detectClaudeLoginRequired, parseClaudeStreamJson } from "./parse.js";
+import {
+  INHERIT_OPT_IN_ENV_KEY,
+  inheritableHostEnv,
+  inheritsHostAnthropicApiKey,
+} from "./host-env.js";
 import { isBedrockModelId } from "./models.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
@@ -79,7 +84,9 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Same environment the agent will actually run with, so the hello probe
+  // cannot succeed on credentials the real run would not have (RK9-228).
+  const runtimeEnv = ensurePathInEnv({ ...inheritableHostEnv(), ...env });
   try {
     await ensureCommandResolvable(command, cwd, runtimeEnv);
     checks.push({
@@ -106,6 +113,9 @@ export async function testEnvironment(
 
   const configApiKey = env.ANTHROPIC_API_KEY;
   const hostApiKey = process.env.ANTHROPIC_API_KEY;
+  // Mirrors inheritableHostEnv() in execute.ts: a server-wide key reaches the
+  // CLI only when the deployment opts in (RK9-228).
+  const hostKeyIsInherited = inheritsHostAnthropicApiKey();
   if (hasBedrock) {
     const source =
       env.CLAUDE_CODE_USE_BEDROCK === "1" ||
@@ -120,15 +130,33 @@ export async function testEnvironment(
       detail: `Detected in ${source}.`,
       hint: "Ensure AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE) and AWS_REGION are configured.",
     });
-  } else if (isNonEmpty(configApiKey) || isNonEmpty(hostApiKey)) {
-    const source = isNonEmpty(configApiKey) ? "adapter config env" : "server environment";
+  } else if (isNonEmpty(configApiKey)) {
     checks.push({
       code: "claude_anthropic_api_key_overrides_subscription",
       level: "warn",
       message:
         "ANTHROPIC_API_KEY is set. Claude will use API-key auth instead of subscription credentials.",
-      detail: `Detected in ${source}.`,
+      detail: "Detected in adapter config env.",
       hint: "Unset ANTHROPIC_API_KEY if you want subscription-based Claude login behavior.",
+    });
+  } else if (isNonEmpty(hostApiKey) && hostKeyIsInherited) {
+    checks.push({
+      code: "claude_anthropic_api_key_overrides_subscription",
+      level: "warn",
+      message:
+        "ANTHROPIC_API_KEY is set. Claude will use API-key auth instead of subscription credentials.",
+      detail: `Detected in server environment, inherited because ${INHERIT_OPT_IN_ENV_KEY} is set.`,
+      hint: `Unset ${INHERIT_OPT_IN_ENV_KEY} to keep server-wide keys away from agents, or unset ANTHROPIC_API_KEY.`,
+    });
+  } else if (isNonEmpty(hostApiKey)) {
+    checks.push({
+      code: "claude_anthropic_api_key_not_inherited",
+      level: "info",
+      message:
+        "ANTHROPIC_API_KEY is set in the server environment but is not passed to agents; subscription auth is used.",
+      detail:
+        "A server-wide key would move every agent from subscription billing to metered API credit, so it is not inherited.",
+      hint: `Set the key in this agent's adapter config env to use API-key auth, or set ${INHERIT_OPT_IN_ENV_KEY}=1 to inherit it for every agent.`,
     });
   } else {
     checks.push({

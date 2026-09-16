@@ -252,3 +252,9 @@ Notes:
 
 - The `docker-entrypoint.sh` adjusts the container `node` user UID/GID at startup to match the values passed via `USER_UID`/`USER_GID`, avoiding permission issues on bind-mounted volumes.
 - Paperclip data persists via Docker volumes/bind mounts (compose) or at `~/.local/share/paperclip` (quadlet).
+
+> **`ANTHROPIC_API_KEY` in a container:** `claude_local` agents do not inherit a
+> host-level key by default — it would switch every agent from subscription to
+> metered billing at once. In a container, where there is no interactive login,
+> also set `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY=1`, or set the key in each
+> agent's adapter config `env`. See `docs/adapters/claude-local.md`.

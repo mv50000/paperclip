@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/adapter-utils";
+import { inheritableHostEnv } from "./host-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -115,7 +116,9 @@ interface ClaudeAuthStatus {
 export async function readClaudeAuthStatus(): Promise<ClaudeAuthStatus | null> {
   try {
     const { stdout } = await execFileAsync("claude", ["auth", "status"], {
-      env: process.env,
+      // Agents do not inherit a host ANTHROPIC_API_KEY (RK9-228), so the auth
+      // status has to be read the same way or it describes a different session.
+      env: inheritableHostEnv(),
       timeout: 5_000,
       maxBuffer: 1024 * 1024,
     });

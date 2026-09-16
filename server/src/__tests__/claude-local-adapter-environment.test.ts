@@ -7,6 +7,7 @@ import { testEnvironment } from "@paperclipai/adapter-claude-local/server";
 const ORIGINAL_ANTHROPIC = process.env.ANTHROPIC_API_KEY;
 const ORIGINAL_BEDROCK = process.env.CLAUDE_CODE_USE_BEDROCK;
 const ORIGINAL_BEDROCK_URL = process.env.ANTHROPIC_BEDROCK_BASE_URL;
+const ORIGINAL_INHERIT_OPT_IN = process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY;
 
 afterEach(() => {
   if (ORIGINAL_ANTHROPIC === undefined) {
@@ -24,13 +25,51 @@ afterEach(() => {
   } else {
     process.env.ANTHROPIC_BEDROCK_BASE_URL = ORIGINAL_BEDROCK_URL;
   }
+  if (ORIGINAL_INHERIT_OPT_IN === undefined) {
+    delete process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY;
+  } else {
+    process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY = ORIGINAL_INHERIT_OPT_IN;
+  }
 });
 
 describe("claude_local environment diagnostics", () => {
-  it("returns a warning (not an error) when ANTHROPIC_API_KEY is set in host environment", async () => {
+  // RK9-228: a host key used to be inherited by every agent, which is how one
+  // feature's API key moved the whole fleet off subscription billing. It is now
+  // reported as ignored, not as an override.
+  it("reports a host-only ANTHROPIC_API_KEY as not inherited", async () => {
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
+    delete process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-test-host";
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "claude_local",
+      config: {
+        command: process.execPath,
+        cwd: process.cwd(),
+      },
+    });
+
+    expect(
+      result.checks.some(
+        (check) =>
+          check.code === "claude_anthropic_api_key_not_inherited" && check.level === "info",
+      ),
+    ).toBe(true);
+    expect(
+      result.checks.some(
+        (check) => check.code === "claude_anthropic_api_key_overrides_subscription",
+      ),
+    ).toBe(false);
+    expect(result.checks.some((check) => check.level === "error")).toBe(false);
+  });
+
+  it("warns about a host ANTHROPIC_API_KEY when the deployment opts into inheriting it", async () => {
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
     delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
     process.env.ANTHROPIC_API_KEY = "sk-test-host";
+    process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY = "1";
 
     const result = await testEnvironment({
       companyId: "company-1",

@@ -162,7 +162,8 @@ Typical failure causes:
 
 Claude-specific note:
 
-- If `ANTHROPIC_API_KEY` is set in adapter env or host environment, Claude uses API-key auth instead of subscription login. Paperclip surfaces this as a warning in environment tests, not a hard error.
+- If `ANTHROPIC_API_KEY` is set in an agent's **adapter env**, Claude uses API-key auth instead of subscription login. Paperclip surfaces this as a warning in environment tests, not a hard error.
+- A key set only in the **host environment is not inherited** by agents. API-key auth is a per-agent choice, because a server-wide key would move every agent from subscription billing to metered API credit at once. Set `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY=1` to opt the whole deployment back into inheriting it (containers with no interactive login).
 
 ## 9. Security and risk notes
 
