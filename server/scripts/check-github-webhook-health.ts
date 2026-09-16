@@ -30,6 +30,10 @@ import { eq } from "drizzle-orm";
 import { createDb, companies } from "@paperclipai/db";
 import { createSlackClientService } from "../src/services/slack/client.js";
 import { createChannelResolver } from "../src/services/slack/channel-resolver.js";
+import {
+  selectAlertableRepos,
+  splitHealth,
+} from "../src/services/webhook-monitor-alerting.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -343,16 +347,6 @@ function buildProbeBlock(probeFailures: ProbeResult[]) {
   };
 }
 
-// A repo the monitor could not query is *blind*, not *failing*. Conflating the
-// two made a 403 from the hooks API read as "webhook deliveries are failing",
-// which points every diagnosis at the wrong system.
-function splitHealth(unhealthy: RepoHealth[]) {
-  return {
-    failing: unhealthy.filter((r) => !r.error && r.recentFailures > 0),
-    blind: unhealthy.filter((r) => r.error !== null),
-  };
-}
-
 function buildSlackBlocks(
   unhealthy: RepoHealth[],
   probeFailures: ProbeResult[],
@@ -567,28 +561,20 @@ async function main() {
     }))
     .filter((r) => r.failingDeliveries.length > 0 || r.error);
 
-  const throttledRepos: string[] = [];
-  const newUnhealthy = dedupedUnhealthy.filter((r) => {
-    // A repo changing state class (healthy → blind, blind → failing, one error
-    // → a different error) is always news, whatever the throttle says.
-    const lastError = repoLastError[r.repo] ?? "";
-    if ((r.error ?? "") !== lastError) return true;
-    const lastAtIso = repoAlertedAt[r.repo];
-    if (!lastAtIso) return true;
-    const lastAtMs = new Date(lastAtIso).getTime();
-    if (Number.isNaN(lastAtMs) || lastAtMs < throttleCutoffMs) return true;
-    // Blind repos used to bypass the throttle entirely, so one unreadable hook
-    // posted an alert every hour for days (RK9-226). The same error has nothing
-    // new to say: throttle it like a persistent delivery failure.
-    if (r.error) {
-      throttledRepos.push(r.repo);
-      return false;
-    }
-    const lastCount = repoLastFailureCount[r.repo] ?? 0;
-    if (r.recentFailures >= lastCount * FAILURE_GROWTH_THRESHOLD) return true;
-    throttledRepos.push(r.repo);
-    return false;
-  });
+  // Blind repos used to bypass the throttle entirely, so one unreadable hook
+  // posted an alert every hour for days (RK9-226). selectAlertableRepos now
+  // throttles them like a persistent delivery failure, while a change of error
+  // text still gets through.
+  const { alertable: newUnhealthy, throttled: throttledRepos } =
+    selectAlertableRepos(
+      dedupedUnhealthy,
+      { repoAlertedAt, repoLastFailureCount, repoLastError },
+      Date.now(),
+      {
+        throttleHours: THROTTLE_HOURS,
+        failureGrowthThreshold: FAILURE_GROWTH_THRESHOLD,
+      },
+    );
 
   const newFailureIds: number[] = [];
   for (const r of newUnhealthy) {
