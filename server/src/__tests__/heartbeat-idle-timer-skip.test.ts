@@ -172,6 +172,75 @@ describeEmbeddedPostgres("heartbeat timer idle precheck", () => {
     expect(await skippedReasons(agentId)).toEqual([]);
   });
 
+  async function seedBlockedIssue(
+    companyId: string,
+    agentId: string,
+    blocker: { status: string } | null,
+  ) {
+    const blockedIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: blockedIssueId,
+      companyId,
+      title: "Blocked work",
+      status: "blocked",
+      priority: "medium",
+      assigneeAgentId: agentId,
+    });
+    if (blocker) {
+      const blockerIssueId = randomUUID();
+      await db.insert(issues).values({
+        id: blockerIssueId,
+        companyId,
+        title: "Blocker",
+        status: blocker.status,
+        priority: "medium",
+      });
+      await db.insert(issueRelations).values({
+        id: randomUUID(),
+        companyId,
+        issueId: blockerIssueId,
+        relatedIssueId: blockedIssueId,
+        type: "blocks",
+      });
+    }
+    return blockedIssueId;
+  }
+
+  // RK9-231: a hand-blocked issue records no `blocks` relation, and dependency
+  // readiness defaults to ready for exactly that case. It used to read as
+  // pending work, so one stale blocked issue kept its agent non-idle forever.
+  it("skips a timer wake when the only assigned issue is blocked with no recorded blockers", async () => {
+    const { companyId, agentId } = await seedAgent({});
+    await seedBlockedIssue(companyId, agentId, null);
+    const adapterCallsBefore = mockAdapterExecute.mock.calls.length;
+
+    const run = await heartbeat.wakeup(agentId, timerWake);
+
+    expect(run).toBeNull();
+    expect(await skippedReasons(agentId)).toEqual(["heartbeat.idle"]);
+    expect(mockAdapterExecute.mock.calls.length).toBe(adapterCallsBefore);
+  });
+
+  it("skips a timer wake when the assigned issue's blockers are still open", async () => {
+    const { companyId, agentId } = await seedAgent({});
+    await seedBlockedIssue(companyId, agentId, { status: "todo" });
+
+    const run = await heartbeat.wakeup(agentId, timerWake);
+
+    expect(run).toBeNull();
+    expect(await skippedReasons(agentId)).toEqual(["heartbeat.idle"]);
+  });
+
+  it("runs the timer wake when the assigned issue's blockers have resolved", async () => {
+    const { companyId, agentId } = await seedAgent({});
+    await seedBlockedIssue(companyId, agentId, { status: "done" });
+
+    const run = await heartbeat.wakeup(agentId, timerWake);
+
+    expect(run).not.toBeNull();
+    expect(await skippedReasons(agentId)).toEqual([]);
+  });
+
   it("does not gate timer wakes when skipWhenIdle is false", async () => {
     const { agentId } = await seedAgent({ skipWhenIdle: false });
 
