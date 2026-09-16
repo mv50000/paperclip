@@ -16,10 +16,11 @@
 //   pnpm tsx scripts/check-github-webhook-health.ts --dry-run # don't post Slack
 //
 // Environment:
-//   GITHUB_TOKEN  - required, used for gh REST calls (GitHub PAT or app token)
-//   DATABASE_URL  - inherited from paperclip env, used to read slack secrets
+//   GITHUB_TOKEN          - required, used for gh REST calls (GitHub PAT or app token)
+//   GITHUB_TOKEN_<OWNER>  - optional per-owner override (see resolveToken below)
+//   DATABASE_URL          - inherited from paperclip env, used to read slack secrets
 //
-// Exits 0 on healthy, 1 on degraded (failures detected), 2 on script error.
+// Exits 0 on healthy, 1 on degraded (failures or blind spots), 2 on script error.
 
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -120,6 +121,26 @@ function parseArgs(argv: string[]): Args {
   return out;
 }
 
+// Fine-grained PATs are scoped to exactly ONE resource owner. Since RK9-172 the
+// paperclip uid's token is owned by `rk9-ai`, so it cannot read hooks on
+// `mv50000/paperclip` — the repo stayed monitored, the token could no longer see
+// it, and the monitor went blind on its most important hook for three days
+// (2026-09-13 → 2026-09-16) while alerting hourly about the wrong thing.
+// A per-owner override lets each owner carry its own token:
+//   GITHUB_TOKEN_MV50000 = fine-grained PAT, resource owner mv50000, Webhooks: read
+// Missing override simply falls back to GITHUB_TOKEN.
+function tokenEnvName(owner: string): string {
+  return `GITHUB_TOKEN_${owner.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+}
+
+function ownerOf(repo: string): string {
+  return repo.split("/")[0] ?? repo;
+}
+
+function resolveToken(repo: string, fallback: string): string {
+  return process.env[tokenEnvName(ownerOf(repo))]?.trim() || fallback;
+}
+
 async function ghApi(path: string, token: string): Promise<unknown> {
   const res = await fetch(`https://api.github.com${path}`, {
     headers: {
@@ -129,7 +150,19 @@ async function ghApi(path: string, token: string): Promise<unknown> {
     },
   });
   if (!res.ok) {
-    throw new Error(`GitHub ${path} → ${res.status} ${res.statusText}`);
+    // GitHub explains authorization failures in the body ("Resource not
+    // accessible by personal access token"); a bare status line sent an
+    // operator hunting the webhook instead of the token.
+    let detail = "";
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) detail = ` — ${body.message}`;
+    } catch {
+      // non-JSON body, status line is all we have
+    }
+    throw new Error(
+      `GitHub ${path} → ${res.status} ${res.statusText}${detail}`,
+    );
   }
   return res.json();
 }
@@ -169,13 +202,23 @@ async function checkHook(
       error: null,
     };
   } catch (err) {
+    let message = err instanceof Error ? err.message : String(err);
+    // 403/404 on the hooks API is an authorization problem, not a webhook
+    // problem. Say which env var fixes it so the alert is actionable.
+    if (/→ (403|404)\b/.test(message)) {
+      const owner = ownerOf(repo);
+      message +=
+        ` (monitor blind, not a delivery failure: the token has no Webhooks:read` +
+        ` on ${repo}. Fix: set ${tokenEnvName(owner)} to a fine-grained PAT with` +
+        ` resource owner ${owner} and Webhooks: read.)`;
+    }
     return {
       repo,
       hookId,
       recentTotal: 0,
       recentFailures: 0,
       failingDeliveries: [],
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
     };
   }
 }
@@ -300,29 +343,53 @@ function buildProbeBlock(probeFailures: ProbeResult[]) {
   };
 }
 
+// A repo the monitor could not query is *blind*, not *failing*. Conflating the
+// two made a 403 from the hooks API read as "webhook deliveries are failing",
+// which points every diagnosis at the wrong system.
+function splitHealth(unhealthy: RepoHealth[]) {
+  return {
+    failing: unhealthy.filter((r) => !r.error && r.recentFailures > 0),
+    blind: unhealthy.filter((r) => r.error !== null),
+  };
+}
+
 function buildSlackBlocks(
   unhealthy: RepoHealth[],
   probeFailures: ProbeResult[],
   lookbackHours: number,
 ) {
+  const { failing, blind } = splitHealth(unhealthy);
+  const headline =
+    failing.length > 0
+      ? `:rotating_light: GitHub webhook delivery failures (${lookbackHours}h)`
+      : `:mag: GitHub webhook monitor blind (${lookbackHours}h)`;
   const blocks: Array<Record<string, unknown>> = [
     {
       type: "header",
-      text: {
-        type: "plain_text",
-        text: `:rotating_light: GitHub webhook delivery failures (${lookbackHours}h)`,
-      },
+      text: { type: "plain_text", text: headline },
     },
   ];
-  if (unhealthy.length > 0) {
+  if (failing.length > 0) {
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
         text:
-          `*${unhealthy.length}* repo(s) reporting non-200 webhook responses to ` +
+          `*${failing.length}* repo(s) reporting non-200 webhook responses to ` +
           "`paperclip.rk9.fi/api/github/webhooks`. Likely causes: paperclip down, " +
           "wrong git branch deployed, expired/rotated webhook secret.",
+      },
+    });
+  }
+  if (blind.length > 0) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `:warning: *${blind.length}* repo(s) could not be checked at all — the ` +
+          "monitor is blind there, so a real outage would go unnoticed. This is an " +
+          "API/credential problem, not evidence that webhooks are failing.",
       },
     });
   }
@@ -331,7 +398,19 @@ function buildSlackBlocks(
   }
   blocks.push({ type: "divider" });
 
-  for (const r of unhealthy) {
+  for (const r of blind) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*<https://github.com/${r.repo}/settings/hooks/${r.hookId}|${r.repo}>* — not checked\n` +
+          `  • \`${r.error}\``,
+      },
+    });
+  }
+
+  for (const r of failing) {
     const lines: string[] = [];
     lines.push(
       `*<https://github.com/${r.repo}/settings/hooks/${r.hookId}|${r.repo}>* — ${r.recentFailures}/${r.recentTotal} deliveries failed`,
@@ -379,17 +458,22 @@ async function main() {
   const cutoffMs = Date.now() - LOOKBACK_HOURS * 3600 * 1000;
   const [results, probes] = await Promise.all([
     Promise.all(
-      MONITORED_HOOKS.map((h) => checkHook(h.repo, h.hookId, token, cutoffMs)),
+      MONITORED_HOOKS.map((h) =>
+        checkHook(h.repo, h.hookId, resolveToken(h.repo, token), cutoffMs),
+      ),
     ),
     probeWebhookEndpoint(),
   ]);
   const unhealthy = results.filter((r) => r.recentFailures > 0 || r.error);
   const probeFailures = probes.filter((p) => !p.ok);
+  const { failing: failingRepos, blind: blindRepos } = splitHealth(unhealthy);
   const summary = {
     timestamp: new Date().toISOString(),
     lookbackHours: LOOKBACK_HOURS,
     healthy: results.length - unhealthy.length,
     unhealthy: unhealthy.length,
+    degraded: failingRepos.length,
+    blind: blindRepos.length,
     probes,
     results,
   };
@@ -400,7 +484,7 @@ async function main() {
     for (const r of results) {
       const status =
         r.error
-          ? `ERR    ${r.error}`
+          ? `BLIND  ${r.error}`
           : r.recentFailures > 0
             ? `DEGRADED  ${r.recentFailures}/${r.recentTotal} failed`
             : `OK     ${r.recentTotal} deliveries, all 200`;
@@ -413,7 +497,8 @@ async function main() {
       );
     }
     console.log(
-      `\nSummary: ${summary.healthy}/${results.length} healthy, ${summary.unhealthy} degraded, probe ${probeFailures.length === 0 ? "OK" : "FAILING"}`,
+      `\nSummary: ${summary.healthy}/${results.length} healthy, ${summary.degraded} degraded, ` +
+        `${summary.blind} blind, probe ${probeFailures.length === 0 ? "OK" : "FAILING"}`,
     );
   }
 
@@ -427,6 +512,7 @@ async function main() {
             alertedDeliveryIds: [],
             repoAlertedAt: {},
             repoLastFailureCount: {},
+            repoLastError: {},
           }),
         );
       } catch {
@@ -446,6 +532,7 @@ async function main() {
   const seenIds = new Set<number>();
   const repoAlertedAt: Record<string, string> = {};
   const repoLastFailureCount: Record<string, number> = {};
+  const repoLastError: Record<string, string> = {};
   let probeAlertedAtIso: string | undefined;
   if (existsSync(STATE_FILE)) {
     try {
@@ -453,11 +540,13 @@ async function main() {
         alertedDeliveryIds?: number[];
         repoAlertedAt?: Record<string, string>;
         repoLastFailureCount?: Record<string, number>;
+        repoLastError?: Record<string, string>;
         probeFailureAlertedAt?: string;
       };
       for (const id of raw.alertedDeliveryIds ?? []) seenIds.add(id);
       Object.assign(repoAlertedAt, raw.repoAlertedAt ?? {});
       Object.assign(repoLastFailureCount, raw.repoLastFailureCount ?? {});
+      Object.assign(repoLastError, raw.repoLastError ?? {});
       probeAlertedAtIso = raw.probeFailureAlertedAt;
     } catch {
       // ignore corrupt state
@@ -480,13 +569,21 @@ async function main() {
 
   const throttledRepos: string[] = [];
   const newUnhealthy = dedupedUnhealthy.filter((r) => {
-    // Script-level errors (e.g. GitHub API fetch fail) are not throttled —
-    // those are a different class of problem.
-    if (r.error) return true;
+    // A repo changing state class (healthy → blind, blind → failing, one error
+    // → a different error) is always news, whatever the throttle says.
+    const lastError = repoLastError[r.repo] ?? "";
+    if ((r.error ?? "") !== lastError) return true;
     const lastAtIso = repoAlertedAt[r.repo];
     if (!lastAtIso) return true;
     const lastAtMs = new Date(lastAtIso).getTime();
     if (Number.isNaN(lastAtMs) || lastAtMs < throttleCutoffMs) return true;
+    // Blind repos used to bypass the throttle entirely, so one unreadable hook
+    // posted an alert every hour for days (RK9-226). The same error has nothing
+    // new to say: throttle it like a persistent delivery failure.
+    if (r.error) {
+      throttledRepos.push(r.repo);
+      return false;
+    }
     const lastCount = repoLastFailureCount[r.repo] ?? 0;
     if (r.recentFailures >= lastCount * FAILURE_GROWTH_THRESHOLD) return true;
     throttledRepos.push(r.repo);
@@ -500,7 +597,7 @@ async function main() {
   if (newUnhealthy.length === 0 && !shouldAlertProbe) {
     if (throttledRepos.length > 0) {
       console.log(
-        `All ${unhealthy.length} degraded repo(s) throttled (alerted within ${THROTTLE_HOURS}h, no >=${FAILURE_GROWTH_THRESHOLD}x growth) — suppressing.`,
+        `All ${unhealthy.length} degraded/blind repo(s) throttled (alerted within ${THROTTLE_HOURS}h, unchanged error, no >=${FAILURE_GROWTH_THRESHOLD}x growth) — suppressing.`,
       );
     } else if (unhealthy.length > 0) {
       console.log(
@@ -548,9 +645,15 @@ async function main() {
     const slack = createSlackClientService(db);
     const blocks = buildSlackBlocks(newUnhealthy, probeFailures, LOOKBACK_HOURS);
     const fallbackParts: string[] = [];
-    if (newUnhealthy.length > 0) {
+    const { failing: newFailing, blind: newBlind } = splitHealth(newUnhealthy);
+    if (newFailing.length > 0) {
       fallbackParts.push(
-        `GitHub webhook delivery failures: ${newUnhealthy.length} repo(s)`,
+        `GitHub webhook delivery failures: ${newFailing.length} repo(s)`,
+      );
+    }
+    if (newBlind.length > 0) {
+      fallbackParts.push(
+        `GitHub webhook monitor blind: ${newBlind.length} repo(s)`,
       );
     }
     if (probeFailures.length > 0) {
@@ -572,9 +675,21 @@ async function main() {
         const nowIso = new Date().toISOString();
         const updatedAlertedAt = { ...repoAlertedAt };
         const updatedFailureCount = { ...repoLastFailureCount };
+        const updatedLastError = { ...repoLastError };
+        // Drop state for repos that are healthy in this run. Without this a
+        // repo that recovered while another stayed broken kept its old
+        // timestamp, so its next failure could land inside a stale throttle.
+        for (const r of results) {
+          if (r.error || r.recentFailures > 0) continue;
+          delete updatedAlertedAt[r.repo];
+          delete updatedFailureCount[r.repo];
+          delete updatedLastError[r.repo];
+        }
         for (const r of newUnhealthy) {
           updatedAlertedAt[r.repo] = nowIso;
           updatedFailureCount[r.repo] = r.recentFailures;
+          if (r.error) updatedLastError[r.repo] = r.error;
+          else delete updatedLastError[r.repo];
         }
         writeFileSync(
           STATE_FILE,
@@ -582,6 +697,7 @@ async function main() {
             alertedDeliveryIds: merged,
             repoAlertedAt: updatedAlertedAt,
             repoLastFailureCount: updatedFailureCount,
+            repoLastError: updatedLastError,
             // Keep the throttle timestamp while the probe is failing so the
             // healthy path can clear it; refresh it when this alert covered
             // a probe failure.
