@@ -59,3 +59,17 @@ export function resolveClaudeEffectiveEnv(
     ),
   );
 }
+
+/**
+ * The keys to pass as `doNotInheritEnvKeys` when spawning the CLI.
+ *
+ * This is the one that actually matters at runtime: `runChildProcess` builds the
+ * child environment itself (`{ ...sanitizeInheritedPaperclipEnv(process.env),
+ * ...opts.env }`), so filtering `process.env` here in the adapter is not enough
+ * — the spawn helper has to be told which keys the host may not contribute.
+ */
+export function hostEnvKeysNotInherited(
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return inheritsHostAnthropicApiKey(hostEnv) ? [] : [...HOST_ENV_KEYS_NOT_INHERITED];
+}

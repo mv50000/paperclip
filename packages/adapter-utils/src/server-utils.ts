@@ -1470,6 +1470,8 @@ export async function runChildProcess(
     terminalResultCleanup?: TerminalResultCleanupOptions;
     stdin?: string;
     remoteExecution?: RemoteExecutionSpec | null;
+    /** Host env keys the child must not inherit unless `env` sets them explicitly. */
+    doNotInheritEnvKeys?: readonly string[];
   },
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
@@ -1478,6 +1480,17 @@ export async function runChildProcess(
       ...sanitizeInheritedPaperclipEnv(process.env),
       ...opts.env,
     };
+
+    // Keys the caller refuses to inherit from the host. An adapter uses this for
+    // credentials that change how the child bills or authenticates: a server-wide
+    // ANTHROPIC_API_KEY, set for some unrelated feature, would otherwise move every
+    // Claude agent from subscription auth to metered API credit (RK9-228).
+    // Applied after the merge, so an explicit `opts.env` value still wins.
+    for (const key of opts.doNotInheritEnvKeys ?? []) {
+      const explicit = opts.env?.[key];
+      if (typeof explicit === "string" && explicit.trim().length > 0) continue;
+      delete rawMerged[key];
+    }
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".

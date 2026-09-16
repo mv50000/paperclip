@@ -47,7 +47,11 @@ import {
 } from "./parse.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
-import { inheritableHostEnv, resolveClaudeEffectiveEnv } from "./host-env.js";
+import {
+  hostEnvKeysNotInherited,
+  inheritableHostEnv,
+  resolveClaudeEffectiveEnv,
+} from "./host-env.js";
 import { prepareClaudePromptBundle } from "./prompt-cache.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -291,6 +295,7 @@ export async function runClaudeLogin(input: {
   const proc = await runAdapterExecutionTargetProcess(input.runId, null, runtime.command, ["login"], {
     cwd: runtime.cwd,
     env: runtime.env,
+    doNotInheritEnvKeys: hostEnvKeysNotInherited(),
     timeoutSec: runtime.timeoutSec,
     graceSec: runtime.graceSec,
     onLog,
@@ -593,6 +598,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onLog,
+      doNotInheritEnvKeys: hostEnvKeysNotInherited(),
       terminalResultCleanup: {
         graceMs: terminalResultCleanupGraceMs,
         hasTerminalResult: ({ stdout }) => parseClaudeStreamJson(stdout).resultJson !== null,
