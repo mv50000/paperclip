@@ -1,0 +1,67 @@
+Return-Path: <0000000000000000-00000000-0000-0000-0000-000000000000-000000@eu-north-1.amazonses.com>
+Received: from e240-5.smtp-out.eu-north-1.amazonses.com (e240-5.smtp-out.eu-north-1.amazonses.com [23.251.240.5])
+ by inbound-smtp.eu-north-1.amazonaws.com with SMTP id lqtviph4ersdjoc480ose0s0vcdbjlkm23f5kp01
+ for no-reply@sunspot.fi;
+ Sat, 08 Aug 2026 08:44:32 +0000 (UTC)
+X-SES-Spam-Verdict: PASS
+X-SES-Virus-Verdict: PASS
+Received-SPF: pass (spfCheck: domain of eu-north-1.amazonses.com designates 23.251.240.5 as permitted sender) client-ip=23.251.240.5; envelope-from=0000000000000000-00000000-0000-0000-0000-000000000000-000000@eu-north-1.amazonses.com; helo=e240-5.smtp-out.eu-north-1.amazonses.com;
+Authentication-Results: amazonses.com;
+ spf=pass (spfCheck: domain of eu-north-1.amazonses.com designates 23.251.240.5 as permitted sender) client-ip=23.251.240.5; envelope-from=0000000000000000-00000000-0000-0000-0000-000000000000-000000@eu-north-1.amazonses.com; helo=e240-5.smtp-out.eu-north-1.amazonses.com;
+ dkim=pass header.i=@amazonses.com;
+ dmarc=pass header.from=amazonses.com;
+X-SES-RECEIPT: REDACTED_TEST_FIXTURE_RECEIPT_TOKEN==
+X-SES-DKIM-SIGNATURE: a=rsa-sha256; q=dns/txt; b=REDACTED_TEST_FIXTURE_SIGNATURE==; c=relaxed/simple; s=test; d=amazonses.com; t=0; v=1; bh=REDACTED_TEST_FIXTURE==; h=From:To:Cc:Bcc:Subject:Date:Message-ID:MIME-Version:Content-Type:X-SES-RECEIPT;
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=test; d=amazonses.com; t=0;
+	h=From:Subject:To:MIME-Version:Content-Type:Date:Message-ID:Feedback-ID;
+	bh=REDACTED_TEST_FIXTURE==;
+	b=REDACTED_TEST_FIXTURE_DKIM_BODY_HASH_PLACEHOLDER_VALUE_ONLY
+	REDACTED_TEST_FIXTURE_DKIM_BODY_HASH_PLACEHOLDER_VALUE_ONLY_TWO
+	REDACTED_TEST_FIXTURE_DKIM_BODY_HASH_END=
+From: MAILER-DAEMON@amazonses.com
+Subject: Undelivered Mail Returned to Sender
+To: Estotesti <no-reply@sunspot.fi>
+Auto-Submitted: auto-replied
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status;
+        boundary="__boundary-9a35d738-3b55-48ee-b405-0a323631e52c"
+Date: Sat, 8 Aug 2026 08:44:32 +0000
+Message-ID: <0000000000000000-00000000-0000-0000-0000-000000000000-000000@eu-north-1.amazonses.com>
+Feedback-ID: ::1.eu-north-1.REDACTED_TEST_FIXTURE==:AmazonSES
+X-SES-Outgoing: 2026.08.08-23.251.240.5
+
+This is a MIME-encapsulated message.
+--__boundary-9a35d738-3b55-48ee-b405-0a323631e52c
+Content-Description: Notification
+Content-Type: text/plain
+Content-Transfer-Encoding: 7bit
+
+The message was not sent because Amazon SES has determined that it might contain viruses.
+Please check the content of the message, or contact the server administrator for assistance.
+
+--__boundary-9a35d738-3b55-48ee-b405-0a323631e52c
+Content-Description: Delivery report
+Content-Type: message/delivery-status
+Content-Transfer-Encoding: 7bit
+
+Reporting-MTA: x-local-hostname; amazonses.com
+
+Final-Recipient: rfc822; hei@sunspot.fi
+Original-Recipient: rfc822; hei@sunspot.fi
+Action: failed
+Status: 5.7.1
+Diagnostic-Code: content rejected
+
+
+--__boundary-9a35d738-3b55-48ee-b405-0a323631e52c
+Content-Description: Undelivered Message
+Content-Type: message/rfc822
+Content-Transfer-Encoding: 7bit
+
+From: Estotesti <no-reply@sunspot.fi>
+To: hei@sunspot.fi
+Subject: [ESTOTESTI] EICAR - taman EI pida tulla perille
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="raja1"
+--__boundary-9a35d738-3b55-48ee-b405-0a323631e52c--
