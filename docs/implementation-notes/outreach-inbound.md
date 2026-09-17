@@ -107,17 +107,47 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
     client's one-click UI, which usually carries no `In-Reply-To`. The global
     suppression table needs no company/prospect resolution by design (see
     outreach-data-model.md's "why a separate, global suppression table").
-  - A genuine **reply** also gets a best-effort handoff into the existing
-    CS-desk pipeline (`createInboundRouter(db).handleEvent(companyId, event)`
-    from `../email/inbound-router.ts`) so it surfaces to the company's
-    customer-service agent like a transactional support email would. This is
-    intentionally a no-op today: `handleReceived` requires an `email_routes`
-    row for the recipient domain and there isn't one yet for the outreach
-    domain (adding it is a data/ops step, out of scope — DB was blocked for
-    this ticket) — it gracefully returns `no_matching_route` rather than
-    erroring, and the reply is still fully recorded via `recordEvent`
-    regardless of whether the handoff finds a route. Wrapped in try/catch so
-    a handoff failure never loses the primary `recordEvent` write.
+  - A genuine **reply** is handed to the existing CS-desk pipeline
+    (`createInboundRouter(db).handleEvent(companyId, event, { tenantResolvedBy: "thread" })`
+    from `../email/inbound-router.ts`), which is what durably stores the body.
+    The `outreach_events` row records only THAT a reply arrived — its payload
+    is `{}` and always was.
+
+    > **Correction (RK9-234, 17.9.2026).** This section used to call the
+    > handoff "intentionally a no-op" and claim the reply was "fully recorded
+    > via `recordEvent` regardless of whether the handoff finds a route". Both
+    > halves were wrong, and together they cost us the RK9-198 pilot's first
+    > prospect reply. `recordEvent` records the event, not the message: the
+    > sender's actual words had no home. And the handoff was not a no-op
+    > waiting on data — it could never have succeeded, because
+    > `handleReceived` re-checked the recipient domain against the company's
+    > own `primary_domain` and outreach replies always arrive at the shared
+    > `outreach.rk9.fi`. The reply was classified, counted and discarded, and
+    > the digest reported it as `vastauksia 1`.
+
+    Two things changed:
+
+    1. **The tenant is proven by threading, not by domain.**
+       `tenantResolvedBy: "thread"` tells the router that `companyId` came
+       from matching the reply's `In-Reply-To` to an outreach message we sent,
+       which carries its own `company_id` — a stronger binding than a domain
+       comparison. The SES/Resend callers keep the default
+       (`recipient_domain`), where the check is genuine tenant defence.
+    2. **Storage no longer depends on configuration.** `handleReceived`
+       persists the `email_messages` row first and routes second. A missing
+       route now costs the issue, the assignee and the auto-reply — never the
+       body. The result is `stored_unrouted`, counted by
+       `outreach_inbound_unrouted` in `/metrics` and called out in the daily
+       digest, so an unowned reply is visible instead of silent.
+
+    Migration `9010_rk9_outreach_inbound_routes.sql` seeds one `email_routes`
+    row per outreach sender identity, with a NULL agent and a NULL auto-reply
+    template on purpose: a warm reply to a cold outreach mail is the one thing
+    a human must answer, so no robot ever answers it and no agent run is
+    burned. `escalate_after_hours` 24 emails the operator if it sits unanswered.
+
+    Still wrapped in try/catch so a handoff failure never loses the
+    `recordEvent` write.
 
 ## Config
 

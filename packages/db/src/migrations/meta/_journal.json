@@ -575,6 +575,13 @@
       "when": 1789485600000,
       "tag": "9009_rk9_outreach_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1789572000000,
+      "tag": "9010_rk9_outreach_inbound_routes",
+      "breakpoints": true
     }
   ]
 }

@@ -137,12 +137,40 @@ export type ResolveTenantResult =
   | { ok: false; reason: "no_match" | "no_secrets_configured" };
 
 export type RouteEventResult =
-  | { ok: true; status: "issue_created" | "reply_linked" | "suppression_added" | "ignored" }
+  | {
+      ok: true;
+      status: "issue_created" | "reply_linked" | "suppression_added" | "ignored" | "stored_unrouted";
+    }
   | { ok: false; reason: "no_matching_route" | "duplicate" | "missing_fields" };
+
+/**
+ * How the caller established which company this event belongs to — it decides
+ * whether the recipient domain is re-checked against the tenant's own domain.
+ *
+ * - `recipient_domain` (default): the tenant was looked up FROM the recipient
+ *   domain (the SES/Resend routes do this). Re-checking the domain is real
+ *   defence there: a message addressed to several tenants must not be filed
+ *   under the wrong one.
+ * - `thread`: the tenant came from threading the reply back to a specific
+ *   message we sent, which carries its own `company_id`. That binding is
+ *   stronger than a domain comparison, and the domain check is not merely
+ *   redundant but wrong: outreach replies arrive at a SHARED domain
+ *   (`saatavilla@outreach.rk9.fi`), never at the company's own, so the check
+ *   rejected every single one.
+ */
+export type TenantResolution = "recipient_domain" | "thread";
+
+export interface HandleEventOptions {
+  tenantResolvedBy?: TenantResolution;
+}
 
 export interface InboundRouter {
   resolveTenant(rawBody: string, headers: SvixHeaders): Promise<ResolveTenantResult>;
-  handleEvent(companyId: string, event: ResendEvent): Promise<RouteEventResult>;
+  handleEvent(
+    companyId: string,
+    event: ResendEvent,
+    opts?: HandleEventOptions,
+  ): Promise<RouteEventResult>;
   invalidateSecretCache(): void;
 }
 
@@ -248,6 +276,7 @@ export function createInboundRouter(
   async function handleReceived(
     companyId: string,
     event: InboundEmailEvent,
+    tenantResolvedBy: TenantResolution,
   ): Promise<RouteEventResult> {
     const data = event.data;
     const providerMessageId = data.email_id ?? data.id;
@@ -263,12 +292,18 @@ export function createInboundRouter(
       .from(companyEmailConfig)
       .where(eq(companyEmailConfig.companyId, companyId));
 
+    // See `TenantResolution`: only re-check the domain when the tenant was
+    // derived from it in the first place.
+    const enforceTenantDomain = tenantResolvedBy === "recipient_domain";
+
     let matchedRoute: typeof emailRoutes.$inferSelect | null = null;
     let matchedAddress = "";
     for (const addr of to) {
       const parsed = parseAddress(addr);
       if (!parsed) continue;
-      if (config && parsed.domain !== config.primaryDomain.toLowerCase()) continue;
+      if (enforceTenantDomain && config && parsed.domain !== config.primaryDomain.toLowerCase()) {
+        continue;
+      }
       const route = await findRoute(companyId, parsed.localPart, parsed.domain);
       if (route) {
         matchedRoute = route;
@@ -277,8 +312,15 @@ export function createInboundRouter(
       }
     }
 
+    // A missing route used to return here, before anything was written — which
+    // made PERSISTENCE CONDITIONAL ON CONFIGURATION. An unconfigured route then
+    // cost us the sender's actual words: the first reply of the RK9-198 outreach
+    // pilot (17.9.2026) was classified, counted and thrown away, and the
+    // implementation note claimed the reply was "fully recorded" because an
+    // empty-payload event row existed. Storage now happens either way; a missing
+    // route costs the issue, the assignee and the auto-reply, never the body.
     if (!matchedRoute) {
-      return { ok: false, reason: "no_matching_route" };
+      matchedAddress = to[0] ?? "";
     }
 
     const subject = data.subject ?? "(ei aihetta)";
@@ -309,6 +351,8 @@ export function createInboundRouter(
 
     type TxOutcome =
       | { kind: "ignored" }
+      /** Persisted, but no route exists to open an issue or assign an owner. */
+      | { kind: "stored"; messageId: string }
       | {
           kind: "created";
           messageId: string;
@@ -336,8 +380,8 @@ export function createInboundRouter(
           bodyHtmlSanitized: sanitized.sanitizedHtml,
           attachments: attachments,
           headers: data.headers ?? {},
-          routeKey: matchedRoute!.routeKey,
-          assignedAgentId: matchedRoute!.assignedAgentId,
+          routeKey: matchedRoute?.routeKey ?? null,
+          assignedAgentId: matchedRoute?.assignedAgentId ?? null,
           status: "received",
           classification: junk.automated ? "automated" : null,
           receivedAt: new Date(event.created_at ?? Date.now()),
@@ -381,6 +425,11 @@ export function createInboundRouter(
         return { kind: "reply", messageId: persisted.id, issue: thread.issue };
       }
 
+      if (!matchedRoute) {
+        return { kind: "stored", messageId: persisted.id };
+      }
+      const route = matchedRoute;
+
       // Build the issue description: metadata only — never the body.
       const description = [
         `# Saapuva sähköposti — ${matchedAddress}`,
@@ -402,7 +451,7 @@ export function createInboundRouter(
       // Automated mail is parked in backlog even on an assigned route — the
       // backlog status is what keeps queueIssueAssignmentWakeup silent.
       const issueStatus =
-        !junk.automated && matchedRoute!.assignedAgentId ? "todo" : "backlog";
+        !junk.automated && route.assignedAgentId ? "todo" : "backlog";
       const [issue] = await tx
         .insert(issues)
         .values({
@@ -411,7 +460,7 @@ export function createInboundRouter(
           description,
           status: issueStatus,
           priority: "medium",
-          assigneeAgentId: matchedRoute!.assignedAgentId,
+          assigneeAgentId: route.assignedAgentId,
           originKind: "email_inbound",
           originFingerprint: providerMessageId,
         })
@@ -422,27 +471,27 @@ export function createInboundRouter(
         .set({ issueId: issue.id })
         .where(eq(emailMessages.id, persisted.id));
 
-      const autoReplyTemplateId = matchedRoute!.autoReplyTemplateId;
+      const autoReplyTemplateId = route.autoReplyTemplateId;
       const senderDomain = from.split("@")[1]?.toLowerCase();
-      const ownDomain = matchedRoute!.domain.toLowerCase();
+      const ownDomain = route.domain.toLowerCase();
       const isSelfLoop = senderDomain === ownDomain;
       // No auto-reply to automated senders (reply loops with other robots) and
       // never on the catch-all route (unsolicited traffic, cf. the Instagram
       // incident) — defence in depth on top of the DB template config.
       const autoReplyAllowed =
-        !junk.automated && matchedRoute!.localPart !== "*" && !isSelfLoop;
+        !junk.automated && route.localPart !== "*" && !isSelfLoop;
 
       return {
         kind: "created",
         messageId: persisted.id,
         issue: {
           id: issue.id,
-          assigneeAgentId: matchedRoute!.assignedAgentId,
+          assigneeAgentId: route.assignedAgentId,
           status: issueStatus,
         },
         autoReply:
           autoReplyTemplateId && autoReplyAllowed
-            ? { templateId: autoReplyTemplateId, routeKey: matchedRoute!.routeKey }
+            ? { templateId: autoReplyTemplateId, routeKey: route.routeKey }
             : null,
       };
     });
@@ -451,6 +500,18 @@ export function createInboundRouter(
     // hold the tx open, and the woken agent must be able to see the issue.
     if (outcome.kind === "ignored") {
       return { ok: true, status: "ignored" };
+    }
+
+    // Stored but unrouted: the body is safe and readable through the email API,
+    // but there is no issue to assign, no template to auto-reply with and
+    // nobody to wake. The caller decides how loudly to complain — for an
+    // outreach reply this is an operational fault, not a normal outcome.
+    if (outcome.kind === "stored") {
+      logger.warn(
+        { companyId, messageId: outcome.messageId, from, to },
+        "inbound email stored without a matching route — body kept, but no issue and no owner",
+      );
+      return { ok: true, status: "stored_unrouted" };
     }
 
     if (outcome.kind === "created" && outcome.autoReply) {
@@ -589,10 +650,18 @@ export function createInboundRouter(
     return { ok: true, status: "suppression_added" };
   }
 
-  async function handleEvent(companyId: string, event: ResendEvent): Promise<RouteEventResult> {
+  async function handleEvent(
+    companyId: string,
+    event: ResendEvent,
+    opts: HandleEventOptions = {},
+  ): Promise<RouteEventResult> {
     switch (event.type) {
       case "email.received":
-        return handleReceived(companyId, event as InboundEmailEvent);
+        return handleReceived(
+          companyId,
+          event as InboundEmailEvent,
+          opts.tenantResolvedBy ?? "recipient_domain",
+        );
       case "email.bounced":
         return handleBounce(companyId, event as BounceEvent);
       case "email.complained":
