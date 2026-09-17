@@ -63,20 +63,41 @@ const DROP_HEADERS = new Set([
   "x-ses-virus-verdict", "x-ses-spf-verdict", "x-ses-dmarc-verdict", "feedback-id",
 ]);
 
+/** Every MIME delimiter line actually present in the message: RFC 2046 requires a
+ *  boundary delimiter to start at the beginning of a line as `--token` (optionally
+ *  followed by a closing `--`). One O(n) pass, independent of how many candidate
+ *  `boundary=` declarations exist — see sanitizeDanglingBoundaries() for why that
+ *  matters. */
+function collectBoundaryDelimiters(text) {
+  const tokens = new Set();
+  const re = /^--(\S+?)(--)?$/gm;
+  let m;
+  while ((m = re.exec(text))) tokens.add(m[1]);
+  return tokens;
+}
+
 /** A `Content-Type: multipart/*; boundary="X"` header only makes a message valid if
- *  the delimiter `--X` actually occurs later in the content. SES's virus quarantine can
- *  strip a nested `message/rfc822` part down to bare headers and leave exactly this kind
- *  of dangling declaration (RK9-236). Rather than trying to fully parse and repair the
- *  nested part, downgrade any such orphaned declaration to a boundary-less type — the
- *  sub-part becomes an inert, valid stub instead of a parse error for the whole message.
- *  Runs on the raw text before anything else, so it applies at any nesting depth. */
+ *  the delimiter `--X` actually occurs as a real MIME boundary line. SES's virus
+ *  quarantine can strip a nested `message/rfc822` part down to bare headers and leave
+ *  exactly this kind of dangling declaration (RK9-236). Rather than trying to fully
+ *  parse and repair the nested part, downgrade any such orphaned declaration to a
+ *  boundary-less type — the sub-part becomes an inert, valid stub instead of a parse
+ *  error for the whole message. Runs on the raw text before anything else, so it
+ *  applies at any nesting depth.
+ *
+ *  Checking each declaration against a pre-collected Set (O(1) each) instead of
+ *  re-scanning the remaining text per declaration matters here specifically because
+ *  the input is fully attacker-controlled (anyone can email hei@sunspot.fi): a message
+ *  with many `boundary=` look-alikes used to make the old substring-rescan approach
+ *  O(n²) — a few thousand fake headers in an otherwise ordinary-sized message was
+ *  enough to burn seconds of Lambda CPU per message (measured in review). */
 export function sanitizeDanglingBoundaries(text) {
+  const delimiters = collectBoundaryDelimiters(text);
   const re = /Content-Type:\s*multipart\/[a-zA-Z0-9.+-]+\s*;[^\r\n]*boundary=(?:"([^"]+)"|([^;\r\n]+))(?:\r?\n[ \t][^\r\n]*)*/gi;
-  return text.replace(re, (block, quoted, bare, offset) => {
+  return text.replace(re, (block, quoted, bare) => {
     const boundary = (quoted || bare || "").trim();
     if (!boundary) return block;
-    const rest = text.slice(offset + block.length);
-    return rest.includes(`--${boundary}`) ? block : "Content-Type: text/plain";
+    return delimiters.has(boundary) ? block : "Content-Type: text/plain";
   });
 }
 

@@ -68,3 +68,31 @@ test("rewrite() still drops inbound authentication/SES bookkeeping headers", () 
     assert.ok(!new RegExp(`^${header}:`, "im").test(out), `${header} must be dropped`);
   }
 });
+
+// RK9-236 review: an earlier version of sanitizeDanglingBoundaries() re-scanned the
+// remaining message text on every `boundary=` declaration it found, which is O(n^2)
+// on a fully attacker-controlled input (anyone can email hei@sunspot.fi). Guard
+// against reintroducing that by asserting the work scales roughly linearly, not
+// quadratically, as input size grows.
+test("sanitizeDanglingBoundaries() scales linearly, not quadratically, with attacker-controlled input", () => {
+  const buildPayload = (n) =>
+    Array.from({ length: n }, (_, i) => `Content-Type: multipart/mixed; boundary="fake${i}"`).join("\r\n") +
+    "\r\n\r\nbody\r\n";
+
+  const time = (n) => {
+    const payload = buildPayload(n);
+    const t0 = process.hrtime.bigint();
+    sanitizeDanglingBoundaries(payload);
+    return Number(process.hrtime.bigint() - t0) / 1e6; // ms
+  };
+
+  const small = Math.max(time(2000), 1); // avoid div-by-zero on a very fast run
+  const large = time(16000); // 8x the input
+
+  // Quadratic behavior would make this ~64x; linear is ~8x. Allow generous slack
+  // for scheduling noise while still catching a real O(n^2) regression.
+  assert.ok(
+    large / small < 20,
+    `expected roughly linear scaling, got ${small}ms -> ${large}ms (${(large / small).toFixed(1)}x for 8x input)`
+  );
+});
