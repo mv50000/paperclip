@@ -100,6 +100,32 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
     there is no cross-company fallback-by-email lookup; the tested path is a
     threaded reply, and guessing a prospect from an unthreaded sender address
     risks misrouting across companies.
+
+    **RK9-235: the drop is now counted.** That reasoning is about routing, and
+    it holds. It does not extend to visibility, and for a while the two were
+    confused: `reply_unmatched` was returned in the HTTP response body and
+    logged nowhere, so Postfix saw a successful delivery, the receiver exited 0
+    and Paperclip answered 200. Zero occurrences in the log meant "we cannot
+    see it", not "it never happens" — the same mistake as RK9-226 and RK9-227.
+
+    Phase 1 (this): a `warn` line plus one `activity_log` row per drop, with
+    action `outreach.reply_unmatched`. Threading answers *which prospect*; the
+    recipient still answers *which company* (`saatavilla@outreach.rk9.fi` is
+    SAA's local part and nobody else's), so the row is attributed by an
+    `email_routes` lookup — the same recipient-based question all other inbound
+    mail asks, not a guess from the sender. Metadata only: sender, recipient,
+    subject, message-id. The body is **not** kept. The count surfaces as the
+    `outreach_inbound_reply_unmatched` counter and as a digest line for the
+    day; it lives in the database rather than a module variable so a restart
+    cannot report a confident zero.
+
+    Bookkeeping never changes delivery: if the lookup or the insert fails, it
+    is logged and swallowed, and the mail's outcome is unchanged.
+
+    Phase 2 (separate, only if the number turns out to be non-zero): whether to
+    keep the body. Storing unthreaded mail from unknown senders means ingesting
+    spam, which is a filtering and retention question this ticket deliberately
+    does not answer.
   - **Unsubscribe** tries threading first (precise: a specific
     prospect/company + an event row for audit), and falls back to a direct
     global `addOutreachSuppression(email)` when there's no threading header

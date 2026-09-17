@@ -3,8 +3,11 @@
 // (events.ts) — no new tables, no new state machine. See
 // docs/implementation-notes/outreach-inbound.md for the full design.
 
+import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { emailRoutes } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
+import { logActivity } from "../activity-log.js";
 import { createInboundRouter, extractReferencedMessageIds, type InboundEmailEvent } from "../email/inbound-router.js";
 import {
   classifyInboundOutreachMail,
@@ -61,6 +64,87 @@ async function resolveByThreading(db: Db, parsed: ParsedInboundMail): Promise<Th
     if (message) return { companyId: message.companyId, prospectId: message.prospectId, messageId: message.id };
   }
   return null;
+}
+
+/**
+ * RK9-235: which company a reply was addressed TO, even when we cannot tell
+ * which prospect it came FROM.
+ *
+ * Threading answers "which prospect"; the recipient answers "which company".
+ * Losing the first does not cost us the second: every company has its own local
+ * part on the shared outreach domain (`saatavilla@outreach.rk9.fi` is SAA's and
+ * nobody else's), so this is the same recipient-based lookup all normal inbound
+ * mail uses. The cross-company misrouting `outreach-inbound.md` warns about
+ * comes from guessing a PROSPECT from the SENDER address — a different question
+ * with a different answer, and this does not do it.
+ */
+async function resolveCompanyByRecipient(db: Db, to: string[]): Promise<string | null> {
+  for (const addr of to) {
+    const at = addr.lastIndexOf("@");
+    if (at <= 0) continue;
+    const localPart = addr.slice(0, at).replace(/^.*</, "").toLowerCase();
+    const domain = addr.slice(at + 1).replace(/>.*$/, "").toLowerCase();
+    const [route] = await db
+      .select({ companyId: emailRoutes.companyId })
+      .from(emailRoutes)
+      .where(
+        and(
+          eq(emailRoutes.domain, domain),
+          eq(emailRoutes.localPart, localPart),
+        ),
+      );
+    if (route) return route.companyId;
+  }
+  return null;
+}
+
+/**
+ * RK9-235: record THAT an unthreadable reply arrived, never what it said.
+ *
+ * Phase 1 is measurement only: we do not yet know whether this happens at all,
+ * because `reply_unmatched` was returned in the HTTP response and logged
+ * nowhere — Postfix saw a successful delivery, the receiver exited 0 and
+ * Paperclip answered 200, so a dropped reply was invisible at every layer.
+ *
+ * The count lives in `activity_log`, not in a module-level variable: an
+ * in-memory counter resets on every restart, which is exactly how the LLM
+ * portfolio-manager watchdog spent days reporting a confident zero. Metadata
+ * only (sender, recipient, subject, message-id) — deciding whether to keep the
+ * BODY is phase 2, and it carries its own spam-ingestion and retention
+ * questions that this ticket deliberately does not answer.
+ */
+async function recordUnmatchedReply(db: Db, parsed: ParsedInboundMail): Promise<void> {
+  logger.warn(
+    { from: parsed.from, to: parsed.to, subject: parsed.subject, messageId: parsed.messageId },
+    "outreach inbound: reply could not be threaded to a sent message — dropped (RK9-235)",
+  );
+  // Everything below is measurement, and measurement must never decide whether
+  // a mail was accepted. The warn line above is already on disk; if the lookup
+  // or the insert fails, we log that and return normally rather than letting an
+  // observability error propagate into the delivery outcome.
+  try {
+    const companyId = await resolveCompanyByRecipient(db, parsed.to);
+    if (!companyId) {
+      // Addressed to something we do not own a route for — nothing to
+      // attribute it to, so the warn line above is the whole record.
+      return;
+    }
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: "outreach-inbound",
+      action: "outreach.reply_unmatched",
+      entityType: "outreach_reply",
+      entityId: parsed.messageId ?? "(no message-id)",
+      details: {
+        from: parsed.from,
+        to: parsed.to,
+        subject: parsed.subject || "(ei aihetta)",
+      },
+    });
+  } catch (err) {
+    logger.warn({ err }, "outreach inbound: could not record unmatched reply");
+  }
 }
 
 /**
@@ -206,7 +290,10 @@ export async function processOutreachInboundMail(
 
     case "reply": {
       const thread = await resolveByThreading(db, parsed);
-      if (!thread) return { outcome: "reply_unmatched" };
+      if (!thread) {
+        await recordUnmatchedReply(db, parsed);
+        return { outcome: "reply_unmatched" };
+      }
       const result = await recordEvent(db, thread.companyId, {
         prospectId: thread.prospectId,
         messageId: thread.messageId,
