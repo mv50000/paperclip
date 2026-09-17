@@ -7,7 +7,7 @@
 // change on a feature branch — same reasoning `outreach-sender.md` gives for
 // hand-rolling the SMTP client instead of pulling in nodemailer) — the text
 // format is a handful of lines, so it's built by hand below.
-import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
@@ -227,7 +227,11 @@ async function countTodayByIdentity(
           eq(outreachSequences.senderIdentity, senderIdentity),
           eq(outreachMessages.status, "sent"),
           gte(outreachMessages.sentAt, range.start),
-          sql`${outreachMessages.sentAt} < ${range.end}`,
+          // RK9-207: `lt()`, not a raw `sql` template. A raw template binds the
+          // `Date` with no column type in scope, so postgres.js gets a `Date`
+          // where it expects a string and the whole digest 500s — which is how
+          // the daily 08:00 Telegram digest silently never sent a single time.
+          lt(outreachMessages.sentAt, range.end),
         ),
       );
     return Number(rows[0]?.count ?? 0);
@@ -242,7 +246,7 @@ async function countTodayByIdentity(
         eq(outreachSequences.senderIdentity, senderIdentity),
         eq(outreachEvents.type, type),
         gte(outreachEvents.occurredAt, range.start),
-        sql`${outreachEvents.occurredAt} < ${range.end}`,
+        lt(outreachEvents.occurredAt, range.end),
       ),
     );
   return Number(rows[0]?.count ?? 0);
