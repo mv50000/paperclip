@@ -9,7 +9,7 @@
 // format is a handful of lines, so it's built by hand below.
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
+import { emailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
 import { listActivePauses } from "./sender-pauses.js";
 import { getOutreachDnsblState, isDnsblListTrustworthy, type OutreachDnsblState } from "./dnsbl.js";
@@ -49,6 +49,12 @@ export interface OutreachPrometheusMetrics {
   // Should stay at 0 now that drafting always resolves a sequence; a nonzero
   // value here means something bypassed that (a direct `POST .../messages` call).
   approvedWithoutSequence: ApprovedWithoutSequenceByCompany[];
+  // RK9-234: inbound mail we stored but could not route — the body is safe in
+  // `email_messages`, but no issue was opened and nobody owns it. Nonzero means
+  // an outreach domain is missing an `email_routes` row. Kept visible here
+  // because a prospect's reply going unanswered is the most expensive silence
+  // in the pipeline.
+  inboundUnrouted: number;
 }
 
 async function countEventsByType(db: Db, types: string[]) {
@@ -60,8 +66,17 @@ async function countEventsByType(db: Db, types: string[]) {
 }
 
 export async function collectOutreachPrometheusMetrics(db: Db): Promise<OutreachPrometheusMetrics> {
-  const [sentRows, bounceRows, replyRows, unsubscribeRows, queueDepthRows, activePauses, identityRows, approvedWithoutSequenceRows] =
-    await Promise.all([
+  const [
+    sentRows,
+    bounceRows,
+    replyRows,
+    unsubscribeRows,
+    queueDepthRows,
+    activePauses,
+    identityRows,
+    approvedWithoutSequenceRows,
+    inboundUnroutedRows,
+  ] = await Promise.all([
       db
         .select({
           companyId: outreachMessages.companyId,
@@ -86,6 +101,16 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
         .from(outreachMessages)
         .where(and(eq(outreachMessages.status, "approved"), isNull(outreachMessages.sequenceId)))
         .groupBy(outreachMessages.companyId),
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(emailMessages)
+        .where(
+          and(
+            eq(emailMessages.direction, "inbound"),
+            isNull(emailMessages.routeKey),
+            isNull(emailMessages.issueId),
+          ),
+        ),
     ]);
 
   const pausedIdentities = new Set(activePauses.map((p) => p.senderIdentity));
@@ -101,6 +126,7 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
       paused: pausedIdentities.has(r.senderIdentity) ? 1 : 0,
     })),
     approvedWithoutSequence: approvedWithoutSequenceRows.map((r) => ({ companyId: r.companyId, count: Number(r.count) })),
+    inboundUnrouted: Number(inboundUnroutedRows[0]?.count ?? 0),
   };
 }
 
@@ -156,6 +182,13 @@ export function renderOutreachPrometheusText(metrics: OutreachPrometheusMetrics)
     lines.push(metricLine("outreach_approved_without_sequence", { company: r.companyId }, r.count));
   }
 
+  // RK9-234: should stay at 0 — see OutreachPrometheusMetrics.inboundUnrouted.
+  lines.push(
+    "# HELP outreach_inbound_unrouted Inbound emails stored without a matching route — the body is kept, but no issue was opened and nobody owns it.",
+  );
+  lines.push("# TYPE outreach_inbound_unrouted gauge");
+  lines.push(`outreach_inbound_unrouted ${metrics.inboundUnrouted}`);
+
   // RK9-225: only a list we can currently trust gets to publish a verdict. A
   // refused or failed lookup publishes nothing here — `outreach_dnsbl_list_ok`
   // below is what makes that blindness visible, so a blind list can never look
@@ -207,6 +240,8 @@ export interface OutreachDigest {
   senders: OutreachDigestSenderSummary[];
   /** RK9-224: total `approved` messages with no sequence, across all companies — see `outreach_approved_without_sequence`. */
   approvedWithoutSequenceTotal: number;
+  /** RK9-234: inbound mail stored with no route — a reply nobody owns. See `outreach_inbound_unrouted`. */
+  inboundUnroutedTotal: number;
   /** Ready-to-send Finnish message text — the host cron script's only job is `rk9_telegram_send "$(curl ... | jq -r .text)"`. */
   text: string;
 }
@@ -285,19 +320,41 @@ async function countApprovedWithoutSequence(db: Db): Promise<number> {
   return Number(row?.count ?? 0);
 }
 
+/** RK9-234: inbound mail we stored but could not route — see `OutreachPrometheusMetrics.inboundUnrouted`. */
+async function countInboundUnrouted(db: Db): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(emailMessages)
+    .where(
+      and(
+        eq(emailMessages.direction, "inbound"),
+        isNull(emailMessages.routeKey),
+        isNull(emailMessages.issueId),
+      ),
+    );
+  return Number(row?.count ?? 0);
+}
+
 function formatDigestText(
   date: string,
   senders: OutreachDigestSenderSummary[],
   dnsblLine: string | null,
   approvedWithoutSequenceTotal: number,
+  inboundUnroutedTotal: number,
 ): string {
   const warningLine =
     approvedWithoutSequenceTotal > 0
       ? `⚠️ ${approvedWithoutSequenceTotal} hyväksyttyä viestiä ilman sekvenssiä — scheduler ei koskaan lähetä niitä (RK9-224).`
       : null;
+  // A stored-but-unrouted reply is a human waiting for an answer, so it says
+  // where to read it rather than just counting.
+  const unroutedLine =
+    inboundUnroutedTotal > 0
+      ? `⚠️ ${inboundUnroutedTotal} saapunutta viestiä ilman reittiä — runko on tallessa, mutta tikettiä ei avattu eikä kukaan omista niitä (RK9-234).`
+      : null;
   if (senders.length === 0) {
     const empty = `Outreach-digest ${date}: ei aktiivisia lähettäjiä.`;
-    const lines = [empty, dnsblLine, warningLine].filter((l): l is string => l !== null);
+    const lines = [empty, dnsblLine, warningLine, unroutedLine].filter((l): l is string => l !== null);
     return lines.join("\n");
   }
   const lines = [`Outreach-digest ${date}:`];
@@ -310,6 +367,7 @@ function formatDigestText(
   }
   if (dnsblLine) lines.push(dnsblLine);
   if (warningLine) lines.push(warningLine);
+  if (unroutedLine) lines.push(unroutedLine);
   return lines.join("\n");
 }
 
@@ -343,6 +401,7 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
   const activePauses = await listActivePauses(db);
   const pausedIdentities = new Set(activePauses.map((p) => p.senderIdentity));
   const approvedWithoutSequenceTotal = await countApprovedWithoutSequence(db);
+  const inboundUnroutedTotal = await countInboundUnrouted(db);
 
   const senders: OutreachDigestSenderSummary[] = await Promise.all(
     sequenceRows.map(async (seq) => {
@@ -374,6 +433,13 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
     date,
     senders,
     approvedWithoutSequenceTotal,
-    text: formatDigestText(date, senders, formatDnsblDigestLine(getOutreachDnsblState()), approvedWithoutSequenceTotal),
+    inboundUnroutedTotal,
+    text: formatDigestText(
+      date,
+      senders,
+      formatDnsblDigestLine(getOutreachDnsblState()),
+      approvedWithoutSequenceTotal,
+      inboundUnroutedTotal,
+    ),
   };
 }

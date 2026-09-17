@@ -64,13 +64,17 @@ async function resolveByThreading(db: Db, parsed: ParsedInboundMail): Promise<Th
 }
 
 /**
- * Best-effort handoff into the existing CS-desk inbound pipeline
- * (`inbound-router.ts`) so a genuine reply also surfaces to the company's
- * customer-service agent, exactly like a transactional support email would.
- * Purely additive: `handleEvent` no-ops (`no_matching_route`) until a company
- * has an `email_routes` row for the outreach domain — configuring that is an
- * ops/data step out of scope for this ticket (DB seeding was blocked), not a
- * code path this function needs to create.
+ * Hands the reply to the existing CS-desk inbound pipeline
+ * (`inbound-router.ts`), which is what durably stores the body — the
+ * `outreach_events` row records only that a reply happened, never what it said.
+ *
+ * RK9-234: this was documented as "purely additive" and safe to no-op, on the
+ * assumption that `recordEvent` had already recorded the reply. It had not. The
+ * router rejected every outreach reply on the recipient-domain check and then
+ * refused to store anything without a route, so the RK9-198 pilot's first reply
+ * (17.9.2026) was counted and discarded. Both halves are fixed: the tenant is
+ * proven by threading (`tenantResolvedBy: "thread"`), and the router persists
+ * before it routes.
  */
 async function attemptCsAgentHandoff(db: Db, companyId: string, parsed: ParsedInboundMail): Promise<void> {
   const event: InboundEmailEvent = {
@@ -86,9 +90,28 @@ async function attemptCsAgentHandoff(db: Db, companyId: string, parsed: ParsedIn
       headers: parsed.headers,
     },
   };
-  const result = await createInboundRouter(db).handleEvent(companyId, event);
+  // `thread`: companyId came from threading this reply back to the outreach
+  // message we sent, which carries its own company_id. Without this the router
+  // re-checked the recipient domain against the company's OWN domain and
+  // rejected every outreach reply, because they all arrive at the shared
+  // `outreach.rk9.fi` — that is how the pilot's first reply was lost
+  // (17.9.2026, see docs/implementation-notes/outreach-inbound.md).
+  const result = await createInboundRouter(db).handleEvent(companyId, event, {
+    tenantResolvedBy: "thread",
+  });
   if (!result.ok) {
-    logger.info({ companyId, reason: result.reason }, "outreach inbound: no CS-desk route configured yet");
+    logger.warn({ companyId, reason: result.reason }, "outreach inbound: CS-desk handoff rejected the reply");
+    return;
+  }
+  if (result.status === "stored_unrouted") {
+    // The body is safe (email_messages), but nobody owns it. Surfaced as
+    // `outreach_inbound_unrouted` in /metrics and as a line in the daily
+    // digest — this repo does not call Telegram itself (see
+    // docs/implementation-notes/outreach-metrics.md).
+    logger.warn(
+      { companyId, from: parsed.from },
+      "outreach inbound: reply stored but no route — add an email_routes row for the outreach domain",
+    );
   }
 }
 
