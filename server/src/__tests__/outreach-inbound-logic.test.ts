@@ -8,14 +8,28 @@ const mockInboundRouter = vi.hoisted(() => ({
   extractReferencedMessageIds: vi.fn(),
 }));
 const mockLogger = vi.hoisted(() => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
+const mockActivityLog = vi.hoisted(() => ({ logActivity: vi.fn() }));
 
 vi.mock("../services/outreach/messages.js", () => mockMessages);
 vi.mock("../services/outreach/events.js", () => mockEvents);
 vi.mock("../services/outreach/suppressions.js", () => mockSuppressions);
 vi.mock("../services/email/inbound-router.js", () => mockInboundRouter);
 vi.mock("../middleware/logger.js", () => mockLogger);
+vi.mock("../services/activity-log.js", () => mockActivityLog);
 
 const OWN_DOMAINS = { ownDomains: ["outreach.rk9.fi"] };
+
+// RK9-235: an unthreadable reply is now counted, and the count is attributed to
+// a company by looking the recipient up in `email_routes`. That makes the db a
+// real collaborator of this code path, so the double answers a
+// `select().from().where()` chain instead of being `{}`. Handing in an empty
+// object again would make these tests green through a swallowed TypeError.
+let routeRows: Array<{ companyId: string }> = [];
+function fakeDb(): any {
+  return {
+    select: () => ({ from: () => ({ where: () => Promise.resolve(routeRows) }) }),
+  };
+}
 
 function rawMime(lines: string[]): Buffer {
   return Buffer.from(lines.join("\r\n"), "utf8");
@@ -117,6 +131,9 @@ describe("processOutreachInboundMail", () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
+    // One route owns `outreach-saatavilla@outreach.rk9.fi`, which is what every
+    // fixture above is addressed to.
+    routeRows = [{ companyId: "company-1" }];
     mockInboundRouter.createInboundRouter.mockReturnValue({
       handleEvent: vi.fn().mockResolvedValue({ ok: false, reason: "no_matching_route" }),
       resolveTenant: vi.fn(),
@@ -127,7 +144,7 @@ describe("processOutreachInboundMail", () => {
   });
 
   it("drops a self-loop message without touching the DB (mail-loop guard)", async () => {
-    const result = await processOutreachInboundMail({} as any, SELF_LOOP_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), SELF_LOOP_RAW, OWN_DOMAINS);
     expect(result.outcome).toBe("self_loop_dropped");
     expect(mockMessages.getMessagesByRfc822Ids).not.toHaveBeenCalled();
     expect(mockEvents.recordEvent).not.toHaveBeenCalled();
@@ -135,7 +152,7 @@ describe("processOutreachInboundMail", () => {
   });
 
   it("ignores an OOO/auto-reply without recording a reply", async () => {
-    const result = await processOutreachInboundMail({} as any, OOO_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), OOO_RAW, OWN_DOMAINS);
     expect(result.outcome).toBe("auto_reply_ignored");
     expect(mockEvents.recordEvent).not.toHaveBeenCalled();
   });
@@ -147,11 +164,11 @@ describe("processOutreachInboundMail", () => {
     ]);
     mockEvents.recordEvent.mockResolvedValue({ ok: true, prospectStatus: "replied", suppressed: false });
 
-    const result = await processOutreachInboundMail({} as any, REPLY_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), REPLY_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("reply_recorded");
     expect(mockEvents.recordEvent).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       "company-1",
       expect.objectContaining({ prospectId: "prospect-1", messageId: "msg-1", type: "reply" }),
     );
@@ -169,17 +186,34 @@ describe("processOutreachInboundMail", () => {
       invalidateSecretCache: vi.fn(),
     });
 
-    const result = await processOutreachInboundMail({} as any, REPLY_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), REPLY_RAW, OWN_DOMAINS);
     expect(result.outcome).toBe("reply_recorded");
   });
 
-  it("returns reply_unmatched (and records nothing) when threading doesn't resolve to a known message", async () => {
+  it("returns reply_unmatched (recording no reply event, but counting the drop) when threading doesn't resolve to a known message", async () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue(["<unknown@outreach.rk9.fi>"]);
     mockMessages.getMessagesByRfc822Ids.mockResolvedValue([]);
 
-    const result = await processOutreachInboundMail({} as any, REPLY_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), REPLY_RAW, OWN_DOMAINS);
     expect(result.outcome).toBe("reply_unmatched");
     expect(mockEvents.recordEvent).not.toHaveBeenCalled();
+    // RK9-235: no reply event — the prospect is genuinely unknown — but the
+    // drop itself is now counted against the company that owns the recipient.
+    expect(mockActivityLog.logActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ companyId: "company-1", action: "outreach.reply_unmatched" }),
+    );
+  });
+
+  it("still returns reply_unmatched when the unmatched-reply bookkeeping itself fails", async () => {
+    mockInboundRouter.extractReferencedMessageIds.mockReturnValue(["<unknown@outreach.rk9.fi>"]);
+    mockMessages.getMessagesByRfc822Ids.mockResolvedValue([]);
+    mockActivityLog.logActivity.mockRejectedValue(new Error("activity_log is down"));
+
+    // Measuring a dropped reply must not change what happens to the mail: if
+    // the counter throws, Postfix still gets its 200 and the warn line stands.
+    const result = await processOutreachInboundMail(fakeDb(), REPLY_RAW, OWN_DOMAINS);
+    expect(result.outcome).toBe("reply_unmatched");
   });
 
   it("caps threading candidates and issues a single batched lookup instead of one query per candidate (RK9-195 verifier H2)", async () => {
@@ -187,7 +221,7 @@ describe("processOutreachInboundMail", () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue(manyCandidates);
     mockMessages.getMessagesByRfc822Ids.mockResolvedValue([]);
 
-    const result = await processOutreachInboundMail({} as any, REPLY_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), REPLY_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("reply_unmatched");
     expect(mockMessages.getMessagesByRfc822Ids).toHaveBeenCalledTimes(1);
@@ -199,7 +233,7 @@ describe("processOutreachInboundMail", () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
     const noSenderRaw = rawMime(["To: unsub@outreach.rk9.fi", "Subject: unsubscribe", "Message-ID: <x@example.com>", "", "stop"]);
 
-    const result = await processOutreachInboundMail({} as any, noSenderRaw, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), noSenderRaw, OWN_DOMAINS);
 
     expect(result.outcome).toBe("unsubscribe_skipped_no_sender");
     expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
@@ -213,11 +247,11 @@ describe("processOutreachInboundMail", () => {
     ]);
     mockEvents.recordEvent.mockResolvedValue({ ok: true, prospectStatus: "unsubscribed", suppressed: true });
 
-    const result = await processOutreachInboundMail({} as any, UNSUB_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), UNSUB_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("unsubscribed_by_thread");
     expect(mockEvents.recordEvent).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       "company-1",
       expect.objectContaining({ type: "unsubscribe" }),
     );
@@ -228,11 +262,11 @@ describe("processOutreachInboundMail", () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
     mockSuppressions.addOutreachSuppression.mockResolvedValue({ entry: {}, created: true });
 
-    const result = await processOutreachInboundMail({} as any, UNSUB_AUTHENTICATED_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), UNSUB_AUTHENTICATED_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("unsubscribed_by_email");
     expect(mockSuppressions.addOutreachSuppression).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       expect.objectContaining({ email: "prospect@example.com", reason: "unsubscribe" }),
     );
     expect(mockEvents.recordEvent).not.toHaveBeenCalled();
@@ -241,7 +275,7 @@ describe("processOutreachInboundMail", () => {
   it("skips the address-based suppression when Authentication-Results is missing entirely (RK9-206, fail closed)", async () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
 
-    const result = await processOutreachInboundMail({} as any, UNSUB_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), UNSUB_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("unsubscribe_skipped_unauthenticated");
     expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
@@ -254,7 +288,7 @@ describe("processOutreachInboundMail", () => {
   it("skips the address-based suppression when only one of SPF/DKIM passes (RK9-206, fail closed)", async () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
 
-    const result = await processOutreachInboundMail({} as any, UNSUB_FAILED_AUTH_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), UNSUB_FAILED_AUTH_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("unsubscribe_skipped_unauthenticated");
     expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
@@ -271,7 +305,7 @@ describe("processOutreachInboundMail", () => {
       "stop",
     ]);
 
-    const result = await processOutreachInboundMail({} as any, foreignUnsubRaw, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), foreignUnsubRaw, OWN_DOMAINS);
 
     // Falls through to the default "reply" classification since it isn't a
     // self-loop, DSN, or (now correctly scoped) unsubscribe — and there's no
@@ -283,7 +317,7 @@ describe("processOutreachInboundMail", () => {
   it("does NOT honor unsub@ at all when ownDomains is unconfigured (fail closed)", async () => {
     mockInboundRouter.extractReferencedMessageIds.mockReturnValue([]);
 
-    const result = await processOutreachInboundMail({} as any, UNSUB_RAW, { ownDomains: [] });
+    const result = await processOutreachInboundMail(fakeDb(), UNSUB_RAW, { ownDomains: [] });
 
     expect(result.outcome).toBe("reply_unmatched");
     expect(mockSuppressions.addOutreachSuppression).not.toHaveBeenCalled();
@@ -296,7 +330,7 @@ describe("processOutreachInboundMail", () => {
     ]);
     mockEvents.recordEvent.mockResolvedValue({ ok: false, reason: "message_not_found" });
 
-    const result = await processOutreachInboundMail({} as any, REPLY_RAW, OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), REPLY_RAW, OWN_DOMAINS);
 
     expect(result.outcome).toBe("reply_recorded");
     expect(mockLogger.logger.warn).toHaveBeenCalledWith(
@@ -313,12 +347,12 @@ describe("processOutreachInboundMail", () => {
     });
     mockEvents.recordEvent.mockResolvedValue({ ok: true, prospectStatus: "bounced", suppressed: true });
 
-    const result = await processOutreachInboundMail({} as any, dsnRaw("failed", "5.1.1"), OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), dsnRaw("failed", "5.1.1"), OWN_DOMAINS);
 
     expect(result.outcome).toBe("bounce_recorded");
-    expect(mockMessages.getMessageByRfc822Id).toHaveBeenCalledWith({}, "<orig-test-1@outreach.rk9.fi>");
+    expect(mockMessages.getMessageByRfc822Id).toHaveBeenCalledWith(expect.anything(), "<orig-test-1@outreach.rk9.fi>");
     expect(mockEvents.recordEvent).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       "company-1",
       expect.objectContaining({ prospectId: "prospect-1", messageId: "msg-1", type: "bounce_hard" }),
     );
@@ -332,11 +366,11 @@ describe("processOutreachInboundMail", () => {
     });
     mockEvents.recordEvent.mockResolvedValue({ ok: true, prospectStatus: "in_sequence", suppressed: false });
 
-    const result = await processOutreachInboundMail({} as any, dsnRaw("failed", "4.4.7"), OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), dsnRaw("failed", "4.4.7"), OWN_DOMAINS);
 
     expect(result.outcome).toBe("bounce_recorded");
     expect(mockEvents.recordEvent).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       "company-1",
       expect.objectContaining({ type: "bounce_soft" }),
     );
@@ -345,7 +379,7 @@ describe("processOutreachInboundMail", () => {
   it("returns dsn_unmatched (and records nothing) when the DSN's original message is unknown to us", async () => {
     mockMessages.getMessageByRfc822Id.mockResolvedValue(null);
 
-    const result = await processOutreachInboundMail({} as any, dsnRaw("failed", "5.1.1"), OWN_DOMAINS);
+    const result = await processOutreachInboundMail(fakeDb(), dsnRaw("failed", "5.1.1"), OWN_DOMAINS);
 
     expect(result.outcome).toBe("dsn_unmatched");
     expect(mockEvents.recordEvent).not.toHaveBeenCalled();

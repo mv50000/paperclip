@@ -9,7 +9,7 @@
 // format is a handful of lines, so it's built by hand below.
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { emailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
+import { activityLog, emailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
 import { listActivePauses } from "./sender-pauses.js";
 import { getOutreachDnsblState, isDnsblListTrustworthy, type OutreachDnsblState } from "./dnsbl.js";
@@ -55,6 +55,11 @@ export interface OutreachPrometheusMetrics {
   // because a prospect's reply going unanswered is the most expensive silence
   // in the pipeline.
   inboundUnrouted: number;
+  // RK9-235: replies that could not be threaded back to a message we sent, so
+  // they were dropped. Counted from `activity_log`, not a module-level counter
+  // — an in-memory tally resets on restart and reports a confident zero.
+  // Unknown whether this happens at all; that is what the measurement is for.
+  replyUnmatched: number;
 }
 
 async function countEventsByType(db: Db, types: string[]) {
@@ -76,6 +81,7 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
     identityRows,
     approvedWithoutSequenceRows,
     inboundUnroutedRows,
+    replyUnmatchedRows,
   ] = await Promise.all([
       db
         .select({
@@ -111,6 +117,10 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
             isNull(emailMessages.issueId),
           ),
         ),
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(activityLog)
+        .where(eq(activityLog.action, "outreach.reply_unmatched")),
     ]);
 
   const pausedIdentities = new Set(activePauses.map((p) => p.senderIdentity));
@@ -127,6 +137,7 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
     })),
     approvedWithoutSequence: approvedWithoutSequenceRows.map((r) => ({ companyId: r.companyId, count: Number(r.count) })),
     inboundUnrouted: Number(inboundUnroutedRows[0]?.count ?? 0),
+    replyUnmatched: Number(replyUnmatchedRows[0]?.count ?? 0),
   };
 }
 
@@ -189,6 +200,14 @@ export function renderOutreachPrometheusText(metrics: OutreachPrometheusMetrics)
   lines.push("# TYPE outreach_inbound_unrouted gauge");
   lines.push(`outreach_inbound_unrouted ${metrics.inboundUnrouted}`);
 
+  // RK9-235: measurement, not an alert threshold — we do not yet know whether
+  // an unthreadable reply ever happens in practice.
+  lines.push(
+    "# HELP outreach_inbound_reply_unmatched Replies that could not be threaded back to a sent message and were dropped. Metadata only — the body is not kept (RK9-235 phase 1).",
+  );
+  lines.push("# TYPE outreach_inbound_reply_unmatched counter");
+  lines.push(`outreach_inbound_reply_unmatched ${metrics.replyUnmatched}`);
+
   // RK9-225: only a list we can currently trust gets to publish a verdict. A
   // refused or failed lookup publishes nothing here — `outreach_dnsbl_list_ok`
   // below is what makes that blindness visible, so a blind list can never look
@@ -242,6 +261,8 @@ export interface OutreachDigest {
   approvedWithoutSequenceTotal: number;
   /** RK9-234: inbound mail stored with no route — a reply nobody owns. See `outreach_inbound_unrouted`. */
   inboundUnroutedTotal: number;
+  /** RK9-235: replies received today that could not be threaded back to a sent message, so they were dropped. See `outreach_inbound_reply_unmatched`. */
+  replyUnmatchedToday: number;
   /** Ready-to-send Finnish message text — the host cron script's only job is `rk9_telegram_send "$(curl ... | jq -r .text)"`. */
   text: string;
 }
@@ -335,12 +356,33 @@ async function countInboundUnrouted(db: Db): Promise<number> {
   return Number(row?.count ?? 0);
 }
 
+/**
+ * RK9-235: today's dropped replies. The Prometheus counter is cumulative, as a
+ * counter should be; the digest is a report on one day, so it asks the same
+ * question with a date range. Reading `activity_log` rather than a process
+ * counter is deliberate — a restart must not be able to report a clean zero.
+ */
+async function countReplyUnmatchedToday(db: Db, range: { start: Date; end: Date }): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.action, "outreach.reply_unmatched"),
+        gte(activityLog.createdAt, range.start),
+        lt(activityLog.createdAt, range.end),
+      ),
+    );
+  return Number(row?.count ?? 0);
+}
+
 function formatDigestText(
   date: string,
   senders: OutreachDigestSenderSummary[],
   dnsblLine: string | null,
   approvedWithoutSequenceTotal: number,
   inboundUnroutedTotal: number,
+  replyUnmatchedToday: number,
 ): string {
   const warningLine =
     approvedWithoutSequenceTotal > 0
@@ -352,9 +394,17 @@ function formatDigestText(
     inboundUnroutedTotal > 0
       ? `⚠️ ${inboundUnroutedTotal} saapunutta viestiä ilman reittiä — runko on tallessa, mutta tikettiä ei avattu eikä kukaan omista niitä (RK9-234).`
       : null;
+  // Phase 1 is measurement: this line exists so the number reaches a human
+  // daily instead of sitting in Prometheus where nobody is alerting on it.
+  const replyUnmatchedLine =
+    replyUnmatchedToday > 0
+      ? `⚠️ ${replyUnmatchedToday} vastausta joita ei saatu ketjutettua lähettämäämme viestiin — pudotettu, runkoa ei ole tallessa (RK9-235).`
+      : null;
   if (senders.length === 0) {
     const empty = `Outreach-digest ${date}: ei aktiivisia lähettäjiä.`;
-    const lines = [empty, dnsblLine, warningLine, unroutedLine].filter((l): l is string => l !== null);
+    const lines = [empty, dnsblLine, warningLine, unroutedLine, replyUnmatchedLine].filter(
+      (l): l is string => l !== null,
+    );
     return lines.join("\n");
   }
   const lines = [`Outreach-digest ${date}:`];
@@ -368,6 +418,7 @@ function formatDigestText(
   if (dnsblLine) lines.push(dnsblLine);
   if (warningLine) lines.push(warningLine);
   if (unroutedLine) lines.push(unroutedLine);
+  if (replyUnmatchedLine) lines.push(replyUnmatchedLine);
   return lines.join("\n");
 }
 
@@ -402,6 +453,7 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
   const pausedIdentities = new Set(activePauses.map((p) => p.senderIdentity));
   const approvedWithoutSequenceTotal = await countApprovedWithoutSequence(db);
   const inboundUnroutedTotal = await countInboundUnrouted(db);
+  const replyUnmatchedToday = await countReplyUnmatchedToday(db, range);
 
   const senders: OutreachDigestSenderSummary[] = await Promise.all(
     sequenceRows.map(async (seq) => {
@@ -434,12 +486,14 @@ export async function buildOutreachDigest(db: Db, now: Date = new Date()): Promi
     senders,
     approvedWithoutSequenceTotal,
     inboundUnroutedTotal,
+    replyUnmatchedToday,
     text: formatDigestText(
       date,
       senders,
       formatDnsblDigestLine(getOutreachDnsblState()),
       approvedWithoutSequenceTotal,
       inboundUnroutedTotal,
+      replyUnmatchedToday,
     ),
   };
 }
