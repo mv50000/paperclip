@@ -45,11 +45,12 @@ Todennettu paikallisista upstream-tageista komennoilla `git show <tag>:<polku>`.
 
 - ACP-polku ei kutsu `runChildProcess`ia. Se käynnistää `claude-agent-acp`-binäärin
   ACP SDK:lla (`createAcpRuntime`, `acpx/runtime`).
-- v2026.512.0–v2026.831.x: env on koko host-env,
+- v2026.512.0–v2026.831.x: env on koko host-env.
+  v2026.512.0:ssa se on `acpx-local/src/server/execute.ts:787`
   `const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });`.
-  Rivi on v2026.512.0:ssa `acpx-local/src/server/execute.ts:787` ja
-  v2026.720.0:sta alkaen `adapter-utils/src/acpx-engine/execute.ts`
-  (`:1201` v2026.720.0:ssa, `:1876` v2026.831.1:ssä).
+  v2026.720.0:sta alkaen sama tehdään `adapter-utils/src/acpx-engine/execute.ts`:ssä:
+  v2026.720.0:ssa rivit `:1241-1242` (`Object.fromEntries(...)`),
+  v2026.824.1:ssä ja v2026.831.1:ssä funktio `resolveRuntimeEnv`.
 - v2026.916.0 alkaen env on allowlist (`projectAcpxInheritedHostEnvironment`),
   mutta `ACPX_INHERITED_PROVIDER_ENV_KEYS.claude` sisältää `ANTHROPIC_API_KEY`:n,
   `ANTHROPIC_AUTH_TOKEN`in ja `CLAUDE_CODE_OAUTH_TOKEN`in
@@ -61,18 +62,17 @@ Todennettu paikallisista upstream-tageista komennoilla `git show <tag>:<polku>`.
   `doNotInheritEnvKeys` on vain forkissa.
 
 CLI-fallback on vielä v2026.831.1:ssä (`fallbackReason`) ja poissa
-v2026.916.0:ssa. v2026.720.0–v2026.831.1 putoaa CLI:lle hiljaa
-(`defaultClaudeAcpFallbackReason`), kun jokin näistä pätee:
+v2026.916.0:ssa. v2026.720.0–v2026.831.1 putoaa CLI:lle hiljaa, kun jokin
+näistä pätee:
 
-- Node on liian vanha: alle 22.12.0 tageissa v2026.720.0–v2026.824.1, alle
-  24.11.0 tageissa v2026.831.x (`MIN_ACP_NODE_VERSION`). Tämän koneen Node
+- `defaultClaudeAcpFallbackReason`: Node on liian vanha, alle 22.12.0
+  tageissa v2026.720.0–v2026.824.1, alle 24.11.0 tageissa v2026.831.x (`MIN_ACP_NODE_VERSION`). Tämän koneen Node
   v22.22.1 putoaa siis CLI:lle v2026.831.x:ssä.
-- `claude-agent-acp` puuttuu.
-- Ajon kohde on remote, jolla ei ole kaksisuuntaista prosessiyhteyttä, tai
-  tiedosto-/verkkorajaus estää ACP:n.
+- `defaultClaudeAcpFallbackReason`: `claude-agent-acp` puuttuu, tai ajon kohde
+  on remote, jolla ei ole kaksisuuntaista prosessiyhteyttä.
+- `resolveClaudeExecutionEngineForRun`: tiedosto- tai verkkorajaus estää ACP:n.
 
-Todentamatta: v2026.831.1:n ACP-env ja CLI:n oma oletusmalli ennen
-v2026.916.0:aa.
+Todentamatta: CLI:n oma oletusmalli ennen v2026.916.0:aa.
 
 ### Native runner
 
@@ -137,9 +137,10 @@ Mitä testit lukitsevat:
   vaatia `cli`-oletusta heti, kun merge tuo `resolveClaudeExecutionEngine`n
   (upstream exporttaa sen `server/index.ts`:n `export * from "./acp.js"`
   -rivillä). Tämä on pinnauksen portti. Jos upstream nimeää resolverin
-  uudelleen, testi kaatuu, koska se hylkää minkä tahansa muun
-  `*ExecutionEngine*`-exportin. Silloin testi päivitetään uuteen nimeen,
-  ei poisteta.
+  uudelleen niin, että nimessä on yhä `ExecutionEngine`, testi kaatuu, ja se
+  päivitetään uuteen nimeen. Muunlaista uudelleennimeämistä testi ei huomaa.
+  Siksi portaan tekijä tarkistaa `acp.ts`:n oletusmoottorin käsin jokaisessa
+  portaassa, joka koskee tiedostoa.
 - `claude-local-adapter-environment.test.ts`, describe
   `claude_local hello probe environment`: sama sääntö hello-proben spawnille.
 - `claude-local-adapter-billing-inheritance.test.ts`: env-apufunktioiden
