@@ -1,0 +1,74 @@
+# Forkin omat vitest-tiedostot (lisätty d0bdbe11a..origin/master), jotka ovat vihreitä masterilla.
+# Pakollisesti vihreä jokaisessa upstream-portaassa. Ajo: scripts/upgrade-smoke.sh --offline --fork-tests
+# Lähtötila 2026-09-26 @ 9ed8e7704: 69 tiedostoa, 752 testiä. email-routes.test.ts on vihreä CI:n
+# verify-jobissa, mutta aikakatkaistuu paikallisesti paperclip-01:llä (ks. regression-matrix.md).
+# Rivin pääte "# ci-only" ohittaa tiedoston paikallisesti; skripti ajaa sen, kun CI on asetettu.
+cli/src/__tests__/outreach.test.ts
+packages/adapters/claude-local/src/server/execute.tools.test.ts
+packages/adapters/cursor-local/src/server/parse.test.ts
+packages/adapters/gemini-local/src/server/parse.test.ts
+packages/shared/src/validators/outreach.test.ts
+server/src/__tests__/approval-telegram-listener-outreach.test.ts
+server/src/__tests__/auth-run-id-guard.test.ts
+server/src/__tests__/child-process-env-inheritance.test.ts
+server/src/__tests__/claude-local-adapter-billing-inheritance.test.ts
+server/src/__tests__/config.test.ts
+server/src/__tests__/email-approval-gate.test.ts
+server/src/__tests__/email-deliverability.test.ts
+server/src/__tests__/email-escalation.test.ts
+server/src/__tests__/email-inbound-router.test.ts
+server/src/__tests__/email-inbound-wakeup.test.ts
+server/src/__tests__/email-junk-guard.test.ts
+server/src/__tests__/email-mime.test.ts
+server/src/__tests__/email-render.test.ts
+server/src/__tests__/email-routes.test.ts  # ci-only
+server/src/__tests__/email-sanitize.test.ts
+server/src/__tests__/email-ses-inbound-route.test.ts
+server/src/__tests__/email-ses-inbound.test.ts
+server/src/__tests__/email-ses-provider.test.ts
+server/src/__tests__/email-sns-verify.test.ts
+server/src/__tests__/email-suppression.test.ts
+server/src/__tests__/email-svix-verify.test.ts
+server/src/__tests__/emit-approval-created.test.ts
+server/src/__tests__/github-webhook-routes.test.ts
+server/src/__tests__/heartbeat-idle-timer-skip.test.ts
+server/src/__tests__/human-proxy.test.ts
+server/src/__tests__/issue-outcome-requirements.test.ts
+server/src/__tests__/issues-checkout-race.test.ts
+server/src/__tests__/knowledge-routes.test.ts
+server/src/__tests__/outreach-auto-pause-logic.test.ts
+server/src/__tests__/outreach-digest-db.test.ts
+server/src/__tests__/outreach-dnsbl.test.ts
+server/src/__tests__/outreach-draft-api-key.test.ts
+server/src/__tests__/outreach-draft-logic.test.ts
+server/src/__tests__/outreach-draft-sequence.test.ts
+server/src/__tests__/outreach-enrichment-logic.test.ts
+server/src/__tests__/outreach-inbound-classify.test.ts
+server/src/__tests__/outreach-inbound-logic.test.ts
+server/src/__tests__/outreach-inbound-reply-persistence.test.ts
+server/src/__tests__/outreach-inbound-route.test.ts
+server/src/__tests__/outreach-inbound-unmatched-reply.test.ts
+server/src/__tests__/outreach-inbound-verify.test.ts
+server/src/__tests__/outreach-logic.test.ts
+server/src/__tests__/outreach-message-format.test.ts
+server/src/__tests__/outreach-metrics-approved-without-sequence.test.ts
+server/src/__tests__/outreach-metrics-dnsbl-render.test.ts
+server/src/__tests__/outreach-metrics-routes.test.ts
+server/src/__tests__/outreach-quality-gate.test.ts
+server/src/__tests__/outreach-routes.test.ts
+server/src/__tests__/outreach-scheduler-logic.test.ts
+server/src/__tests__/outreach-scheduler-pause-gate.test.ts
+server/src/__tests__/outreach-sender-routes.test.ts
+server/src/__tests__/outreach-smtp-client.test.ts
+server/src/__tests__/outreach-unsubscribe-route.test.ts
+server/src/__tests__/risk-monitors.test.ts
+server/src/__tests__/slack-event-classifier.test.ts
+server/src/__tests__/slack-formatters.test.ts
+server/src/__tests__/slack-interactions.test.ts
+server/src/__tests__/slack-liveness-watchdog.test.ts
+server/src/__tests__/slack-signature-verify.test.ts
+server/src/services/knowledge-injection.test.ts
+server/src/services/knowledge-recall.test.ts
+server/src/services/qmd-mcp-client.test.ts
+server/src/services/qmd-orphan-watchdog.test.ts
+server/src/services/webhook-monitor-alerting.test.ts
