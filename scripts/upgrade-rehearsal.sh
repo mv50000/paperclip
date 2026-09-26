@@ -107,7 +107,9 @@ psql_q() { psql -X -qAt -v ON_ERROR_STOP=1 "$@"; }
 pid_is() {
   [[ -s "$1" ]] || return 1
   local pid; pid="$(cat "$1")"
-  [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/cmdline" ]] && tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q -E -- "$2"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  local cmd; cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"   # ei putkea: pipefail + grep -q antaa SIGPIPE-virheen
+  [[ "$cmd" =~ $2 ]]
 }
 # Holder on `sleep infinity`, ja sen verkkonimiavaruus eroaa omastamme.
 holder_alive() {
@@ -118,7 +120,9 @@ holder_alive() {
 server_alive() {
   [[ -s "$SERVER_PID_FILE" ]] || return 1
   local pid; pid="$(cat "$SERVER_PID_FILE")"
-  [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/environ" ]] && tr '\0' '\n' <"/proc/$pid/environ" | grep -qx "PAPERCLIP_HOME=$REH_HOME"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/environ" ]] || return 1
+  local env; env="$(tr '\0' '\n' <"/proc/$pid/environ")"
+  [[ $'\n'"$env"$'\n' == *$'\n'"PAPERCLIP_HOME=$REH_HOME"$'\n'* ]]
 }
 
 # tree_pids PID — pid ja kaikki sen jälkeläiset.
@@ -145,7 +149,7 @@ start_netns() {
   setsid unshare -r -n bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 &
   echo $! >"$HOLDER_PID_FILE"
   for _ in $(seq 1 20); do
-    if ns_exec ip -o link show lo 2>/dev/null | grep -q 'UP\|UNKNOWN'; then return; fi
+    if [[ "$(ns_exec ip -o link show lo 2>/dev/null || true)" =~ (UP|UNKNOWN) ]]; then return; fi
     sleep 0.25
   done
   die "verkkonimiavaruus ei käynnistynyt. Jos unshare -rn on estetty (kernel.unprivileged_userns_clone=0 / apparmor), aja operaattorina: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0"
@@ -156,7 +160,7 @@ verify_isolation() {
   local links probe
   links="$(ns_exec ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | sort | tr '\n' ' ')"
   [[ "$links" == "lo " ]] || die "eristys: nimiavaruudessa on muita liitäntöjä kuin lo: $links"
-  if ns_exec ip -o route show | grep -q .; then die "eristys: nimiavaruudessa on reittejä"; fi
+  [[ -z "$(ns_exec ip -o route show)" ]] || die "eristys: nimiavaruudessa on reittejä"
   for probe in 1.1.1.1:443 8.8.8.8:53 169.254.169.254:80; do
     if ns_exec timeout 3 bash -c "exec 3<>/dev/tcp/${probe%:*}/${probe#*:}" 2>/dev/null; then
       die "eristys: egress-koetin pääsi ulos ($probe)"
@@ -270,8 +274,9 @@ net.createServer((c) => {
 JS
   local sock="$SOCKET_DIR/.s.PGSQL.${PGPORT:-5432}"
   [[ -S "$sock" ]] || die "PG-socketia ei löydy: $sock"
-  ns_exec node "$REH_HOME/pg-bridge.js" "$sock" 5432 >>"$SERVER_LOG" 2>&1 </dev/null &
-  echo $! >"$BRIDGE_PID_FILE"
+  # Pid kirjoitetaan sisäpuolelta: taustalla ajettu funktio on aliprosessi, jonka $! ei ole node.
+  ns_exec bash -c 'echo $$ >"$1"; exec node "$2" "$3" 5432' _ "$BRIDGE_PID_FILE" "$REH_HOME/pg-bridge.js" "$sock" \
+    >>"$SERVER_LOG" 2>&1 </dev/null &
   for _ in $(seq 1 20); do
     ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/5432" 2>/dev/null && return
     sleep 0.25
@@ -299,7 +304,11 @@ start_server() {
       PAPERCLIP_ANNOUNCEMENTS_ENABLED=false PAPERCLIP_QMD_WATCHDOG_ENABLED=false \
       PAPERCLIP_DB_BACKUP_ENABLED=false \
       bash -c "echo \$\$ >'$SERVER_PID_FILE'; exec $SERVER_CMD" ) >>"$SERVER_LOG" 2>&1 </dev/null &
-  for _ in $(seq 1 120); do
+  for i in $(seq 1 120); do
+    if (( i > 5 )) && ! server_alive; then
+      tail -n 30 "$SERVER_LOG" >&2 || true
+      die "palvelin päättyi ennen kuin alkoi kuunnella (loki: $SERVER_LOG)"
+    fi
     if server_alive && ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
       log "palvelin kuuntelee nimiavaruudessa 127.0.0.1:$PORT (pid $(cat "$SERVER_PID_FILE"))"
       verify_server_env "$(cat "$SERVER_PID_FILE")"
@@ -340,6 +349,7 @@ cmd_run() {
   guard_names
   SECONDS=0
   DUMP_PART=""
+  trap 'exit 143' TERM INT
   # Virhe kesken ajon: siivoa osittainen dumppi ja pysäytä palvelin/nimiavaruus (fail closed).
   trap 'rc=$?; [[ -n "${DUMP_PART:-}" ]] && rm -f -- "$DUMP_PART"; if (( rc != 0 )); then stop_all; fi' EXIT
   git -C "$REPO_ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "ref '$ref' ei ole olemassa (git fetch --tags?)"
