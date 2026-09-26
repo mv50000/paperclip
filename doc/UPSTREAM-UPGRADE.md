@@ -104,7 +104,9 @@ harjoitusinstanssissa egress estettynä.
 
 ## ACPX
 
-Varattu upstreamin ACPX-muutosten arvioinnille ja päätöksille.
+Varattu upstreamin ACPX-muutosten arvioinnille ja päätöksille. `claude_local`-moottorin
+kiinnitys ja RK9-228-avainvartijan portaat: [`doc/upgrade/acpx-claude-local.md`](upgrade/acpx-claude-local.md)
+(RK9-305).
 
 ## Upgrade-prosessi
 
