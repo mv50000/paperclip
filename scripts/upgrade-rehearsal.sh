@@ -214,7 +214,8 @@ table_counts() { # db → "taulu=n" riveittäin; puuttuva taulu = -1; virhe kesk
 }
 
 # Skeemasormenjälki: rollbackin pitää palauttaa täsmälleen restore-hetken skeema.
-schema_hash() { local h; h="$(pg_dump -s --no-owner --no-acl -d "$1" | md5sum)" || die "pg_dump -s epäonnistui: $1"; echo "${h%% *}"; }
+# pg_dump 17 lisää satunnaisen \restrict-tunnisteen, joten se poistetaan ennen tiivistettä.
+schema_hash() { local h; h="$(pg_dump -s --no-owner --no-acl -d "$1" | sed -E '/^\\(un)?restrict /d' | md5sum)" || die "pg_dump -s epäonnistui: $1"; echo "${h%% *}"; }
 
 check_disk_and_retention() {
   mkdir -p "$BACKUP_DIR" 2>/dev/null || die "en voi luoda $BACKUP_DIR. Operaattori: sudo install -d -o $(id -un) -m 700 $BACKUP_DIR"
