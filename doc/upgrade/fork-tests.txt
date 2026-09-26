@@ -38,6 +38,7 @@ server/src/__tests__/issue-outcome-requirements.test.ts
 server/src/__tests__/issues-checkout-race.test.ts
 server/src/__tests__/knowledge-routes.test.ts
 server/src/__tests__/outreach-auto-pause-logic.test.ts
+server/src/__tests__/system-pause-threshold.test.ts
 server/src/__tests__/outreach-digest-db.test.ts
 server/src/__tests__/outreach-dnsbl.test.ts
 server/src/__tests__/outreach-draft-api-key.test.ts
