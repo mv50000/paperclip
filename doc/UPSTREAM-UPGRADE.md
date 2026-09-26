@@ -60,6 +60,14 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
 - `scripts/provision-worktree.sh`
 - `server/src/services/index.ts`, `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/constants.ts` — exportit
 
+### Heartbeat/Recovery/Routines/Execution-Policy hotspot resolution
+
+Päätöstaulukko (drop / re-port / redesign per forkin korjaus, upstream-vertailu tagia
+`v2026.916.1` vasten ja regressiotestit) on tiedostossa
+[`doc/regression/heartbeat-recovery-fork-inventory.md`](regression/heartbeat-recovery-fork-inventory.md).
+Konsultoi sitä ennen kuin ratkaiset konflikteja tiedostoissa `heartbeat.ts`,
+`recovery/service.ts`, `routines.ts`, `issues.ts`, `issue-execution-policy.ts` ja `index.ts`.
+
 ## Porrastusmalli
 
 Upstream päivitetään tagi kerrallaan, ei suoraan `upstream/master`iin. Vahvistettu
