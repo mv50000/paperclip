@@ -82,11 +82,73 @@ Kirjaa jokainen porras osioon "Porrasloki".
 
 ## Node 24
 
-Upstream vaatii `engines.node >=24.11.0` (tarkistettu tageista `v2026.916.1` ja
-`upstream/master`). Fork vaatii nyt `>=20`, ja paperclip-01 ajaa Node 22:ta. Node pitää
-päivittää 24.11:een tai uudempaan viimeistään ennen portaan, jonka `package.json`
-nostaa vaatimuksen, mergeä. Päivitä samalla CI-runnerit (builder, builder-fast) ja
-tuotannon systemd-palvelun Node. Toteutus ja tarkka porras: kirjataan tähän osioon.
+Päivitetty 2026-09-26 ([RK9-310](/RK9/issues/RK9-310)). Upstream vaatii `engines.node >=24.11.0` (tarkistettu tageista
+`v2026.916.1` ja `upstream/master`). Fork vaatii `>=20`, ja paperclip-01 ajaa Node 22.22.1:tä. Node 24 tuodaan
+tuotantoon nykyisellä forkilla **ennen yhtäkään upstream-mergeä**, jotta runtime-regressiot erottuvat merge-regressioista.
+
+### Päätökset
+
+- **`engines.node` jää arvoon `>=20`.** Upstream nostaa sen arvoon `>=24.11.0` tagissa `v2026.831.1`. Etukäteen tehty fork-bumppi tuottaisi turhan konfliktin, joten arvo tulee portaan 831.1 mergessä. (Poikkeama tiketin hyväksymisehdosta.)
+- **CI:** `e2e.yml` ja `refresh-lockfile.yml` käyttävät `node-version: 24` kuten `pr.yml`, `release.yml` ja `release-smoke.yml`. `runs-on`-arvot eivät muutu (ei GitHub-hosted-buildeja).
+- **Preflightin Node-gate** on jo `~/.claude`-lähteessä ([RK9-307](/RK9/issues/RK9-307)): `hosts/paperclip/paperclip-service/paperclip-preflight.sh`. Tämä tiketti ei muokkaa sitä.
+- **`paperclip-start.sh`:n PATH** on `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. `/usr/local/bin/node` ei ole olemassa, joten `node` resolvoituu polkuun `/usr/bin/node`, jonka `nodejs`-paketti omistaa. apt-päivitys vaihtaa siis palvelun Noden ilman muutoksia käynnistysskriptiin.
+- **Rollback-kysymys:** nykyinen fork-koodi toimii Node 24.21.0:lla (todiste alla). Koodin rollback (`git reset` + `pnpm install`) ei siis vaadi Noden palautusta, ja uusi preflight (Node ≥ 24.11) pysyy paikallaan. Node palautetaan vain, jos vika on Node 24:ssä itsessään; silloin tarvitaan myös vanha preflight (ks. `doc/upgrade/cutover-runbook.md`, "Node ja preflight rollbackissa").
+
+### Todiste (26.9.2026, Node v24.21.0, nykyinen master `24f1f07b`)
+
+Node ladattiin virallisena tarballina (`nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz`, `SHASUMS256.txt` täsmäsi) `/tmp`-hakemistoon. Koneen Nodeen ei koskettu.
+
+| Tarkistus | Tulos |
+|---|---|
+| `pnpm install --frozen-lockfile` | OK, 1 min. Ei natiivimoduulien rebuild- eikä prebuild-latausvirheitä (`embedded-postgres` + patch, `sharp`). |
+| `pnpm -r typecheck` | OK, 7 min. |
+| `pnpm test:run` | 189 / 190 tiedostoa, 1478 / 1480 testiä läpi. Yksi virhe: `workspace-runtime.test.ts` "writes an isolated repo-local Paperclip config…". **Sama virhe Node 22.22.1:llä**, joten se ei johdu Node 24:stä (ympäristöriippuva; ajettu agentin worktreessä). Kesto 15 min. |
+| Harjoitusinstanssi (`scripts/upgrade-rehearsal.sh`, master `24f1f07b`) | Putki (dump, restore, worktree, install, palvelin) 130 s. Eristystarkistukset OK. HTTP-savutesti 10/10. |
+| Fork-testit harjoituksessa | 768 / 769 läpi. `heartbeat-idle-timer-skip.test.ts` epäonnistui kerran (FK-virhe siivouksessa, kuormaflake); erikseen ajettuna 2 / 2 läpi Node 24:llä, ja koko suitessa läpi. |
+| Rollback-harjoitus | 49 s, rivimäärät ja skeemasormenjälki täsmäsivät. |
+| `claude` CLI Node 24:n `child_process`-spawnista | `claude --version` → 2.1.283, exit 0. `claude` on natiivi binääri, joten Node-versio ei vaikuta siihen. `claude-local`-testit (5 tiedostoa) läpi. |
+| `cicd-failure-watch.sh` Node 24:n spawnista | exit 0 (`gh` korvattu tynkällä; ei verkkoa). |
+| `qmd-mcp-client`, `email-inbound`, outreach, heartbeat-testit | läpi (1 / 1 / 33 / 35 tiedostoa). |
+
+Ei todennettu (todentamatta): oikea `claude_local`-heartbeat autentikoituna ja oikea outreach-lähetys eivät kuulu harjoitukseen
+(ajastimet ja verkko estetty tarkoituksella). Ne tarkistetaan tuotannossa 48 h seurannassa.
+
+### Host-apt-päivitys (operaattorin ikkunassa, runbookin vaiheet 0.3–0.4)
+
+Lähde on `/etc/apt/sources.list.d/nodesource.sources` (deb822, ei `.list`), nykyinen `URIs: https://deb.nodesource.com/node_22.x`.
+Komennot on kirjoitettu mutta **ei ajettu** (todentamatta; agentilla ei ole `apt`-oikeutta). Tarkista versiomerkkijono ennen ajoa: `apt-cache policy nodejs` päivityksen jälkeen.
+
+```bash
+# 1. Varmista rollback-lähtötila ja säästä vanha lähde.
+dpkg -l nodejs | tail -1                      # odotus: 22.22.1-1nodesource1
+sudo cp -a /etc/apt/sources.list.d/nodesource.sources /root/nodesource.sources.node22
+# 2. Vaihda lähde node_22.x → node_24.x.
+sudo sed -i 's#/node_22\.x#/node_24.x#' /etc/apt/sources.list.d/nodesource.sources
+sudo apt-get update
+apt-cache policy nodejs                       # Candidate: 24.x.y-1nodesource1, x ≥ 11
+# 3. Pysäytä palvelu vain jos runbook on jo vaiheessa 4; muuten asenna ja restarttaa erikseen.
+sudo apt-get install -y nodejs                # päivittää /usr/bin/node
+# 4. Todenna.
+/usr/bin/node --version                       # ≥ v24.11.0
+sudo -u paperclip env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin node --version
+pnpm --version                                # 9.15.4 (asennettu erikseen /usr/lib/node_modules/pnpm)
+# 5. Estä tahaton nousu seuraavaan major-versioon.
+sudo apt-mark hold nodejs                     # vapauta: apt-mark unhold nodejs
+```
+
+Rollback Node 22:een (vain jos vika on Node 24:ssä):
+
+```bash
+sudo apt-mark unhold nodejs
+sudo cp -a /root/nodesource.sources.node22 /etc/apt/sources.list.d/nodesource.sources
+sudo apt-get update
+sudo apt-get install -y --allow-downgrades nodejs=22.22.1-1nodesource1
+/usr/bin/node --version                       # v22.22.1
+# Asenna vanha preflight, koska uusi vaatii Node ≥ 24.11 (ks. cutover-runbook, "Node ja preflight rollbackissa").
+```
+
+Tuotannon 48 h seuranta Node 24:llä ilman muita fork-koodimuutoksia: heartbeat-ajot, outreach-lähetys ja saapuva posti
+(`resend-inbound`, `ses-inbound`) ilman regressioita. Toteutus on seurantatiketissä (RK9-303:n lapsi).
 
 ## Oletusten kovennus
 
