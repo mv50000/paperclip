@@ -37,7 +37,7 @@ Todennettu paikallisista upstream-tageista komennoilla `git show <tag>:<polku>`.
 | v2026.609.0, v2026.707.0 | `acpx-local` jatkuu | Ei vaikutusta |
 | **v2026.720.0** | ACP-moottori siirtyy `packages/adapter-utils/src/acpx-engine/`:iin. `claude_local` saa `engine`-kentän, oletus `acp`. Migraatio `0136_acpx_default_engine_migration.sql` kääntää `acpx_local`-rivit `claude_local`/`codex_local` + `engine: 'acp'`. | **Kriittinen porras.** Asettamaton `engine` ajaa ACP:llä. Jos ACP ei ole saatavilla, ajo putoaa CLI:lle (vain lokirivi, ei virhettä). |
 | v2026.831.0 | `enableNativeRunner` tulee instanssiasetuksiin, oletus `false` | Ei vaikutusta `claude_local`-ajoon |
-| v2026.916.0 | `enableNativeRunner` oletus `true`. `DEFAULT_CLAUDE_LOCAL_MODEL = "claude-opus-5"`. ACP-env muuttuu allowlistiksi. CLI-fallback poistuu: ilman ACP:tä ajo epäonnistuu (`adapter_engine_unavailable`). | Asettamaton malli ajaa Opus 5:llä. Ilman pinnausta agentit pysähtyvät, jos `claude-agent-acp` puuttuu. |
+| v2026.916.0 | `enableNativeRunner` oletus `true`. `DEFAULT_CLAUDE_LOCAL_MODEL = "claude-opus-5"`. ACP-env muuttuu allowlistiksi. CLI-fallback poistuu: ilman ACP:tä ajo epäonnistuu (`adapter_engine_unavailable`). | Asettamaton malli ajaa Opus 5:llä. Ilman pinnausta agentit pysähtyvät, jos `claude-agent-acp` puuttuu tai Node on alle 24.11.0 (tämän koneen Node v22.22.1). |
 
 ### Ohittaako ACPX host-env-suodattimen?
 
@@ -74,7 +74,8 @@ stderr-lokiin tulee yksi rivi (`formatClaudeAcpFallbackMessage`).
   on mikä tahansa remote paitsi sandbox, jolla on prosessisilta (myös
   SSH-kohde putoaa CLI:lle).
 - `resolveClaudeExecutionEngineForRun`: tiedosto- tai verkkorajaus estää ACP:n.
-- `execute.ts`: `executeClaudeAcp` heittää virheen käynnistyksessä.
+- `execute.ts`: `executeClaudeAcp` heittää virheen. Tämä koskee myös
+  kesken ajon heitettyä virhettä, jolloin tehtävä voi ajautua uudelleen CLI:llä.
 
 Todentamatta: CLI:n oma oletusmalli ennen v2026.916.0:aa.
 
