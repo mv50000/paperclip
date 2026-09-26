@@ -99,6 +99,9 @@ if [ -n "$VERIFY_DIR" ]; then
   NOW=$(mktemp); trap 'rm -f "$NOW"' EXIT
   count_state "$DATABASE_URL" >"$NOW"
   DIFFS=0
+  want_enc=$(sed -n 's/^encoding=\([^|]*\).*/\1/p' "$VERIFY_DIR/db-level.txt" 2>/dev/null | head -n 1)
+  have_enc=$(psqlq "$DATABASE_URL" -c "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = current_database()")
+  [ -z "$want_enc" ] || [ "$want_enc" = "$have_enc" ] || { echo "$LOGTAG EROA: merkistö: snapshotissa $want_enc, kannassa $have_enc" >&2; DIFFS=$((DIFFS + 1)); }
   for key in tables migrations "${KEY_TABLES[@]}"; do
     want=$(get "$VERIFY_DIR/counts-scratch.txt" "$key"); have=$(get "$NOW" "$key")
     [ "$want" = "$have" ] || { echo "$LOGTAG EROA: $key: snapshotissa $want, kannassa $have" >&2; DIFFS=$((DIFFS + 1)); }
@@ -153,7 +156,7 @@ count_state "$DATABASE_URL" >"$SNAP_DIR/counts-before.txt"
 
 # Tietokantatason tila, jota dump (--no-privileges, ei ALTER DATABASE) ei kanna: käyttöoikeudet ja
 # roolikohtaiset asetukset. Rollbackin R4 (DROP/CREATE DATABASE) hävittää ne, joten ne tallennetaan.
-psqlq "$DATABASE_URL" -c "SELECT 'owner=' || pg_get_userbyid(datdba), 'acl=' || coalesce(datacl::text, ''), 'settings=' || coalesce((SELECT string_agg(coalesce(setrole::text, '0') || ':' || setconfig::text, ';') FROM pg_db_role_setting s WHERE s.setdatabase = d.oid), '') FROM pg_database d WHERE datname = current_database()" >"$SNAP_DIR/db-level.txt" \
+psqlq "$DATABASE_URL" -c "SELECT 'encoding=' || pg_encoding_to_char(encoding), 'collate=' || datcollate, 'ctype=' || datctype, 'owner=' || pg_get_userbyid(datdba), 'acl=' || coalesce(datacl::text, ''), 'settings=' || coalesce((SELECT string_agg(coalesce(setrole::text, '0') || ':' || setconfig::text, ';') FROM pg_db_role_setting s WHERE s.setdatabase = d.oid), '') FROM pg_database d WHERE datname = current_database()" >"$SNAP_DIR/db-level.txt" \
   || die "tietokantatason tilan luku epäonnistui"
 
 # --- 3. Dump ----------------------------------------------------------------------------------
@@ -167,7 +170,10 @@ echo "$LOGTAG dump valmis: $(stat -c %s "$DUMP") tavua"
 
 # --- 4. Palautus scratch-kantaan ---------------------------------------------------------------
 [ "$SCRATCH_URL" != "$DATABASE_URL" ] || die "scratch-URL on sama kuin lähde-URL; keskeytetään"
-psqlq "$ADMIN_URL" -c "CREATE DATABASE \"$SCRATCH\"" >/dev/null \
+# Sama merkistö ja locale kuin lähteellä (template1 voi olla SQL_ASCII, ja väärä merkistö ei näy rivimäärissä).
+IFS='|' read -r DB_ENC DB_COLL DB_CTYPE < <(psqlq "$DATABASE_URL" -F'|' -c "SELECT pg_encoding_to_char(encoding), datcollate, datctype FROM pg_database WHERE datname = current_database()")
+[[ "$DB_ENC$DB_COLL$DB_CTYPE" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "lähdekannan merkistö tai locale ei ole luettavissa"
+psqlq "$ADMIN_URL" -c "CREATE DATABASE \"$SCRATCH\" TEMPLATE template0 ENCODING '$DB_ENC' LC_COLLATE '$DB_COLL' LC_CTYPE '$DB_CTYPE'" >/dev/null \
   || die "scratch-kannan luonti epäonnistui (CREATEDB-oikeus?)"
 SCRATCH_CREATED=1
 # Todenna ennen palautusta, että scratch-yhteys osuu scratchiin eikä lähteeseen.

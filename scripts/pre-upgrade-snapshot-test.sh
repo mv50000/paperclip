@@ -82,6 +82,7 @@ has "upstream/master unknown" "$(cat "$SHAF" 2>/dev/null)" "upstream/master=unkn
 [ "$(stat -c %a "$SNAP/paperclip.dump")" = 600 ] && ok "dump 0600" || bad "dump-oikeudet $(stat -c %a "$SNAP/paperclip.dump")"
 [ "$(stat -c %a "$OUT")" = 700 ] && ok "out-dir 0700" || bad "out-dir-oikeudet"
 has "scratch-luvut talteen" "$(cat "$SNAP/counts-scratch.txt")" "companies=7"
+has "db-level.txt sisältää merkistön" "$(cat "$SNAP/db-level.txt")" "encoding=$(psql "$(url src)" -qAt -c "select pg_encoding_to_char(encoding) from pg_database where datname='src'")"
 LEFT=$(psql "$(url postgres)" -qAt -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'pcp_restore_check_%'")
 [ "$LEFT" = 0 ] && ok "scratch pudotettu" || bad "scratch-kantoja jäi $LEFT"
 ( cd "$SNAP" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ) && ok "SHA256SUMS täsmää" || bad "SHA256SUMS ei täsmää"
