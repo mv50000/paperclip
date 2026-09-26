@@ -107,10 +107,82 @@ korjauksia vasten on tiedostossa `doc/upgrade/defaults-hardening.md`.
 
 ## Harjoitusinstanssi
 
-Varattu harjoitusinstanssin lapselle. Operaattorin päätös (2026-09-26): instanssi eristetään
-ensisijaisesti verkkotasolla (oma käyttäjä tai netns, egress vain loopback ja paikallinen PG)
-ja salaisuudet pidetään poissa envistä. Koodiin lisätään gate vain sinne, mitä verkkotaso ei
-kata. Savutesti ajetaan: `scripts/upgrade-smoke.sh http://<harjoitusinstanssi>:<portti>`.
+`scripts/upgrade-rehearsal.sh <git-ref>` (RK9-306) ajaa jokaisen portaan prod-kannan kopiota
+vasten. Aja se ennen jokaista porrasta (512 → 609 → 720 → 817 → 831.1 → 916.1) ja kirjaa tulos
+Porraslokiin. Komento tekee yhdellä ajolla:
+
+1. `pg_dump -Fc` prod-kannasta tiedostoon `/var/backups/paperclip/rehearsal-<aika>.dump` (vain luku).
+   Skripti tarkistaa ensin levytilan (vapaata vähintään 3 × kannan koko) ja säilyttää 5 viimeisintä dumpia.
+2. Palautus kantaan `paperclip_rehearsal`. Nimi on lukittu muotoon `paperclip_rehearsal[_x]`, eikä se voi olla prod-kanta.
+3. Worktree `/tmp/paperclip-worktrees/RK9/rehearsal` refistä ja `pnpm install --frozen-lockfile`.
+4. Palvelin porttiin 3199 omalla `PAPERCLIP_HOME`lla (`~/.paperclip-rehearsal`), joka ei saa osua prodin kotiin.
+
+Tuloste: dumpin polku, pre-upgrade-SHA (`git rev-parse HEAD` ennen checkoutia) ja kokonaiskesto.
+
+### Eristys
+
+Operaattorin päätös (2026-09-26): eristä ensisijaisesti verkkotasolla ja pidä salaisuudet poissa envistä.
+Koodiin ei lisätty kill-switchiä. Heartbeat-, routine- ja outreach-ajastimet sammuvat olemassa olevilla
+lipuilla, joten `heartbeat.ts` ja `routines.ts` pysyvät koskemattomina (konfliktipinta ei kasva).
+
+| Kerros | Toteutus | Mitä estää |
+|---|---|---|
+| Verkko | palvelin ajetaan `unshare -rn` -nimiavaruudessa (vain `lo`, ei reittejä) | SES/Resend, Slack, GitHub, outreach-lähetys, DNSBL, announcement feed |
+| Kanta | yhteys unix-socketin kautta (`?host=/var/run/postgresql`), ei TCP:tä | ei tarvitse egressiä paikalliseen PG:hen |
+| Env | `env -i` + allowlist; ei `ses.env`iä, tokeneita eikä `PAPERCLIP_SECRETS_*` | salaisuudet eivät päädy palvelimeen |
+| Salaisuudet kannassa | oma `PAPERCLIP_HOME`, joten `master.key` on uusi | kantaan tallennetut salaisuudet eivät pura |
+| Ajastimet | `HEARTBEAT_SCHEDULER_ENABLED=false`, `OUTREACH_SENDER_ENABLED=false`, `OUTREACH_AUTO_PAUSE_ENABLED=false`, `OUTREACH_DNSBL_ENABLED=false`, `PAPERCLIP_DB_BACKUP_ENABLED=false` | agenttiajot (ne kirjoittaisivat oikeisiin repoihin), routinet, outreach-cronit |
+
+Skripti epäonnistuu suljetusti (`die`), jos jokin näistä ei päde: nimiavaruudessa on muu liitäntä kuin `lo`,
+reittejä on, egress-koetin pääsee ulos (1.1.1.1, 8.8.8.8, metadata, SES, Resend, Slack, GitHub),
+palvelimen env sisältää salaisuudennäköisen muuttujan tai ulos lähtevien taulujen
+(`email_messages`, `email_outbound_audit`, `outreach_messages`, `outreach_events`, `outreach_sender_pauses`)
+rivimäärä kasvaa käynnistyksessä. Tarkistus ajetaan ennen palvelimen käynnistystä ja sen jälkeen.
+
+Palvelin kuuntelee vain nimiavaruuden loopbackissa. Hostilta se ei ole tavoitettavissa, joten
+savutesti ajetaan nimiavaruuden sisällä: `scripts/upgrade-rehearsal.sh smoke [--fork-tests]`
+(kutsuu `scripts/upgrade-smoke.sh`ia, jota ei luoda uudelleen).
+
+Yksi `claude_local`-heartbeat per yritys (regressiomatriisin kohta 4) ei ole automatisoitu. Ajastin on pois päältä,
+koska agentti voisi kirjoittaa kannan osoittamiin oikeisiin työhakemistoihin. Ajo vaatii erillisen päätöksen
+(heartbeat-päätökset -osion lapsi) ja työhakemistojen uudelleenohjauksen.
+
+### Ajo tällä koneella
+
+Kanta hyväksyy socketissa vain peer-tunnistuksen, joten aja palvelun käyttäjänä:
+
+```bash
+sudo -u paperclip scripts/upgrade-rehearsal.sh v2026.512.0    # tai porrasbranch
+sudo -u paperclip scripts/upgrade-rehearsal.sh smoke --fork-tests
+sudo -u paperclip scripts/upgrade-rehearsal.sh rollback
+sudo -u paperclip scripts/upgrade-rehearsal.sh stop
+```
+
+Kertaluonteinen valmistelu (operaattori, root). Sitä ei voitu tehdä agenttisessiosta, koska sessiolla ei ole sudoa:
+
+```bash
+sudo install -d -o paperclip -m 700 /var/backups/paperclip
+sudo -u postgres psql -c 'ALTER ROLE paperclip CREATEDB'
+sudo install -d -o paperclip -m 755 /tmp/paperclip-worktrees/RK9
+sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0   # vain jos unshare -rn estetty
+```
+
+### Rollback-harjoitus
+
+`rollback` pysäyttää palvelimen, luo `paperclip_rehearsal`in tyhjäksi, ajaa `pg_restore --clean` dumpista ja
+tekee `git reset --hard <pre-SHA>` worktreessä. Rivimäärät (companies, agents, issues, heartbeat_runs,
+activity_log ja ulos lähtevät taulut) sekä julkisten taulujen ja sarakkeiden määrä on vastattava restore-hetkeä,
+muuten skripti epäonnistuu. Kanta luodaan tyhjäksi, koska `--clean` yksin ei poista tauluja, jotka portti lisäsi.
+Kirjaa rollbackin kesto Porraslokiin.
+
+### Tunnetut rajat
+
+- Skriptin putki (dump, restore, worktree, nimiavaruus, eristystarkistukset, smoke `--offline`, rollback) on ajettu
+  kertaalleen tilapäistä PG-klusteria ja tynkäpalvelinta vasten. Ajoa oikeaa prod-kantaa ja oikeaa palvelinta vasten ei ole tehty.
+- `?host=`-muotoinen `DATABASE_URL` postgres.js:lle ja migraatioiden ajo palvelimen käynnistyksessä on todentamatta;
+  tarkista ensimmäisellä oikealla ajolla lokista (`~/.paperclip-rehearsal/server.log`).
+- Nimiavaruus ei vaihda mount-nimiavaruutta: tiedostopolut (esim. agenttien workspacet kannassa) ovat näkyvissä.
+  Siksi heartbeat-ajastin on pois päältä.
 
 ## Deploy ja rollback
 
@@ -148,6 +220,8 @@ git push origin "rk9/pre-upgrade-v2026.NNN.N"
 ```
 
 Aja lähtötilan savutesti: `scripts/upgrade-smoke.sh --offline --fork-tests`.
+Aja harjoitusinstanssi porrasrefillä (osio "Harjoitusinstanssi") ennen mergeä:
+`sudo -u paperclip scripts/upgrade-rehearsal.sh <ref>`, sen jälkeen `smoke` ja kerran `rollback`.
 
 ### 2. Fetch & inspect
 
