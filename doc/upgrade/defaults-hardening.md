@@ -221,13 +221,21 @@ sinne loopbackista, ja `TRUST_PROXY=loopback` luottaa siihen tarkoituksella.
 Todennus deployn jälkeen tuotannossa:
 
 1. Kirjaudu `https://paperclip.rk9.fi`:hin ja tee yksi board-mutaatio. Sen pitää onnistua.
-2. Luo kertakäyttöinen issue ilman assigneeta. Kommentti ei silloin herätä yhtään agenttia.
-3. Lähetä sille kommentti `curl`illa toiselta koneelta osoitteeseen `http://192.168.1.54:3100`
-   (paperclip-01:n oma `eth0`) voimassa olevalla istuntoevästeellä. Käytä hostnimeä, joka on
+2. Luo kertakäyttöinen issue ilman assigneeta ja ilman execution policyä. Kirjoita kommenttiin
+   ei yhtään `@`-mainintaa. Silloin kommentti ei herätä yhtään agenttia.
+3. Lähetä sille kommentti `curl`illa toiselta LAN-koneelta osoitteeseen `http://192.168.1.54:3100`
+   (paperclip-01:n oma `eth0`) voimassa olevalla istuntoevästeellä. Eväste kulkee salaamattomana,
+   joten käytä luotettua konetta. Käytä hostnimeä, joka on
    `PAPERCLIP_ALLOWED_HOSTNAMES`-listalla mutta eri kuin `Host`:
    `X-Forwarded-Host: paperclip-01.rk9.fi` ja `Origin: https://paperclip-01.rk9.fi`.
-4. Odotettu tulos on 403 ja virhe "Board mutation requires trusted browser origin". Jos kommentti
-   syntyy, guard ei toimi: palauta edellinen porras ja peruuta issue.
+4. Odotettu tulos on 403 ja virhe "Board mutation requires trusted browser origin".
+5. Peruuta kertakäyttöinen issue tuloksesta riippumatta.
+
+Jos kommentti syntyy, guard ei toimi. Korjaa eteenpäin, älä palauta porrasta: aiemmat portaat ja
+nykyfork luottavat `X-Forwarded-Host`-otsakkeeseen joka tapauksessa, ja porrasrollback
+(`pg_restore --clean`) hävittäisi deployn jälkeen kirjoitetun datan. Todennäköiset syyt ovat
+`TRUST_PROXY`-arvo `paperclip-start.sh`:ssa tai guard, jota ei otettu upstreamista sellaisenaan.
+Avaa korjaustiketti.
 
 Huomiot:
 
