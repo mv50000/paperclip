@@ -6,7 +6,8 @@
 # loopback. Tuotantoon ei kirjoiteta, eikä paperclip.serviceä kosketa.
 #
 # Eristys (operaattorin päätös 2026-09-26, ensisijaisesti verkkotaso):
-#   1. Palvelin ajetaan `unshare -rn` -nimiavaruudessa: ei reittiä ulos. Nimet voivat resolvoitua
+#   1. Palvelin ajetaan `unshare -r -n -p -f --mount-proc` -nimiavaruudessa: ei reittiä ulos, oma pid-avaruus
+#      (kannan kopion process_pid-arvot eivät osu prodin prosesseihin). Nimet voivat resolvoitua
 #      hostin resolverin unix-socketin kautta, mutta yhteys ei avaudu. Ulos lähtevä
 #      SES/Resend/Slack/GitHub/outreach epäonnistuu yhteyden avauksessa.
 #   2. Kantayhteys: nimiavaruuden sisäinen silta 127.0.0.1:5432 → hostin PG:n unix-socket
@@ -14,10 +15,10 @@
 #   3. Palvelimen env rakennetaan `env -i`:llä allowlististä: ei ses.env:iä eikä tokeneita.
 #      Oma PAPERCLIP_HOME, PAPERCLIP_CONFIG ja PAPERCLIP_SECRETS_MASTER_KEY_FILE on lukittu sen alle,
 #      joten master.key on uusi eikä kantaan tallennettuja salaisuuksia voi purkaa.
-#   4. Ajastimet pois olemassa olevilla lipuilla (HEARTBEAT_SCHEDULER_ENABLED=false,
-#      OUTREACH_*_ENABLED=false ym.). Koodiin ei lisätty gatea: verkkotaso kattaa loput.
+#   4. Ajastimet pois lipuilla (HEARTBEAT_SCHEDULER_ENABLED=false, OUTREACH_*_ENABLED=false ym.;
+#      PAPERCLIP_ANNOUNCEMENTS_ENABLED tulee voimaan vasta portaassa 916.1). Koodiin ei lisätty gatea: verkkotaso kattaa loput.
 #   5. Skripti kieltäytyy jatkamasta (fail closed), jos egress-koetin pääsee ulos, nimiavaruudessa
-#      on muu kuin lo tai palvelimen env sisältää salaisuudennäköisen muuttujan.
+#      on muu kuin lo tai jonkin nimiavaruuden prosessin env sisältää salaisuudennäköisen muuttujan.
 #
 # Käyttö:
 #   scripts/upgrade-rehearsal.sh <git-ref>     koko putki: dump → restore → worktree → install → palvelin
@@ -25,6 +26,7 @@
 #   scripts/upgrade-rehearsal.sh rollback      tyhjä kanta + pg_restore --clean dumpista + git reset pre-SHA:han
 #   scripts/upgrade-rehearsal.sh status        näytä tila
 #   scripts/upgrade-rehearsal.sh stop          pysäytä palvelin ja nimiavaruus
+#   scripts/upgrade-rehearsal.sh clean [--dumps]  pudota harjoituskanta (prod-dataa!) ja worktree; dumpit vain --dumps
 #
 # Ajo tällä koneella: kanta hyväksyy socketissa vain peer-tunnistuksen, joten aja
 # palvelun käyttäjänä paperclip-omisteisesta checkoutista (ks. doc/UPSTREAM-UPGRADE.md, "Ajo tällä koneella").
@@ -37,6 +39,7 @@
 #   REHEARSAL_WORKTREE=/tmp/paperclip-worktrees/rehearsal/RK9   REHEARSAL_KEEP_DUMPS=5
 #   REHEARSAL_MIN_FREE_FACTOR=3   vapaata levyä vähintään näin monta kertaa kannan koko
 # Testisaumat: REHEARSAL_INSTALL_CMD, REHEARSAL_SERVER_CMD.
+# sudo nollaa ympäristön: anna muuttujat näin:  sudo -u paperclip env REHEARSAL_X=… scripts/upgrade-rehearsal.sh …
 #
 # Poistumiskoodi: 0 = ok, 1 = virhe tai eristystarkistus epäonnistui, 2 = käyttövirhe.
 
@@ -58,7 +61,6 @@ FREE_FACTOR="${REHEARSAL_MIN_FREE_FACTOR:-3}"
 INSTALL_CMD="${REHEARSAL_INSTALL_CMD:-pnpm install --frozen-lockfile}"
 SERVER_CMD="${REHEARSAL_SERVER_CMD:-pnpm --filter @paperclipai/server exec tsx src/index.ts}"
 
-BRIDGE_PID_FILE="$REH_HOME/pg-bridge.pid"
 STATE_FILE="$REH_HOME/rehearsal-state.env"
 HOLDER_PID_FILE="$REH_HOME/netns-holder.pid"
 SERVER_PID_FILE="$REH_HOME/server.pid"
@@ -69,7 +71,7 @@ OUTBOUND_TABLES=(email_messages email_outbound_audit outreach_messages outreach_
 KEY_TABLES=(companies agents issues heartbeat_runs activity_log "${OUTBOUND_TABLES[@]}")
 
 die()  { printf 'VIRHE: %s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,45p' "$0"; exit 2; }
+usage() { sed -n '2,47p' "$0"; exit 2; }
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 export PGHOST="$SOCKET_DIR" PGUSER="$PG_USER"
@@ -103,56 +105,49 @@ psql_q() { psql -X -qAt -v ON_ERROR_STOP=1 "$@"; }
 
 # --- Nimiavaruus ----------------------------------------------------------------------------
 
-# pid_is PIDFILE REGEX — pid elää ja sen komentorivi täsmää (suojaa uudelleenkäytetyiltä pideiltä).
-pid_is() {
-  [[ -s "$1" ]] || return 1
-  local pid; pid="$(cat "$1")"
-  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
-  local cmd; cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"   # ei putkea: pipefail + grep -q antaa SIGPIPE-virheen
-  [[ "$cmd" =~ $2 ]]
-}
-# Holder on `sleep infinity`, ja sen verkkonimiavaruus eroaa omastamme.
+# Holder on `unshare -r -n -p -f --mount-proc`: käyttäjä-, verkko-, pid- ja mount-nimiavaruus.
+# Pid-nimiavaruus estää palvelinta signaloimasta prodin prosesseja kannan kopion pid-arvoilla
+# (heartbeat_runs.process_pid). Kun nimiavaruuden init kuolee, kaikki sen prosessit kuolevat.
+holder_init_pid() { pgrep -P "$(cat "$HOLDER_PID_FILE")" 2>/dev/null | head -1; }
 holder_alive() {
-  pid_is "$HOLDER_PID_FILE" '^sleep infinity' || return 1
-  [[ "$(readlink "/proc/$(cat "$HOLDER_PID_FILE")/ns/net")" != "$(readlink /proc/self/ns/net)" ]]
-}
-# server_alive — pid elää ja sen env kantaa harjoitusinstanssin PAPERCLIP_HOMEa (exec vaihtaa komentorivin).
-server_alive() {
-  [[ -s "$SERVER_PID_FILE" ]] || return 1
-  local pid; pid="$(cat "$SERVER_PID_FILE")"
-  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/environ" ]] || return 1
-  local env; env="$(tr '\0' '\n' <"/proc/$pid/environ")"
-  [[ $'\n'"$env"$'\n' == *$'\n'"PAPERCLIP_HOME=$REH_HOME"$'\n'* ]]
+  [[ -s "$HOLDER_PID_FILE" ]] || return 1
+  local pid init cmd; pid="$(cat "$HOLDER_PID_FILE")"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"   # ei putkea: pipefail + grep -q antaa SIGPIPE-virheen
+  [[ "$cmd" == *"unshare -r -n -p -f --mount-proc"* ]] || return 1
+  init="$(holder_init_pid)"; [[ -n "$init" ]] || return 1
+  [[ "$(readlink "/proc/$init/ns/net")" != "$(readlink /proc/self/ns/net)" && "$(readlink "/proc/$init/ns/pid")" != "$(readlink /proc/self/ns/pid)" ]]
 }
 
-# tree_pids PID — pid ja kaikki sen jälkeläiset.
-tree_pids() {
-  local pid="$1" child
-  echo "$pid"
-  for child in $(ps -o pid= --ppid "$pid" 2>/dev/null); do tree_pids "$child"; done
-}
-kill_tree() { # PID SIGNAALI
-  local p
-  for p in $(tree_pids "$1" | tac); do kill "-$2" "$p" 2>/dev/null || true; done
-}
-
-# ns_exec CMD... — aja komento harjoitusnimiavaruudessa (käyttäjä+verkko).
+# ns_exec CMD... — aja komento harjoitusnimiavaruudessa. NS_WD asettaa työhakemiston.
 ns_exec() {
   holder_alive || die "nimiavaruutta ei ole käynnissä (aja ensin: $0 <git-ref>)"
-  nsenter -t "$(cat "$HOLDER_PID_FILE")" -U -n --preserve-credentials -- "$@"
+  nsenter -t "$(holder_init_pid)" -U -n -p -m ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@"
+}
+# ns_daemon LOKI CMD... — sama taustalle omassa istunnossa (sudo-pty:n SIGHUP ei tapa sitä).
+ns_daemon() {
+  local logfile="$1"; shift
+  holder_alive || die "nimiavaruutta ei ole käynnissä"
+  setsid nsenter -t "$(holder_init_pid)" -U -n -p -m ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@" >>"$logfile" 2>&1 </dev/null &
+}
+
+# server_alive — palvelimen pid (nimiavaruuden numeroinnissa) elää.
+server_alive() {
+  holder_alive && [[ -s "$SERVER_PID_FILE" ]] || return 1
+  ns_exec bash -c 'p="$(cat "$1")"; [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p"' _ "$SERVER_PID_FILE" 2>/dev/null
 }
 
 start_netns() {
-  command -v unshare >/dev/null && command -v nsenter >/dev/null || die "unshare/nsenter puuttuu"
+  command -v unshare >/dev/null && command -v nsenter >/dev/null && command -v pgrep >/dev/null || die "unshare/nsenter/pgrep puuttuu"
   if holder_alive; then return; fi
-  # Holder pitää nimiavaruuden elossa. lo nostetaan ylös, muuta liitäntää ei ole.
-  setsid unshare -r -n bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 &
+  # env -i: nimiavaruuden init ei peri operaattorin env:iä. lo nostetaan ylös, muuta liitäntää ei ole.
+  setsid env -i PATH="$PATH" unshare -r -n -p -f --mount-proc bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 </dev/null &
   echo $! >"$HOLDER_PID_FILE"
   for _ in $(seq 1 20); do
-    if [[ "$(ns_exec ip -o link show lo 2>/dev/null || true)" =~ (UP|UNKNOWN) ]]; then return; fi
+    if holder_alive && [[ "$(ns_exec ip -o link show lo 2>/dev/null || true)" =~ (UP|UNKNOWN) ]]; then return; fi
     sleep 0.25
   done
-  die "verkkonimiavaruus ei käynnistynyt. Jos unshare -rn on estetty (kernel.unprivileged_userns_clone=0 / apparmor), aja operaattorina: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0"
+  die "verkko/pid-nimiavaruus ei käynnistynyt. Jos unshare -rnpf on estetty (kernel.unprivileged_userns_clone=0 / apparmor), aja operaattorina: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0"
 }
 
 # Fail closed: todista eristys ennen kuin palvelin käynnistetään ja sen jälkeen.
@@ -175,19 +170,26 @@ verify_isolation() {
   log "eristys ok: vain lo, ei reittejä, egress-koettimet (1.1.1.1, 8.8.8.8, metadata, SES, Resend, Slack, GitHub) estetty"
 }
 
-# Palvelimen prosessipuun (pnpm → tsx → node) env ei saa sisältää salaisuudennäköisiä muuttujia.
+# Kaikkien nimiavaruuden prosessien env ei saa sisältää salaisuudennäköisiä muuttujia. Nimiavaruudessa on vain
+# init, silta ja palvelin, joten koko /proc käydään läpi. Ei luettavissa oleva env on virhe (fail closed).
 verify_server_env() {
-  local root="$1" p bad="" leaked
-  for p in $(tree_pids "$root"); do
-    [[ -r "/proc/$p/environ" ]] || continue
-    leaked="$(tr '\0' '\n' <"/proc/$p/environ" | cut -d= -f1 \
-      | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
-      | grep -v -E '^PAPERCLIP_SECRETS_MASTER_KEY_FILE$' || true)"
-    [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr '\n' ' ') "
-    if tr '\0' '\n' <"/proc/$p/environ" | grep -q -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@'; then bad+="pid $p: DATABASE_URL sisältää salasanan "; fi
-  done
-  [[ -z "$bad" ]] || die "eristys: palvelimen env sisältää salaisuudennäköistä: $bad"
-  log "palvelimen env ok ($(tree_pids "$root" | wc -l) prosessia): ei salaisuusmuuttujia"
+  local out
+  out="$(ns_exec bash -c '
+    bad=""; n=0
+    for d in /proc/[0-9]*; do
+      p="${d#/proc/}"; [[ "$p" == "$$" ]] && continue
+      if [[ ! -r "$d/environ" ]]; then [[ -d "$d" ]] && bad+="pid $p: environ ei luettavissa; "; continue; fi
+      n=$((n + 1))
+      leaked="$(tr "\0" "\n" <"$d/environ" | cut -d= -f1 \
+        | grep -E -i "(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)" \
+        | grep -v -E "^PAPERCLIP_SECRETS_MASTER_KEY_FILE$" || true)"
+      [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr "\n" " ")"
+      if tr "\0" "\n" <"$d/environ" | grep -q -E "^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@"; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
+    done
+    echo "$n|$bad"')" || die "eristys: env-tarkistus epäonnistui"
+  [[ "${out#*|}" == "" ]] || die "eristys: nimiavaruuden env sisältää salaisuudennäköistä: ${out#*|}"
+  [[ "${out%%|*}" -ge 2 ]] || die "eristys: nimiavaruudessa on liian vähän prosesseja tarkistettavaksi (${out%%|*})"
+  log "nimiavaruuden env ok (${out%%|*} prosessia): ei salaisuusmuuttujia"
 }
 
 # --- Kanta ----------------------------------------------------------------------------------
@@ -201,9 +203,16 @@ table_counts() { # db → "taulu=n" riveittäin; puuttuva taulu = -1; virhe kesk
     echo "$t=$n"
   done
   # Skeema: portti voi lisätä tauluja ja sarakkeita, joita --clean yksin ei poista.
-  echo "_public_tables=$(psql_q -d "$db" -c "select count(*) from information_schema.tables where table_schema='public'")"
-  echo "_public_columns=$(psql_q -d "$db" -c "select count(*) from information_schema.columns where table_schema='public'")"
+  local nt nc
+  nt="$(psql_q -d "$db" -c "select count(*) from information_schema.tables where table_schema='public'")"
+  nc="$(psql_q -d "$db" -c "select count(*) from information_schema.columns where table_schema='public'")"
+  [[ "$nt" =~ ^[0-9]+$ && "$nc" =~ ^[0-9]+$ ]] || die "skeemalaskenta epäonnistui: $db"
+  echo "_public_tables=$nt"
+  echo "_public_columns=$nc"
 }
+
+# Skeemasormenjälki: rollbackin pitää palauttaa täsmälleen restore-hetken skeema.
+schema_hash() { local h; h="$(pg_dump -s --no-owner --no-acl -d "$1" | md5sum)" || die "pg_dump -s epäonnistui: $1"; echo "${h%% *}"; }
 
 check_disk_and_retention() {
   mkdir -p "$BACKUP_DIR" 2>/dev/null || die "en voi luoda $BACKUP_DIR. Operaattori: sudo install -d -o $(id -un) -m 700 $BACKUP_DIR"
@@ -242,22 +251,14 @@ restore_dump() { # dump [--clean]
 
 # --- Palvelin -------------------------------------------------------------------------------
 
-stop_server() {
-  if server_alive; then
-    local pid; pid="$(cat "$SERVER_PID_FILE")"
-    kill_tree "$pid" TERM
-    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
-    kill_tree "$pid" KILL
-  fi
-  rm -f "$SERVER_PID_FILE"
-  if pid_is "$BRIDGE_PID_FILE" 'pg-bridge.js'; then kill_tree "$(cat "$BRIDGE_PID_FILE")" KILL; fi
-  rm -f "$BRIDGE_PID_FILE"
-}
-
+# Pysäyttää koko nimiavaruuden: init kuolee → kernel tappaa sen kaikki prosessit (palvelin, silta, orvot lapset).
 stop_all() {
-  stop_server
-  if holder_alive; then kill "$(cat "$HOLDER_PID_FILE")" 2>/dev/null || true; fi
-  rm -f "$HOLDER_PID_FILE"
+  if holder_alive; then
+    local init; init="$(holder_init_pid)"
+    kill -KILL "$init" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "$init" 2>/dev/null || break; sleep 0.25; done
+  fi
+  rm -f "$HOLDER_PID_FILE" "$SERVER_PID_FILE"
 }
 
 # Silta: nimiavaruuden 127.0.0.1:5432 → hostin PG:n unix-socket. Kuuluu vain nimiavaruuteen.
@@ -274,9 +275,7 @@ net.createServer((c) => {
 JS
   local sock="$SOCKET_DIR/.s.PGSQL.${PGPORT:-5432}"
   [[ -S "$sock" ]] || die "PG-socketia ei löydy: $sock"
-  # Pid kirjoitetaan sisäpuolelta: taustalla ajettu funktio on aliprosessi, jonka $! ei ole node.
-  ns_exec bash -c 'echo $$ >"$1"; exec node "$2" "$3" 5432' _ "$BRIDGE_PID_FILE" "$REH_HOME/pg-bridge.js" "$sock" \
-    >>"$SERVER_LOG" 2>&1 </dev/null &
+  ns_daemon "$SERVER_LOG" env -i PATH="$PATH" HOME="$REH_HOME" node "$REH_HOME/pg-bridge.js" "$sock" 5432
   for _ in $(seq 1 20); do
     ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/5432" 2>/dev/null && return
     sleep 0.25
@@ -290,8 +289,9 @@ start_server() {
   local db_url="postgres://${PG_USER}@127.0.0.1:5432/${REH_DB}"
   : >"$SERVER_LOG"
   start_pg_bridge
-  # env -i: vain allowlist. Ei perittyjä tokeneita, ei ses.env:iä, ei PAPERCLIP_SECRETS_*.
-  ( cd "$WORKTREE" && ns_exec env -i \
+  rm -f "$SERVER_PID_FILE"
+  # env -i: vain allowlist. Ei perittyjä tokeneita eikä ses.env:iä; salaisuuksista vain master.key:n polku.
+  NS_WD="$WORKTREE" ns_daemon "$SERVER_LOG" env -i \
       PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_HOME="$REH_HOME" \
       NODE_ENV=development HOST=127.0.0.1 PORT="$PORT" \
       PAPERCLIP_LISTEN_HOST=127.0.0.1 PAPERCLIP_LISTEN_PORT="$PORT" \
@@ -303,15 +303,15 @@ start_server() {
       OUTREACH_SENDER_ENABLED=false OUTREACH_AUTO_PAUSE_ENABLED=false OUTREACH_DNSBL_ENABLED=false \
       PAPERCLIP_ANNOUNCEMENTS_ENABLED=false PAPERCLIP_QMD_WATCHDOG_ENABLED=false \
       PAPERCLIP_DB_BACKUP_ENABLED=false \
-      bash -c "echo \$\$ >'$SERVER_PID_FILE'; exec $SERVER_CMD" ) >>"$SERVER_LOG" 2>&1 </dev/null &
+      bash -c "echo \$\$ >'$SERVER_PID_FILE'; exec $SERVER_CMD"
   for i in $(seq 1 120); do
     if (( i > 5 )) && ! server_alive; then
       tail -n 30 "$SERVER_LOG" >&2 || true
       die "palvelin päättyi ennen kuin alkoi kuunnella (loki: $SERVER_LOG)"
     fi
     if server_alive && ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
-      log "palvelin kuuntelee nimiavaruudessa 127.0.0.1:$PORT (pid $(cat "$SERVER_PID_FILE"))"
-      verify_server_env "$(cat "$SERVER_PID_FILE")"
+      log "palvelin kuuntelee nimiavaruudessa 127.0.0.1:$PORT (nimiavaruuden pid $(cat "$SERVER_PID_FILE"))"
+      verify_server_env
       return
     fi
     sleep 1
@@ -338,15 +338,23 @@ load_state() {
     k="${line%%=*}"; v="${line#*=}"
     case "$k" in
       DUMP) DUMP="$v" ;; PRE_SHA) PRE_SHA="$v" ;; PORT) PORT="$v" ;;
-      WORKTREE) WORKTREE="$v" ;; COUNTS_RESTORED) COUNTS_RESTORED="$v" ;;
+      WORKTREE) WORKTREE="$v" ;; COUNTS_RESTORED) COUNTS_RESTORED="$v" ;; SCHEMA_RESTORED) SCHEMA_RESTORED="$v" ;;
     esac
   done <"$STATE_FILE"
   guard_names   # tilasta luetut arvot tarkistetaan uudelleen
 }
 
+# Yksi ajo kerrallaan: päällekkäinen ajo tappaisi toisen instanssin (EXIT-trap, stop_all).
+acquire_lock() {
+  mkdir -p "$REH_HOME"; chmod 700 "$REH_HOME"
+  exec 9>"$REH_HOME/lock"
+  flock -n 9 || die "toinen upgrade-rehearsal-ajo on käynnissä ($REH_HOME/lock)"
+}
+
 cmd_run() {
   local ref="$1"
   guard_names
+  acquire_lock
   SECONDS=0
   DUMP_PART=""
   trap 'exit 143' TERM INT
@@ -369,7 +377,9 @@ cmd_run() {
   log "palautetaan kantaan $REH_DB"
   recreate_reh_db
   restore_dump "$dump"
-  local counts_restored; counts_restored="$(table_counts "$REH_DB" | tr '\n' ' ')"
+  local counts_restored schema_restored
+  counts_restored="$(table_counts "$REH_DB" | tr '\n' ' ')"
+  schema_restored="$(schema_hash "$REH_DB")"
 
   log "worktree $WORKTREE @ $ref"
   if [[ -e "$WORKTREE" ]]; then git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" || rm -rf -- "$WORKTREE"; fi
@@ -379,7 +389,7 @@ cmd_run() {
   log "asennus: $INSTALL_CMD"
   ( cd "$WORKTREE" && bash -c "$INSTALL_CMD" )
 
-  save_state "DUMP=$dump" "PRE_SHA=$pre_sha" "REF=$ref" "COUNTS_RESTORED=$counts_restored" "PORT=$PORT" "WORKTREE=$WORKTREE"
+  save_state "DUMP=$dump" "PRE_SHA=$pre_sha" "REF=$ref" "COUNTS_RESTORED=$counts_restored" "SCHEMA_RESTORED=$schema_restored" "PORT=$PORT" "WORKTREE=$WORKTREE"
   start_netns
   verify_isolation
   start_server
@@ -409,20 +419,44 @@ seuraava:      $0 smoke        # savutesti instanssia vasten
 EOF
 }
 
+# Savutesti refin omalla upgrade-smoke.sh:lla (worktreestä, ei ajokopiosta): offline- ja fork-testit
+# ajetaan nimiavaruuden ulkopuolella (embedded PG ei käynnisty root-uidilla), HTTP-tarkistukset sen sisällä.
 cmd_smoke() {
   load_state
-  ns_exec env -i PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_SMOKE_URL="http://127.0.0.1:$PORT" \
-    bash "$REPO_ROOT/scripts/upgrade-smoke.sh" "$@"
+  local smoke="$WORKTREE/scripts/upgrade-smoke.sh" a rc=0 offline_only=0
+  [[ -f "$smoke" ]] || die "$smoke puuttuu refistä ${REF:-?}: porrasbranchin pitää perustua masteriin (RK9-304)"
+  local outside=(--offline) http_args=()
+  for a in "$@"; do
+    case "$a" in
+      --fork-tests) outside+=(--fork-tests) ;;
+      --offline) offline_only=1 ;;
+      *) http_args+=("$a") ;;
+    esac
+  done
+  log "smoke (worktree $WORKTREE): offline${outside[1]:+ + fork-testit}"
+  ( cd "$WORKTREE" && bash "$smoke" "${outside[@]}" ) || rc=1
+  if (( offline_only == 0 )); then
+    log "smoke: HTTP-tarkistukset nimiavaruudessa http://127.0.0.1:$PORT"
+    ns_exec env -i PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_SMOKE_URL="http://127.0.0.1:$PORT" \
+      bash "$smoke" "${http_args[@]}" || rc=1
+  fi
+  return "$rc"
 }
 
 cmd_rollback() {
   load_state
-  guard_names
+  acquire_lock
   SECONDS=0
   [[ -f "$DUMP" ]] || die "dumppia ei löydy: $DUMP"
   local expected="$COUNTS_RESTORED"
-  log "pysäytetään palvelin ja palautetaan $REH_DB dumpista (pg_restore --clean)"
-  stop_server
+  local schema_upgraded; schema_upgraded="$(schema_hash "$REH_DB")"
+  if [[ "$schema_upgraded" == "$SCHEMA_RESTORED" ]]; then
+    log "huom: skeema on muuttumaton restoresta (palvelin ei ajanut migraatioita), rollback ei todista skeeman palautusta"
+  else
+    log "skeema on muuttunut restoresta (migraatiot ajettu): rollbackin pitää palauttaa se"
+  fi
+  log "pysäytetään nimiavaruus ja palautetaan $REH_DB dumpista (pg_restore --clean)"
+  stop_all
   # Luo kanta tyhjäksi ennen restorea: pg_restore --clean ei poista tauluja, jotka portti lisäsi.
   recreate_reh_db
   restore_dump "$DUMP" --clean
@@ -433,15 +467,29 @@ cmd_rollback() {
   local after; after="$(table_counts "$REH_DB" | tr '\n' ' ')"
   echo "rivimäärät restoren jälkeen:  $expected"
   echo "rivimäärät rollbackin jälkeen: $after"
-  [[ "$(echo $expected)" == "$(echo $after)" ]] || die "rollback: rivimäärät eivät täsmää"
+  [[ "${expected% }" == "${after% }" ]] || die "rollback: rivimäärät eivät täsmää"
+  [[ "$(schema_hash "$REH_DB")" == "$SCHEMA_RESTORED" ]] || die "rollback: skeema ei vastaa restore-hetkeä"
   save_state "ROLLBACK_SECONDS=$SECONDS"
-  log "rollback ok: rivimäärät ja skeema täsmäävät, HEAD = $PRE_SHA, kesto ${SECONDS} s"
+  log "rollback ok: rivimäärät ja skeemasormenjälki täsmäävät, HEAD = $PRE_SHA, kesto ${SECONDS} s"
 }
 
 cmd_status() {
   if [[ -f "$STATE_FILE" ]]; then cat "$STATE_FILE"; else echo "ei tilaa"; fi
-  holder_alive && echo "nimiavaruus: käynnissä (pid $(cat "$HOLDER_PID_FILE"))" || echo "nimiavaruus: ei käynnissä"
-  [[ -s "$SERVER_PID_FILE" ]] && kill -0 "$(cat "$SERVER_PID_FILE")" 2>/dev/null && echo "palvelin: käynnissä" || echo "palvelin: ei käynnissä"
+  if holder_alive; then echo "nimiavaruus: käynnissä (pid $(cat "$HOLDER_PID_FILE"))"; else echo "nimiavaruus: ei käynnissä"; fi
+  if server_alive; then echo "palvelin: käynnissä"; else echo "palvelin: ei käynnissä"; fi
+}
+
+# Siivoa: pysäytä, pudota harjoituskanta (sisältää prod-dataa, myös prospektien henkilötietoja), poista worktree.
+# Dumpit poistetaan vain valitsimella --dumps.
+cmd_clean() {
+  guard_names
+  acquire_lock
+  stop_all
+  dropdb --if-exists "$REH_DB"
+  [[ -e "$WORKTREE" ]] && { git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" || rm -rf -- "$WORKTREE"; git -C "$REPO_ROOT" worktree prune; }
+  if [[ "${1:-}" == "--dumps" ]]; then rm -f -- "$BACKUP_DIR"/rehearsal-*.dump; log "dumpit poistettu"; fi
+  rm -f "$STATE_FILE"
+  log "siivottu: kanta $REH_DB pudotettu, worktree poistettu"
 }
 
 case "${1:-}" in
@@ -450,6 +498,7 @@ case "${1:-}" in
   rollback) cmd_rollback ;;
   status) cmd_status ;;
   stop) stop_all; log "pysäytetty" ;;
+  clean) shift; cmd_clean "$@" ;;
   -*) echo "tuntematon valitsin: $1" >&2; exit 2 ;;
   *) cmd_run "$1" ;;
 esac
