@@ -98,10 +98,10 @@ upstream tuo sen.
 | Announcement feed | `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false` (opt-out) | päällä, hakee `pages.paperclip.ing` | v2026.916.1 | env, systemd-drop-in |
 | Cloud sync | ei konfiguroida (`enableCloudSync` pysyy `false`) | `false` | v2026.609.0, poistuu v2026.817.0:ssa (migraatio 0196) | instanssiasetus `experimental`, ei kirjoiteta |
 | Standard-trust-agentin hire-oikeus | vain board, CEO tai eksplisiittinen grantti; `requireBoardApprovalForNewAgents` yrityskohtaisesti (0071) | `canCreateAgents` päällä standard-trust-agenteille | v2026.916.1 | koodi: RK9 Custom -pinnaus `agent-permissions.ts`:ään, lukitsee `hire-approval-policy.test.ts` |
-| Proxy trust | `TRUST_PROXY=192.168.1.17` (nginx-edge); `PAPERCLIP_ALLOWED_HOSTNAMES` ja `PAPERCLIP_PUBLIC_URL` kattavat `paperclip.rk9.fi`:n | `TRUST_PROXY` asettamatta | `TRUST_PROXY` v2026.720.0, guardin `X-Forwarded-Host`-rajaus v2026.916.1 | env, systemd-drop-in |
+| Proxy trust | `TRUST_PROXY=loopback`: Express luottaa vain paikalliseen nginxiin, joka luottaa vain edgeen `192.168.1.17` (`set_real_ip_from`); `PAPERCLIP_ALLOWED_HOSTNAMES` ja `PAPERCLIP_PUBLIC_URL` kattavat `paperclip.rk9.fi`:n | `TRUST_PROXY` asettamatta | `TRUST_PROXY` v2026.720.0, guardin `X-Forwarded-Host`-rajaus v2026.916.1 | env, systemd-drop-in |
 | Native runner | `enableNativeRunner=false`, `claude_local` pinnattu CLI-moottoriin (RK9-305) | `false` 831.1:ssä, `true` 916.0:sta alkaen | v2026.831.1 | instanssiasetus `experimental`, kirjoitetaan eksplisiittisesti |
 
-Tietoturvakorjaukset: #11400 (CWE-78, CLI-ohjeet) tulee portaassa v2026.831.1 ja #12776
+Tietoturvakorjaukset: #11400 (CWE-78, CLI-ohjeet, ensimmäinen tagi v2026.824.0) tulee portaassa v2026.831.1 ja #12776
 (etuoikeutetut rajapinnat, SSRF) portaassa v2026.916.1. Forkin webhook-reittien tarkistus
 korjauksia vasten on tiedostossa `doc/upgrade/defaults-hardening.md`.
 

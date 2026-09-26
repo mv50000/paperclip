@@ -49,13 +49,35 @@ tyhjän).
 `server/src/middleware/trust-proxy.ts` ja `applyTrustProxy(app, parseTrustProxyEnv(process.env.TRUST_PROXY))`
 tulevat tässä tagissa. Oletus on asettamaton: Express ei luota yhteenkään proxyyn.
 
-- Aseta `TRUST_PROXY=192.168.1.17` (nginx-edge). Älä käytä arvoa `true` äläkä hop-lukua.
-  Älä lisää `loopback`-arvoa: paikalliset agentit kutsuvat suoraan `localhost:3100`:aa eivätkä
-  kulje proxyn kautta.
+Proxyketju paperclip-01:llä (todennettu 2026-09-26, `/etc/nginx/sites-enabled/paperclip`):
+
+1. Edge-nginx `192.168.1.17` terminoi TLS:n ja välittää pyynnön paperclip-01:n porttiin 80.
+2. Paikallinen nginx (portti 80, `server_name _`) luottaa vain edgeen: `set_real_ip_from 192.168.1.17`
+   ja `set_real_ip_from 127.0.0.1`. Se kirjoittaa `X-Forwarded-Host $host` -otsakkeen aina yli
+   ja lisää asiakkaan osoitteen `X-Forwarded-For`-ketjuun.
+3. Paikallinen nginx välittää pyynnön osoitteeseen `127.0.0.1:3100`. Express näkee siis vertaisena
+   aina `127.0.0.1`:n, ei edgen osoitetta.
+
+Operaattorin päätös "luotetaan vain edgeen 192.168.1.17" toteutuu siksi kahdessa kerroksessa:
+paikallinen nginx luottaa edgeen, ja Express luottaa vain paikalliseen nginxiin.
+
+- Aseta `TRUST_PROXY=loopback`. Arvo `192.168.1.17` ei toimi, koska edge ei ole Expressin
+  välitön vertainen. Älä käytä arvoa `true` äläkä hop-lukua.
+- Suorat LAN-pyynnöt porttiin 3100 (`0.0.0.0:3100`) tulevat muusta kuin loopback-osoitteesta.
+  Express ei luota niiden `X-Forwarded-*`-otsakkeisiin.
+- Paikalliset prosessit (agentit samalla koneella) tulevat loopbackista. Ne voivat asettaa
+  `X-Forwarded-*`-otsakkeet itse. Tämä hyväksytään: niillä ei ole board-istuntoa, ja ne ajavat
+  jo samalla koneella.
 - Vaikutus tässä portaassa: `req.ip`, `req.protocol` ja `req.hostname` alkavat lukea
-  `X-Forwarded-*`-otsakkeita vain edgeltä. Board-mutation-guard ei vielä käytä asetusta (ks. 916.1).
+  `X-Forwarded-*`-otsakkeita paikalliselta nginxiltä. Board-mutation-guard ei vielä käytä asetusta
+  (ks. 916.1).
 - Todennus: kirjaudu `https://paperclip.rk9.fi`:hin ja tee yksi board-mutaatio (esim. kommentti).
-  Tarkista pyyntölokista, että `req.ip` on asiakkaan osoite eikä `192.168.1.17`.
+  Tarkista pyyntölokista, että `req.ip` on asiakkaan osoite eikä `127.0.0.1` tai `192.168.1.17`.
+- Paikallinen nginx kuuntelee porttia 80 kaikissa liitännöissä. LAN-asiakas voi siis ohittaa edgen.
+  `set_real_ip_from` estää sitä väärentämästä osoitettaan, mutta `Host`-otsakkeen se voi asettaa
+  vapaasti. Porttien 80 ja 3100 rajaaminen (esim. `allow 192.168.1.17; deny all;` tai bindaus
+  127.0.0.1:een) on operaattorin päätös. Huomaa ensin Tailscale-kuuntelija `100.120.245.107:443`
+  ja `PAPERCLIP_ALLOWED_HOSTNAMES=100.120.245.107`: jokin käyttää palvelinta Tailscalen kautta.
 
 ## Porras v2026.831.1
 
@@ -77,7 +99,7 @@ pinnattuna CLI-moottoriin samassa dokumentissa kuvatulla tavalla.
 | Kohta | Arvo |
 |---|---|
 | PR | [paperclipai/paperclip#11400](https://github.com/paperclipai/paperclip/pull/11400) "fix(security): route paperclipai CLI guidance through safe npx form (CWE-78)" |
-| Merge-commit | `fdb9a4880db3641079402a3c08bddc3fb71a6aa7`, ensimmäinen tagi v2026.831.0 |
+| Merge-commit | `fdb9a4880db3641079402a3c08bddc3fb71a6aa7`, ensimmäinen tagi v2026.824.0. Porrastus ohittaa 824:n, joten korjaus tulee portaassa 831.1. |
 | Koskee | `server/src/middleware/private-hostname-guard.ts`, `server/src/routes/access.ts`, `server/src/adapters/hermes-gateway-doc.ts` ja CLI-ohjeet dokumenteissa ja skilleissä (`pnpm paperclipai` → `npx paperclipai`) |
 
 Mergessä: ota upstreamin `npx paperclipai`-muoto myös forkin hotspot-skilleihin
@@ -128,9 +150,15 @@ Lukitsevat testit (`server/src/__tests__/hire-approval-policy.test.ts`):
 - CEO:n hire menee tilaan `pending_approval` ja luo `hire_agent`-hyväksynnän, kun yritys vaatii hyväksynnän.
 - Eksplisiittinen `agents:create`-grantti ei ohita hyväksyntäporttia.
 - Agentti ei voi hyväksyä odottavaa hirea (`POST /agents/:id/approve` → 403).
-- `defaultPermissionsForRole` antaa `canCreateAgents`-oikeuden oletuksena vain CEO:lle. Tämä
-  testi on laukaisin: se hajoaa 916.1-portaassa, koska upstream muuttaa funktion. Älä poista
-  testiä, vaan siirrä sama väite upstreamin uuteen `defaultAgentPermissions`-rajapintaan.
+- `defaultPermissionsForRole` ja `normalizeAgentPermissions` antavat `canCreateAgents`-oikeuden
+  oletuksena vain CEO:lle. Tämä testi on laukaisin: se hajoaa 916.1-portaassa, koska upstream
+  nimeää funktion uudelleen ja muuttaa oletuksen. Älä poista testiä, vaan siirrä sama väite
+  upstreamin `defaultAgentPermissions({ context: "create" })`-kutsuun.
+
+Rajaus: reittitestien standard-trust-agentilla on eksplisiittinen `canCreateAgents: false`, ja
+agenttipalvelu on mockattu. Reittitestit eivät siis huomaa, jos upstream tallentaa uudelle
+agentille eri oikeudet. Oletuksen muutoksen huomaa vain yllä oleva laukaisintesti. Lisää
+916.1-portaassa reittitesti, joka tarkistaa `svc.create`-kutsun `permissions`-kentän.
 
 ### Proxy trust ja `X-Forwarded-Host`
 
@@ -138,14 +166,17 @@ Lukitsevat testit (`server/src/__tests__/hire-approval-policy.test.ts`):
 |---|---|
 | Muutos | `board-mutation-guard.ts` lukee `X-Forwarded-Host`-otsakkeen vain, kun välitön vertaisosoite läpäisee Expressin `trust proxy fn`:n. Muuten guard käyttää `Host`-otsaketta. |
 | Upstream-oletus | `TRUST_PROXY` asettamatta, joten `X-Forwarded-Host` ohitetaan kaikilta |
-| RK9-arvo | `TRUST_PROXY=192.168.1.17` (asetettu jo portaassa 720.0), `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, `PAPERCLIP_PUBLIC_URL=https://paperclip.rk9.fi` |
+| RK9-arvo | `TRUST_PROXY=loopback` (asetettu jo portaassa 720.0, ks. proxyketju), `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, `PAPERCLIP_PUBLIC_URL=https://paperclip.rk9.fi` |
 | Sijainti | `TRUST_PROXY` ja `PAPERCLIP_PUBLIC_URL`: systemd-drop-in. `PAPERCLIP_ALLOWED_HOSTNAMES` on nyt tiedostossa `/etc/paperclip/paperclip-server.env`. |
 
 Nykytila 2026-09-26:
 
 - Forkin `board-mutation-guard.ts` luottaa `X-Forwarded-Host`-otsakkeeseen lähdeosoitteesta
   riippumatta.
-- Palvelin kuuntelee osoitteessa `0.0.0.0:3100` (`ss -ltnp`). Edge ei siis ole ainoa reitti palvelimelle.
+- Palvelin kuuntelee osoitteessa `0.0.0.0:3100`, ja paikallinen nginx porttia 80 kaikissa
+  liitännöissä (`ss -ltnp`). Edge ei siis ole ainoa reitti palvelimelle.
+- Paikallinen nginx kirjoittaa `X-Forwarded-Host`-otsakkeen aina yli (`$host`). Edgen kautta
+  tulevassa pyynnössä otsake on siis sama kuin `Host`.
 - Riski on pieni, koska selain ei voi asettaa `X-Forwarded-Host`-otsaketta CSRF-hyökkäyksessä.
   Upstreamin korjaus sulkee reiän 916.1-portaassa, joten tässä tiketissä ajonaikaista muutosta ei tehdä.
 - `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää nyt vain osoitteen `100.120.245.107`.
@@ -155,17 +186,20 @@ Nykytila 2026-09-26:
 Mergessä: ota upstreamin `board-mutation-guard.ts` ja sen testi sellaisenaan. Lisää forkin testiin
 kaksi tapausta upstreamin `app.set("trust proxy", ...)`-mallilla:
 
-1. Pyyntö vertaisosoitteesta `192.168.1.17`, `X-Forwarded-Host: paperclip.rk9.fi` ja
-   `Origin: https://paperclip.rk9.fi` → sallitaan.
-2. Sama pyyntö mistä tahansa muusta osoitteesta (esim. `10.90.10.20`) → 403.
+1. `trust proxy` = `loopback`, pyyntö vertaisosoitteesta `127.0.0.1`, `Host: 127.0.0.1:3100`,
+   `X-Forwarded-Host: paperclip.rk9.fi` ja `Origin: https://paperclip.rk9.fi` → sallitaan.
+2. Sama pyyntö vertaisosoitteesta `10.90.10.20` → 403.
 
 Todennus harjoitusinstanssissa: kirjautuminen ja yksi board-mutaatio `paperclip.rk9.fi`:n kautta
-onnistuvat. Suora `curl` portin 3100 kautta väärennetyllä `X-Forwarded-Host`-otsakkeella ja
-samalla `Origin`illa saa vastauksen 403.
+onnistuvat. Suora `curl` toiselta koneelta porttiin 3100 väärennetyllä `X-Forwarded-Host`-otsakkeella
+ja samalla `Origin`illa saa vastauksen 403.
 
 `CLAUDE_LOGIN_TRUSTED_PROXIES` ja `CLAUDE_LOGIN_EDGE_TLS_TERMINATED` (setup-token-kirjautuminen,
-SR-7, `server/src/app.ts:654` @ v2026.916.1) jätetään asettamatta. Jos setup-token-kirjautumista
-tarvitaan edgen kautta, arvo on `CLAUDE_LOGIN_TRUSTED_PROXIES=192.168.1.17`.
+SR-7, `server/src/app.ts:654` @ v2026.916.1) jätetään asettamatta. Tarkistus vertaa välittömään
+vertaiseen, joka on `127.0.0.1`. Arvo `192.168.1.17` ei siksi koskaan täsmää. Jos
+setup-token-kirjautumista tarvitaan edgen kautta, se vaatii operaattorin päätöksen: edgen ja
+paperclip-01:n välinen yhteys on salaamaton HTTP, joten SR-7:n luottamuksellisuusvaatimus ei
+täyty pelkällä `127.0.0.1`-allowlistilla.
 
 ### `enableNativeRunner`-oletus kääntyy
 
@@ -190,7 +224,7 @@ Forkin reittien tarkistus #12776:ta vasten:
 | Reitti | Allekirjoitus | Forkin testi (väärennys → hylätään, oikea → läpi) | Huomio 916.1-portaaseen |
 |---|---|---|---|
 | `github-webhooks.ts` | HMAC `GITHUB_WEBHOOK_SECRET` | `github-webhook-routes.test.ts` | Ei ulkoista fetchiä |
-| `resend-inbound.ts` | Svix, yrityskohtainen salaisuus | `resend-inbound-route.test.ts` (uusi), `email-svix-verify.test.ts` | Tarkistus lukee raakatavut: globaali body parser tämän reitin edellä rikkoo sen |
+| `resend-inbound.ts` | Svix, yrityskohtainen salaisuus | `resend-inbound-route.test.ts` (uusi, reititin yksinään), `email-svix-verify.test.ts` | Tarkistus lukee raakatavut: globaali body parser tämän reitin edellä rikkoo sen. Uusi testi ei kata `app.ts`:n mount-järjestystä, joten aja lisäksi savutestin Resend-tarkistus. |
 | `ses-inbound.ts` | SNS-allekirjoitus, sertifikaatti vain `sns.*.amazonaws.com` | `email-ses-inbound-route.test.ts` | `SubscribeURL` haetaan vasta allekirjoituksen jälkeen. Harkitse sen reitittämistä `remote-fetch.ts`:n kautta. |
 | `slack-interactions.ts` | Slack v0 -allekirjoitus, 5 min ikkuna | `slack-signature-verify.test.ts`, `slack-interactions.test.ts` | Ei muutosta |
 | `outreach-inbound.ts` | HMAC `OUTREACH_INBOUND_HMAC_SECRET`, 5 min ikkuna | `outreach-inbound-verify.test.ts`, `outreach-inbound-route.test.ts` | Ei muutosta |
@@ -208,13 +242,14 @@ asetus tulee mukaan:
 
 | Porras | Tarkistus | Tulos, jos arvo on väärä |
 |---|---|---|
-| 720.0 | `TRUST_PROXY` on täsmälleen `192.168.1.17`. Arvo ei saa olla `true`, hop-luku eikä sisältää `loopback`-arvoa. | virhe (palvelu ei käynnisty) |
+| 720.0 | `TRUST_PROXY` on täsmälleen `loopback`. Arvo ei saa olla `true` eikä hop-luku. | virhe (palvelu ei käynnisty) |
+| 720.0 | Paikallisen nginxin `set_real_ip_from` sisältää vain osoitteet `192.168.1.17` ja `127.0.0.1`, ja `location /` asettaa `X-Forwarded-Host $host` | varoitus |
 | 720.0 | `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, ja `PAPERCLIP_PUBLIC_URL` on `https://paperclip.rk9.fi` | virhe |
 | 831.1 | `instance_settings.experimental ->> 'enableNativeRunner'` on `false` (avain olemassa) | varoitus 831.1:ssä, virhe 916.1:stä alkaen |
 | 609.0–720.0 | `instance_settings.experimental ->> 'enableCloudSync'` ei ole `true` | virhe |
 | 916.1 | `PAPERCLIP_ANNOUNCEMENTS_ENABLED` on täsmälleen `false` | virhe |
 | 916.1 | `agent-permissions.ts` sisältää RK9 Custom -pinnauksen (grep-ankkuri kuten nykyinen `github-webhooks.ts`-tarkistus) | virhe |
-| kaikki | `CLAUDE_LOGIN_TRUSTED_PROXIES` on tyhjä tai `192.168.1.17` | varoitus |
+| 916.1 | `CLAUDE_LOGIN_TRUSTED_PROXIES` ja `CLAUDE_LOGIN_EDGE_TLS_TERMINATED` ovat tyhjiä, ellei operaattori ole päättänyt toisin | varoitus |
 
 ## Hyväksyntäehtojen tila (RK9-309)
 
@@ -223,7 +258,7 @@ asetus tulee mukaan:
 | RK9-oletukset-taulukko `UPSTREAM-UPGRADE.md`:ssä | Tehty tässä tiketissä |
 | Nolla announcement- ja cloud sync -kutsua harjoitusinstanssissa | Siirtyy portaisiin 609.0–720.0 (cloud sync) ja 916.1 (announcements). Asetuksia ei ole nykyforkissa. |
 | Testi: standard-trust-agentin hire hylätään tai menee hyväksyntään | Tehty: `hire-approval-policy.test.ts` |
-| Proxy trust vain `192.168.1.17`:lle ja väärennystesti | Siirtyy portaaseen 916.1 (upstreamin guard + `TRUST_PROXY`). Testitapaukset on kuvattu yllä. |
+| Proxy trust vain `192.168.1.17`:lle ja väärennystesti | Siirtyy portaisiin 720.0 (`TRUST_PROXY=loopback`) ja 916.1 (upstreamin guard). Edge-luottamus on paikallisessa nginxissä, koska Express näkee vertaisena `127.0.0.1`:n. Testitapaukset on kuvattu yllä. |
 | Webhook-reittien allekirjoitustestit | Kattavuus todennettu reiteittäin. Puuttuva resend-inbound-reittitesti lisätty. |
 | Preflight varoittaa puuttuvasta kovennuksesta | Tarkistuslista RK9-307:lle yllä |
 | Asetukset env- tai instanssiasetuksina | Sijainti määritetty jokaiselle asetukselle. Hire-oikeus pinnataan koodissa, koska upstream ei tarjoa asetusta. |
