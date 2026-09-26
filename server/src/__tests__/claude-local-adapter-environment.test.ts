@@ -220,3 +220,60 @@ describe("claude_local environment diagnostics", () => {
     await fs.rm(path.dirname(cwd), { recursive: true, force: true });
   });
 });
+
+/**
+ * RK9-228 on the hello-probe spawn path. The probe runs the real `claude`
+ * command, so a probe that inherited the server's key could pass on credentials
+ * the agent itself never gets. Pin what the probe process actually receives
+ * (RK9-305: must hold on every upgrade step, whichever spawn path is used).
+ */
+describe("claude_local hello probe environment", () => {
+  async function probeWithHostKey(optIn: boolean): Promise<string | null> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-probe-env-"));
+    const commandPath = path.join(root, "claude");
+    const capturePath = path.join(root, "capture.json");
+    await fs.writeFile(
+      commandPath,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+const key = Object.prototype.hasOwnProperty.call(process.env, "ANTHROPIC_API_KEY") ? process.env.ANTHROPIC_API_KEY : null;
+fs.writeFileSync(process.env.PAPERCLIP_TEST_CAPTURE_PATH, JSON.stringify({ anthropicApiKey: key }), "utf8");
+fs.readFileSync(0, "utf8");
+console.log(JSON.stringify({ type: "result", session_id: "s", result: "hello" }));
+`,
+      "utf8",
+    );
+    await fs.chmod(commandPath, 0o755);
+
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
+    process.env.ANTHROPIC_API_KEY = "sk-test-host";
+    if (optIn) process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY = "1";
+    else delete process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY;
+
+    try {
+      const result = await testEnvironment({
+        companyId: "company-1",
+        adapterType: "claude_local",
+        config: {
+          command: commandPath,
+          cwd: root,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+        },
+      });
+      expect(result.checks.some((check) => check.code === "claude_hello_probe_passed")).toBe(true);
+      const captured = JSON.parse(await fs.readFile(capturePath, "utf8")) as { anthropicApiKey: string | null };
+      return captured.anthropicApiKey;
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("does not hand a server-wide ANTHROPIC_API_KEY to the probe process", async () => {
+    expect(await probeWithHostKey(false)).toBeNull();
+  });
+
+  it("hands the server key to the probe only when the deployment opts in", async () => {
+    expect(await probeWithHostKey(true)).toBe("sk-test-host");
+  });
+});

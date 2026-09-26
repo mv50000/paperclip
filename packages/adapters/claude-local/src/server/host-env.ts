@@ -1,3 +1,4 @@
+// --- RK9 Custom (RK9-228): whole file is fork-only. Upstream has no equivalent; see doc/upgrade/acpx-claude-local.md ---
 /**
  * What the Claude CLI inherits from the Paperclip server process.
  *

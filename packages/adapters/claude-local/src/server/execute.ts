@@ -295,6 +295,7 @@ export async function runClaudeLogin(input: {
   const proc = await runAdapterExecutionTargetProcess(input.runId, null, runtime.command, ["login"], {
     cwd: runtime.cwd,
     env: runtime.env,
+    // --- RK9 Custom (RK9-228): keep a server-wide ANTHROPIC_API_KEY out of the CLI. See doc/upgrade/acpx-claude-local.md ---
     doNotInheritEnvKeys: hostEnvKeysNotInherited(),
     timeoutSec: runtime.timeoutSec,
     graceSec: runtime.graceSec,
@@ -598,6 +599,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onLog,
+      // --- RK9 Custom (RK9-228): keep a server-wide ANTHROPIC_API_KEY out of the CLI. See doc/upgrade/acpx-claude-local.md ---
       doNotInheritEnvKeys: hostEnvKeysNotInherited(),
       terminalResultCleanup: {
         graceMs: terminalResultCleanupGraceMs,
