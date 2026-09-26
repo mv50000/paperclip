@@ -125,7 +125,7 @@ alla) ja savutesti `scripts/upgrade-smoke.sh` `paperclip.rk9.fi`-hostnimellä.
 | Kohta | Arvo |
 |---|---|
 | Asetus | env `PAPERCLIP_ANNOUNCEMENTS_ENABLED` (config-avain `announcementsEnabled`), syöte `PAPERCLIP_ANNOUNCEMENTS_FEED_URL` |
-| Upstream-oletus | päällä: `process.env.PAPERCLIP_ANNOUNCEMENTS_ENABLED !== "false"` (`server/src/config.ts:369`). Syöte `https://pages.paperclip.ing/announcements/v1/current.json`. |
+| Upstream-oletus | päällä: `process.env.PAPERCLIP_ANNOUNCEMENTS_ENABLED !== "false"` (`server/src/config.ts:369` @ v2026.916.0 ja 916.1). Syöte `https://pages.paperclip.ing/announcements/v1/current.json`. |
 | RK9-arvo | `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false` (opt-out) |
 | Sijainti | `export` käynnistysskriptissä `paperclip-start.sh`, ei salaisuus |
 
@@ -197,13 +197,23 @@ Nykytila 2026-09-26:
 Mergessä: ota upstreamin `board-mutation-guard.ts` ja sen testi sellaisenaan. Lisää forkin testiin
 kaksi tapausta upstreamin `app.set("trust proxy", ...)`-mallilla:
 
-1. `trust proxy` = `loopback`, pyyntö vertaisosoitteesta `127.0.0.1`, `Host: 127.0.0.1:3100`,
-   `X-Forwarded-Host: paperclip.rk9.fi` ja `Origin: https://paperclip.rk9.fi` → sallitaan.
-2. Sama pyyntö vertaisosoitteesta `10.90.10.20` → 403.
+Guard luottaa aina `PAPERCLIP_PUBLIC_URL`-originiin (`trustedOriginsForRequest`, sekä forkissa
+että upstreamissa). Siksi `Origin: https://paperclip.rk9.fi` menee läpi `X-Forwarded-Host`-otsakkeesta
+riippumatta, eikä sillä voi testata proxy trustia. Jätä `PAPERCLIP_PUBLIC_URL` asettamatta testissä
+ja käytä väärennykseen hyökkääjän originia:
+
+1. `trust proxy` = `loopback`, vertaisosoite `127.0.0.1`, `Host: 127.0.0.1:3100`,
+   `X-Forwarded-Host: paperclip.rk9.fi` ja `Origin: https://paperclip.rk9.fi` → sallitaan
+   (luotettu vertainen saa nostaa `X-Forwarded-Host`-arvon).
+2. Vertaisosoite `10.90.10.20`, `Host: 127.0.0.1:3100`, `X-Forwarded-Host: evil.example` ja
+   `Origin: https://evil.example` → 403 (epäluotettavan vertaisen `X-Forwarded-Host` ohitetaan).
+3. Sama kuin tapaus 2, mutta ilman `trust proxy` -asetusta ja vertaisena `127.0.0.1` → 403.
 
 Todennus harjoitusinstanssissa: kirjautuminen ja yksi board-mutaatio `paperclip.rk9.fi`:n kautta
-onnistuvat. Suora `curl` toiselta koneelta porttiin 3100 väärennetyllä `X-Forwarded-Host`-otsakkeella
-ja samalla `Origin`illa saa vastauksen 403.
+onnistuvat. Tee sitten suora `curl` toiselta koneelta porttiin 3100 voimassa olevalla
+istuntoevästeellä, otsakkeilla `X-Forwarded-Host: evil.example` ja `Origin: https://evil.example`.
+Odotettu vastaus on 403 ja virhe "Board mutation requires trusted browser origin". Ilman evästettä
+pyyntö kaatuu jo autentikointiin, eikä tulos todista mitään.
 
 `CLAUDE_LOGIN_TRUSTED_PROXIES` ja `CLAUDE_LOGIN_EDGE_TLS_TERMINATED` (setup-token-kirjautuminen,
 SR-7, `server/src/app.ts:654` @ v2026.916.1) jätetään asettamatta. Tarkistus vertaa välittömään
@@ -253,9 +263,9 @@ asetus tulee mukaan:
 
 | Porras | Tarkistus | Tulos, jos arvo on väärä |
 |---|---|---|
-| 720.0 | `TRUST_PROXY` on täsmälleen `loopback` (luetaan samasta paikasta kuin yllä). Arvo ei saa olla `true` eikä hop-luku. | virhe (palvelu ei käynnisty) |
+| 720.0 | `TRUST_PROXY` on täsmälleen `loopback` (luetaan `paperclip-start.sh`:n `export`-riviltä, ks. seuraava rivi). Arvo ei saa olla `true` eikä hop-luku. | virhe (palvelu ei käynnisty) |
 | 720.0 | Paikallisen nginxin `set_real_ip_from` sisältää vain osoitteet `192.168.1.17` ja `127.0.0.1`, ja `location /` asettaa `X-Forwarded-Host $host` | varoitus |
-| 720.0 | Käynnistysskriptin `paperclip-start.sh` tehokkaat arvot: `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, ja `PAPERCLIP_PUBLIC_URL` on `https://paperclip.rk9.fi`. Preflight ajetaan `ExecStartPre`nä eikä näe skriptin exportteja, joten se lukee arvot skriptistä (tai ajaa sen kuivana), ei systemd:n ympäristöstä. | virhe |
+| 720.0 | Käynnistysskriptin `paperclip-start.sh` tehokkaat arvot: `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, ja `PAPERCLIP_PUBLIC_URL` on `https://paperclip.rk9.fi`. Preflight ajetaan `ExecStartPre`nä eikä näe skriptin exportteja. Se jäsentää skriptin `export`-rivit (esim. `grep '^export NIMI='`), ei lue systemd:n ympäristöä. Älä aja skriptiä preflightista: se päättyy `exec pnpm dev:once` -kutsuun ja käynnistäisi palvelimen. | virhe |
 | 831.1 | `instance_settings.experimental ->> 'enableNativeRunner'` on `false` (avain olemassa) | varoitus 831.1:ssä, virhe 916.1:stä alkaen |
 | 609.0–720.0 | `instance_settings.experimental ->> 'enableCloudSync'` ei ole `true` | virhe |
 | 916.1 | `PAPERCLIP_ANNOUNCEMENTS_ENABLED` on täsmälleen `false` (käynnistysskriptin tehokas arvo) | virhe |
