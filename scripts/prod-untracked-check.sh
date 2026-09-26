@@ -29,6 +29,11 @@ TAR_AS=""
 LOGTAG="[prod-untracked-check]"
 
 die() { echo "$LOGTAG VIRHE: $*" >&2; exit 2; }
+# /opt/paperclip/.git/config on agenttien (käyttäjä paperclip) kirjoitettavissa: repon konfiguraatio ei saa
+# ajaa koodia operaattorina. Git ajetaan repon omistajana (lib-repo-git.sh), fsmonitor ja hookit pois.
+# shellcheck source=lib-repo-git.sh
+. "$HERE/lib-repo-git.sh"
+G() { repo_git "$REPO" "$@"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO=${2:-}; shift 2 ;;
@@ -41,7 +46,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -f "$MANIFEST" ] || die "manifest puuttuu: $MANIFEST"
-git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO ei ole luettavissa git-hakemistona (dubious ownership? ks. runbook)"
+G rev-parse --git-dir >/dev/null 2>&1 || die "$REPO ei ole luettavissa git-hakemistona (dubious ownership? ks. runbook)"
 
 declare -a CLASS PATTERN
 while IFS=$'\t' read -r cls pat _; do
@@ -59,7 +64,7 @@ class_of() { # <polku> -> luokka tai tyhjä
 }
 
 FAILS=0
-mapfile -t UNTRACKED < <(git -C "$REPO" ls-files --others --exclude-standard --directory --no-empty-directory)
+mapfile -t UNTRACKED < <(G ls-files --others --exclude-standard --directory --no-empty-directory)
 for p in "${UNTRACKED[@]}"; do
   c=$(class_of "$p")
   if [ -z "$c" ]; then
@@ -82,12 +87,12 @@ done
 if [ "${#KEEP[@]}" -gt 0 ]; then mapfile -t KEEP < <(printf '%s\n' "${KEEP[@]}" | LC_ALL=C sort -u); fi
 
 if [ -n "$TARGET" ]; then
-  git -C "$REPO" rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null || die "--target $TARGET ei ratkea"
+  G rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null || die "--target $TARGET ei ratkea"
   # Törmäys koskee myös gitignorattuja tiedostoja: reset --hard ylikirjoittaa ne yhtä lailla.
-  mapfile -t IGNORED < <(git -C "$REPO" ls-files --others --ignored --exclude-standard --directory --no-empty-directory)
+  mapfile -t IGNORED < <(G ls-files --others --ignored --exclude-standard --directory --no-empty-directory)
   for p in "${UNTRACKED[@]}" "${IGNORED[@]}"; do
     [ -n "$p" ] || continue
-    hit=$(git -C "$REPO" ls-tree -r --name-only "$TARGET" -- "$p" | head -n 1)
+    hit=$(G ls-tree -r --name-only "$TARGET" -- "$p" | head -n 1)
     if [ -n "$hit" ]; then
       echo "$LOGTAG TÖRMÄYS: $p on versioitu kohteessa $TARGET ($hit); reset --hard ylikirjoittaisi sen" >&2
       FAILS=$((FAILS + 1))
@@ -95,7 +100,7 @@ if [ -n "$TARGET" ]; then
   done
 fi
 
-mapfile -t MODIFIED < <(git -C "$REPO" diff --name-only HEAD)
+mapfile -t MODIFIED < <(G diff --no-ext-diff --no-textconv --name-only HEAD)
 for p in "${MODIFIED[@]}"; do
   [ -n "$p" ] || continue
   if [ "$(class_of "$p")" = tolerated ]; then echo "$LOGTAG tolerated: $p"; continue; fi
@@ -106,14 +111,14 @@ done
 if [ -n "$BACKUP" ]; then
   umask 077
   mkdir -p "$BACKUP"; chmod 700 "$BACKUP"
-  git -C "$REPO" diff --binary HEAD >"$BACKUP/local-changes.patch" || { echo "$LOGTAG VIRHE: git diff epäonnistui" >&2; exit 3; }
+  G diff --no-ext-diff --no-textconv --binary HEAD >"$BACKUP/local-changes.patch" || { echo "$LOGTAG VIRHE: git diff epäonnistui" >&2; exit 3; }
   if [ "${#KEEP[@]}" -gt 0 ]; then
     TAR_CMD=(tar)
     [ -z "$TAR_AS" ] || TAR_CMD=(sudo -n -u "$TAR_AS" tar)
     # Tar kirjoitetaan stdoutiin ja tiedosto luodaan kutsujan oikeuksilla; mikä tahansa tar-virhe
     # (myös "file changed as we read it") on epätäydellinen varmuuskopio.
     if ! "${TAR_CMD[@]}" -C "$REPO" -cf - -- "${KEEP[@]}" >"$BACKUP/untracked-preserved.tar"; then
-      echo "$LOGTAG VIRHE: tar epäonnistui tai jokin tiedosto ei ollut luettavissa; varmuuskopio on epätäydellinen (kokeile --tar-as paperclip)" >&2
+      echo "$LOGTAG VIRHE: tar epäonnistui tai jokin tiedosto ei ollut luettavissa; varmuuskopio on epätäydellinen (kokeile --tar-as root)" >&2
       exit 3
     fi
   else

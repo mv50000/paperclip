@@ -65,8 +65,8 @@ export DATABASE_URL="$(pwurl src)"
 OUT="$TMP/out"
 # argv-lokitus: kääre kirjaa jokaisen psql-, pg_dump- ja pg_restore-kutsun argumentit.
 WRAP="$TMP/wrap"; ARGV_LOG="$TMP/argv.log"; mkdir -p "$WRAP"; : >"$ARGV_LOG"
-for tool in psql pg_dump pg_restore; do
-  printf '#!/usr/bin/env bash\necho "%s $*" >>"%s"\nexec "%s/%s" "$@"\n' "$tool" "$ARGV_LOG" "$PGBIN" "$tool" >"$WRAP/$tool"; chmod +x "$WRAP/$tool"
+for tool in psql pg_dump pg_restore python3; do
+  B=$PGBIN; [ "$tool" != python3 ] || B=/usr/bin; printf '#!/usr/bin/env bash\necho "%s $*" >>"%s"\nexec "%s/%s" "$@"\n' "$tool" "$ARGV_LOG" "$B" "$tool" >"$WRAP/$tool"; chmod +x "$WRAP/$tool"
 done
 
 echo "== onnistunut ajo"

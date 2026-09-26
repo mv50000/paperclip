@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lib-pg-url.sh — kirjasto: muuttaa PostgreSQL-URL:n libpq-ympäristömuuttujiksi (RK9-307).
-# Syy: URL argumenttina (`psql "$DATABASE_URL"`, `pg_dump --dbname=URL`) näkyy salasanoineen
-# prosessilistassa (/proc/<pid>/cmdline) koko dumpin ajan. Ympäristö ei näy muille käyttäjille.
+# Syy: URL argumenttina (`psql "$DATABASE_URL"`, `pg_dump --dbname=URL`, `python3 - "$URL"`) näkyy
+# salasanoineen prosessilistassa (/proc/<pid>/cmdline). Ympäristö (/proc/<pid>/environ) ei näy muille
+# käyttäjille, joten URL kulkee aina ympäristömuuttujana PGURL_IN, ei argumenttina.
 #
 #   . scripts/lib-pg-url.sh
 #   pg_url_env <url>                    tulostaa `export PGHOST=... PGDATABASE=...` -rivit (arvot lainattu)
@@ -13,11 +14,13 @@
 # &sslrootcert=&sslcert=&sslkey=&connect_timeout=. Tuntematon query-avain tai `dbname` queryssä hylätään
 # (vaiennettu asetus voisi ohjata yhteyden eri kantaan kuin URL:n polku väittää).
 pg_url_env() {
-  python3 - "$1" <<'PY'
-import sys, shlex
-from urllib.parse import urlsplit, unquote, parse_qsl
+  PGURL_IN="$1" python3 -c "$_PG_URL_ENV_PY"
+}
+_PG_URL_ENV_PY=$(cat <<'PY'
+import os, sys, shlex
+from urllib.parse import urlsplit, unquote
 try:
-    u = urlsplit(sys.argv[1])
+    u = urlsplit(os.environ["PGURL_IN"])
     port = u.port
     hostname, username, password = u.hostname, u.username, u.password
 except ValueError:
@@ -34,7 +37,10 @@ db = unquote(u.path.lstrip("/"))
 if db: env["PGDATABASE"] = db
 allowed = {"host": "PGHOST", "port": "PGPORT", "user": "PGUSER", "password": "PGPASSWORD", "sslmode": "PGSSLMODE",
            "sslrootcert": "PGSSLROOTCERT", "sslcert": "PGSSLCERT", "sslkey": "PGSSLKEY", "connect_timeout": "PGCONNECT_TIMEOUT"}
-for k, v in parse_qsl(u.query, keep_blank_values=True):
+# Ei parse_qsl:ää: se muuttaisi + välilyönniksi, libpq ei.
+for part in (u.query.split("&") if u.query else []):
+    k, _, v = part.partition("=")
+    k, v = unquote(k), unquote(v)
     if k not in allowed:
         sys.exit("pg-url: tuntematon tai kielletty query-avain: " + k)
     env[allowed[k]] = v
@@ -43,7 +49,7 @@ if "PGDATABASE" not in env:
 for k, v in env.items():
     print("export %s=%s" % (k, shlex.quote(v)))
 PY
-}
+)
 
 pg_with() { # <url> <komento> [arg...]
   local url=$1 envs; shift
@@ -55,10 +61,10 @@ pg_with() { # <url> <komento> [arg...]
 }
 
 pg_url_with_db() { # <url> <kanta>
-  python3 - "$1" "$2" <<'PY'
-import sys
+  PGURL_IN="$1" PGDB_IN="$2" python3 -c '
+import os
 from urllib.parse import urlsplit, urlunsplit, quote
-u = urlsplit(sys.argv[1])
-print(urlunsplit((u.scheme, u.netloc, "/" + quote(sys.argv[2], safe=""), u.query, "")))
-PY
+u = urlsplit(os.environ["PGURL_IN"])
+print(urlunsplit((u.scheme, u.netloc, "/" + quote(os.environ["PGDB_IN"], safe=""), u.query, "")))
+'
 }

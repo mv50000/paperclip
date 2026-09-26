@@ -92,6 +92,24 @@ OUT=$("$SUT" --repo "$R2" --target t2 2>&1); RC=$?
 [ "$RC" = 1 ] && has "törmäys gitignoratun tiedoston kanssa" "$OUT" "TÖRMÄYS: data/" || bad "ignored-törmäys: exit $RC: $OUT"
 R="$TMP/repo"
 
+echo "== repon konfiguraatio ei ajaa koodia (core.fsmonitor, diff.external)"
+R3="$TMP/repo3"; git init -q "$R3"; R=$R3
+echo a >"$R3/f"; G add -A; G commit -q -m base
+printf '#!/bin/sh\ntouch "%s/PWNED"\n' "$TMP" >"$TMP/evil.sh"; chmod +x "$TMP/evil.sh"
+git -C "$R3" config core.fsmonitor "$TMP/evil.sh"; git -C "$R3" config diff.external "$TMP/evil.sh"
+echo b >"$R3/f"
+"$SUT" --repo "$R3" >/dev/null 2>&1 || true
+"$SUT" --repo "$R3" --backup "$TMP/bk4" >/dev/null 2>&1 || true
+[ ! -e "$TMP/PWNED" ] && ok "fsmonitor/diff.external-koukkua ei ajettu" || bad "repon konfiguraatio ajoi koodia"
+
+echo "== git ajetaan repon omistajana (sudo -n -u <omistaja>)"
+mkdir -p "$TMP/sbin"
+printf '#!/usr/bin/env bash\necho "sudo $*" >>"%s/sudo.log"\n[ "$1" = -n ] && [ "$2" = -u ] || exit 9\nshift 3\nexec "$@"\n' "$TMP" >"$TMP/sbin/sudo"; chmod +x "$TMP/sbin/sudo"
+: >"$TMP/sudo.log"
+PATH="$TMP/sbin:$PATH" REPO_GIT_AS=someoneelse "$SUT" --repo "$R3" >/dev/null 2>&1 || true
+has "git kulki sudo -n -u -kautta" "$(cat "$TMP/sudo.log")" "sudo -n -u someoneelse git -C $R3"
+R="$TMP/repo"
+
 echo "== reset --hard -kuivaharjoitus: versioimattomat säilyvät, versioitu muutos häviää"
 rm "$R/wh.psd1.template"
 G reset -q --hard master

@@ -29,8 +29,8 @@
 #   SNAPSHOT_ADMIN_URL    yhteys, jolla scratch-kanta luodaan ja pudotetaan. Oletus: DATABASE_URL,
 #                         kantana `postgres`. Käyttäjällä pitää olla CREATEDB.
 #   SNAPSHOT_TAR_AS       käyttäjä, jonka oikeuksilla versioimattomat tiedostot pakataan
-#                         (`sudo -n -u <käyttäjä> tar`), esim. paperclip: osa tuotannon tiedostoista
-#                         (data/secrets, cli/.paperclip) ei ole operaattorin luettavissa. Ilman tätä
+#                         (`sudo -n -u <käyttäjä> tar`), esim. root: osa tuotannon tiedostoista
+#                         (cli/.paperclip/.env, server/data/secrets/master.key) on root-omisteisia 0600-tiedostoja. Ilman tätä
 #                         lukematon tiedosto katkaisee snapshotin.
 # Salasana ei näy prosessilistassa: URL muutetaan libpq-ympäristömuuttujiksi (lib-pg-url.sh).
 #
@@ -109,7 +109,9 @@ if [ -n "$VERIFY_DIR" ]; then
 fi
 
 [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "--tag puuttuu tai sisältää kiellettyjä merkkejä" 2
-git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO ei ole git-työhakemisto (dubious ownership? ks. runbook, vaihe 0)" 2
+# shellcheck source=lib-repo-git.sh
+. "$HERE/lib-repo-git.sh"
+repo_git "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO ei ole luettavissa git-hakemistona (git ajetaan repon omistajana: tarvitaan sudo -n -u <omistaja>)" 2
 
 ADMIN_URL=${SNAPSHOT_ADMIN_URL:-$(pg_url_with_db "$DATABASE_URL" postgres)}
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -133,7 +135,7 @@ umask 077
 mkdir "$SNAP_DIR"
 
 # --- 1. SHA:t ---------------------------------------------------------------------------------
-sha_of() { git -C "$REPO" rev-parse --verify --quiet "$1^{commit}" 2>/dev/null || echo unknown; }
+sha_of() { repo_git "$REPO" rev-parse --verify --quiet "$1^{commit}" 2>/dev/null || echo unknown; }
 {
   echo "tag=$TAG"
   echo "recorded_at=$STAMP"
@@ -148,6 +150,11 @@ echo "$LOGTAG SHA:t kirjattu: $SNAP_DIR/pre-upgrade-sha.txt"
 
 # --- 2. Avaintaulujen määrät ennen dumpia ------------------------------------------------------
 count_state "$DATABASE_URL" >"$SNAP_DIR/counts-before.txt"
+
+# Tietokantatason tila, jota dump (--no-privileges, ei ALTER DATABASE) ei kanna: käyttöoikeudet ja
+# roolikohtaiset asetukset. Rollbackin R4 (DROP/CREATE DATABASE) hävittää ne, joten ne tallennetaan.
+psqlq "$DATABASE_URL" -c "SELECT 'owner=' || pg_get_userbyid(datdba), 'acl=' || coalesce(datacl::text, ''), 'settings=' || coalesce((SELECT string_agg(coalesce(setrole::text, '0') || ':' || setconfig::text, ';') FROM pg_db_role_setting s WHERE s.setdatabase = d.oid), '') FROM pg_database d WHERE datname = current_database()" >"$SNAP_DIR/db-level.txt" \
+  || die "tietokantatason tilan luku epäonnistui"
 
 # --- 3. Dump ----------------------------------------------------------------------------------
 DUMP="$SNAP_DIR/paperclip.dump"
@@ -213,11 +220,11 @@ TAR_AS_ARGS=()
 case "$UNTRACKED_RC" in
   0) ;;
   1) echo "$LOGTAG VAROITUS: prod-untracked-check löysi ongelmia (ks. $SNAP_DIR/untracked-check.txt). Ratkaise ennen resettiä." >&2 ;;
-  *) die "varmuuskopio versioimattomista tiedostoista epäonnistui (exit $UNTRACKED_RC): $(tail -n 3 "$SNAP_DIR/untracked-check.txt"). Aseta SNAPSHOT_TAR_AS=paperclip, jos tiedostot eivät ole luettavissa." ;;
+  *) die "varmuuskopio versioimattomista tiedostoista epäonnistui (exit $UNTRACKED_RC): $(tail -n 3 "$SNAP_DIR/untracked-check.txt"). Aseta SNAPSHOT_TAR_AS=root, jos tiedostot eivät ole luettavissa." ;;
 esac
 
 # --- 7. Summa ja loppu -------------------------------------------------------------------------
-( cd "$SNAP_DIR" && sha256sum paperclip.dump pre-upgrade-sha.txt local/local-changes.patch local/untracked-preserved.tar >SHA256SUMS )
+( cd "$SNAP_DIR" && sha256sum paperclip.dump pre-upgrade-sha.txt db-level.txt local/local-changes.patch local/untracked-preserved.tar >SHA256SUMS )
 find "$SNAP_DIR" -type f -exec chmod 600 {} +
 echo "$LOGTAG SNAPSHOT_OK dir=$SNAP_DIR tables=$(get "$SNAP_DIR/counts-scratch.txt" tables) migrations=$(get "$SNAP_DIR/counts-scratch.txt" migrations)"
 echo "$LOGTAG rollback ja todennus: doc/upgrade/cutover-runbook.md, osio Rollback"

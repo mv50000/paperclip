@@ -35,4 +35,12 @@ V=$(PGSERVICE=foo PGHOSTADDR=1.2.3.4 PGDATABASE=other pg_with 'postgresql://u@h:
 OUT=$(pg_url_env 'postgres://app:Secr3tPart#rest@db/paperclip' 2>&1); RC=$?
 [ "$RC" != 0 ] && ok "koodaamaton # hylätään" || bad "hyväksyttiin"
 case "$OUT" in *Secr3tPart*|*rest*) bad "virheviesti vuotaa salasanaa: $OUT" ;; *) ok "virheviesti ei sisällä salasanaa" ;; esac
+# Salasana ei saa päätyä minkään aliprosessin argv:hen (python3 mukaan lukien).
+TMPW=$(mktemp -d); trap 'rm -rf "$TMPW"' EXIT
+printf '#!/usr/bin/env bash\necho "ARGV: $*" >>"%s/argv.log"\nexec /usr/bin/python3 "$@"\n' "$TMPW" >"$TMPW/python3"; chmod +x "$TMPW/python3"
+: >"$TMPW/argv.log"
+( PATH="$TMPW:$PATH"; pg_with 'postgresql://app:TOPSECRETPW@h:1/d' true; pg_url_with_db 'postgresql://app:TOPSECRETPW@h:1/d' x >/dev/null )
+[ -s "$TMPW/argv.log" ] && ok "python3-kutsut kirjattu ($(wc -l <"$TMPW/argv.log"))" || bad "python3-kääre ei kutsuttu"
+if grep -q TOPSECRETPW "$TMPW/argv.log"; then bad "salasana python3:n argv:ssä: $(cat "$TMPW/argv.log")"; else ok "salasana ei näy python3:n argv:ssä"; fi
+OUT=$(pg_url_env 'postgresql://a:b%2Bc@h:1/d?sslmode=x+y'); has "+ säilyy plussana queryssä" "$OUT" "PGSSLMODE=x+y"
 echo "yhteensä: $PASS ok, $FAIL virhettä"; [ "$FAIL" = 0 ]
