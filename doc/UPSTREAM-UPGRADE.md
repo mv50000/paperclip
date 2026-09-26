@@ -221,7 +221,12 @@ Kirjaa rollbackin kesto Porraslokiin.
 
 ## Deploy ja rollback
 
-Varattu deploy- ja rollback-lapselle. Perusrunko on osioissa "Upgrade-prosessi" 1 ja 7.
+Jokaisen tuotantoon menevän portaan deploy ja rollback ajetaan tiedoston
+[`doc/upgrade/cutover-runbook.md`](upgrade/cutover-runbook.md) mukaan (RK9-307): ikkuna
+outreach-erien ulkopuolelta, outreachin ja heartbeatien pysäytys, `scripts/pre-upgrade-snapshot.sh`,
+fetch ja reset, preflight ja smoke, jatko ja 24 h seuranta. Merge masteriin deployaa 05:00Z-päivityksellä,
+joten runbook asettaa `/etc/paperclip/update-hold`-tiedoston ennen mergeä. Perusrunko on osioissa
+"Upgrade-prosessi" 1 ja 7; runbook ohittaa ne tuotannossa.
 
 ## Heartbeat-päätökset
 
@@ -305,6 +310,8 @@ PR mergetään masteriin vasta, kun kaikki PR-checkit ovat vihreitä ja harjoitu
 tarkistukset on kirjattu Porraslokiin.
 
 ### 7. Rollback
+
+> **Älä käytä alla olevia komentoja.** `pg_restore --clean` jättää uuden version lisäämät sarakkeet ja taulut, eikä `git reset --hard` yksin kata versioimattomia tiedostoja. Käytä [cutover-runbookin](upgrade/cutover-runbook.md) osiota Rollback R1–R11.
 
 ```bash
 # Koodi: git reset --hard rk9/pre-upgrade-v2026.NNN.N   (tai Porraslokin SHA)

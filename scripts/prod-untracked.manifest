@@ -1,0 +1,36 @@
+# RK9-307: /opt/paperclipin versioimattomat tiedostot ja luokitus. Sarakkeet (sarkain): luokka, polku, syy.
+# Polku on git ls-files --others --directory -muodossa (hakemisto loppuviivalla) tai jokerikuvio (bash [[ == ]]).
+#
+# Luokat:
+#   preserve   Tuotannon ainoa kopio. Varmuuskopioidaan ennen resettiä (--backup). Ei poisteta.
+#   secret     Salaisuuksiin liittyvä. Varmuuskopio 0600. EI koskaan commitoida mihinkään repoon.
+#   runtime    Ajonaikainen tila (data, .paperclip). Varmuuskopioidaan. Ei poisteta.
+#   generated  Buildin tai testiajon tuotos. Voi hävitä, rakennetaan uudelleen. Ei varmuuskopioida.
+#   artifact   Kertaluonteinen kuva tai vedos. Voi hävitä. Ei varmuuskopioida.
+#   tolerated  Versioitu tiedosto, jonka paikallinen muutos on ajonaikaista kohinaa (lukko). Reset saa hävittää sen.
+#
+# `git fetch && git reset --hard` EI poista versioimattomia tiedostoja (vain `git clean` poistaa).
+# Se ylikirjoittaa kuitenkin polun, joka on kohde-refissä versioituna, ja hylkää versioidut
+# paikalliset muutokset. Molemmat tarkistaa scripts/prod-untracked-check.sh.
+preserve	voice-gateway/	Voice gateway -POC (RK9-tiketin ulkopuolinen). Ei repoa. Siirto omaan repoon: seurantatiketti.
+secret	decrypt-secret.cjs	Salaisuuksien purkutyökalu. Ei commitoida (RK9-307). Varmuuskopio 0600.
+preserve	wh.psd1.template	Windows-hostin webhook-mallipohja. Ei repoa.
+preserve	aur-kattoterassit-prod.csv	Sunspot-yritysdataa (ent. Aurinko Terassit). Kuuluu Sunspot-repoon tai vaulttiin.
+preserve	aur-homev2-snapshot.md	Sunspot-yritysdataa. Kuuluu Sunspot-repoon tai vaulttiin.
+preserve	sunspot-snapshot.md	Sunspot-yritysdataa. Kuuluu Sunspot-repoon tai vaulttiin.
+artifact	qua-*.png	Quantimodo-näyttökuvia.
+artifact	sunspot-*.png	Sunspot-näyttökuvia.
+runtime	data/	Ajonaikainen data.
+runtime	server/data/	Palvelimen ajonaikainen data.
+runtime	.paperclip/	Instanssin tila.
+runtime	cli/.paperclip/	CLI:n tila.
+generated	*/dist/	Buildin tuotos.
+generated	*/*/dist/	Buildin tuotos.
+generated	*/*/*/dist/	Buildin tuotos.
+generated	*/*/*/*/dist/	Buildin tuotos.
+generated	ui/tsconfig.tsbuildinfo	TypeScriptin välimuisti.
+generated	.playwright-mcp/	Playwright-MCP:n ajotila.
+generated	tests/e2e-companies/.last-run.json	Playwrightin ajotila.
+generated	tests/e2e-companies/playwright-report/	Playwrightin raportti.
+generated	tests/e2e-companies/test-results/	Playwrightin tulokset.
+tolerated	.claude/scheduled_tasks.lock	Claude Coden ajastuslukko; muuttuu jokaisella ajolla.
