@@ -536,8 +536,9 @@ async function main(): Promise<void> {
   const text = report.join("\n");
   console.log(text);
   if (args.report) {
-    await writeFile(args.report, `${text}\n`, { mode: 0o600 });
-    await chmod(args.report, 0o600); // mode only applies to new files
+    await writeFile(args.report, "", { mode: 0o600 });
+    await chmod(args.report, 0o600); // mode only applies to new files; restrict before content is written
+    await writeFile(args.report, `${text}\n`);
   }
   process.exit(failures.length === 0 ? 0 : 1);
 }
