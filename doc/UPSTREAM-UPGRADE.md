@@ -358,7 +358,7 @@ tunnistuksen. Fallback laukeaa vain, kun **yksikään** hash ei tunnistu. Testit
   -markerin sisällä, koska upstream muuttaa tiedostoa 916.1:een mennessä: tarkista marker trial-mergessä.
   Realistinen laukaisija: kaikkien tiedostojen sisältö muuttuu kerralla (esim. rivinvaihtojen muunnos checkoutissa).
   Testit: `it("throws when history has rows but no hash resolves")`, tyhjän historian testi ja
-  `applyPendingMigrations`-hylkäystesti. PR: RK9-348 (linkki lisätään PR:n avauksen jälkeen).
+  `applyPendingMigrations`-hylkäystesti. PR: [#119](https://github.com/mv50000/paperclip/pull/119).
 
 **Nimitörmäys (estää portaan 916.1).** Upstreamin `0272_light_kate_bishop.sql` tekee `CREATE TABLE IF NOT EXISTS
 "email_messages"`. Forkin 9002 loi jo samannimisen taulun (50 528 riviä prodissa), joten `IF NOT EXISTS` ohittaa luonnin
