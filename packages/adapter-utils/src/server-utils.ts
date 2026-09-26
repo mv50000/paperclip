@@ -1481,6 +1481,7 @@ export async function runChildProcess(
       ...opts.env,
     };
 
+    // --- RK9 Custom (RK9-228): upstream runChildProcess has no doNotInheritEnvKeys. See doc/upgrade/acpx-claude-local.md ---
     // Keys the caller refuses to inherit from the host. An adapter uses this for
     // credentials that change how the child bills or authenticates: a server-wide
     // ANTHROPIC_API_KEY, set for some unrelated feature, would otherwise move every

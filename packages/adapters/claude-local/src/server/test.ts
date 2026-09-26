@@ -208,6 +208,7 @@ export async function testEnvironment(
         {
           cwd,
           env,
+          // --- RK9 Custom (RK9-228): keep a server-wide ANTHROPIC_API_KEY out of the CLI. See doc/upgrade/acpx-claude-local.md ---
           doNotInheritEnvKeys: hostEnvKeysNotInherited(),
           timeoutSec: 45,
           graceSec: 5,

@@ -894,3 +894,170 @@ describe("claude execute", () => {
     }
   });
 });
+
+/**
+ * RK9-228 end to end, through the real spawn path. The unit tests in
+ * claude-local-adapter-billing-inheritance.test.ts pin the env helpers; these
+ * pin what the spawned `claude` process actually receives and what billing type
+ * the run reports. Upstream later runs local agents through ACPX and a native
+ * runner (RK9-305): these tests must keep passing at every upgrade step, on
+ * whichever spawn path claude_local then uses.
+ */
+async function writeEnvCapturingClaudeCommand(commandPath: string): Promise<void> {
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const pick = (key) => (Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : null);
+if (capturePath) {
+  fs.writeFileSync(capturePath, JSON.stringify({
+    argv: process.argv.slice(2),
+    anthropicApiKey: pick("ANTHROPIC_API_KEY"),
+    inheritOptIn: pick("PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY"),
+    paperclipApiUrl: pick("PAPERCLIP_API_URL"),
+    paperclipApiKey: pick("PAPERCLIP_API_KEY"),
+  }), "utf8");
+}
+fs.readFileSync(0, "utf8");
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-1", model: "claude-opus-5-5" }));
+console.log(JSON.stringify({ type: "result", session_id: "claude-session-1", result: "hello", usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 } }));
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
+type EnvCapture = {
+  argv: string[];
+  anthropicApiKey: string | null;
+  inheritOptIn: string | null;
+  paperclipApiUrl: string | null;
+  paperclipApiKey: string | null;
+};
+
+describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", () => {
+  const HOST_KEYS = [
+    "ANTHROPIC_API_KEY",
+    "PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY",
+    "PAPERCLIP_API_URL",
+    "PAPERCLIP_RUNTIME_API_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+  ] as const;
+
+  async function runWithHostEnv(
+    hostEnv: Partial<Record<(typeof HOST_KEYS)[number], string>>,
+    config: Record<string, unknown> = {},
+  ) {
+    const saved = Object.fromEntries(HOST_KEYS.map((key) => [key, process.env[key]]));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-rk9-228-"));
+    let restore = () => {};
+    try {
+      for (const key of HOST_KEYS) delete process.env[key];
+      Object.assign(process.env, hostEnv);
+      const setup = await setupExecuteEnv(root, { commandWriter: writeEnvCapturingClaudeCommand });
+      restore = setup.restore;
+      const { workspace, commandPath, capturePath } = setup;
+      const configEnv = (config.env as Record<string, string> | undefined) ?? {};
+      const result = await execute({
+        runId: "run-rk9-228",
+        agent: { id: "agent-1", companyId: "co-1", name: "Test", adapterType: "claude_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          promptTemplate: "Do work.",
+          ...config,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath, ...configEnv },
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+        onMeta: async () => {},
+      });
+      const captured = JSON.parse(await fs.readFile(capturePath, "utf-8")) as EnvCapture;
+      return { result, captured };
+    } finally {
+      restore();
+      for (const key of HOST_KEYS) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("keeps a server-wide key out of the spawned CLI and reports subscription billing", async () => {
+    const { result, captured } = await runWithHostEnv({ ANTHROPIC_API_KEY: "sk-server-wide" });
+
+    expect(result.exitCode).toBe(0);
+    expect(captured.anthropicApiKey).toBeNull();
+    expect(result.billingType).toBe("subscription");
+  });
+
+  it("passes the agent's own adapter-config key and reports API billing", async () => {
+    const { result, captured } = await runWithHostEnv(
+      { ANTHROPIC_API_KEY: "sk-server-wide" },
+      { env: { ANTHROPIC_API_KEY: "sk-agent" } },
+    );
+
+    expect(captured.anthropicApiKey).toBe("sk-agent");
+    expect(result.billingType).toBe("api");
+  });
+
+  it("inherits the server key only when the deployment opts in", async () => {
+    const { result, captured } = await runWithHostEnv({
+      ANTHROPIC_API_KEY: "sk-server-wide",
+      PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY: "1",
+    });
+
+    expect(captured.anthropicApiKey).toBe("sk-server-wide");
+    expect(result.billingType).toBe("api");
+  });
+
+  it("hands the agent the run JWT and the server's API URL, not an Anthropic credential", async () => {
+    const { captured } = await runWithHostEnv({
+      ANTHROPIC_API_KEY: "sk-server-wide",
+      PAPERCLIP_API_URL: "http://127.0.0.1:3100",
+    });
+
+    expect(captured.paperclipApiKey).toBe("run-jwt-token");
+    expect(captured.paperclipApiUrl).toBe("http://127.0.0.1:3100");
+    expect(captured.anthropicApiKey).toBeNull();
+  });
+
+  // Upstream v2026.720.0+ runs claude_local on the ACP engine when `engine` is
+  // unset, and ACP passes a server-wide ANTHROPIC_API_KEY to the agent. The
+  // spawn tests above cannot see that on a host where ACP silently falls back
+  // to the CLI, so pin the engine choice itself. The resolver does not exist in
+  // the fork yet; this starts asserting as soon as a merge brings it in.
+  it("pins claude_local to the CLI engine when no engine is configured", async () => {
+    const serverModule: Record<string, unknown> = await import("@paperclipai/adapter-claude-local/server");
+    const resolveEngine = serverModule.resolveClaudeExecutionEngine;
+    if (resolveEngine === undefined) {
+      // No resolver means no ACP engine yet. A renamed resolver must not let
+      // this gate pass vacuously: update the name here instead.
+      const engineExports = Object.keys(serverModule).filter((name) => /ExecutionEngine/i.test(name));
+      expect(engineExports).toEqual([]);
+      return;
+    }
+
+    expect(typeof resolveEngine).toBe("function");
+    const selection = (resolveEngine as (config: Record<string, unknown>) => { engine: string })({});
+    expect(selection.engine).toBe("cli");
+  });
+
+  // Upstream resolves an unset model to its own default (Opus 5). This fork
+  // passes no --model at all, so the CLI's own configuration decides (RK9-305).
+  it("passes no --model when the agent has no model configured", async () => {
+    const { captured } = await runWithHostEnv({});
+
+    expect(captured.argv).not.toContain("--model");
+  });
+
+  it("passes the configured model through unchanged", async () => {
+    const { captured } = await runWithHostEnv({}, { model: "claude-opus-5-5" });
+
+    const modelIndex = captured.argv.indexOf("--model");
+    expect(modelIndex).toBeGreaterThanOrEqual(0);
+    expect(captured.argv[modelIndex + 1]).toBe("claude-opus-5-5");
+  });
+});

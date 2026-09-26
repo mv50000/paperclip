@@ -270,3 +270,29 @@ describe("runAgentHealthMonitor", () => {
     expect(result.risksResolved).toBe(1);
   });
 });
+
+/**
+ * RK9-305. The governance drift detector flags any agent whose configured model
+ * is not on the allow-list. If the allow-list names a model the claude_local
+ * adapter does not offer, the board cannot pick a compliant model in the UI; if
+ * the adapter offers a model the allow-list lacks (Opus 5.5 before #106), every
+ * agent moved to it is flagged as drift. Pin both lists together here, so an
+ * upstream merge that rewrites either one fails CI instead of production.
+ */
+describe("default model allow-list", () => {
+  it("names only models the claude_local adapter offers", async () => {
+    const { DEFAULT_ALLOWED_MODELS } = await import("../services/risk-monitors.js");
+    const { models } = await import("@paperclipai/adapter-claude-local");
+    const offered = new Set(models.map((model) => model.id));
+
+    for (const id of DEFAULT_ALLOWED_MODELS) {
+      expect(offered.has(id), `${id} is allowed but not offered by claude_local`).toBe(true);
+    }
+  });
+
+  it("allows the fleet's current Opus 5.5 default", async () => {
+    const { DEFAULT_ALLOWED_MODELS } = await import("../services/risk-monitors.js");
+
+    expect(DEFAULT_ALLOWED_MODELS).toContain("claude-opus-5-5");
+  });
+});

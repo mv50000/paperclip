@@ -18,6 +18,18 @@ import { riskIncidentService } from "./risk-incidents.js";
 import { PLAYBOOKS } from "./risk-playbooks.js";
 import { logger } from "../middleware/logger.js";
 
+/**
+ * Model ids an agent may run on when a company's MODEL_NONCOMPLIANT policy sets
+ * no `allowed_models` of its own. Every id here must also be offered by the
+ * claude_local model list; `risk-monitors.test.ts` fails when the two drift apart.
+ */
+export const DEFAULT_ALLOWED_MODELS: readonly string[] = [
+  "claude-sonnet-5",
+  "claude-opus-5-5",
+  "claude-opus-5",
+  "claude-fable-5-1",
+];
+
 export interface MonitorResult {
   monitor: string;
   risksCreated: number;
@@ -499,7 +511,7 @@ export function riskMonitorService(db: Db) {
     if (!modelEnabled && !orgEnabled) return result;
 
     const t = getThresholds(modelPolicy);
-    const allowedModels = t.allowed_models ?? ["claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"];
+    const allowedModels = t.allowed_models ?? DEFAULT_ALLOWED_MODELS;
 
     try {
       const activeAgents = await db
