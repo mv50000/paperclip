@@ -66,6 +66,13 @@ has "tarissa data" "$TARL" "data/d"
 case "$TARL" in *ui/dist*|*qua-x.png*) bad "generated/artifact ei kuulu tariin" ;; *) ok "generated ja artifact pois tarista" ;; esac
 [ "$(stat -c %a "$B/untracked-preserved.tar")" = 600 ] && [ "$(stat -c %a "$B")" = 700 ] && ok "oikeudet 700/600" || bad "oikeudet"
 
+echo "== lukematon tiedosto -> exit 3, ei osittaista tariä hyväksytä"
+chmod 000 "$R/data/d"
+"$SUT" --repo "$R" --backup "$TMP/bk2" >"$TMP/o3" 2>&1; RC=$?
+chmod 644 "$R/data/d"
+[ "$RC" = 3 ] && ok "lukematon tiedosto -> exit 3" || bad "exit $RC: $(cat "$TMP/o3")"
+has "virheilmoitus neuvoo --tar-as" "$(cat "$TMP/o3")" "--tar-as"
+
 echo "== reset --hard -kuivaharjoitus: versioimattomat säilyvät, versioitu muutos häviää"
 rm "$R/wh.psd1.template"
 G reset -q --hard master

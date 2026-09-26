@@ -33,6 +33,9 @@ has() { if printf '%s' "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1: '$3'
 export PATH="$PGBIN:$PATH"
 URL_BASE="postgresql:///%s?host=$SOCK&port=$PORT&user=postgres"
 url() { printf "$URL_BASE" "$1"; }
+# Salasanallinen URL (trust-tunnistus ei pyydä sitä): testaa, ettei salasana päädy argv:hen.
+PWURL_BASE="postgresql://postgres:s3cretpw@/%s?host=$SOCK&port=$PORT"
+pwurl() { printf "$PWURL_BASE" "$1"; }
 
 psql "$(url postgres)" -qAt -c 'CREATE DATABASE src' >/dev/null
 psql "$(url src)" -qAt -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
@@ -58,11 +61,16 @@ git -C "$REPO" update-ref refs/remotes/fork/master HEAD
 HEAD_SHA=$(git -C "$REPO" rev-parse HEAD)
 ORIGIN_SHA=$(git -C "$REPO" rev-parse origin/master)
 
-export DATABASE_URL="$(url src)"
+export DATABASE_URL="$(pwurl src)"
 OUT="$TMP/out"
+# argv-lokitus: kääre kirjaa jokaisen psql-, pg_dump- ja pg_restore-kutsun argumentit.
+WRAP="$TMP/wrap"; ARGV_LOG="$TMP/argv.log"; mkdir -p "$WRAP"; : >"$ARGV_LOG"
+for tool in psql pg_dump pg_restore; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >>"%s"\nexec "%s/%s" "$@"\n' "$tool" "$ARGV_LOG" "$PGBIN" "$tool" >"$WRAP/$tool"; chmod +x "$WRAP/$tool"
+done
 
 echo "== onnistunut ajo"
-OUTPUT=$("$SUT" --tag v2026.512.0 --repo "$REPO" --out-dir "$OUT" 2>&1); RC=$?
+OUTPUT=$(PATH="$WRAP:$PATH" "$SUT" --tag v2026.512.0 --repo "$REPO" --out-dir "$OUT" 2>&1); RC=$?
 [ "$RC" = 0 ] && ok "exit 0" || bad "exit $RC: $OUTPUT"
 has "SNAPSHOT_OK tulostuu" "$OUTPUT" "SNAPSHOT_OK"
 SNAP=$(ls -d "$OUT"/v2026.512.0-* 2>/dev/null | head -n 1)
@@ -77,14 +85,29 @@ has "scratch-luvut talteen" "$(cat "$SNAP/counts-scratch.txt")" "companies=7"
 LEFT=$(psql "$(url postgres)" -qAt -c "SELECT count(*) FROM pg_database WHERE datname LIKE 'pcp_restore_check_%'")
 [ "$LEFT" = 0 ] && ok "scratch pudotettu" || bad "scratch-kantoja jäi $LEFT"
 ( cd "$SNAP" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ) && ok "SHA256SUMS täsmää" || bad "SHA256SUMS ei täsmää"
+[ -s "$ARGV_LOG" ] && ok "kutsut kirjattu ($(wc -l <"$ARGV_LOG"))" || bad "argv-loki tyhjä"
+if grep -q 's3cretpw' "$ARGV_LOG" "$SNAP"/*.txt 2>/dev/null; then bad "salasana näkyy argv:ssä tai tiedostoissa"; else ok "salasana ei näy argv:ssä eikä tiedostoissa"; fi
+case "$OUTPUT" in *s3cretpw*) bad "salasana tulosteessa" ;; *) ok "salasana ei tulosteessa" ;; esac
+
+echo "== --verify"
+OUTPUT=$("$SUT" --verify "$SNAP" 2>&1); RC=$?
+[ "$RC" = 0 ] && has "VERIFY_OK" "$OUTPUT" "VERIFY_OK" || bad "verify exit $RC: $OUTPUT"
+psql "$(url src)" -qAt -c "INSERT INTO companies (name) VALUES ('x')" >/dev/null
+OUTPUT=$("$SUT" --verify "$SNAP" 2>&1); RC=$?
+[ "$RC" = 1 ] && has "verify löytää eron" "$OUTPUT" "companies: snapshotissa 7, kannassa 8" || bad "verify exit $RC: $OUTPUT"
+psql "$(url src)" -qAt -c "DELETE FROM companies WHERE name = 'x'" >/dev/null
+
+echo "== dbname-query hylätään"
+OUTPUT=$(DATABASE_URL="postgresql:///src?host=$SOCK&port=$PORT&dbname=postgres" "$SUT" --tag x --repo "$REPO" --out-dir "$OUT" 2>&1); RC=$?
+[ "$RC" = 2 ] && ok "dbname=-query -> exit 2" || bad "exit $RC: $OUTPUT"
 
 echo "== palautus pudottaa rivin -> exit 1"
 STUB="$TMP/stub"; mkdir -p "$STUB"
 cat >"$STUB/pg_restore" <<EOF
 #!/usr/bin/env bash
 "$PGBIN/pg_restore" "\$@" || exit \$?
-for a in "\$@"; do case "\$a" in --dbname=*) u=\${a#--dbname=} ;; esac; done
-[ -z "\${u:-}" ] || psql "\$u" -qAt -c 'DELETE FROM companies WHERE id = 1' >/dev/null
+# PGDATABASE ja muut PG*-muuttujat tulevat snapshot-skriptin ympäristöstä (scratch-kanta)
+psql -qAt -c 'DELETE FROM companies WHERE id = 1' >/dev/null
 exit 0
 EOF
 chmod +x "$STUB/pg_restore"

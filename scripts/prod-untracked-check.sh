@@ -4,16 +4,20 @@
 #
 # Käyttö:
 #   scripts/prod-untracked-check.sh [--repo /opt/paperclip] [--target <ref>] [--manifest <tiedosto>]
-#                                   [--backup <hakemisto>]
+#                                   [--backup <hakemisto>] [--tar-as <käyttäjä>]
 #
 #   --target    ref, johon reset aiotaan (esim. origin/master). Törmäys = versioimaton polku, joka on
 #               kohteessa versioituna: reset --hard ylikirjoittaisi sen.
 #   --backup    tallentaa hakemistoon (0700): local-changes.patch (versioidut paikalliset muutokset,
 #               jotka reset --hard hävittäisi) ja untracked-preserved.tar (luokat preserve, secret,
-#               runtime; tar 0600).
+#               runtime; tar 0600). Lukematon tiedosto tai tar-virhe = exit 3 (varmuuskopio epätäydellinen).
+#   --tar-as    pakkaa `sudo -n -u <käyttäjä> tar`illa: osa tuotannon tiedostoista (data/secrets,
+#               cli/.paperclip) on vain palvelun käyttäjän luettavissa. Tiedosto kirjoitetaan silti
+#               kutsujan oikeuksilla (0600).
 #
 # Poistumiskoodi: 0 = kaikki luokiteltu, ei törmäyksiä eikä versioituja paikallisia muutoksia;
-#                 1 = luokittelematon polku, törmäys tai versioitu paikallinen muutos; 2 = käyttövirhe.
+#                 1 = luokittelematon polku, törmäys tai versioitu paikallinen muutos; 2 = käyttövirhe;
+#                 3 = varmuuskopio epätäydellinen (lukematon tiedosto, tar-virhe).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -21,6 +25,7 @@ REPO=/opt/paperclip
 TARGET=""
 MANIFEST="$HERE/prod-untracked.manifest"
 BACKUP=""
+TAR_AS=""
 LOGTAG="[prod-untracked-check]"
 
 die() { echo "$LOGTAG VIRHE: $*" >&2; exit 2; }
@@ -30,7 +35,8 @@ while [ $# -gt 0 ]; do
     --target) TARGET=${2:-}; shift 2 ;;
     --manifest) MANIFEST=${2:-}; shift 2 ;;
     --backup) BACKUP=${2:-}; shift 2 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    --tar-as) TAR_AS=${2:-}; shift 2 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) die "tuntematon valitsin: $1" ;;
   esac
 done
@@ -87,9 +93,16 @@ done
 if [ -n "$BACKUP" ]; then
   umask 077
   mkdir -p "$BACKUP"; chmod 700 "$BACKUP"
-  git -C "$REPO" diff --binary HEAD >"$BACKUP/local-changes.patch"
+  git -C "$REPO" diff --binary HEAD >"$BACKUP/local-changes.patch" || { echo "$LOGTAG VIRHE: git diff epäonnistui" >&2; exit 3; }
   if [ "${#KEEP[@]}" -gt 0 ]; then
-    tar -C "$REPO" -cf "$BACKUP/untracked-preserved.tar" -- "${KEEP[@]}"
+    TAR_CMD=(tar)
+    [ -z "$TAR_AS" ] || TAR_CMD=(sudo -n -u "$TAR_AS" tar)
+    # Tar kirjoitetaan stdoutiin ja tiedosto luodaan kutsujan oikeuksilla; mikä tahansa tar-virhe
+    # (myös "file changed as we read it") on epätäydellinen varmuuskopio.
+    if ! "${TAR_CMD[@]}" -C "$REPO" -cf - -- "${KEEP[@]}" >"$BACKUP/untracked-preserved.tar"; then
+      echo "$LOGTAG VIRHE: tar epäonnistui tai jokin tiedosto ei ollut luettavissa; varmuuskopio on epätäydellinen (kokeile --tar-as paperclip)" >&2
+      exit 3
+    fi
   else
     head -c 10240 /dev/zero >"$BACKUP/untracked-preserved.tar"  # tyhjä tar (GNU tar ei luo tyhjää itse)
   fi

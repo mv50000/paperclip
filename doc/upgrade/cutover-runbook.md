@@ -32,8 +32,8 @@ Kaikki skriptit ovat vain luku -tilassa lähdekantaan; snapshot kirjoittaa vain 
 
 | Työkalu | Tehtävä |
 |---|---|
-| `scripts/outreach-window-report.sh snapshot\|compare` | Outreach-jono, viimeisin lähetys, käsittelemättömät vastaukset ennen ja jälkeen. `compare` löytää hävinneet ja kaksinkertaistuneet viestit. |
-| `scripts/pre-upgrade-snapshot.sh --tag <porras>` | SHA:t, `pg_dump -Fc`, palautus scratch-kantaan ja rivimäärävertailu, paikallisten muutosten patch ja versioimattomien tiedostojen tar. |
+| `scripts/outreach-window-report.sh snapshot\|compare\|export` | Outreach-jono, viimeisin lähetys, käsittelemättömät vastaukset ennen ja jälkeen. `compare` vertaa viestejä id:llä ja löytää hävinneet ja kaksinkertaistuneet. `export` tallentaa ikkunan rivit rollbackia varten. |
+| `scripts/pre-upgrade-snapshot.sh --tag <porras>` / `--verify <hakemisto>` | SHA:t, `pg_dump -Fc`, palautus scratch-kantaan ja rivimäärävertailu, paikallisten muutosten patch ja versioimattomien tiedostojen tar. `--verify` todentaa kannan rollbackin jälkeen. |
 | `scripts/prod-untracked-check.sh --repo /opt/paperclip --target <ref>` | Luokittelee versioimattomat tiedostot, löytää versioidut paikalliset muutokset ja törmäykset kohde-refin kanssa. Luokitus: `scripts/prod-untracked.manifest`. |
 | `scripts/upgrade-smoke.sh` | Savutesti ([RK9-304](/RK9/issues/RK9-304)). |
 | `/usr/local/bin/paperclip-preflight.sh` | `ExecStartPre`. Fork-ankkurit, migraatio 9010, host-env-suodatin, Node ≥ 24.11. Lähde: `~/.claude/hosts/paperclip/paperclip-service/`. |
@@ -54,10 +54,10 @@ Nämä ovat tuotantomuutoksia, ja **operaattori ajaa ne itse**. Tämä tiketti e
 | # | Komento | Tarkoitus | Todennus |
 |---|---|---|---|
 | 0.1 | `sudo ~/.claude/hosts/paperclip/paperclip-service/paperclip-safe-directory.sh` | `/opt/paperclip` `safe.directory`-listalle `/etc/gitconfig`iin. Palvelun käyttäjä `paperclip` omistaa repon eikä törmää virheeseen. Root törmää (todennettu 26.9.: `sudo git -C /opt/paperclip rev-parse HEAD` antaa `dubious ownership`). Skripti on idempotentti, ja `install.sh --apply` ajaa sen jatkossa. | `sudo git -C /opt/paperclip status --short` ei tulosta virhettä |
-| 0.2 | `sudo ~/.claude/hosts/paperclip/paperclip-update/install.sh --apply <commit>` | Asentaa hold-tuen `paperclip-update.sh`:iin. Commit on `~/.claude`-repon commit `f39caba` tai myöhempi. | `grep -c update-hold /usr/local/bin/paperclip-update.sh` ≥ 1 |
+| 0.2 | `sudo ~/.claude/hosts/paperclip/paperclip-update/install.sh --apply <commit>` | Asentaa hold-tuen `paperclip-update.sh`:iin. Commit on `~/.claude`-repon commit `3f2a19a` tai myöhempi (`f39caba` ja sen korjaus). | `grep -c update-hold /usr/local/bin/paperclip-update.sh` ≥ 1 |
 | 0.3 | Node 24 asennetaan ([RK9-310](/RK9/issues/RK9-310)). | Uusi preflight estää palvelun käynnistyksen, jos Node < 24.11. paperclip-01 ajaa 26.9. Node 22.22.1:tä, joten **älä asenna preflightia ennen Node 24:ää**. | `sudo -u paperclip env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin node --version` |
-| 0.4 | `sudo ~/.claude/hosts/paperclip/paperclip-service/install.sh` (tarkistus), sitten `sudo ./install.sh --apply <commit>` | Asentaa uuden `paperclip-preflight.sh`:n. Aja vain, kun 0.3 on tehty. Asennin ei restarttaa. | `sudo -u paperclip /usr/local/bin/paperclip-preflight.sh; echo $?` tulostaa `OK`-rivin ja `0` |
-| 0.5 | `sudo mkdir -p /var/backups/paperclip-pre-upgrade && sudo chown "$USER": /var/backups/paperclip-pre-upgrade` | Snapshotien kohde (hakemisto 0700, tiedostot 0600). Tarkista levytila: `df -h /var/backups` (dump + scratch-palautus vaativat 2 × kannan koon). | `df -BG --output=avail /var/backups` |
+| 0.4 | `sudo ~/.claude/hosts/paperclip/paperclip-service/install.sh` (tarkistus), sitten `sudo ./install.sh --apply <commit>` | Asentaa uuden `paperclip-preflight.sh`:n. Aja vain, kun 0.3 on tehty: `install.sh` hylkää uuden preflightin, jos palvelun PATHin Node on alle 24.11 (todennettu `install-test.sh`:lla). Asennin ei restarttaa. | `sudo -u paperclip /usr/local/bin/paperclip-preflight.sh; echo $?` tulostaa `OK`-rivin ja `0` |
+| 0.5 | `sudo install -d -m 700 -o "$USER" /var/backups/paperclip-pre-upgrade` | Snapshotien kohde (hakemisto 0700, tiedostot 0600). Tarkista levytila: `df -h /var/backups` (dump + scratch-palautus vaativat 2 × kannan koon). | `df -BG --output=avail /var/backups` |
 | 0.6 | Anna käyttäjälle, jolla `DATABASE_URL` yhdistää, `CREATEDB` (scratch-kantaa varten), tai aseta `SNAPSHOT_ADMIN_URL` toiselle käyttäjälle. | `pre-upgrade-snapshot.sh` luo ja pudottaa kannan `pcp_restore_check_*`. | `psql "$DATABASE_URL" -c "select rolcreatedb from pg_roles where rolname = current_user"` |
 
 **Versioimattomat ja paikalliset tiedostot** (`/opt/paperclip`, tarkistettu 26.9.). `git fetch && git reset --hard` ei poista versioimattomia tiedostoja, koska vain `git clean` poistaa. Se **hävittää versioidut paikalliset muutokset** ja ylikirjoittaa polun, joka on kohde-refissä versioituna. Luokitus on tiedostossa `scripts/prod-untracked.manifest`; yhteenveto:
@@ -88,7 +88,7 @@ Nämä ovat tuotantomuutoksia, ja **operaattori ajaa ne itse**. Tämä tiketti e
 
 Aikaraja: valmis ennen ikkunan alkua. Ei prod-muutoksia paitsi update-holdi.
 
-1. Valitse ikkuna RK9-198:n lähetyserien ulkopuolelta. Katso lähetyserien aikataulu tiketistä [RK9-198](/RK9/issues/RK9-198) ja jonon tila: `scripts/outreach-window-report.sh snapshot --label t-1 --out /tmp/window-t-1.json`. Ikkuna alkaa, kun `jono (queued)` on 0 ja seuraava erä on vähintään ikkunan pituuden päässä.
+1. Valitse ikkuna RK9-198:n lähetyserien ulkopuolelta. Katso lähetyserien aikataulu tiketistä [RK9-198](/RK9/issues/RK9-198) ja jonon tila: `scripts/outreach-window-report.sh snapshot --label t-1 --out /tmp/window-t-1.json`. Ikkuna alkaa, kun `jono (queued)` on 0 ja seuraava erä on vähintään ikkunan pituuden päässä. Jono ei saa olla ei-tyhjä: `send-queue` ei lukitse viestiä, joten jonoon jäänyt viesti voi lähteä uudelleen palautuksen jälkeen.
 2. Tarkista, ettei käynnissä ole yhtäjaksoisuutta vaativaa ajoa (QUA-1007 paper-forward, QUA-1207 pariteettiajo). Ikkuna on aikaisintaan 4.10.
 3. **Aseta update-holdi** ennen kuin merge-haara avataan: `sudo install -m 644 /dev/null /etc/paperclip/update-hold`. Kirjaa syy: `echo "cutover <porras> <päivämäärä>" | sudo tee /etc/paperclip/update-hold`. Ilman holdia 05:00Z-päivitys deployaa mergen.
 4. Jäädytä masterin merge-liikenne (sääntö 3): ilmoita kanavalla ja lisää PR:ään otsikko `[FREEZE]` kunnes vaihe 6 on valmis.
@@ -96,7 +96,7 @@ Aikaraja: valmis ennen ikkunan alkua. Ei prod-muutoksia paitsi update-holdi.
 6. Aja preflight kuivana: `sudo -u paperclip /usr/local/bin/paperclip-preflight.sh`.
 7. Aja savutesti nykytilaa vasten: `scripts/upgrade-smoke.sh --offline --fork-tests`.
 
-**Go**, kun: (a) `jono` on 0 tai seuraava erä on ikkunan ulkopuolella, (b) `prod-untracked-check.sh` exit 0, (c) preflight exit 0, (d) update-holdi on paikallaan, (e) porras-PR:n kaikki checkit ovat vihreitä ja harjoitusinstanssin tarkistukset on kirjattu Porraslokiin.
+**Go**, kun: (a) `jono (queued)` on 0 ja seuraava erä on ikkunan ulkopuolella, (b) `prod-untracked-check.sh` exit 0, (c) preflight exit 0, (d) update-holdi on paikallaan, (e) porras-PR:n kaikki checkit ovat vihreitä ja harjoitusinstanssin tarkistukset on kirjattu Porraslokiin.
 **No-go**: mikä tahansa yllä oleva puuttuu. Siirrä ikkunaa. Mitään ei ole vielä muutettu, joten rollbackia ei tarvita.
 
 ## Vaihe 2 — Outreach ja heartbeatit pysäytetään (T+0, aikaraja 15 min)
@@ -111,22 +111,25 @@ Tämä vaihe käynnistää ikkunan. Kello alkaa tästä.
      "$API/api/companies/<companyId>/outreach/senders/$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "<sender>")/pause"
    ```
    Pause on globaali lähettäjää kohden, ja vain board voi asettaa ja jatkaa sen (`routes/outreach.ts`). Kirjaa lista jatkoa varten.
-3. **SYSTEM_PAUSE päälle:** `curl -fsS -X POST -H "Authorization: Bearer $BOARD_TOKEN" -H "Content-Type: application/json" -d '{"reason":"cutover <porras>"}' "$API/api/instance/system-pause"`. Uudet agenttiajot ja rutiinit estyvät. Käynnissä olevat ajot päättyvät itsestään.
-4. **Odota tyhjenemistä:** `psql "$DATABASE_URL" -Atc "select count(*) from heartbeat_runs where status = 'running'"` on 0 (aikaraja 10 min). Jos ajo jää roikkumaan yli 10 min, kirjaa sen id ja jatka: restart katkaisee sen, ja ajo palautuu paluujonoon.
-5. **Todenna pysäytys:** ota toinen snapshot (`--label paused`) ja aja `compare before paused --expect-paused`. Lähetyksiä ei saa tulla lainkaan.
+3. **Pysäytä ulkoinen lähetysdaemoni** (rk9-prod, `outreach-sender.service`). Lähettäjäpause estää uudet viestit `send-queue`sta, mutta daemonilla voi olla viesti kesken (satunnaisviive 30–180 s viestien välillä). Odota 3 min pausen jälkeen ja pysäytä: `ssh rk9admin@100.103.149.19 'sudo journalctl -u outreach-sender.service --since "-5 min" --no-pager | tail -5; sudo systemctl stop outreach-sender.service'`. Käynnistys on vaiheessa 6. Ohje ja ssh-osoite: `~/.claude/hosts/rk9-prod/outreach-sender/README.md`.
+4. **SYSTEM_PAUSE päälle:** `curl -fsS -X POST -H "Authorization: Bearer $BOARD_TOKEN" -H "Content-Type: application/json" -d '{"reason":"cutover <porras>"}' "$API/api/instance/system-pause"`. Uudet agenttiajot ja rutiinit estyvät. Käynnissä olevat ajot päättyvät itsestään.
+5. **Odota tyhjenemistä:** `psql "$DATABASE_URL" -Atc "select count(*) from heartbeat_runs where status = 'running'"` on 0 (aikaraja 10 min). Jos ajo jää roikkumaan yli 10 min, kirjaa sen id ja jatka: restart katkaisee sen, ja ajo palautuu paluujonoon.
+6. **Todenna pysäytys:** ota toinen snapshot (`--label paused`) ja aja `compare before paused --expect-paused`. Lähetyksiä ei saa tulla lainkaan.
 
-**Go**, kun `compare ... --expect-paused` antaa "ei löydöksiä", ja kaikki lähettäjät ovat pausella, ja `heartbeat_runs` `running` = 0.
+**Go**, kun `compare ... --expect-paused` antaa "ei löydöksiä", kaikki lähettäjät ovat pausella, daemon on pysäytetty ja `heartbeat_runs` `running` = 0.
 **No-go**: lähetyksiä tulee pauseista huolimatta tai pause epäonnistuu. Älä jatka. Tutki: `GET /api/companies/<companyId>/outreach/senders/pauses`. Purku: `POST /api/instance/system-resume` ja jatka vain omat cutover-pausesi (vaihe 6, kohta 2). Ikkuna siirtyy.
 
 ## Vaihe 3 — Dump ja pre-upgrade-SHA (aikaraja 20 min)
 
 ```bash
-scripts/pre-upgrade-snapshot.sh --tag <porras> --repo /opt/paperclip
+SNAPSHOT_TAR_AS=paperclip scripts/pre-upgrade-snapshot.sh --tag <porras> --repo /opt/paperclip
 ```
+
+`SNAPSHOT_TAR_AS=paperclip` pakkaa versioimattomat tiedostot `sudo -n -u paperclip tar`illa, koska `data/secrets/master.key`, `cli/.paperclip/.env` ja `cli/.paperclip/config.json` eivät ole operaattorin luettavissa (todennettu 26.9.). Ilman sitä lukematon tiedosto katkaisee snapshotin (exit 1). Snapshot ei koskaan hyväksy osittaista tariä. `DATABASE_URL` ei näy prosessilistassa: skripti muuttaa sen libpq-ympäristömuuttujiksi.
 
 Skripti kirjaa `pre-upgrade-sha.txt`-tiedostoon `HEAD`, `origin/master`, `fork/master` ja `upstream/master`, ajaa `pg_dump -Fc`, palauttaa dumpin kertakäyttöiseen scratch-kantaan, vertaa taulumäärää, migraatiomäärää ja avaintaulujen rivimääriä, pudottaa scratch-kannan ja tulostaa `SNAPSHOT_OK dir=...`. Se tallentaa myös `local/local-changes.patch` (versioidut paikalliset muutokset) ja `local/untracked-preserved.tar` (luokat preserve, secret, runtime).
 
-Pysyvä SHA-kirjaus (ei `/tmp`): lisää rivi osioon "Porrasloki" tiedostossa `doc/UPSTREAM-UPGRADE.md` ja luo tagi: `git -C /opt/paperclip tag rk9/pre-upgrade-<porras> $(sed -n 's/^HEAD=//p' <snapshot-hakemisto>/pre-upgrade-sha.txt) && git -C /opt/paperclip push origin rk9/pre-upgrade-<porras>`.
+Pysyvä SHA-kirjaus (ei `/tmp`): lisää rivi osioon "Porrasloki" tiedostossa `doc/UPSTREAM-UPGRADE.md` ja luo tagi operaattorin masterin kloonissa (`/opt/paperclip` on käyttäjän `paperclip` omistuksessa, eikä operaattori pushaa sieltä): `git -C <klooni> fetch origin && git -C <klooni> tag rk9/pre-upgrade-<porras> $(sed -n 's/^HEAD=//p' <snapshot-hakemisto>/pre-upgrade-sha.txt) && git -C <klooni> push origin rk9/pre-upgrade-<porras>`.
 
 **Go**, kun tulostuu `SNAPSHOT_OK`, dump on yli 0 tavua, `SHA256SUMS` täsmää (`sha256sum -c`) ja SHA-rivi on Porraslokissa.
 **No-go**: `SNAPSHOT_OK` puuttuu, vertailu antaa eroja tai scratch-palautus epäonnistuu. **Älä jatka.** Dumpia ei voi käyttää rollbackiin. Korjaa syy (levytila, `CREATEDB`, pysäyttämätön kirjoittaja: skripti varoittaa, jos rivimäärät muuttuivat dumpin aikana) ja aja uudelleen. Purkuvaihe 2:n mukaan, jos ikkuna venyy yli 45 min.
@@ -167,7 +170,7 @@ sudo systemctl restart paperclip.service
 Tähän vaiheeseen mennään vain, kun vaiheen 5 go on annettu. **Tämän jälkeen rollback ei ole enää sallittu ilman datan exportia.**
 
 1. **SYSTEM_PAUSE pois:** `curl -fsS -X POST -H "Authorization: Bearer $BOARD_TOKEN" "$API/api/instance/system-resume"`. Odota yksi heartbeat-kierros ja tarkista, että ajot käynnistyvät.
-2. **Outreach jatkuu:** jatka vain ne lähettäjät, jotka pausetit vaiheessa 2 (`POST .../outreach/senders/<sender>/resume`). Älä jatka lähettäjiä, jotka olivat pausella jo ennen ikkunaa.
+2. **Outreach jatkuu:** jatka vain ne lähettäjät, jotka pausetit vaiheessa 2 (`POST .../outreach/senders/<sender>/resume`). Älä jatka lähettäjiä, jotka olivat pausella jo ennen ikkunaa. Käynnistä sen jälkeen daemon: `ssh rk9admin@100.103.149.19 'sudo systemctl start outreach-sender.service'`, ja tarkista sen loki.
 3. **Update-holdi pois** vasta, kun 24 h seuranta on vihreä: `sudo rm /etc/paperclip/update-hold`. Hold ilmoittaa Telegramiin 72 h:n jälkeen. Poista holdi vasta, kun seuraavan portaan merge-haara ei ole auki.
 4. **Master vapautetaan** (sääntö 3) kirjaamalla Porraslokiin, että porras on tuotannossa.
 5. **Jälkeen-raportti:** heti jatkon jälkeen ja 1 h, 6 h ja 24 h kohdalla: `scripts/outreach-window-report.sh snapshot --label after-resume --out ...` ja `compare before after-resume`. Tulos "ei löydöksiä" tarkoittaa, ettei viestejä ole hävinnyt eikä kaksinkertaistunut, ja että saapuneet vastaukset ovat säilyneet ([RK9-234](/RK9/issues/RK9-234): vastaus talletetaan ennen reititystä).
@@ -189,34 +192,44 @@ Päätös tehdään ennen outreachin jatkamista (vaiheet 4–5). Aikaraja päät
 | Smoke-tarkistus punainen upstream-kyvyssä, joka ei kosketa forkin toimintaa | Ei rollbackia; korjaa eteenpäin tai jatka operaattorin päätöksellä |
 | Löydös vasta vaiheen 6 jälkeen | **Ei rollbackia.** Korjaa eteenpäin. Poikkeus: ikkunan data exportataan ja replayataan (alla) |
 
-**Rollback ennen jatkoa** (vaihe 6 ei ole alkanut, joten ikkunan aikana ei ole tullut uutta dataa muualle kuin saapuviin vastauksiin, ks. alla):
+**Rollback ennen jatkoa.** Vaiheet ajetaan tässä järjestyksessä. Vaihe R1 on pakollinen ensimmäinen askel: se ottaa talteen datan, jonka palautus pyyhkii.
 
 ```bash
-SNAP=/var/backups/paperclip-pre-upgrade/<porras>-<aikaleima>
-sudo systemctl stop paperclip.service
-sudo -u paperclip git -C /opt/paperclip reset --hard "$(sed -n 's/^HEAD=//p' $SNAP/pre-upgrade-sha.txt)"
-pg_restore --clean --if-exists --no-owner --dbname="$DATABASE_URL" $SNAP/paperclip.dump
-sudo -u paperclip bash -c 'cd /opt/paperclip && pnpm install --frozen-lockfile'
-tar -C /opt/paperclip -xf $SNAP/local/untracked-preserved.tar      # vain jos tiedostoja katosi
-# paikalliset muutokset: git -C /opt/paperclip apply $SNAP/local/local-changes.patch
-sudo systemctl start paperclip.service
+SNAP=/var/backups/paperclip-pre-upgrade/<porras>-<aikaleima>     # vaiheen 3 tuloste
+WINDOW_START=<vaiheen 2 alkuaika, ISO, esim. 2026-10-04T05:00:00Z>
 ```
 
-**Node ja preflight rollbackissa.** Uusi preflight vaatii Node ≥ 24.11 myös vanhalle koodille. Jos vanha koodi ei toimi Node 24:llä, rollback vaatii Noden palautuksen ja vanhan preflightin (`git -C ~/.claude show f39caba~1:hosts/paperclip/paperclip-service/paperclip-preflight.sh`). Siitä päätetään RK9-310:ssä.
+| # | Askel | Komento |
+|---|---|---|
+| R1 | Vie ikkunan data. Palvelu on ollut ylhäällä pauseissa, joten inbound-reitit ovat tallentaneet vastauksia ja `/u/:token` unsubscribeja, ja bounce- ja unsub-postit ovat lisänneet suppressioita. Palautus pyyhkii ne. | `scripts/outreach-window-report.sh export --since "$WINDOW_START" --out "$SNAP/window-export"` |
+| R2 | Pysäytä palvelu. | `sudo systemctl stop paperclip.service` |
+| R3 | Ota turvakopio nykyisestä (rikkinäisestä) kannasta. | `pg_dump -Fc --no-owner --file="$SNAP/failed-upgrade.dump"` (yhteys ympäristömuuttujilla, ks. `scripts/lib-pg-url.sh`: `. scripts/lib-pg-url.sh; pg_with "$DATABASE_URL" pg_dump ...`) |
+| R4 | **Luo kanta tyhjänä uudelleen.** `pg_restore --clean` ei riitä: se jättää uuden version lisäämät sarakkeet ja taulut, ja migraatiomäärä täsmäisi silti (todennettu 26.9. kokeessa). Tuhoava askel: R3:n kopion pitää olla olemassa. | `psql <admin-yhteys> -c 'DROP DATABASE paperclip WITH (FORCE)' -c 'CREATE DATABASE paperclip OWNER <sovelluksen rooli>'` |
+| R5 | Palauta dump kaikki tai ei mitään. | `pg_restore --exit-on-error --single-transaction --no-owner --dbname=paperclip "$SNAP/paperclip.dump"` (sovelluksen roolilla, jotta oliot päätyvät sen omistukseen) |
+| R6 | Palauta koodi. | `sudo -u paperclip git -C /opt/paperclip reset --hard "$(sed -n 's/^HEAD=//p' "$SNAP/pre-upgrade-sha.txt")"` ja `sudo -u paperclip bash -c 'cd /opt/paperclip && pnpm install --frozen-lockfile'` |
+| R7 | Palauta versioimattomat tiedostot ja paikalliset muutokset, jos niitä katosi. | `sudo -u paperclip tar -C /opt/paperclip -xf "$SNAP/local/untracked-preserved.tar"` ja `sudo -u paperclip git -C /opt/paperclip apply "$SNAP/local/local-changes.patch"`. Tiedostot ovat operaattorin 0600-omistuksessa: kopioi ne ensin `paperclip`in luettavaan tilapäishakemistoon ja poista kopio käytön jälkeen. |
+| R8 | Käynnistä palvelu ja todenna. | `sudo systemctl start paperclip.service`, sitten `scripts/pre-upgrade-snapshot.sh --verify "$SNAP"` (tulostaa `VERIFY_OK` tai erot: taulumäärä, migraatiomäärä, avaintaulujen rivit) ja `scripts/upgrade-smoke.sh $API` |
+| R9 | Tuo ikkunan data takaisin **ennen kuin yhtään lähettäjää jatketaan**. Suppressiot ensin: palautettu kanta ei tiedä ikkunan aikana kirjautuneista unsubscribeista, ja jatko lähettäisi niille viestejä. | Ks. alla |
 
-Rollbackin jälkeen tee sama todennus kuin vaiheessa 5 (health, migraatiomäärä = dumpin `counts-scratch.txt`, `compare before after`).
-
-**Ikkunan aikana saapuneet vastaukset.** Palvelu on ylhäällä vaiheen 2 pauseissa, joten inbound-reitit tallentavat vastauksia (talleta ennen reititystä, RK9-234). `pg_restore --clean` pyyhkii ne pois dumpin ottohetken tilaan. Vie ne siksi **ennen palautusta**:
+R9, suppressiot (idempotentti; `ON CONFLICT DO NOTHING`):
 
 ```bash
-psql "$DATABASE_URL" -c "\copy (select * from email_messages where direction = 'inbound' and created_at >= '<ikkunan alku>') to '$SNAP/inbound-window.csv' csv header"
+psql "$DATABASE_URL" <<SQL
+CREATE TEMP TABLE s (LIKE outreach_suppressions INCLUDING DEFAULTS);
+\copy s FROM '$SNAP/window-export/outreach_suppressions.csv' CSV HEADER
+INSERT INTO outreach_suppressions SELECT * FROM s ON CONFLICT (email) DO NOTHING;
+SQL
 ```
 
-Palautuksen jälkeen operaattori tuo rivit käsin (`\copy ... from`) ja ajaa `compare`-raportin. Ilman vientiä ikkunan vastaukset katoavat. Jos palvelu ei ole ollut ylhäällä (restart kesken), lähettäjä yrittää toimitusta uudelleen, eikä vientiä tarvita.
+R9, muut viennin taulut (`email_messages`, `outreach_events`, `outreach_prospects`, `outreach_messages`, `outreach_sender_pauses`): tarkista CSV:t käsin ja tuo tarvittavat rivit. Vastausrivit viittaavat issueihin (`issue_id`), joita palautettu kanta ei välttämättä tunne, joten niiden tuonti voi rikkoa viiteavaimen ja vaatii tapauskohtaisen käsittelyn. **Tätä tuontia ei ole harjoiteltu** (todentamatta): se harjoitellaan Node 24 -dry-runissa ([RK9-310](/RK9/issues/RK9-310)). Ilman R1:tä ikkunan vastaukset ja unsubscribet katoavat.
+
+Vaiheen 6 kohdat 1–2 (jatko) sallitaan vasta, kun R8 antaa `VERIFY_OK` ja R9:n suppressiot on tuotu. Jos palvelu ei ehtinyt kirjoittaa mitään, R1 tuottaa nolla riviä.
+
+**Node ja preflight rollbackissa.** Uusi preflight vaatii Node ≥ 24.11 myös vanhalle koodille. Jos vanha koodi ei toimi Node 24:llä, rollback vaatii Noden palautuksen ja vanhan preflightin (`git -C ~/.claude show f39caba~1:hosts/paperclip/paperclip-service/paperclip-preflight.sh`). `install.sh` hylkää vain uuden, Node-portilla varustetun preflightin, joten vanhan asennus onnistuu. Siitä päätetään RK9-310:ssä.
 
 ## Preflightin todennus rikkinäisellä puulla
 
-Automaattitesti: `~/.claude/hosts/paperclip/paperclip-service/paperclip-preflight-test.sh` (50 tarkistusta). Se rakentaa väliaikaisen git-puun ja todentaa jokaisen vian: poistettu ankkuritiedosto (jokainen seitsemästä) → exit 12 ja `FAIL anchor-missing: <tiedosto>`, puuttuva migraatio 9010 → 13, host-env-suodatin pois → 14, Node 22.22.1, 24.10.9 ja 24.9.0 → 15, feature-branch → 11, ei git-repo → 16.
+Automaattitesti: `~/.claude/hosts/paperclip/paperclip-service/paperclip-preflight-test.sh` (52 tarkistusta). Se rakentaa väliaikaisen git-puun ja todentaa jokaisen vian: poistettu ankkuritiedosto (jokainen seitsemästä) → exit 12 ja `FAIL anchor-missing: <tiedosto>`, puuttuva migraatio 9010 → 13, host-env-suodatin pois → 14, Node 22.22.1, 24.10.9 ja 24.9.0 → 15, feature-branch → 11, ei git-repo → 16.
 
 Käsin (kuiva, vain luku): `PAPERCLIP_PREFLIGHT_REPO=<kopio> ~/.claude/hosts/paperclip/paperclip-service/paperclip-preflight.sh`. Kopio: `git worktree add /tmp/pf-broken origin/master && rm /tmp/pf-broken/server/src/routes/outreach.ts`. Node-vika: `PAPERCLIP_PREFLIGHT_NODE=<skripti, joka tulostaa v22.22.1>`.
 
