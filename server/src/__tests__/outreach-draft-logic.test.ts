@@ -5,6 +5,7 @@ import {
   estimateCostUsd,
   parseDraftResponse,
   parseProviders,
+  RK9_EXPLAINER_URL,
 } from "../services/outreach/draft.js";
 
 describe("outreach AI drafting — pure logic (RK9-196)", () => {
@@ -63,6 +64,55 @@ describe("outreach AI drafting — pure logic (RK9-196)", () => {
     expect(demoUrlForSegment("pt")).toBe("https://pt-demo.saatavilla.fi");
     expect(demoUrlForSegment("kampaamo")).toBe("https://saatavilla.fi");
     expect(demoUrlForSegment(null)).toBe("https://saatavilla.fi");
+  });
+
+  // RK9-349: the rk9 template sells a website — no booking-system lines, A/B by website
+  it("rk9: asks for type B and names the website when one was found", () => {
+    const msg = buildDraftUserMessage({
+      company: "rk9",
+      orgName: "Acme Oy",
+      observation: "Sivulla on vain puhelinnumero.",
+      providers: ["timma"],
+      demoUrl: "https://jooga-demo.saatavilla.fi",
+      websiteUrl: "https://www.acme.fi/",
+    });
+    expect(msg).toContain("Yrityksen nimi: Acme Oy");
+    expect(msg).toContain("Verkkosivu löytyi: https://www.acme.fi/. → Kirjoita viestityyppi B (SIVU ON).");
+    expect(msg).toContain("Sivulla on vain puhelinnumero.");
+    expect(msg).toContain("Ainoa sallittu linkki viestissä: https://rk9.fi/selitys");
+    expect(msg).not.toMatch(/ajanvaraus|VAIHTOVIESTI|ALOITUSVIESTI|Timma|saatavilla/i);
+    expect(msg).toContain("SUBJECT:");
+  });
+
+  it("rk9: asks for type A when no website was found", () => {
+    const msg = buildDraftUserMessage({ company: "rk9", orgName: "Acme Oy", observation: null, websiteUrl: null });
+    expect(msg).toContain("Verkkosivua ei löytynyt. → Kirjoita viestityyppi A (EI SIVUA).");
+    expect(msg).not.toContain("viestityyppi B");
+    expect(msg).toMatch(/älä keksi/i);
+    expect(msg).toContain(`Ainoa sallittu linkki viestissä: ${RK9_EXPLAINER_URL}`);
+    expect(msg).not.toMatch(/ajanvaraus|saatavilla/i);
+    // websiteUrl omitted behaves as "not found"
+    expect(buildDraftUserMessage({ company: "rk9", orgName: "Acme Oy", observation: null })).toContain(
+      "viestityyppi A (EI SIVUA)",
+    );
+  });
+
+  it("saatavilla user message is unchanged by the rk9 branch", () => {
+    const facts = { orgName: "Acme Oy", observation: "x", providers: ["timma"], demoUrl: "https://pt-demo.saatavilla.fi" };
+    const expected = [
+      "Yrityksen nimi: Acme Oy",
+      "Nykyinen ajanvarausjärjestelmä (tunnistettu sivulta): Timma. → Kirjoita VAIHTOVIESTI (template, kohta B).",
+      'Ote heidän verkkosivultaan (käytä siitä VAIN tarkistettavaa faktaa, älä kerro sivua uudelleen): "x"',
+      "Ainoa sallittu linkki viestissä: https://pt-demo.saatavilla.fi",
+      "",
+      "Vastaa TÄSMÄLLEEN tässä muodossa, ei muuta tekstiä ennen tai jälkeen:",
+      "SUBJECT: <otsikko>",
+      "BODY:",
+      "<viestin runko>",
+    ].join("\n");
+    expect(buildDraftUserMessage(facts)).toBe(expected);
+    expect(buildDraftUserMessage({ ...facts, company: "saatavilla" })).toBe(expected);
+    expect(buildDraftUserMessage({ ...facts, company: "saatavilla", websiteUrl: "https://acme.fi" })).toBe(expected);
   });
 
   it("parses the SUBJECT/BODY format", () => {

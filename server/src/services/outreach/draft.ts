@@ -60,6 +60,10 @@ export interface DraftProspectFacts {
   providers?: string[];
   /** RK9-223: the one link the model may use (segment demo tenant or the marketing site). */
   demoUrl?: string;
+  /** RK9-349: the template being drafted; `rk9` gets its own user turn (no booking-system lines). */
+  company?: OutreachTemplateCompany;
+  /** RK9-349 (rk9 only): the prospect's website if one is known — decides message type A/B. */
+  websiteUrl?: string | null;
 }
 
 /** Human-readable names for the provider slugs the PRH scan emits (`skills/prh-prospector`). */
@@ -108,6 +112,9 @@ export function demoUrlForSegment(segment: string | null | undefined): string {
   return (segment && DEMO_URL_BY_SEGMENT[segment.toLowerCase()]) || DEFAULT_DEMO_URL;
 }
 
+/** RK9-349: the only link an rk9 draft may carry (30-second intro page). */
+export const RK9_EXPLAINER_URL = "https://rk9.fi/selitys";
+
 /**
  * Builds the user turn. The template file (loaded by the caller) is the
  * system prompt in full — it carries the company voice, the value
@@ -118,6 +125,7 @@ export function buildDraftUserMessage(facts: DraftProspectFacts): string {
   const observationLine = facts.observation
     ? `Ote heidän verkkosivultaan (käytä siitä VAIN tarkistettavaa faktaa, älä kerro sivua uudelleen): "${facts.observation}"`
     : "Ei tietoa verkkosivusta — älä keksi havaintoa, pidäydy yleisessä arvolupauksessa.";
+  if (facts.company === "rk9") return buildRk9UserMessage(facts, observationLine);
   const providers = facts.providers ?? [];
   const providerLine =
     providers.length > 0
@@ -129,6 +137,27 @@ export function buildDraftUserMessage(facts: DraftProspectFacts): string {
     providerLine,
     observationLine,
     demoLine,
+    "",
+    "Vastaa TÄSMÄLLEEN tässä muodossa, ei muuta tekstiä ennen tai jälkeen:",
+    "SUBJECT: <otsikko>",
+    "BODY:",
+    "<viestin runko>",
+  ].join("\n");
+}
+
+/**
+ * RK9-349: the rk9 template sells a website, not booking — so no provider
+ * line; the branch is "is there a website at all" (docs/outreach/templates/rk9.md, A/B).
+ */
+function buildRk9UserMessage(facts: DraftProspectFacts, observationLine: string): string {
+  const websiteLine = facts.websiteUrl
+    ? `Verkkosivu löytyi: ${facts.websiteUrl}. → Kirjoita viestityyppi B (SIVU ON).`
+    : "Verkkosivua ei löytynyt. → Kirjoita viestityyppi A (EI SIVUA).";
+  return [
+    `Yrityksen nimi: ${facts.orgName}`,
+    websiteLine,
+    observationLine,
+    `Ainoa sallittu linkki viestissä: ${RK9_EXPLAINER_URL}`,
     "",
     "Vastaa TÄSMÄLLEEN tässä muodossa, ei muuta tekstiä ennen tai jälkeen:",
     "SUBJECT: <otsikko>",
@@ -235,15 +264,23 @@ export async function draftMessageForProspect(
   if (!prospect.email) return { ok: false, reason: "missing_email", costUsd: 0 };
 
   const enrichment = prospect.enrichment as
-    | { website?: { snippet?: string }; providers?: unknown; seg?: string }
+    | { website?: { snippet?: string; url?: string }; providers?: unknown; seg?: string }
     | null;
   const system = loadTemplate(company);
-  const user = buildDraftUserMessage({
-    orgName: prospect.orgName,
-    observation: enrichment?.website?.snippet ?? null,
-    providers: parseProviders(enrichment?.providers),
-    demoUrl: demoUrlForSegment(enrichment?.seg),
-  });
+  const user =
+    company === "rk9"
+      ? buildDraftUserMessage({
+          company,
+          orgName: prospect.orgName,
+          observation: enrichment?.website?.snippet ?? null,
+          websiteUrl: enrichment?.website?.url || prospect.sourceUrl || null,
+        })
+      : buildDraftUserMessage({
+          orgName: prospect.orgName,
+          observation: enrichment?.website?.snippet ?? null,
+          providers: parseProviders(enrichment?.providers),
+          demoUrl: demoUrlForSegment(enrichment?.seg),
+        });
 
   let call: ClaudeDraftCall;
   try {
@@ -266,7 +303,7 @@ export async function draftMessageForProspect(
   if (!created.ok) return { ok: false, reason: "generation_failed", costUsd: call.costUsd };
 
   const suppressed = (await findOutreachSuppressed(db, [prospect.email])).size > 0;
-  const verdict = runQualityGate({ email: prospect.email, bodyText: parsed.bodyText, suppressed });
+  const verdict = runQualityGate({ email: prospect.email, bodyText: parsed.bodyText, suppressed, company });
   if (!verdict.ok) {
     await rejectMessage(db, companyId, created.message.id, "system", verdict.reason);
     return { ok: true, messageId: created.message.id, gate: "rejected", costUsd: call.costUsd };

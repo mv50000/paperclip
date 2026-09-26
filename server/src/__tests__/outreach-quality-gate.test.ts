@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  allowedLinkHostSuffix,
   containsPlaceholderText,
   countWords,
   emailDomain,
@@ -54,6 +55,37 @@ describe("outreach quality gate (RK9-196)", () => {
     expect(
       runQualityGate({ email: "info@acme.fi", bodyText: "Katso https://jooga-demo.saatavilla.fi", suppressed: false }),
     ).toEqual({ ok: true });
+  });
+
+  // RK9-349: the allowed link host is per template
+  it("picks the allowed link host per template, defaulting to saatavilla.fi", () => {
+    expect(allowedLinkHostSuffix("rk9")).toBe("rk9.fi");
+    expect(allowedLinkHostSuffix("saatavilla")).toBe("saatavilla.fi");
+    expect(allowedLinkHostSuffix("ololla")).toBe("saatavilla.fi");
+    expect(allowedLinkHostSuffix("alli-audit")).toBe("saatavilla.fi");
+    expect(allowedLinkHostSuffix(undefined)).toBe("saatavilla.fi");
+  });
+
+  it("rk9: allows one rk9.fi link and rejects saatavilla.fi and third-party links", () => {
+    const gate = (bodyText: string) => runQualityGate({ email: "info@acme.fi", bodyText, suppressed: false, company: "rk9" });
+    expect(gate("Keitä olemme, 30 sekunnissa: https://rk9.fi/selitys.")).toEqual({ ok: true });
+    expect(gate("Ei linkkejä.")).toEqual({ ok: true });
+    expect(gate("Katso https://saatavilla.fi")).toEqual({ ok: false, reason: "disallowed_link" });
+    expect(gate("Katso https://hieroja-demo.saatavilla.fi")).toEqual({ ok: false, reason: "disallowed_link" });
+    expect(gate("Sivunne https://www.acme.fi/")).toEqual({ ok: false, reason: "disallowed_link" });
+    expect(gate("https://notrk9.fi/selitys")).toEqual({ ok: false, reason: "disallowed_link" });
+    expect(gate("https://evil.example/rk9.fi")).toEqual({ ok: false, reason: "disallowed_link" });
+    // still at most one link
+    expect(gate("https://rk9.fi/selitys ja https://rk9.fi")).toEqual({ ok: false, reason: "disallowed_link" });
+    expect(hasDisallowedLink("https://www.rk9.fi/selitys", "rk9.fi")).toBe(false);
+  });
+
+  it("saatavilla gate is unchanged when the template is passed explicitly", () => {
+    for (const company of ["saatavilla", "ololla", "alli-audit"] as const) {
+      const gate = (bodyText: string) => runQualityGate({ email: "info@acme.fi", bodyText, suppressed: false, company });
+      expect(gate("Katso https://jooga-demo.saatavilla.fi")).toEqual({ ok: true });
+      expect(gate("Katso https://rk9.fi/selitys")).toEqual({ ok: false, reason: "disallowed_link" });
+    }
   });
 
   it("flags private/free e-mail domains from the AC list", () => {

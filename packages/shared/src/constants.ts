@@ -1046,7 +1046,7 @@ export type OutreachPauseReason = (typeof OUTREACH_PAUSE_REASONS)[number];
 
 // --- RK9 outreach personalization (RK9-196) ---
 /** Slugs of `docs/outreach/templates/<slug>.md` — the per-company draft prompt/voice. */
-export const OUTREACH_TEMPLATE_COMPANIES = ["saatavilla", "alli-audit", "ololla"] as const;
+export const OUTREACH_TEMPLATE_COMPANIES = ["saatavilla", "alli-audit", "ololla", "rk9"] as const;
 export type OutreachTemplateCompany = (typeof OUTREACH_TEMPLATE_COMPANIES)[number];
 
 /** First-step draft body word cap enforced by the quality gate (AC, RK9-196). */
