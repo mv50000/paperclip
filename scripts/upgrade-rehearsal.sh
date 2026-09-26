@@ -6,8 +6,8 @@
 # loopback. Tuotantoon ei kirjoiteta, eikä paperclip.serviceä kosketa.
 #
 # Eristys (operaattorin päätös 2026-09-26, ensisijaisesti verkkotaso):
-#   1. Palvelin ajetaan `unshare -r -n -p -f --mount-proc` -nimiavaruudessa: ei reittiä ulos, oma pid-avaruus
-#      (kannan kopion process_pid-arvot eivät osu prodin prosesseihin). Nimet voivat resolvoitua
+#   1. Palvelin ajetaan `unshare -r -n -p -f` -nimiavaruudessa: ei reittiä ulos, oma pid-avaruus
+#      (kannan kopion process_pid-arvot eivät osu prodin prosesseihin; /proc on silti hostin). Nimet voivat resolvoitua
 #      hostin resolverin unix-socketin kautta, mutta yhteys ei avaudu. Ulos lähtevä
 #      SES/Resend/Slack/GitHub/outreach epäonnistuu yhteyden avauksessa.
 #   2. Kantayhteys: nimiavaruuden sisäinen silta 127.0.0.1:5432 → hostin PG:n unix-socket
@@ -105,7 +105,8 @@ psql_q() { psql -X -qAt -v ON_ERROR_STOP=1 "$@"; }
 
 # --- Nimiavaruus ----------------------------------------------------------------------------
 
-# Holder on `unshare -r -n -p -f --mount-proc`: käyttäjä-, verkko-, pid- ja mount-nimiavaruus.
+# Holder on `unshare -r -n -p -f`: käyttäjä-, verkko- ja pid-nimiavaruus. (--mount-proc ei onnistu
+# LXC-kontissa, joten /proc on hostin: nimiavaruuden prosessit näkyvät sieltä hostin pideillä.)
 # Pid-nimiavaruus estää palvelinta signaloimasta prodin prosesseja kannan kopion pid-arvoilla
 # (heartbeat_runs.process_pid). Kun nimiavaruuden init kuolee, kaikki sen prosessit kuolevat.
 holder_init_pid() { pgrep -P "$(cat "$HOLDER_PID_FILE")" 2>/dev/null | head -1; }
@@ -114,7 +115,7 @@ holder_alive() {
   local pid init cmd; pid="$(cat "$HOLDER_PID_FILE")"
   [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
   cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline")"   # ei putkea: pipefail + grep -q antaa SIGPIPE-virheen
-  [[ "$cmd" == *"unshare -r -n -p -f --mount-proc"* ]] || return 1
+  [[ "$cmd" == *"unshare -r -n -p -f "* ]] || return 1
   init="$(holder_init_pid)"; [[ -n "$init" ]] || return 1
   [[ "$(readlink "/proc/$init/ns/net")" != "$(readlink /proc/self/ns/net)" && "$(readlink "/proc/$init/ns/pid")" != "$(readlink /proc/self/ns/pid)" ]]
 }
@@ -122,13 +123,13 @@ holder_alive() {
 # ns_exec CMD... — aja komento harjoitusnimiavaruudessa. NS_WD asettaa työhakemiston.
 ns_exec() {
   holder_alive || die "nimiavaruutta ei ole käynnissä (aja ensin: $0 <git-ref>)"
-  nsenter -t "$(holder_init_pid)" -U -n -p -m ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@"
+  nsenter -t "$(holder_init_pid)" -U -n -p ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@"
 }
 # ns_daemon LOKI CMD... — sama taustalle omassa istunnossa (sudo-pty:n SIGHUP ei tapa sitä).
 ns_daemon() {
   local logfile="$1"; shift
   holder_alive || die "nimiavaruutta ei ole käynnissä"
-  setsid nsenter -t "$(holder_init_pid)" -U -n -p -m ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@" >>"$logfile" 2>&1 </dev/null &
+  setsid nsenter -t "$(holder_init_pid)" -U -n -p ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@" >>"$logfile" 2>&1 </dev/null &
 }
 
 # server_alive — palvelimen pid (nimiavaruuden numeroinnissa) elää.
@@ -141,7 +142,7 @@ start_netns() {
   command -v unshare >/dev/null && command -v nsenter >/dev/null && command -v pgrep >/dev/null || die "unshare/nsenter/pgrep puuttuu"
   if holder_alive; then return; fi
   # env -i: nimiavaruuden init ei peri operaattorin env:iä. lo nostetaan ylös, muuta liitäntää ei ole.
-  setsid env -i PATH="$PATH" unshare -r -n -p -f --mount-proc bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 </dev/null &
+  setsid env -i PATH="$PATH" unshare -r -n -p -f bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 </dev/null &
   echo $! >"$HOLDER_PID_FILE"
   for _ in $(seq 1 20); do
     if holder_alive && [[ "$(ns_exec ip -o link show lo 2>/dev/null || true)" =~ (UP|UNKNOWN) ]]; then return; fi
@@ -170,26 +171,27 @@ verify_isolation() {
   log "eristys ok: vain lo, ei reittejä, egress-koettimet (1.1.1.1, 8.8.8.8, metadata, SES, Resend, Slack, GitHub) estetty"
 }
 
-# Kaikkien nimiavaruuden prosessien env ei saa sisältää salaisuudennäköisiä muuttujia. Nimiavaruudessa on vain
-# init, silta ja palvelin, joten koko /proc käydään läpi. Ei luettavissa oleva env on virhe (fail closed).
+# Kaikkien nimiavaruuden prosessien env ei saa sisältää salaisuudennäköisiä muuttujia. Prosessit tunnistetaan
+# pid-nimiavaruuden inodesta hostin /procista (nimiavaruudessa ei ole omaa /procia). Ei luettavissa oleva env on
+# virhe (fail closed).
 verify_server_env() {
-  local out
-  out="$(ns_exec bash -c '
-    bad=""; n=0
-    for d in /proc/[0-9]*; do
-      p="${d#/proc/}"; [[ "$p" == "$$" ]] && continue
-      if [[ ! -r "$d/environ" ]]; then [[ -d "$d" ]] && bad+="pid $p: environ ei luettavissa; "; continue; fi
-      n=$((n + 1))
-      leaked="$(tr "\0" "\n" <"$d/environ" | cut -d= -f1 \
-        | grep -E -i "(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)" \
-        | grep -v -E "^PAPERCLIP_SECRETS_MASTER_KEY_FILE$" || true)"
-      [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr "\n" " ")"
-      if tr "\0" "\n" <"$d/environ" | grep -q -E "^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@"; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
-    done
-    echo "$n|$bad"')" || die "eristys: env-tarkistus epäonnistui"
-  [[ "${out#*|}" == "" ]] || die "eristys: nimiavaruuden env sisältää salaisuudennäköistä: ${out#*|}"
-  [[ "${out%%|*}" -ge 2 ]] || die "eristys: nimiavaruudessa on liian vähän prosesseja tarkistettavaksi (${out%%|*})"
-  log "nimiavaruuden env ok (${out%%|*} prosessia): ei salaisuusmuuttujia"
+  local init ns d p n=0 bad="" leaked
+  init="$(holder_init_pid)"; ns="$(readlink "/proc/$init/ns/pid")"
+  for d in /proc/[0-9]*; do
+    p="${d#/proc/}"
+    [[ "$(readlink "$d/ns/pid" 2>/dev/null || true)" == "$ns" ]] || continue
+    if [[ ! -r "$d/environ" ]]; then [[ -d "$d" ]] && bad+="pid $p: environ ei luettavissa; "; continue; fi
+    n=$((n + 1))
+    leaked="$(tr '\0' '\n' <"$d/environ" | cut -d= -f1 \
+      | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
+      | grep -v -E '^PAPERCLIP_SECRETS_MASTER_KEY_FILE$' || true)"
+    [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr '\n' ' ')"
+    # Ei -q: pipefail + SIGPIPE.
+    if [[ -n "$(tr '\0' '\n' <"$d/environ" | grep -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@' || true)" ]]; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
+  done
+  [[ -z "$bad" ]] || die "eristys: nimiavaruuden env sisältää salaisuudennäköistä: $bad"
+  (( n >= 3 )) || die "eristys: nimiavaruudessa on $n prosessia, odotettu vähintään 3 (init, silta, palvelin)"
+  log "nimiavaruuden env ok ($n prosessia): ei salaisuusmuuttujia"
 }
 
 # --- Kanta ----------------------------------------------------------------------------------
