@@ -22,7 +22,7 @@
 #   --out-dir <polku> oletus /var/backups/paperclip-pre-upgrade (luotaessa 0700, tiedostot 0600)
 #   --verify <hakemisto>
 #                     rollbackin jälkeinen todennus: vertaa DATABASE_URL:n kannan taulu-, migraatio- ja
-#                     avaintaulumäärät snapshotin counts-after.txt:hen. Tulostaa VERIFY_OK tai erot.
+#                     avaintaulumäärät snapshotin counts-scratch.txt:hen (dumpin sisältö). Tulostaa VERIFY_OK tai erot.
 #
 # Ympäristö:
 #   DATABASE_URL          lähdekanta (pakollinen).
@@ -95,12 +95,12 @@ get() { sed -n "s/^$2=//p" "$1"; }
 
 # --- Rollbackin jälkeinen todennus ------------------------------------------------------------
 if [ -n "$VERIFY_DIR" ]; then
-  [ -f "$VERIFY_DIR/counts-after.txt" ] || die "$VERIFY_DIR/counts-after.txt puuttuu" 2
+  [ -f "$VERIFY_DIR/counts-scratch.txt" ] || die "$VERIFY_DIR/counts-scratch.txt puuttuu" 2
   NOW=$(mktemp); trap 'rm -f "$NOW"' EXIT
   count_state "$DATABASE_URL" >"$NOW"
   DIFFS=0
   for key in tables migrations "${KEY_TABLES[@]}"; do
-    want=$(get "$VERIFY_DIR/counts-after.txt" "$key"); have=$(get "$NOW" "$key")
+    want=$(get "$VERIFY_DIR/counts-scratch.txt" "$key"); have=$(get "$NOW" "$key")
     [ "$want" = "$have" ] || { echo "$LOGTAG EROA: $key: snapshotissa $want, kannassa $have" >&2; DIFFS=$((DIFFS + 1)); }
   done
   [ "$DIFFS" = 0 ] || die "kanta ei vastaa snapshotia ($DIFFS eroa); rollback on epätäydellinen tai kannassa on uusia kirjoituksia"

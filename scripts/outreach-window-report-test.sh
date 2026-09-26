@@ -35,6 +35,7 @@ psql "$DATABASE_URL" -qAt -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 CREATE TABLE outreach_messages (id serial primary key, status text, message_id text, sent_at timestamptz, updated_at timestamptz DEFAULT now());
 CREATE TABLE outreach_sender_pauses (id serial primary key, resumed_at timestamptz, updated_at timestamptz DEFAULT now());
 CREATE TABLE outreach_suppressions (id serial primary key, email text, created_at timestamptz DEFAULT now());
+CREATE TABLE email_suppression_list (id serial primary key, address text, created_at timestamptz DEFAULT now());
 CREATE TABLE outreach_events (id serial primary key, type text, created_at timestamptz DEFAULT now());
 CREATE TABLE outreach_prospects (id serial primary key, name text, updated_at timestamptz DEFAULT now());
 CREATE TABLE instance_settings (singleton_key text, general jsonb NOT NULL DEFAULT '{}');
@@ -115,10 +116,12 @@ OUT=$("$SUT" compare "$B" "$A" --expect-paused 2>&1); RC=$?
 
 echo "== export"
 sql "INSERT INTO outreach_suppressions (email) VALUES ('new@example.test')"
+sql "INSERT INTO email_suppression_list (address) VALUES ('bounce@example.test')"
 EXP="$TMP/export"
 OUT=$("$SUT" export --since 2026-09-15T00:00:00Z --out "$EXP" 2>&1); RC=$?
 [ "$RC" = 0 ] && ok "export exit 0" || bad "export exit $RC: $OUT"
 has "suppressions-rivi mukana" "$(cat "$EXP/outreach_suppressions.csv")" "new@example.test"
+has "email_suppression_list viety" "$(cat "$EXP/email_suppression_list.csv")" "bounce@example.test"
 case "$(cat "$EXP/outreach_suppressions.csv")" in *old@example.test*) bad "vanha rivi ei kuulu ikkunaan" ;; *) ok "vanha rivi rajautuu pois" ;; esac
 [ "$(stat -c %a "$EXP/outreach_suppressions.csv")" = 600 ] && [ "$(stat -c %a "$EXP")" = 700 ] && ok "oikeudet 700/600" || bad "export-oikeudet"
 OUT=$("$SUT" export --since "x'; drop table outreach_messages;--" --out "$TMP/e2" 2>&1); RC=$?

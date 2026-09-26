@@ -172,7 +172,7 @@ export_window() {
   need_db
   ( umask 077; mkdir -p "$out" ); chmod 700 "$out"
   # Taulu:aikasarake. created_at riittää taulussa, jonka rivejä ei päivitetä.
-  for spec in outreach_suppressions:created_at outreach_events:created_at email_messages:created_at \
+  for spec in outreach_suppressions:created_at email_suppression_list:created_at outreach_events:created_at email_messages:created_at \
               outreach_prospects:updated_at outreach_messages:updated_at outreach_sender_pauses:updated_at; do
     t=${spec%%:*}; file="$out/$t.csv"
     ( umask 077; ro_psql -c "\\copy (SELECT * FROM public.\"$t\" WHERE ${spec##*:} >= '$since') TO '$file' CSV HEADER" >/dev/null )
