@@ -195,7 +195,7 @@ Nykytila 2026-09-26:
   `100.120.245.107`). Se on todennäköisesti vanhentunut. Poista se, jos sitä ei tarvita.
 
 Mergessä: ota upstreamin `board-mutation-guard.ts` ja sen testi sellaisenaan. Lisää forkin testiin
-kaksi tapausta upstreamin `app.set("trust proxy", ...)`-mallilla:
+kolme tapausta upstreamin `app.set("trust proxy", ...)`-mallilla:
 
 Guard luottaa aina `PAPERCLIP_PUBLIC_URL`-originiin (`trustedOriginsForRequest`, sekä forkissa
 että upstreamissa). Siksi `Origin: https://paperclip.rk9.fi` menee läpi `X-Forwarded-Host`-otsakkeesta
@@ -205,15 +205,31 @@ ja käytä väärennykseen hyökkääjän originia:
 1. `trust proxy` = `loopback`, vertaisosoite `127.0.0.1`, `Host: 127.0.0.1:3100`,
    `X-Forwarded-Host: paperclip.rk9.fi` ja `Origin: https://paperclip.rk9.fi` → sallitaan
    (luotettu vertainen saa nostaa `X-Forwarded-Host`-arvon).
-2. Vertaisosoite `10.90.10.20`, `Host: 127.0.0.1:3100`, `X-Forwarded-Host: evil.example` ja
-   `Origin: https://evil.example` → 403 (epäluotettavan vertaisen `X-Forwarded-Host` ohitetaan).
+2. `trust proxy` = `loopback`, vertaisosoite `10.90.10.20`, `Host: 127.0.0.1:3100`,
+   `X-Forwarded-Host: evil.example` ja `Origin: https://evil.example` → 403 (epäluotettavan vertaisen
+   `X-Forwarded-Host` ohitetaan). Supertest yhdistää aina loopbackista, joten tee tämä tapaus
+   mock-pyynnöllä, jossa on `socket.remoteAddress` ja `app.get("trust proxy fn")`.
 3. Sama kuin tapaus 2, mutta ilman `trust proxy` -asetusta ja vertaisena `127.0.0.1` → 403.
+   Upstreamin testi "ignores x-forwarded-host from an untrusted direct client" kattaa tämän jo.
 
 Todennus harjoitusinstanssissa: kirjautuminen ja yksi board-mutaatio `paperclip.rk9.fi`:n kautta
-onnistuvat. Tee sitten suora `curl` toiselta koneelta porttiin 3100 voimassa olevalla
-istuntoevästeellä, otsakkeilla `X-Forwarded-Host: evil.example` ja `Origin: https://evil.example`.
-Odotettu vastaus on 403 ja virhe "Board mutation requires trusted browser origin". Ilman evästettä
-pyyntö kaatuu jo autentikointiin, eikä tulos todista mitään.
+onnistuvat. Tee sitten suora board-mutaatio (esim. kommentti) `curl`illa toiselta koneelta
+osoitteeseen `http://192.168.1.54:3100` voimassa olevalla istuntoevästeellä. Käytä hostnimeä, joka
+on `PAPERCLIP_ALLOWED_HOSTNAMES`-listalla mutta eri kuin `Host`:
+`X-Forwarded-Host: paperclip-01.rk9.fi` ja `Origin: https://paperclip-01.rk9.fi`.
+
+- Korjattu guard: 403 ja virhe "Board mutation requires trusted browser origin".
+- Vanha guard (nykyfork): mutaatio menee läpi.
+- Älä käytä vierasta nimeä kuten `evil.example`. `private-hostname-guard.ts` lukee
+  `X-Forwarded-Host`-otsakkeen ilman proxy trustia (myös v2026.916.1:ssä) ja palauttaa 403
+  "This hostname is not allowed for this Paperclip instance" ennen board-guardia. Tällainen 403
+  ei todista board-guardista mitään.
+- Ilman evästettä pyyntö kaatuu jo autentikointiin, eikä tulos todista mitään.
+
+Jäännösriski: `private-hostname-guard.ts` luottaa `X-Forwarded-Host`-otsakkeeseen lähteestä
+riippumatta myös 916.1:ssä. Suora asiakas voi siis ohittaa hostname-tarkistuksen sallitulla
+nimellä. Selain ei voi asettaa otsaketta, joten DNS-rebinding-suoja pysyy. Korjaus kuuluu
+upstreamiin tai erilliseen forkin tikettiin, ei tähän.
 
 `CLAUDE_LOGIN_TRUSTED_PROXIES` ja `CLAUDE_LOGIN_EDGE_TLS_TERMINATED` (setup-token-kirjautuminen,
 SR-7, `server/src/app.ts:654` @ v2026.916.1) jätetään asettamatta. Tarkistus vertaa välittömään
