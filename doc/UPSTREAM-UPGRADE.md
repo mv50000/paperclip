@@ -219,6 +219,123 @@ Kirjaa rollbackin kesto Porraslokiin.
 - Rollback palauttaa saman dumpin tuoreeseen kantaan ja resetoi worktreen pre-SHA:han. Se todistaa palautusmekanismin,
   rivimäärät ja skeeman, ei sitä, että palvelin käynnistyy pre-SHA:lla. Käynnistä palvelin pre-SHA:lla käsin tarvittaessa.
 
+## Migraatioiden dry-run prod-kopioon (RK9-311)
+
+`packages/db/scripts/migration-dry-run.ts` ajaa puun migraatiot prod-dumpin kopiota vasten ja kirjoittaa
+raportin, jossa on vain rivimääriä ja tunnisteita (dump sisältää prospektien henkilötietoja). Jokainen
+porras (RK9-312…317) ajaa sen omassa portaassaan. Työkalu käyttää **ajettavan puun omaa** `client.ts`:ää,
+joten aja se portaan worktreessä, ei masterissa.
+
+```bash
+# paperclip-käyttäjänä (kanta hyväksyy socketissa vain peer-tunnistuksen), paperclip-omisteisesta checkoutista
+sudo -u paperclip env PGHOST=/var/run/postgresql PGUSER=paperclip \
+  pnpm db:migration-dry-run --dump /var/backups/paperclip/rehearsal-<aika>.dump \
+  --schema-diff --report /tmp/migration-dry-run-<porras>.md
+```
+
+Työkalu palauttaa dumpin kantaan `paperclip_migdryrun`, ajaa `applyPendingMigrations`in ja pudottaa kannan
+lopuksi (`--keep-db` jättää sen; pudota käsin, kanta sisältää prod-dataa). Fail closed: kannan nimi on
+`paperclip_migdryrun[_x]`, se ei voi olla `paperclip`, ja yhteys menee vain unix-socketin kautta.
+RK9-310:n harness käyttää omaa kantaansa `paperclip_rehearsal`, joten ajot eivät törmää.
+
+Raportti tarkistaa ja kirjaa:
+
+- journalin ja tiedostojen määrän, journalin `when`-järjestyksen ja prod-historian hashien tunnistuksen
+  (rivit, joiden hash ei vastaa yhtäkään tiedostoa, ja fork-hashit, jotka puuttuvat historiasta);
+- datavaikutuksen migraatiokohtaisesti ennen ajoa (0196, 0218, 0229, 0230, 0236) sekä kaikki `DROP TABLE` ja
+  `DROP COLUMN` -lauseet, joiden kohteessa on rivejä;
+- upstream-DDL:n, joka koskee fork-taulua tai luo olemassa olevan nimen (taulu, indeksi, constraint);
+- assertit: historiarivien määrä on yhtä suuri kuin journalin entryjen määrä, jokaisella tiedostolla on
+  historiarivi hashilla, 9001–9010-taulujen rivimäärät ovat ennen ja jälkeen samat;
+- keston ja pisimmän `AccessExclusiveLock`-pidon (`pg_locks`-näytteenotto 20 ms välein) sekä vertailun
+  ikkunaan (`--deploy-window-seconds`, oletus 300);
+- `--schema-diff`: migratun prod-kopion rakenne (sarakkeet, indeksit, constraintit) vs. tuore kanta samasta puusta.
+
+Poistumiskoodi 1, jos jokin assert kaatuu.
+
+**Hash-pinnaus.** `check:migrations` (ja siten `build`, `typecheck`, `migrate`) vertaa jokaisen 9xxx-tiedoston
+sha256:tta tiedostoon `packages/db/src/fork-migration-hashes.json`. `client.ts` tunnistaa ajetut migraatiot
+tiedoston hashilla, joten muutettu 9xxx-tiedosto ajettaisiin prodia vasten uudelleen. Älä muokkaa 9xxx-tiedostoa;
+uusi tiedosto lisätään kirjoittamalla sen hash pinnaustiedostoon. Testi: `migration-dry-run-lib.test.ts`.
+
+### Koemergen tulokset 26.9.2026
+
+Heitettävä koemerge: `origin/master` (`24f1f07b`) + upstream `v2026.916.1` (`d554c478`), 93 konfliktia, ratkaistu
+vain sen verran, että `packages/db` ajaa (journal: upstream-entryt ensin, 9001–9010 perässä; muut konfliktit
+upstreamin puolelta). Ei pushattu. Prod-kopio: `rehearsal-20260926-142518.dump`. Ajuri on merge-puun `client.ts`
+(+380 riviä forkiin verrattuna).
+
+**Journalin järjestys.** Merge-journalissa on 288 entryä ja tiedostoa; idx 126 ja 130 puuttuvat upstreamista
+(numeroissa on aukko, ei tiedostoa). `check-migration-numbering.ts` hyväksyy aukot: se vaatii vain, että tiedostonimet ja
+journalin tagit ovat samat, lajitellussa järjestyksessä ja ilman kaksoisnumeroita. Ajo merge-puussa läpäisi. Sama vaatimus
+tarkoittaa, että 9xxx-migraatiot ovat aina journalin lopussa: fork-migraatiota ei voi sijoittaa upstream-migraation
+väliin. Slotit 0126 ja 0130 ovat vapaat, jos fork-migraatio pitää ajaa ennen 0272:ta.
+
+**Hash-identiteetti.** Prod-historiassa on 85 riviä. Kaikki 85 hashia tunnistuvat merge-puun tiedostoihin, ja kaikki
+kymmenen pinnattua 9xxx-hashia ovat historiassa. Prodissa on jo 0073 ja 0074 (forkin puu päättyy 0072:een), joten
+pending on 203 migraatiota (0075…0279).
+
+`created_at`-fallback ei laukea, kun yksikin hash tunnistuu: `loadAppliedMigrations` palauttaa silloin osittaisen
+tunnistuksen. Fallback laukeaa vain, kun **yksikään** hash ei tunnistu. Testit `migration-fallback.test.ts`
+(kanta: embedded Postgres tai `PAPERCLIP_TEST_PGHOST` hostin socketilla):
+
+- muutettu 9001-hash → 9001 näkyy pendinginä, upstream-migraatiot ajetaan, ja 9001:n uudelleenajo kaatuu äänekkäästi
+  (`CREATE TABLE` ilman `IF NOT EXISTS`); fork-taulun rivit säilyvät. Rivin `IF NOT EXISTS` sisältävät 9xxx-migraatiot
+  ajettaisiin hiljaa uudelleen, siksi pinnaus on tarpeen.
+- nolla tunnistettua hashia → **aito vika**: fallback ottaa `journal.slice(0, rivimäärä)` ja kuittaa upstream-migraatiot
+  ajetuiksi ajamatta niitä; 9xxx-hännän se jättää pendingiksi. Testi on `it.fails` ja kääntyy punaiseksi, kun vika korjataan.
+  Realistinen laukaisija: kaikkien tiedostojen sisältö muuttuu kerralla (esim. rivinvaihtojen muunnos checkoutissa).
+  Ehdotettu korjaus (ei tehty tässä tiketissä, ajuria ei muutettu): kun historiassa on rivejä mutta yksikään hash ei
+  tunnistu, `loadAppliedMigrations` heittää virheen eikä arvaa `created_at`illa.
+
+**Nimitörmäys (estää portaan 916.1).** Upstreamin `0272_light_kate_bishop.sql` tekee `CREATE TABLE IF NOT EXISTS
+"email_messages"`. Forkin 9002 loi jo samannimisen taulun (50 528 riviä prodissa), joten `IF NOT EXISTS` ohittaa luonnin
+ja seuraava lause kaatuu: `column "endpoint_id" referenced in foreign key constraint does not exist`. Seuraukset:
+
+- Prod-kopio: 0075…0271 ajetaan, 0272 kaatuu ja rollbackaa oman transaktionsa; historiassa on 280 riviä 288:sta,
+  kahdeksan migraatiota jää pendingiksi.
+- Tuore kanta: upstream ajetaan ensin, ja 9002:n `CREATE TABLE "email_messages"` kaatuu. Tämä rikkoaa myös tuoreeseen
+  kantaan perustuvat testit ja CI:n.
+- Muita fork-taulujen törmäyksiä ei löytynyt. Muut samannimiset indeksit ja constraintit (0093, 0128, 0217, 0222)
+  ovat drop-and-recreate-rakennuksia.
+
+Kokeiltu korjaus: migraatio slotissa 0126 nimeää forkin taulun `rk9_email_messages`iksi ennen 0272:ta. Prod-polku menee
+läpi (289/289 historiariviä, 50 528 riviä säilyy uudessa taulussa), mutta tuore kanta kaatuu edelleen 9002:ssa. 9011:tä
+ei lisätty, koska rivejä ei häviä ja korjaus vaatii koodimuutoksen (`schema/email.ts` ja kuusi `server/src`-tiedostoa
+käyttävät `email_messages`ia). Ratkaisu kuuluu merge-tikettiin (RK9-312…317), ennen porrasta 916.1. Vaihtoehdot:
+
+1. Nimeä fork-taulu koodissa ja uudessa 9xxx-tiedostossa, ja tee tuoreen kannan 9002 nimikonfliktittomaksi
+   korvaamalla se tietoisesti (uusi pin; prodissa uusi hash ajetaan kerran, joten sen pitää olla idempotentti). Suositus.
+2. Patchaa upstreamin 0272 forkissa. Se ei ole vielä ajettu prodissa, mutta upstreamin chat-koodi käyttää samaa taulua,
+   joten jokainen tuleva merge konfliktoituu.
+
+**Datavaikutus (prod-kopio, rivimääriä).**
+
+| Migraatio | Vaikutus |
+|---|---|
+| 0196 cloud sync | `cloud_upstream_*`-tauluja ei ole prodissa: ei menetystä |
+| 0218 resolver-policy | saraketta `requested_resolver_policy` ei ole ennen ajoa: ei vanhoja rivejä uudelleenkirjoitettavana |
+| 0229 | 1 yrityksellä `brand_color` (menetetään); `attachment_max_bytes` on 11 yrityksellä, kaikilla oletus 10485760 |
+| 0230 better_auth issuer | 1 `account`-riviä, `credential` → `local:credential` |
+| 0236 cheap modelProfiles | 0 agenttia (120:sta) ja 0 revisiota: ei muutettavaa |
+| 0105 ympäristöt | `environments` 11 → 1 rivi (singleton-yhdistäminen), `company_id` poistuu |
+| taustatäytöt | `principal_permission_grants` 134 → 374, `company_memberships` 59 → 75, `documents` 3 225 → 3 290, `document_revisions` 6 904 → 6 969, uusia rivejä `folders` 72, `routine_documents` 65, `routine_revisions` 65 |
+
+Päätös 9011:stä: pre-migraatiota ei tarvita datamenetyksen takia. `brand_color` on yhden yrityksen ikonin sävy, jonka
+upstream on poistanut käytöstä; arvo säilyy dumpissa. Fork-taulujen (9001–9010) rivimäärät pysyivät samoina 17 taulussa;
+poikkeus on `email_messages`, jonka rivit siirtyivät kokeiltuun uuteen nimeen.
+
+**Kesto ja lukot** (idle-kopio; rinnakkaisajo RK9-310:n kanssa lisäsi kohinaa). Kolme ajoa: 67 s ja 68 s (kaatuivat 0272:een, joten ne kattavat 0075…0271) ja 133 s (kokeiltu korjaus, kaikki 203).
+Hitain migraatio oli `0205_narrow_shiva` (6–56 s), toiseksi `0134_run_responsible_user_invariant` (27–38 s, lukitsee
+`companies`-taulun) ja `0227_modern_pandemic` (7–9 s). Pisin havaittu `AccessExclusiveLock` oli 29–56 s. Jokainen migraatio
+ajetaan omassa transaktiossaan, joten lukko kestää siihen asti kun se päättyy. `dev:once` ajaa migraatiot käynnistyksessä,
+joten palvelin ei vastaa ennen kuin kaikki 203 ovat valmiit. Runbookin ikkunan pituus on vielä auki (RK9-310:n mittaus);
+300 sekunnin oletusikkunaan ajo mahtuu (22–44 %), mutta kuormitetun prodin lukkojonot eivät sisälly lukuun.
+Varaa ikkunaan vähintään kaksinkertainen marginaali mitattuun kestoon nähden.
+
+**Ei todennettu:** ajoa ei tehty muilla portailla (512…831.1) eikä prod-kuormitettuna; koemergen konfliktiratkaisu
+on karkea, joten todellisen merge-puun `client.ts`:n ja journalin pitää ajaa työkalu uudelleen.
+
 ## Deploy ja rollback
 
 Jokaisen tuotantoon menevän portaan deploy ja rollback ajetaan tiedoston
