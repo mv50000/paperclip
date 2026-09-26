@@ -15,9 +15,11 @@ ei vielä ole forkissa.
 - Tämä tiketti ei muuta ajonaikaista käytöstä. Paperclip-master deployautuu prodiin
   automaattisesti. Jokainen asetus otetaan käyttöön siinä portaassa, jossa se tulee mukaan.
 - Asetus kirjataan env-muuttujana tai versioituna instanssiasetuksena, ei pelkkänä
-  UI-kytkimenä. Env-muuttujat, jotka eivät ole salaisuuksia, menevät systemd-drop-iniin
-  `~/.claude/hosts/paperclip/paperclip-service/systemd/paperclip.service.d/` (versioitu
-  `~/.claude`-repoon, asennus `install.sh`:lla). Salaisuudet pysyvät tiedostossa
+  UI-kytkimenä. Env-muuttujat, jotka eivät ole salaisuuksia, lisätään `export`-riveinä
+  käynnistysskriptiin `~/.claude/hosts/paperclip/paperclip-service/paperclip-start.sh`
+  (versioitu `~/.claude`-repoon, asennus `install.sh`:lla `/usr/local/bin/`-hakemistoon).
+  Skripti asettaa jo `PAPERCLIP_ALLOWED_HOSTNAMES`:n ja `PAPERCLIP_PUBLIC_URL`:n, ja sen `export`
+  voittaa systemd:n `EnvironmentFile`- ja drop-in-arvot. Salaisuudet pysyvät tiedostossa
   `/etc/paperclip/paperclip-server.env` (RK9-150).
 - Instanssiasetus (`instance_settings.experimental`, jsonb) ei ole gitissä. Siksi preflight
   lukee sen käynnistyksessä ja pysäyttää palvelun, jos arvo on väärä (ks. "Preflight").
@@ -76,8 +78,13 @@ paikallinen nginx luottaa edgeen, ja Express luottaa vain paikalliseen nginxiin.
 - Paikallinen nginx kuuntelee porttia 80 kaikissa liitännöissä. LAN-asiakas voi siis ohittaa edgen.
   `set_real_ip_from` estää sitä väärentämästä osoitettaan, mutta `Host`-otsakkeen se voi asettaa
   vapaasti. Porttien 80 ja 3100 rajaaminen (esim. `allow 192.168.1.17; deny all;` tai bindaus
-  127.0.0.1:een) on operaattorin päätös. Huomaa ensin Tailscale-kuuntelija `100.120.245.107:443`
-  ja `PAPERCLIP_ALLOWED_HOSTNAMES=100.120.245.107`: jokin käyttää palvelinta Tailscalen kautta.
+  127.0.0.1:een) on operaattorin päätös. Tailscale-kuuntelija `100.120.245.107:443` ei koske
+  Paperclipia: `tailscale serve status` näyttää vain polut `/qmd`, `/vault` ja `/vault-personal`.
+- Paikallinen nginx välittää asiakkaan oman `X-Forwarded-Proto`-otsakkeen sellaisenaan
+  (`$http_x_forwarded_proto`). Kun `loopback` on luotettu, LAN-asiakas voi porttiin 80 tullessaan
+  asettaa `req.protocol`- ja `req.secure`-arvot. Upstream käyttää niitä ainakin tiedostoissa
+  `server/src/routes/access.ts`, `smoke-lab.ts` ja `tool-access.ts`. Portin 80 rajaaminen edgeen
+  sulkee tämänkin reitin.
 
 ## Porras v2026.831.1
 
@@ -120,7 +127,7 @@ alla) ja savutesti `scripts/upgrade-smoke.sh` `paperclip.rk9.fi`-hostnimellä.
 | Asetus | env `PAPERCLIP_ANNOUNCEMENTS_ENABLED` (config-avain `announcementsEnabled`), syöte `PAPERCLIP_ANNOUNCEMENTS_FEED_URL` |
 | Upstream-oletus | päällä: `process.env.PAPERCLIP_ANNOUNCEMENTS_ENABLED !== "false"` (`server/src/config.ts:369`). Syöte `https://pages.paperclip.ing/announcements/v1/current.json`. |
 | RK9-arvo | `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false` (opt-out) |
-| Sijainti | systemd-drop-in `paperclip.service.d/` (`Environment=`), ei salaisuus |
+| Sijainti | `export` käynnistysskriptissä `paperclip-start.sh`, ei salaisuus |
 
 Arvon on oltava täsmälleen `false`. Mikä tahansa muu arvo (myös `0` tai `no`) jättää syötteen päälle.
 Todennus harjoitusinstanssissa: injektoi fetch-mock (tai verkkokaappaus) ja tarkista, että
@@ -132,7 +139,7 @@ toteaa, ettei `announcement-feed.ts` kutsu fetchiä.
 
 | Kohta | Arvo |
 |---|---|
-| Muutos | `defaultAgentPermissions` antaa `canCreateAgents: true` jokaiselle hire/create-polulla luodulle standard-trust-agentille (`server/src/services/agent-permissions.ts:46` @ v2026.916.1). Ennen tätä oletus oli `role === "ceo"`. |
+| Muutos | `defaultAgentPermissions` antaa `canCreateAgents: true` jokaiselle hire/create-polulla luodulle standard-trust-agentille (`server/src/services/agent-permissions.ts:46` @ v2026.916.0 ja 916.1). Ennen tätä oletus oli `role === "ceo"`. |
 | Upstream-oletus | päällä standard-trust-agenteille, pois low-trust-agenteille |
 | RK9-arvo | Hire-oikeus on vain boardilla, CEO:lla ja eksplisiittisellä `canCreateAgents`- tai `agents:create`-grantilla. Hyväksyntäportti `requireBoardApprovalForNewAgents` (companies-taulu, 0071) pysyy yrityskohtaisena. |
 | Sijainti | koodi: `// --- RK9 Custom ---` -pinnaus `agent-permissions.ts`:ään. Ei env-muuttujaa, koska upstream ei tarjoa asetusta. |
@@ -164,10 +171,10 @@ agentille eri oikeudet. Oletuksen muutoksen huomaa vain yllä oleva laukaisintes
 
 | Kohta | Arvo |
 |---|---|
-| Muutos | `board-mutation-guard.ts` lukee `X-Forwarded-Host`-otsakkeen vain, kun välitön vertaisosoite läpäisee Expressin `trust proxy fn`:n. Muuten guard käyttää `Host`-otsaketta. |
+| Muutos | v2026.916.0:sta alkaen `board-mutation-guard.ts` lukee `X-Forwarded-Host`-otsakkeen vain, kun välitön vertaisosoite läpäisee Expressin `trust proxy fn`:n. Muuten guard käyttää `Host`-otsaketta. |
 | Upstream-oletus | `TRUST_PROXY` asettamatta, joten `X-Forwarded-Host` ohitetaan kaikilta |
 | RK9-arvo | `TRUST_PROXY=loopback` (asetettu jo portaassa 720.0, ks. proxyketju), `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, `PAPERCLIP_PUBLIC_URL=https://paperclip.rk9.fi` |
-| Sijainti | `TRUST_PROXY` ja `PAPERCLIP_PUBLIC_URL`: systemd-drop-in. `PAPERCLIP_ALLOWED_HOSTNAMES` on nyt tiedostossa `/etc/paperclip/paperclip-server.env`. |
+| Sijainti | kaikki kolme `export`-riveinä käynnistysskriptissä `paperclip-start.sh` |
 
 Nykytila 2026-09-26:
 
@@ -179,9 +186,13 @@ Nykytila 2026-09-26:
   tulevassa pyynnössä otsake on siis sama kuin `Host`.
 - Riski on pieni, koska selain ei voi asettaa `X-Forwarded-Host`-otsaketta CSRF-hyökkäyksessä.
   Upstreamin korjaus sulkee reiän 916.1-portaassa, joten tässä tiketissä ajonaikaista muutosta ei tehdä.
-- `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää nyt vain osoitteen `100.120.245.107`.
-  `PAPERCLIP_PUBLIC_URL`:ia ei löytynyt systemd-yksiköstä eikä env-tiedostoista (todentamatta,
-  voi olla instanssin `config.json`:ssa). Tarkista molemmat ennen tätä porrasta.
+- `paperclip-start.sh` asettaa `PAPERCLIP_ALLOWED_HOSTNAMES=paperclip.rk9.fi,paperclip-01.rk9.fi,paperclip,192.168.1.54,100.81.228.64`
+  ja `PAPERCLIP_PUBLIC_URL=https://paperclip.rk9.fi`. Nämä arvot ovat voimassa ajossa.
+- Tiedostossa `/etc/paperclip/paperclip-server.env` on lisäksi rivi
+  `PAPERCLIP_ALLOWED_HOSTNAMES=100.120.245.107`. Se ei vaikuta, koska käynnistysskriptin `export`
+  kirjoittaa sen yli. Poista rivi, jotta arvo on yhdessä paikassa.
+- Osoite `100.81.228.64` ei ole koneen nykyinen Tailscale-osoite (`tailscale ip -4` palauttaa
+  `100.120.245.107`). Se on todennäköisesti vanhentunut. Poista se, jos sitä ei tarvita.
 
 Mergessä: ota upstreamin `board-mutation-guard.ts` ja sen testi sellaisenaan. Lisää forkin testiin
 kaksi tapausta upstreamin `app.set("trust proxy", ...)`-mallilla:
@@ -242,12 +253,12 @@ asetus tulee mukaan:
 
 | Porras | Tarkistus | Tulos, jos arvo on väärä |
 |---|---|---|
-| 720.0 | `TRUST_PROXY` on täsmälleen `loopback`. Arvo ei saa olla `true` eikä hop-luku. | virhe (palvelu ei käynnisty) |
+| 720.0 | `TRUST_PROXY` on täsmälleen `loopback` (luetaan samasta paikasta kuin yllä). Arvo ei saa olla `true` eikä hop-luku. | virhe (palvelu ei käynnisty) |
 | 720.0 | Paikallisen nginxin `set_real_ip_from` sisältää vain osoitteet `192.168.1.17` ja `127.0.0.1`, ja `location /` asettaa `X-Forwarded-Host $host` | varoitus |
-| 720.0 | `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, ja `PAPERCLIP_PUBLIC_URL` on `https://paperclip.rk9.fi` | virhe |
+| 720.0 | Käynnistysskriptin `paperclip-start.sh` tehokkaat arvot: `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, ja `PAPERCLIP_PUBLIC_URL` on `https://paperclip.rk9.fi`. Preflight ajetaan `ExecStartPre`nä eikä näe skriptin exportteja, joten se lukee arvot skriptistä (tai ajaa sen kuivana), ei systemd:n ympäristöstä. | virhe |
 | 831.1 | `instance_settings.experimental ->> 'enableNativeRunner'` on `false` (avain olemassa) | varoitus 831.1:ssä, virhe 916.1:stä alkaen |
 | 609.0–720.0 | `instance_settings.experimental ->> 'enableCloudSync'` ei ole `true` | virhe |
-| 916.1 | `PAPERCLIP_ANNOUNCEMENTS_ENABLED` on täsmälleen `false` | virhe |
+| 916.1 | `PAPERCLIP_ANNOUNCEMENTS_ENABLED` on täsmälleen `false` (käynnistysskriptin tehokas arvo) | virhe |
 | 916.1 | `agent-permissions.ts` sisältää RK9 Custom -pinnauksen (grep-ankkuri kuten nykyinen `github-webhooks.ts`-tarkistus) | virhe |
 | 916.1 | `CLAUDE_LOGIN_TRUSTED_PROXIES` ja `CLAUDE_LOGIN_EDGE_TLS_TERMINATED` ovat tyhjiä, ellei operaattori ole päättänyt toisin | varoitus |
 
