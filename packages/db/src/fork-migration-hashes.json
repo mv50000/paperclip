@@ -1,0 +1,12 @@
+{
+  "9001_rk9_risk_management.sql": "c16f878df538236c96ef8c3c7acceffeaa4ff94b875851f0e8a3572c72ade3ee",
+  "9002_rk9_resend_email.sql": "53092985f668603b05d455d08f43fb9b08b34d15f6210fff922c06885476f66f",
+  "9003_rk9_email_escalation.sql": "411f64578e03258c779ae5bb15a6abd0fd2423fa6665033a3907910e96f75e91",
+  "9004_rk9_resolve_stale_incidents.sql": "768f6b72d75dfc2885ad30daf54d5afa1d3ca298785f7ca058876924efc0e785",
+  "9005_rk9_email_support_desk.sql": "d84778f1c446a0408320b95079e333b3c0e70afad047339214a4e16c87444d4f",
+  "9006_rk9_outreach.sql": "d0bb2306c6cf5a2c7fbf79d9148268b8bae21c2bf43bf800b9c182423be71d6c",
+  "9007_rk9_outreach_enrichment.sql": "331cdfa8924730e5f39cd4ed3ff7a55d617f863d519f2d8a0a1bb22f23c3a619",
+  "9008_rk9_outreach_sender.sql": "0de3736a38cc9955d4c710dedb0e5a7cbbb3c6aa69feecba7428d58f8863f17e",
+  "9009_rk9_outreach_metrics.sql": "5274a3140952845a5cb0a53c208c13caa353a2d2038e0136b4a2593c868129dd",
+  "9010_rk9_outreach_inbound_routes.sql": "5bdfff5fbaf8dec41e8dc8a27d5ee65342fab7105d9b7d25eee97f12f716c791"
+}

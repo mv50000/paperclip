@@ -20,6 +20,7 @@
     "test:run": "pnpm run preflight:workspace-links && node scripts/run-vitest-stable.mjs",
     "db:generate": "pnpm --filter @paperclipai/db generate",
     "db:migrate": "pnpm --filter @paperclipai/db migrate",
+    "db:migration-dry-run": "pnpm --filter @paperclipai/db db:migration-dry-run",
     "issue-references:backfill": "pnpm run preflight:workspace-links && tsx scripts/backfill-issue-reference-mentions.ts",
     "secrets:migrate-inline-env": "tsx scripts/migrate-inline-env-secrets.ts",
     "db:backup": "./scripts/backup-db.sh",

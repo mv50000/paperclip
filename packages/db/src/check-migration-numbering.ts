@@ -1,7 +1,9 @@
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { checkPinnedForkHashes } from "./migration-dry-run-lib.js";
 
 const migrationsDir = fileURLToPath(new URL("./migrations", import.meta.url));
+const forkHashesPath = fileURLToPath(new URL("./fork-migration-hashes.json", import.meta.url));
 const journalPath = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
 
 type JournalFile = {
@@ -63,6 +65,26 @@ function ensureJournalMatchesFiles(migrationFiles: string[], journalTags: string
   }
 }
 
+// client.ts identifies applied migrations by sha256 of the file content, so an edited 9xxx file
+// would be replayed against prod as a new pending migration. Edit = new file, never a rewrite.
+async function ensureForkMigrationHashesPinned(migrationFiles: string[]) {
+  const baseline = JSON.parse(await readFile(forkHashesPath, "utf8")) as Record<string, string>;
+  const files = await Promise.all(
+    migrationFiles.map(async (file) => ({ file, content: await readFile(`${migrationsDir}/${file}`, "utf8") })),
+  );
+  const result = checkPinnedForkHashes(files, baseline);
+  const problems = [
+    ...result.changed.map((c) => `${c.file} changed (pinned ${c.expected.slice(0, 12)}, now ${c.actual.slice(0, 12)})`),
+    ...result.missingBaseline.map((file) => `${file} has no pinned hash in src/fork-migration-hashes.json`),
+    ...result.staleBaseline.map((file) => `${file} is pinned but the file is missing`),
+  ];
+  if (problems.length > 0) {
+    throw new Error(
+      `Fork migration hash baseline violated (already-applied 9xxx files must never change; add new files to src/fork-migration-hashes.json):\n- ${problems.join("\n- ")}`,
+    );
+  }
+}
+
 async function main() {
   const migrationFiles = (await readdir(migrationsDir))
     .filter((entry) => entry.endsWith(".sql"))
@@ -84,6 +106,7 @@ async function main() {
   ensureNoDuplicates(journalTags, "migration journal");
   ensureStrictlyOrdered(journalTags, "migration journal");
   ensureJournalMatchesFiles(migrationFiles, journalTags);
+  await ensureForkMigrationHashesPinned(migrationFiles);
 }
 
 await main();
