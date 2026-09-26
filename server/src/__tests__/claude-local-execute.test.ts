@@ -939,6 +939,8 @@ describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", ()
     "PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY",
     "PAPERCLIP_API_URL",
     "PAPERCLIP_RUNTIME_API_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
   ] as const;
 
   async function runWithHostEnv(
@@ -946,14 +948,14 @@ describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", ()
     config: Record<string, unknown> = {},
   ) {
     const saved = Object.fromEntries(HOST_KEYS.map((key) => [key, process.env[key]]));
-    for (const key of HOST_KEYS) delete process.env[key];
-    Object.assign(process.env, hostEnv);
-
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-rk9-228-"));
-    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root, {
-      commandWriter: writeEnvCapturingClaudeCommand,
-    });
+    let restore = () => {};
     try {
+      for (const key of HOST_KEYS) delete process.env[key];
+      Object.assign(process.env, hostEnv);
+      const setup = await setupExecuteEnv(root, { commandWriter: writeEnvCapturingClaudeCommand });
+      restore = setup.restore;
+      const { workspace, commandPath, capturePath } = setup;
       const configEnv = (config.env as Record<string, string> | undefined) ?? {};
       const result = await execute({
         runId: "run-rk9-228",
@@ -1020,6 +1022,21 @@ describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", ()
     expect(captured.paperclipApiKey).toBe("run-jwt-token");
     expect(captured.paperclipApiUrl).toBe("http://127.0.0.1:3100");
     expect(captured.anthropicApiKey).toBeNull();
+  });
+
+  // Upstream v2026.720.0+ runs claude_local on the ACP engine when `engine` is
+  // unset, and ACP passes a server-wide ANTHROPIC_API_KEY to the agent. The
+  // spawn tests above cannot see that on a host where ACP silently falls back
+  // to the CLI, so pin the engine choice itself. The resolver does not exist in
+  // the fork yet; this starts asserting as soon as a merge brings it in.
+  it("pins claude_local to the CLI engine when no engine is configured", async () => {
+    const serverModule: Record<string, unknown> = await import("@paperclipai/adapter-claude-local/server");
+    const resolveEngine = serverModule.resolveClaudeExecutionEngine;
+    if (resolveEngine === undefined) return;
+
+    expect(typeof resolveEngine).toBe("function");
+    const selection = (resolveEngine as (config: Record<string, unknown>) => { engine: string })({});
+    expect(selection.engine).toBe("cli");
   });
 
   // Upstream resolves an unset model to its own default (Opus 5). This fork

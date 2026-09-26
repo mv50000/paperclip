@@ -37,8 +37,7 @@ Todennettu paikallisista upstream-tageista komennoilla `git show <tag>:<polku>`.
 | v2026.609.0, v2026.707.0 | `acpx-local` jatkuu | Ei vaikutusta |
 | **v2026.720.0** | ACP-moottori siirtyy `packages/adapter-utils/src/acpx-engine/`:iin. `claude_local` saa `engine`-kentän, oletus `acp`. Migraatio `0136_acpx_default_engine_migration.sql` kääntää `acpx_local`-rivit `claude_local`/`codex_local` + `engine: 'acp'`. | **Kriittinen porras.** Asettamaton `engine` ajaa ACP:llä. Jos ACP ei ole saatavilla, ajo putoaa hiljaa CLI:lle. |
 | v2026.831.0 | `enableNativeRunner` tulee instanssiasetuksiin, oletus `false` | Ei vaikutusta `claude_local`-ajoon |
-| v2026.916.0 | `enableNativeRunner` oletus `true`. `DEFAULT_CLAUDE_LOCAL_MODEL = "claude-opus-5"`. ACP-env muuttuu allowlistiksi. | Asettamaton malli ajaa Opus 5:llä. |
-| v2026.916.1 | CLI-fallback poistuu: ilman ACP:tä ajo epäonnistuu (`adapter_engine_unavailable`) | Ilman pinnausta agentit pysähtyvät, jos `claude-agent-acp` puuttuu |
+| v2026.916.0 | `enableNativeRunner` oletus `true`. `DEFAULT_CLAUDE_LOCAL_MODEL = "claude-opus-5"`. ACP-env muuttuu allowlistiksi. CLI-fallback poistuu: ilman ACP:tä ajo epäonnistuu (`adapter_engine_unavailable`). | Asettamaton malli ajaa Opus 5:llä. Ilman pinnausta agentit pysähtyvät, jos `claude-agent-acp` puuttuu. |
 
 ### Ohittaako ACPX host-env-suodattimen?
 
@@ -59,8 +58,12 @@ Todennettu paikallisista upstream-tageista komennoilla `git show <tag>:<polku>`.
   poistaa vain `PAPERCLIP_*`- ja Claude Code -sisäkkäisyysmuuttujat.
   `doNotInheritEnvKeys` on vain forkissa.
 
-Todentamatta: v2026.831.1:n ACP-env, tarkka tagi jossa CLI-fallback poistui
-(v2026.817.0:n ja v2026.916.1:n välissä) ja CLI:n oma oletusmalli ennen
+CLI-fallback on vielä v2026.831.1:ssä (`fallbackReason`) ja poissa
+v2026.916.0:ssa. v2026.720.0–v2026.831.1 putoaa CLI:lle hiljaa, jos Node on
+vanhempi kuin 22.12.0 tai `claude-agent-acp` puuttuu
+(`defaultClaudeAcpFallbackReason`).
+
+Todentamatta: v2026.831.1:n ACP-env ja CLI:n oma oletusmalli ennen
 v2026.916.0:aa.
 
 ### Native runner
@@ -118,9 +121,14 @@ Mitä testit lukitsevat:
   `host ANTHROPIC_API_KEY is not inherited (RK9-228)`: oikea `execute()` spawnaa
   valeclauden, joka tallentaa saamansa envin. Palvelimen avain ei päädy
   lapselle, ja ajon `billingType` on `subscription`. Agentin oma avain ja
-  opt-in toimivat. Jos `claude_local` alkaa ajaa ACP:llä, valeclaudea ei
-  käynnistetä, capture-tiedosto puuttuu ja testit kaatuvat. Tämä on
-  pinnauksen portti.
+  opt-in toimivat. Jos `claude_local` ajaa ACP:llä, valeclaudea ei
+  käynnistetä, capture-tiedosto puuttuu ja testit kaatuvat.
+- Samassa describessä `pins claude_local to the CLI engine when no engine is
+  configured`: spawn-testit eivät näe ACP:tä koneella, jolla ACP putoaa
+  hiljaa CLI:lle. Siksi testi tarkistaa moottorivalinnan suoraan. Se alkaa
+  vaatia `cli`-oletusta heti, kun merge tuo `resolveClaudeExecutionEngine`n
+  (upstream exporttaa sen `server/index.ts`:n `export * from "./acp.js"`
+  -rivillä). Tämä on pinnauksen portti.
 - `claude-local-adapter-environment.test.ts`, describe
   `claude_local hello probe environment`: sama sääntö hello-proben spawnille.
 - `claude-local-adapter-billing-inheritance.test.ts`: env-apufunktioiden
