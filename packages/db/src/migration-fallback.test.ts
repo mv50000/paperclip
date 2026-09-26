@@ -5,8 +5,8 @@ import postgres from "postgres";
 import { applyPendingMigrations, inspectMigrations } from "./client.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 
-// RK9-311: client.ts identifies applied migrations by sha256 hash and falls back to created_at
-// only when NO hash resolves. These tests build a prod-like history (fork 9xxx applied, the two
+// RK9-311: client.ts identifies applied migrations by sha256 hash and (RK9-348) throws
+// when history has rows but NO hash resolves. These tests build a prod-like history (fork 9xxx applied, the two
 // newest upstream migrations 0071/0072 still pending), then damage the recorded hashes the way a
 // reformatted checkout or an edited 9xxx file would, and pin what the driver does.
 
@@ -124,7 +124,7 @@ describeEmbeddedPostgres("migration history identity (RK9-311)", () => {
     }
   }, 60_000);
 
-  it("treats an empty migration history as a fresh database, not an error", async () => {
+  it("does not throw on an empty migration history (0 rows)", async () => {
     const { url, sql } = await prodLikeDatabase();
     try {
       await sql.unsafe(`DELETE FROM ${MIGRATIONS}`);
@@ -145,7 +145,7 @@ describeEmbeddedPostgres("migration history identity (RK9-311)", () => {
     const { url, sql } = await prodLikeDatabase();
     try {
       await sql.unsafe(`UPDATE ${MIGRATIONS} SET hash = 'unresolved-' || id`);
-      await expect(applyPendingMigrations(url)).rejects.toThrow();
+      await expect(applyPendingMigrations(url)).rejects.toThrow(/none of the recorded hashes/);
       expect(await indexPresent(sql)).toBe(false);
     } finally {
       await sql.end();

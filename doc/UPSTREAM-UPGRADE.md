@@ -341,8 +341,8 @@ pinnatut nimet fork-tiedostoina).
 kymmenen pinnattua 9xxx-hashia ovat historiassa. Prodissa on jo 0073 ja 0074 (forkin puu päättyy 0072:een), joten
 pending on 203 migraatiota (0075…0279).
 
-`created_at`-fallback ei laukea, kun yksikin hash tunnistuu: `loadAppliedMigrations` palauttaa silloin osittaisen
-tunnistuksen. Fallback laukeaa vain, kun **yksikään** hash ei tunnistu. Testit `migration-fallback.test.ts`
+Osittainen tunnistus: kun yksikin hash tunnistuu, `loadAppliedMigrations` palauttaa osittaisen tunnistuksen. Kun **yksikään** hash ei tunnistu
+(ja rivejä on), se heittää virheen (RK9-348; ei enää `created_at`-arvausta). Testit `migration-fallback.test.ts`
 (kanta: embedded Postgres tai `PAPERCLIP_TEST_PGHOST` hostin socketilla):
 
 - muutettu 9001-hash → 9001 näkyy pendinginä, upstream-migraatiot ajetaan, ja 9001:n uudelleenajo kaatuu äänekkäästi
