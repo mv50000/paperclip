@@ -110,12 +110,19 @@ mapped in `updateProspect`'s unique-violation catch).
 Pure, DB-free, checked in this order (first failure wins, stored verbatim as
 `reject_reason`): `missing_email` → `placeholder_text` (`[yritys]`,
 `{{...}}`) → `disallowed_link` (RK9-223: more than one link, or any link
-outside `saatavilla.fi`/its subdomains) → `private_email_domain`
+outside the template's allowed host or its subdomains) → `private_email_domain`
 (gmail/hotmail/outlook/icloud, per AC) → `suppressed` (global list) →
 `too_long` (>120 words, `OUTREACH_DRAFT_MAX_WORDS`). Runs once per draft in `draftMessageForProspect`;
 the CLI's `review` command does not re-run it — a gate-passed draft reaching
 review is assumed clean, and an edited draft is re-approved by the operator,
 not re-gated automatically (a human just read it).
+
+**Per-template link host (RK9-349, 26.9.2026).** `runQualityGate` takes the
+template `company`, and `allowedLinkHostSuffix` maps it to the one host its
+drafts may link to: `saatavilla` → `saatavilla.fi`, `rk9` → `rk9.fi`. Any
+template not listed (`alli-audit`, `ololla`) keeps the old default
+`saatavilla.fi`, so their behaviour did not change. "At most one link" and
+subdomain matching apply to every template.
 
 ## Cost tracking
 
@@ -128,12 +135,23 @@ drifts from what a run reports.
 ## Templates (`docs/outreach/templates/<company>.md`)
 
 One file per `OUTREACH_TEMPLATE_COMPANIES` slug (`saatavilla`, `alli-audit`,
-`ololla`). Each file **is** the prompt sent to Claude — edit the template to
+`ololla`, `rk9`). Each file **is** the prompt sent to Claude — edit the template to
 change voice or rules, not `draft.ts`. Company descriptions in the current
 templates are a first-pass summary from the RK9 knowledge vault
 (2026-09-13); reverify against the company's own docs before the first real
 send — every message still clears the human approval gate regardless, so a
 rough starting template is a safe default, not a shipped claim.
+
+**`rk9` (RK9-349, 26.9.2026)** drafts for RK9 AI Oy's own website offer:
+Finnish small businesses whose website is missing or old. Its user turn
+(`buildDraftUserMessage` with `company: "rk9"`) has no booking-system or
+provider lines. It says instead whether a website was found
+(`enrichment.website.url`, else the prospect's `sourceUrl`): found → message
+type B (SIVU ON), not found → type A (EI SIVUA). The observation line stays.
+The only allowed link is `https://rk9.fi/selitys` (`RK9_EXPLAINER_URL`);
+`draftMessageForProspect` never calls `demoUrlForSegment` for `rk9`, so an
+rk9 draft is never offered a saatavilla.fi URL, and the gate rejects one.
+The Saatavilla user turn is byte-identical to before.
 
 ## Tests
 
