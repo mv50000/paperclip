@@ -175,19 +175,20 @@ verify_isolation() {
 # pid-nimiavaruuden inodesta hostin /procista (nimiavaruudessa ei ole omaa /procia). Ei luettavissa oleva env on
 # virhe (fail closed).
 verify_server_env() {
-  local init ns d p n=0 bad="" leaked
+  local init ns d p n=0 bad="" leaked envtxt
   init="$(holder_init_pid)"; ns="$(readlink "/proc/$init/ns/pid")"
   for d in /proc/[0-9]*; do
     p="${d#/proc/}"
     [[ "$(readlink "$d/ns/pid" 2>/dev/null || true)" == "$ns" ]] || continue
     if [[ ! -r "$d/environ" ]]; then [[ -d "$d" ]] && bad+="pid $p: environ ei luettavissa; "; continue; fi
+    envtxt="$(tr '\0' '\n' <"$d/environ")" || { bad+="pid $p: environ-luku epäonnistui; "; continue; }
     n=$((n + 1))
-    leaked="$(tr '\0' '\n' <"$d/environ" | cut -d= -f1 \
+    leaked="$(printf '%s\n' "$envtxt" | cut -d= -f1 \
       | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
       | grep -v -E '^PAPERCLIP_SECRETS_MASTER_KEY_FILE$' || true)"
     [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr '\n' ' ')"
     # Ei -q: pipefail + SIGPIPE.
-    if [[ -n "$(tr '\0' '\n' <"$d/environ" | grep -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@' || true)" ]]; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
+    if [[ -n "$(printf '%s\n' "$envtxt" | grep -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@' || true)" ]]; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
   done
   [[ -z "$bad" ]] || die "eristys: nimiavaruuden env sisältää salaisuudennäköistä: $bad"
   (( n >= 3 )) || die "eristys: nimiavaruudessa on $n prosessia, odotettu vähintään 3 (init, silta, palvelin)"
@@ -437,7 +438,9 @@ cmd_smoke() {
     esac
   done
   log "smoke (worktree $WORKTREE): offline${outside[1]:+ + fork-testit}"
-  ( cd "$WORKTREE" && bash "$smoke" "${outside[@]}" ) || rc=1
+  # env -i: refin testikoodi ei näe prodin HOME/PAPERCLIP_HOMEa eikä PG-ympäristöä (verkko on tässä osassa auki).
+  ( cd "$WORKTREE" && env -i PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_HOME="$REH_HOME" \
+      PAPERCLIP_CONFIG="$REH_HOME/instances/default/config.json" CI="${CI:-}" bash "$smoke" "${outside[@]}" ) || rc=1
   if (( offline_only == 0 )); then
     log "smoke: HTTP-tarkistukset nimiavaruudessa http://127.0.0.1:$PORT"
     ns_exec env -i PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_SMOKE_URL="http://127.0.0.1:$PORT" \
@@ -491,7 +494,7 @@ cmd_clean() {
   dropdb --if-exists "$REH_DB"
   [[ -e "$WORKTREE" ]] && { git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" || rm -rf -- "$WORKTREE"; git -C "$REPO_ROOT" worktree prune; }
   if [[ "${1:-}" == "--dumps" ]]; then rm -f -- "$BACKUP_DIR"/rehearsal-*.dump; log "dumpit poistettu"; fi
-  rm -f "$STATE_FILE"
+  rm -f "$STATE_FILE" "$SERVER_LOG"
   log "siivottu: kanta $REH_DB pudotettu, worktree poistettu"
 }
 

@@ -129,7 +129,7 @@ lipuilla, joten `heartbeat.ts` ja `routines.ts` pysyvät koskemattomina (konflik
 |---|---|---|
 | Verkko ja pid | palvelin ajetaan `unshare -r -n -p -f` -nimiavaruudessa (vain `lo`, ei reittejä; nimet voivat resolvoitua hostin resolverin socketin kautta, yhteys ei avaudu). Oma pid-avaruus estää palvelinta signaloimasta prodin agenttiprosesseja kannan kopion `process_pid`-arvoilla | SES/Resend, Slack, GitHub, outreach-lähetys, DNSBL, announcement feed |
 | Kanta | nimiavaruuden sisäinen silta `127.0.0.1:5432` → hostin PG:n unix-socket (postgres.js ei tue `?host=`-muotoa) | ei tarvitse egressiä paikalliseen PG:hen |
-| Env | `env -i` + allowlist; ei `ses.env`iä, tokeneita eikä `PAPERCLIP_SECRETS_*` | salaisuudet eivät päädy palvelimeen |
+| Env | `env -i` + allowlist; ei `ses.env`iä eikä tokeneita, `PAPERCLIP_SECRETS_*`-muuttujista vain `master.key`-polku | salaisuudet eivät päädy palvelimeen |
 | Salaisuudet kannassa | oma `PAPERCLIP_HOME`; `PAPERCLIP_CONFIG` ja `PAPERCLIP_SECRETS_MASTER_KEY_FILE` lukittu sen alle, joten `master.key` on uusi | kantaan tallennetut salaisuudet eivät pura |
 | Ajastimet | `HEARTBEAT_SCHEDULER_ENABLED=false`, `OUTREACH_SENDER_ENABLED=false`, `OUTREACH_AUTO_PAUSE_ENABLED=false`, `OUTREACH_DNSBL_ENABLED=false`, `PAPERCLIP_DB_BACKUP_ENABLED=false` | agenttiajot (ne kirjoittaisivat oikeisiin repoihin), routinet, outreach-cronit |
 
@@ -137,7 +137,7 @@ Skripti epäonnistuu suljetusti (`die`), jos jokin näistä ei päde: nimiavaruu
 reittejä on, egress-koetin pääsee ulos (1.1.1.1, 8.8.8.8, metadata, SES, Resend, Slack, GitHub),
 jonkin nimiavaruuden prosessin (init, silta, palvelin) env sisältää salaisuudennäköisen muuttujan tai ulos lähtevien taulujen
 (`email_messages`, `email_outbound_audit`, `outreach_messages`, `outreach_events`, `outreach_sender_pauses`)
-rivimäärä kasvaa käynnistyksessä. Tarkistus ajetaan ennen palvelimen käynnistystä ja sen jälkeen.
+rivimäärä kasvaa käynnistyksessä. Egress-tarkistus ajetaan ennen palvelimen käynnistystä ja sen jälkeen; env- ja rivimääräntarkistus käynnistyksen jälkeen.
 
 Palvelin kuuntelee vain nimiavaruuden loopbackissa. Hostilta se ei ole tavoitettavissa, joten
 savutesti ajetaan komennolla `scripts/upgrade-rehearsal.sh smoke [--fork-tests]`. Se käyttää **refin omaa**
@@ -164,7 +164,7 @@ sudo -u paperclip scripts/upgrade-rehearsal.sh clean          # pudottaa papercl
 Aja `clean` jokaisen portaan jälkeen: harjoituskanta sisältää prospektien henkilötietoja. Dumpit poistuvat komennolla `clean --dumps`
 tai retentiolla (5 viimeisintä).
 
-Aja skripti paperclip-omisteisesta checkoutista, sillä `git` kieltäytyy toisen käyttäjän repoista ja
+Aja skripti paperclip-omisteisesta checkoutista (tällä koneella `/opt/paperclip`, joten worktree-metadata kirjoitetaan prodin `.git`-hakemistoon; se on harmiton), sillä `git` kieltäytyy toisen käyttäjän repoista ja
 `/home/rk9admin` on 700. Worktree lisätään sen `.git`-hakemistoon.
 
 Kertaluonteinen valmistelu (operaattori, root). Sitä ei voitu tehdä agenttisessiosta, koska sessiolla ei ole sudoa.
@@ -204,6 +204,9 @@ Kirjaa rollbackin kesto Porraslokiin.
 - `pnpm install` ajetaan nimiavaruuden ulkopuolella (tarvitsee verkon) ja ajaa testattavan refin
   lifecycle-skriptit palvelun käyttäjällä. Aja vain omia porrasbrancheja ja upstream-tageja.
   pnpm-store on jaettu prodin kanssa (hardlinkit samalla levyllä), joten lifecycle-skripti voisi muuttaa prodin riippuvuuksia paikan päällä.
+- Nimiavaruuden filesystem-socketit (esim. `/run/ssh-unix-local/socket`) ovat palvelimen ulottuvilla; palvelinkoodi ei käytä niitä.
+- Jos vain holder-prosessi kuolee, orpo nimiavaruus jää eikä `stop` löydä sitä; `clean` epäonnistuu silloin (avoimet yhteydet). Tapa init käsin (`pgrep -f "sleep infinity"`).
+- Offline- ja fork-testit ajetaan verkon ollessa auki mutta `env -i`-siivotulla ympäristöllä ja rehearsal-`PAPERCLIP_HOME`lla.
 - Yksi ajo kerrallaan (`flock`). Toinen ajo tapettaisiin muuten EXIT-trapissa.
 - Rollback palauttaa saman dumpin tuoreeseen kantaan ja resetoi worktreen pre-SHA:han. Se todistaa palautusmekanismin,
   rivimäärät ja skeeman, ei sitä, että palvelin käynnistyy pre-SHA:lla. Käynnistä palvelin pre-SHA:lla käsin tarvittaessa.
