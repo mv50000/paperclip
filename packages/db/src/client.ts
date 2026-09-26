@@ -449,23 +449,19 @@ async function loadAppliedMigrations(
       return appliedFromHashes;
     }
 
-    // Fallback only when hashes are unavailable/unresolved.
-    if (columnNames.has("created_at")) {
-      const journalEntries = await listJournalMigrationEntries();
-      if (journalEntries.length > 0) {
-        const lastDbRows = await sql.unsafe<{ created_at: string | number | null }[]>(
-          `SELECT created_at FROM ${qualifiedTable} ORDER BY created_at DESC LIMIT 1`,
-        );
-        const lastCreatedAt = Number(lastDbRows[0]?.created_at ?? -1);
-        if (Number.isFinite(lastCreatedAt) && lastCreatedAt >= 0) {
-          return journalEntries
-            .filter((entry) => availableMigrations.includes(entry.fileName))
-            .filter((entry) => entry.folderMillis <= lastCreatedAt)
-            .map((entry) => entry.fileName)
-            .slice(0, rows.length);
-        }
-      }
+    // --- RK9 Custom (RK9-348): fail closed when history has rows but no hash resolves. ---
+    // The former created_at fallback took journal.slice(0, rows.length) as applied, which marks
+    // never-run upstream migrations as applied (e.g. after a line-ending rewrite of every file).
+    // An empty history (0 rows) is a fresh database and falls through to the empty result below.
+    if (rows.length > 0) {
+      const firstUnknown = rows[0]?.hash;
+      throw new Error(
+        `Migration history has ${rows.length} rows but none of the recorded hashes matches a migration file ` +
+          `(first unknown hash: ${firstUnknown}). Refusing to guess which migrations ran. ` +
+          `Check that the migration files are unchanged (line endings, checkout of the right commit) before retrying.`,
+      );
     }
+    // --- end RK9 Custom ---
   }
 
   const rows = await sql.unsafe<{ id: number }[]>(`SELECT id FROM ${qualifiedTable} ORDER BY id`);
