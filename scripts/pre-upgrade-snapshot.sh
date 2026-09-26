@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# pre-upgrade-snapshot.sh — pg_dump -Fc + pre-upgrade-SHA + todennettu palautus scratch-kantaan
+# (RK9-307). Ajetaan cutover-runbookin vaiheessa 3 (doc/upgrade/cutover-runbook.md), kun
+# outreach-sender ja heartbeatit on pysäytetty.
+#
+# Mitä skripti tekee:
+#   1. Kirjaa SHA:t tiedostoon pre-upgrade-sha.txt: HEAD, origin/master, fork/master ja
+#      upstream/master (puuttuva remote kirjataan "unknown").
+#   2. Ajaa pg_dump -Fc lähdekantaan.
+#   3. Palauttaa dumpin kertakäyttöiseen scratch-kantaan (pg_restore) ja vertaa lähteeseen:
+#      taulujen määrää, drizzle-migraatioiden määrää ja avaintaulujen rivimääriä.
+#   4. Pudottaa scratch-kannan aina, myös virheessä. Lähdekantaan ei kirjoiteta.
+# Vain onnistunut vertailu tulostaa "SNAPSHOT_OK". Muu poistumiskoodi = ÄLÄ jatka deployhin.
+#
+# Käyttö:
+#   DATABASE_URL=postgres://... scripts/pre-upgrade-snapshot.sh --tag v2026.512.0
+#
+#   --tag <nimi>      pakollinen; porras, esim. v2026.512.0 (kirjainnumero, piste, viiva)
+#   --repo <polku>    git-työhakemisto SHA:iden lukuun (oletus /opt/paperclip)
+#   --out-dir <polku> oletus /var/backups/paperclip-pre-upgrade (hakemisto 0700, tiedostot 0600)
+#
+# Ympäristö:
+#   DATABASE_URL          lähdekanta (pakollinen). Ei tulosteta.
+#   SNAPSHOT_ADMIN_URL    yhteys, jolla scratch-kanta luodaan ja pudotetaan. Oletus: DATABASE_URL,
+#                         kantana `postgres`. Käyttäjällä pitää olla CREATEDB.
+#
+# Poistumiskoodi: 0 = dump ja palautus todennettu, 1 = vertailu tai vaihe epäonnistui,
+#                 2 = käyttövirhe.
+set -euo pipefail
+
+TAG=""
+REPO=/opt/paperclip
+OUT_DIR=/var/backups/paperclip-pre-upgrade
+LOGTAG="[pre-upgrade-snapshot]"
+
+die() { echo "$LOGTAG VIRHE: $*" >&2; exit "${2:-1}"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tag) TAG=${2:-}; shift 2 ;;
+    --repo) REPO=${2:-}; shift 2 ;;
+    --out-dir) OUT_DIR=${2:-}; shift 2 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    *) die "tuntematon valitsin: $1" 2 ;;
+  esac
+done
+
+[[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "--tag puuttuu tai sisältää kiellettyjä merkkejä" 2
+[ -n "${DATABASE_URL:-}" ] || die "DATABASE_URL puuttuu" 2
+for t in pg_dump pg_restore psql git sha256sum; do
+  command -v "$t" >/dev/null 2>&1 || die "$t puuttuu PATHista" 2
+done
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO ei ole git-työhakemisto (dubious ownership? ks. runbook, vaihe 0)" 2
+
+# Yhteys samaan palvelimeen, toinen kanta. Ei säilytetä tulosteessa.
+swap_db() { # <url> <kanta>
+  sed -E "s#^(postgres(ql)?://[^/]*/)[^?]*#\\1$2#" <<<"$1"
+}
+ADMIN_URL=${SNAPSHOT_ADMIN_URL:-$(swap_db "$DATABASE_URL" postgres)}
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+SNAP_DIR="$OUT_DIR/$TAG-$STAMP"
+SCRATCH="pcp_restore_check_$(date -u +%Y%m%d%H%M%S)_$$"
+SCRATCH_URL=$(swap_db "$ADMIN_URL" "$SCRATCH")
+SCRATCH_CREATED=0
+
+cleanup() {
+  local rc=$?
+  if [ "$SCRATCH_CREATED" = 1 ]; then
+    psql "$ADMIN_URL" -qAt -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$SCRATCH\"" >/dev/null 2>&1 \
+      || echo "$LOGTAG HUOM: scratch-kantaa $SCRATCH ei voitu pudottaa; pudota käsin" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+umask 077
+mkdir -p "$OUT_DIR"
+chmod 700 "$OUT_DIR"
+mkdir "$SNAP_DIR"
+
+# --- 1. SHA:t ---------------------------------------------------------------------------------
+sha_of() { git -C "$REPO" rev-parse --verify --quiet "$1^{commit}" 2>/dev/null || echo unknown; }
+{
+  echo "tag=$TAG"
+  echo "recorded_at=$STAMP"
+  echo "repo=$REPO"
+  echo "HEAD=$(sha_of HEAD)"
+  echo "origin/master=$(sha_of origin/master)"
+  echo "fork/master=$(sha_of fork/master)"
+  echo "upstream/master=$(sha_of upstream/master)"
+} >"$SNAP_DIR/pre-upgrade-sha.txt"
+grep -q '^HEAD=unknown$' "$SNAP_DIR/pre-upgrade-sha.txt" && die "HEAD ei ratkea $REPO:ssa"
+echo "$LOGTAG SHA:t kirjattu: $SNAP_DIR/pre-upgrade-sha.txt"
+
+# --- 2. Avaintaulujen määrät ennen dumpia -----------------------------------------------------
+# Taulut, joiden häviö tai kaksoiskappale näkyisi cutoverissa. Puuttuva taulu ei ole virhe (vanhempi
+# skeema), mutta sen pitää puuttua molemmista.
+KEY_TABLES=(companies issues agents heartbeat_runs activity_log outreach_prospects outreach_messages
+  outreach_events outreach_sender_pauses email_messages email_routes)
+
+count_state() { # <url> -> rivit "nimi=luku"; puuttuvan taulun arvo "-"
+  local url=$1 t reg
+  echo "tables=$(psql "$url" -qAt -v ON_ERROR_STOP=1 -c \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")"
+  if [ "$(psql "$url" -qAt -v ON_ERROR_STOP=1 -c "SELECT to_regclass('drizzle.__drizzle_migrations') IS NOT NULL")" = t ]; then
+    echo "migrations=$(psql "$url" -qAt -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM drizzle.__drizzle_migrations')"
+  else
+    echo "migrations=-"
+  fi
+  for t in "${KEY_TABLES[@]}"; do
+    reg=$(psql "$url" -qAt -v ON_ERROR_STOP=1 -c "SELECT to_regclass('public.$t') IS NOT NULL")
+    if [ "$reg" = t ]; then
+      echo "$t=$(psql "$url" -qAt -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.\"$t\"")"
+    else
+      echo "$t=-"
+    fi
+  done
+}
+
+count_state "$DATABASE_URL" >"$SNAP_DIR/counts-before.txt"
+
+# --- 3. Dump ----------------------------------------------------------------------------------
+DUMP="$SNAP_DIR/paperclip.dump"
+pg_dump -Fc --no-owner --no-privileges --dbname="$DATABASE_URL" --file="$DUMP" \
+  || die "pg_dump epäonnistui"
+[ -s "$DUMP" ] || die "dump on tyhjä"
+pg_restore --list "$DUMP" >/dev/null || die "pg_restore --list ei lue dumpia"
+count_state "$DATABASE_URL" >"$SNAP_DIR/counts-after.txt"
+echo "$LOGTAG dump valmis: $(stat -c %s "$DUMP") tavua"
+
+# --- 4. Palautus scratch-kantaan ---------------------------------------------------------------
+psql "$ADMIN_URL" -qAt -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$SCRATCH\"" >/dev/null \
+  || die "scratch-kannan luonti epäonnistui (CREATEDB-oikeus?)"
+SCRATCH_CREATED=1
+pg_restore --no-owner --no-privileges --exit-on-error --dbname="$SCRATCH_URL" "$DUMP" \
+  || die "palautus scratch-kantaan epäonnistui"
+count_state "$SCRATCH_URL" >"$SNAP_DIR/counts-scratch.txt"
+
+# --- 5. Vertailu -------------------------------------------------------------------------------
+# Jos lähde ei muuttunut dumpin aikana, scratchin pitää täsmätä tarkasti. Jos muuttui (pysäytys ei
+# pitänyt), scratchin pitää olla ennen/jälkeen-arvojen välissä, ja skripti varoittaa.
+get() { sed -n "s/^$2=//p" "$1"; }
+FAILS=0
+DRIFT=0
+for key in tables migrations "${KEY_TABLES[@]}"; do
+  b=$(get "$SNAP_DIR/counts-before.txt" "$key")
+  a=$(get "$SNAP_DIR/counts-after.txt" "$key")
+  s=$(get "$SNAP_DIR/counts-scratch.txt" "$key")
+  if [ "$b" = "-" ] || [ "$a" = "-" ] || [ "$s" = "-" ]; then
+    if [ "$b" = "$a" ] && [ "$a" = "$s" ]; then continue; fi
+    echo "$LOGTAG EROA: $key: taulu puuttuu joko lähteestä tai scratchista (lähde $b/$a, scratch $s)" >&2
+    FAILS=$((FAILS + 1)); continue
+  fi
+  if [ "$b" = "$a" ]; then
+    [ "$s" = "$b" ] || { echo "$LOGTAG EROA: $key: lähde $b, scratch $s" >&2; FAILS=$((FAILS + 1)); }
+  else
+    DRIFT=$((DRIFT + 1))
+    lo=$b; hi=$a; [ "$a" -lt "$b" ] && { lo=$a; hi=$b; }
+    if [ "$s" -lt "$lo" ] || [ "$s" -gt "$hi" ]; then
+      echo "$LOGTAG EROA: $key: lähde muuttui dumpin aikana ($b -> $a), scratch $s on välin ulkopuolella" >&2
+      FAILS=$((FAILS + 1))
+    fi
+  fi
+done
+[ "$DRIFT" = 0 ] || echo "$LOGTAG VAROITUS: $DRIFT taulun rivimäärä muuttui dumpin aikana. Onko outreach ja heartbeatit pysäytetty?" >&2
+[ "$FAILS" = 0 ] || die "palautusvertailu epäonnistui ($FAILS eroa); dump EI ole käyttökelpoinen rollbackiin"
+# Tyhjä migraatiotaulu tarkoittaa, ettei vertailu todista mitään.
+[ "$(get "$SNAP_DIR/counts-scratch.txt" migrations)" != "-" ] || die "drizzle.__drizzle_migrations puuttuu; vertailu ei todista skeemaa"
+
+# --- 6. Paikalliset muutokset ja versioimattomat tiedostot ------------------------------------
+# reset --hard hävittää versioidut paikalliset muutokset, joten ne talletetaan patchina. Löydös ei
+# kaada snapshotia (dump on silti käyttökelpoinen), mutta runbookin go/no-go vaatii sen ratkaisun.
+UNTRACKED_RC=0
+"$(dirname "${BASH_SOURCE[0]}")/prod-untracked-check.sh" --repo "$REPO" --backup "$SNAP_DIR/local" >"$SNAP_DIR/untracked-check.txt" 2>&1 || UNTRACKED_RC=$?
+[ "$UNTRACKED_RC" -le 1 ] || die "prod-untracked-check epäonnistui (exit $UNTRACKED_RC): $(tail -n 3 "$SNAP_DIR/untracked-check.txt")"
+[ "$UNTRACKED_RC" = 0 ] || echo "$LOGTAG VAROITUS: prod-untracked-check löysi ongelmia (ks. $SNAP_DIR/untracked-check.txt). Ratkaise ennen resettiä." >&2
+
+# --- 7. Summa ja loppu -------------------------------------------------------------------------
+( cd "$SNAP_DIR" && sha256sum paperclip.dump pre-upgrade-sha.txt local/local-changes.patch local/untracked-preserved.tar >SHA256SUMS )
+find "$SNAP_DIR" -type f -exec chmod 600 {} +
+echo "$LOGTAG SNAPSHOT_OK dir=$SNAP_DIR tables=$(get "$SNAP_DIR/counts-scratch.txt" tables) migrations=$(get "$SNAP_DIR/counts-scratch.txt" migrations)"
+echo "$LOGTAG rollback: git -C $REPO reset --hard \$(sed -n 's/^HEAD=//p' $SNAP_DIR/pre-upgrade-sha.txt); pg_restore --clean --if-exists --no-owner -d \"\$DATABASE_URL\" $DUMP"

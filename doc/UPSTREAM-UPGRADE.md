@@ -114,7 +114,12 @@ kata. Savutesti ajetaan: `scripts/upgrade-smoke.sh http://<harjoitusinstanssi>:<
 
 ## Deploy ja rollback
 
-Varattu deploy- ja rollback-lapselle. Perusrunko on osioissa "Upgrade-prosessi" 1 ja 7.
+Jokaisen tuotantoon menevän portaan deploy ja rollback ajetaan tiedoston
+[`doc/upgrade/cutover-runbook.md`](upgrade/cutover-runbook.md) mukaan (RK9-307): ikkuna
+outreach-erien ulkopuolelta, outreachin ja heartbeatien pysäytys, `scripts/pre-upgrade-snapshot.sh`,
+fetch ja reset, preflight ja smoke, jatko ja 24 h seuranta. Merge masteriin deployaa 05:00Z-päivityksellä,
+joten runbook asettaa `/etc/paperclip/update-hold`-tiedoston ennen mergeä. Perusrunko on osioissa
+"Upgrade-prosessi" 1 ja 7; runbook ohittaa ne tuotannossa.
 
 ## Heartbeat-päätökset
 
