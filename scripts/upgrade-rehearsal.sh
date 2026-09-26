@@ -129,7 +129,7 @@ ns_exec() {
 ns_daemon() {
   local logfile="$1"; shift
   holder_alive || die "nimiavaruutta ei ole käynnissä"
-  setsid nsenter -t "$(holder_init_pid)" -U -n -p ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@" >>"$logfile" 2>&1 </dev/null &
+  setsid nsenter -t "$(holder_init_pid)" -U -n -p ${NS_WD:+--wd="$NS_WD"} --preserve-credentials -- "$@" >>"$logfile" 2>&1 </dev/null 9>&- &
 }
 
 # server_alive — palvelimen pid (nimiavaruuden numeroinnissa) elää.
@@ -142,7 +142,7 @@ start_netns() {
   command -v unshare >/dev/null && command -v nsenter >/dev/null && command -v pgrep >/dev/null || die "unshare/nsenter/pgrep puuttuu"
   if holder_alive; then return; fi
   # env -i: nimiavaruuden init ei peri operaattorin env:iä. lo nostetaan ylös, muuta liitäntää ei ole.
-  setsid env -i PATH="$PATH" unshare -r -n -p -f bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 </dev/null &
+  setsid env -i PATH="$PATH" unshare -r -n -p -f bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 </dev/null 9>&- &
   echo $! >"$HOLDER_PID_FILE"
   for _ in $(seq 1 20); do
     if holder_alive && [[ "$(ns_exec ip -o link show lo 2>/dev/null || true)" =~ (UP|UNKNOWN) ]]; then return; fi
