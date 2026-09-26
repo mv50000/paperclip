@@ -6,12 +6,14 @@
 # loopback. Tuotantoon ei kirjoiteta, eikä paperclip.serviceä kosketa.
 #
 # Eristys (operaattorin päätös 2026-09-26, ensisijaisesti verkkotaso):
-#   1. Palvelin ajetaan `unshare -rn` -nimiavaruudessa: ei reittiä ulos, ei DNS:ää.
-#      Ulos lähtevä SES/Resend/Slack/GitHub/outreach epäonnistuu jo yhteyden avauksessa.
-#   2. Kantayhteys kulkee unix-socketin kautta (tiedostopolku, ei kuulu verkkonimiavaruuteen).
-#   3. Palvelimen env rakennetaan `env -i`:llä allowlististä: ei ses.env:iä, ei tokeneita,
-#      ei PAPERCLIP_SECRETS_*-muuttujia. Oma PAPERCLIP_HOME, joten master.key on uusi
-#      eikä kantaan tallennettuja salaisuuksia voi purkaa.
+#   1. Palvelin ajetaan `unshare -rn` -nimiavaruudessa: ei reittiä ulos. Nimet voivat resolvoitua
+#      hostin resolverin unix-socketin kautta, mutta yhteys ei avaudu. Ulos lähtevä
+#      SES/Resend/Slack/GitHub/outreach epäonnistuu yhteyden avauksessa.
+#   2. Kantayhteys: nimiavaruuden sisäinen silta 127.0.0.1:5432 → hostin PG:n unix-socket
+#      (tiedostopolku, ei kuulu verkkonimiavaruuteen). postgres.js ei tue ?host=-muotoa.
+#   3. Palvelimen env rakennetaan `env -i`:llä allowlististä: ei ses.env:iä eikä tokeneita.
+#      Oma PAPERCLIP_HOME, PAPERCLIP_CONFIG ja PAPERCLIP_SECRETS_MASTER_KEY_FILE on lukittu sen alle,
+#      joten master.key on uusi eikä kantaan tallennettuja salaisuuksia voi purkaa.
 #   4. Ajastimet pois olemassa olevilla lipuilla (HEARTBEAT_SCHEDULER_ENABLED=false,
 #      OUTREACH_*_ENABLED=false ym.). Koodiin ei lisätty gatea: verkkotaso kattaa loput.
 #   5. Skripti kieltäytyy jatkamasta (fail closed), jos egress-koetin pääsee ulos, nimiavaruudessa
@@ -25,21 +27,21 @@
 #   scripts/upgrade-rehearsal.sh stop          pysäytä palvelin ja nimiavaruus
 #
 # Ajo tällä koneella: kanta hyväksyy socketissa vain peer-tunnistuksen, joten aja
-# palvelun käyttäjänä:  sudo -u paperclip scripts/upgrade-rehearsal.sh <git-ref>
-# Kertaluonteinen valmistelu (root):  install -d -o paperclip -m 700 /var/backups/paperclip
-#   ja paperclip-roolilla on oltava CREATEDB (tai luo paperclip_rehearsal valmiiksi sen omistajaksi).
+# palvelun käyttäjänä paperclip-omisteisesta checkoutista (ks. doc/UPSTREAM-UPGRADE.md, "Ajo tällä koneella").
+# Rajat: nimiavaruus ei eristä tiedostojärjestelmää eikä käyttäjää; ks. samasta osiosta "Tunnetut rajat".
 #
 # Ympäristömuuttujat (oletus):
 #   REHEARSAL_PROD_DB=paperclip  REHEARSAL_DB=paperclip_rehearsal  REHEARSAL_PORT=3199
 #   REHEARSAL_PG_SOCKET_DIR=/var/run/postgresql  REHEARSAL_PG_USER=paperclip
 #   REHEARSAL_HOME=$HOME/.paperclip-rehearsal    REHEARSAL_BACKUP_DIR=/var/backups/paperclip
-#   REHEARSAL_WORKTREE=/tmp/paperclip-worktrees/RK9/rehearsal   REHEARSAL_KEEP_DUMPS=5
+#   REHEARSAL_WORKTREE=/tmp/paperclip-worktrees/rehearsal/RK9   REHEARSAL_KEEP_DUMPS=5
 #   REHEARSAL_MIN_FREE_FACTOR=3   vapaata levyä vähintään näin monta kertaa kannan koko
 # Testisaumat: REHEARSAL_INSTALL_CMD, REHEARSAL_SERVER_CMD.
 #
 # Poistumiskoodi: 0 = ok, 1 = virhe tai eristystarkistus epäonnistui, 2 = käyttövirhe.
 
 set -euo pipefail
+umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -50,12 +52,13 @@ SOCKET_DIR="${REHEARSAL_PG_SOCKET_DIR:-/var/run/postgresql}"
 PG_USER="${REHEARSAL_PG_USER:-paperclip}"
 REH_HOME="${REHEARSAL_HOME:-${HOME:-/tmp}/.paperclip-rehearsal}"
 BACKUP_DIR="${REHEARSAL_BACKUP_DIR:-/var/backups/paperclip}"
-WORKTREE="${REHEARSAL_WORKTREE:-/tmp/paperclip-worktrees/RK9/rehearsal}"
+WORKTREE="${REHEARSAL_WORKTREE:-/tmp/paperclip-worktrees/rehearsal/RK9}"
 KEEP_DUMPS="${REHEARSAL_KEEP_DUMPS:-5}"
 FREE_FACTOR="${REHEARSAL_MIN_FREE_FACTOR:-3}"
 INSTALL_CMD="${REHEARSAL_INSTALL_CMD:-pnpm install --frozen-lockfile}"
 SERVER_CMD="${REHEARSAL_SERVER_CMD:-pnpm --filter @paperclipai/server exec tsx src/index.ts}"
 
+BRIDGE_PID_FILE="$REH_HOME/pg-bridge.pid"
 STATE_FILE="$REH_HOME/rehearsal-state.env"
 HOLDER_PID_FILE="$REH_HOME/netns-holder.pid"
 SERVER_PID_FILE="$REH_HOME/server.pid"
@@ -87,17 +90,47 @@ guard_names() {
       die "REHEARSAL_HOME ($real_home) osuu prodin PAPERCLIP_HOMEen ($prod_home)"
     fi
   done
+  [[ "$KEEP_DUMPS" =~ ^[1-9][0-9]*$ ]] || die "REHEARSAL_KEEP_DUMPS pitää olla kokonaisluku >= 1"
+  [[ "$FREE_FACTOR" =~ ^[1-9][0-9]*$ ]] || die "REHEARSAL_MIN_FREE_FACTOR pitää olla kokonaisluku >= 1"
+  # Vain rehearsal-alihakemisto: rm -rf / git reset --hard eivät voi osua muiden issueiden worktreihin.
   local real_wt
   real_wt="$(realpath -m "$WORKTREE")"
-  [[ "$real_wt" == /tmp/paperclip-worktrees/* ]] || die "REHEARSAL_WORKTREE pitää olla /tmp/paperclip-worktrees/ alla (nyt $real_wt)"
-  [[ "$real_wt" != "$(realpath -m "$REPO_ROOT")" ]] || die "REHEARSAL_WORKTREE on sama kuin tämä repo"
+  [[ "$real_wt" == /tmp/paperclip-worktrees/rehearsal/?* ]] || die "REHEARSAL_WORKTREE pitää olla /tmp/paperclip-worktrees/rehearsal/<nimi> (nyt $real_wt)"
+  [[ "$real_wt" != "$(realpath -m "$REPO_ROOT")" && "$(realpath -m "$REPO_ROOT")" != "$real_wt"/* ]] || die "REHEARSAL_WORKTREE osuu tähän repoon"
 }
 
 psql_q() { psql -X -qAt -v ON_ERROR_STOP=1 "$@"; }
 
 # --- Nimiavaruus ----------------------------------------------------------------------------
 
-holder_alive() { [[ -s "$HOLDER_PID_FILE" ]] && kill -0 "$(cat "$HOLDER_PID_FILE")" 2>/dev/null; }
+# pid_is PIDFILE REGEX — pid elää ja sen komentorivi täsmää (suojaa uudelleenkäytetyiltä pideiltä).
+pid_is() {
+  [[ -s "$1" ]] || return 1
+  local pid; pid="$(cat "$1")"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/cmdline" ]] && tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q -E -- "$2"
+}
+# Holder on `sleep infinity`, ja sen verkkonimiavaruus eroaa omastamme.
+holder_alive() {
+  pid_is "$HOLDER_PID_FILE" '^sleep infinity' || return 1
+  [[ "$(readlink "/proc/$(cat "$HOLDER_PID_FILE")/ns/net")" != "$(readlink /proc/self/ns/net)" ]]
+}
+# server_alive — pid elää ja sen env kantaa harjoitusinstanssin PAPERCLIP_HOMEa (exec vaihtaa komentorivin).
+server_alive() {
+  [[ -s "$SERVER_PID_FILE" ]] || return 1
+  local pid; pid="$(cat "$SERVER_PID_FILE")"
+  [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/environ" ]] && tr '\0' '\n' <"/proc/$pid/environ" | grep -qx "PAPERCLIP_HOME=$REH_HOME"
+}
+
+# tree_pids PID — pid ja kaikki sen jälkeläiset.
+tree_pids() {
+  local pid="$1" child
+  echo "$pid"
+  for child in $(ps -o pid= --ppid "$pid" 2>/dev/null); do tree_pids "$child"; done
+}
+kill_tree() { # PID SIGNAALI
+  local p
+  for p in $(tree_pids "$1" | tac); do kill "-$2" "$p" 2>/dev/null || true; done
+}
 
 # ns_exec CMD... — aja komento harjoitusnimiavaruudessa (käyttäjä+verkko).
 ns_exec() {
@@ -111,8 +144,7 @@ start_netns() {
   # Holder pitää nimiavaruuden elossa. lo nostetaan ylös, muuta liitäntää ei ole.
   setsid unshare -r -n bash -c 'ip link set lo up && exec sleep infinity' >/dev/null 2>&1 &
   echo $! >"$HOLDER_PID_FILE"
-  local i
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     if ns_exec ip -o link show lo 2>/dev/null | grep -q 'UP\|UNKNOWN'; then return; fi
     sleep 0.25
   done
@@ -139,22 +171,29 @@ verify_isolation() {
   log "eristys ok: vain lo, ei reittejä, egress-koettimet (1.1.1.1, 8.8.8.8, metadata, SES, Resend, Slack, GitHub) estetty"
 }
 
-# Palvelimen env ei saa sisältää salaisuudennäköisiä muuttujia (paitsi kantayhteys).
+# Palvelimen prosessipuun (pnpm → tsx → node) env ei saa sisältää salaisuudennäköisiä muuttujia.
 verify_server_env() {
-  local pid="$1" bad
-  bad="$(tr '\0' '\n' <"/proc/$pid/environ" | cut -d= -f1 \
-    | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
-    | grep -v -E '^(PAPERCLIP_HOME)$' || true)"
-  [[ -z "$bad" ]] || die "eristys: palvelimen env sisältää salaisuudennäköisiä muuttujia: $(echo "$bad" | tr '\n' ' ')"
-  log "palvelimen env ok: ei salaisuusmuuttujia"
+  local root="$1" p bad="" leaked
+  for p in $(tree_pids "$root"); do
+    [[ -r "/proc/$p/environ" ]] || continue
+    leaked="$(tr '\0' '\n' <"/proc/$p/environ" | cut -d= -f1 \
+      | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
+      | grep -v -E '^PAPERCLIP_SECRETS_MASTER_KEY_FILE$' || true)"
+    [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr '\n' ' ') "
+    if tr '\0' '\n' <"/proc/$p/environ" | grep -q -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@'; then bad+="pid $p: DATABASE_URL sisältää salasanan "; fi
+  done
+  [[ -z "$bad" ]] || die "eristys: palvelimen env sisältää salaisuudennäköistä: $bad"
+  log "palvelimen env ok ($(tree_pids "$root" | wc -l) prosessia): ei salaisuusmuuttujia"
 }
 
 # --- Kanta ----------------------------------------------------------------------------------
 
-table_counts() { # db → "taulu=n" riveittäin; puuttuva taulu = -1
+table_counts() { # db → "taulu=n" riveittäin; puuttuva taulu = -1; virhe keskeyttää
   local db="$1" t n
   for t in "${KEY_TABLES[@]}"; do
-    n="$(psql_q -d "$db" -c "select count(*) from \"$t\"" 2>/dev/null || echo -1)"
+    if [[ "$(psql_q -d "$db" -c "select to_regclass('public.$t') is null")" == "t" ]]; then n=-1
+    else n="$(psql_q -d "$db" -c "select count(*) from \"$t\"")"; fi
+    [[ "$n" =~ ^-?[0-9]+$ ]] || die "rivimäärän luku epäonnistui: $db.$t"
     echo "$t=$n"
   done
   # Skeema: portti voi lisätä tauluja ja sarakkeita, joita --clean yksin ei poista.
@@ -200,41 +239,68 @@ restore_dump() { # dump [--clean]
 # --- Palvelin -------------------------------------------------------------------------------
 
 stop_server() {
-  local pid
-  if [[ -s "$SERVER_PID_FILE" ]]; then
-    pid="$(cat "$SERVER_PID_FILE")"
-    kill "$pid" 2>/dev/null || true
+  if server_alive; then
+    local pid; pid="$(cat "$SERVER_PID_FILE")"
+    kill_tree "$pid" TERM
     for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
-    kill -9 "$pid" 2>/dev/null || true
-    rm -f "$SERVER_PID_FILE"
+    kill_tree "$pid" KILL
   fi
+  rm -f "$SERVER_PID_FILE"
+  if pid_is "$BRIDGE_PID_FILE" 'pg-bridge.js'; then kill_tree "$(cat "$BRIDGE_PID_FILE")" KILL; fi
+  rm -f "$BRIDGE_PID_FILE"
 }
 
 stop_all() {
   stop_server
-  if [[ -s "$HOLDER_PID_FILE" ]]; then kill "$(cat "$HOLDER_PID_FILE")" 2>/dev/null || true; rm -f "$HOLDER_PID_FILE"; fi
+  if holder_alive; then kill "$(cat "$HOLDER_PID_FILE")" 2>/dev/null || true; fi
+  rm -f "$HOLDER_PID_FILE"
+}
+
+# Silta: nimiavaruuden 127.0.0.1:5432 → hostin PG:n unix-socket. Kuuluu vain nimiavaruuteen.
+start_pg_bridge() {
+  cat >"$REH_HOME/pg-bridge.js" <<'JS'
+const net = require("node:net");
+const [, , sock, port] = process.argv;
+net.createServer((c) => {
+  const u = net.connect(sock);
+  c.pipe(u); u.pipe(c);
+  const end = () => { c.destroy(); u.destroy(); };
+  c.on("error", end); u.on("error", end);
+}).listen(Number(port), "127.0.0.1");
+JS
+  local sock="$SOCKET_DIR/.s.PGSQL.${PGPORT:-5432}"
+  [[ -S "$sock" ]] || die "PG-socketia ei löydy: $sock"
+  ns_exec node "$REH_HOME/pg-bridge.js" "$sock" 5432 >>"$SERVER_LOG" 2>&1 </dev/null &
+  echo $! >"$BRIDGE_PID_FILE"
+  for _ in $(seq 1 20); do
+    ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/5432" 2>/dev/null && return
+    sleep 0.25
+  done
+  die "PG-silta ei käynnistynyt"
 }
 
 start_server() {
   mkdir -p "$REH_HOME"
   chmod 700 "$REH_HOME"
-  local db_url="postgres://${PG_USER}@localhost/${REH_DB}?host=$(printf %s "$SOCKET_DIR" | sed 's|/|%2F|g')${PGPORT:+&port=$PGPORT}"
+  local db_url="postgres://${PG_USER}@127.0.0.1:5432/${REH_DB}"
   : >"$SERVER_LOG"
+  start_pg_bridge
   # env -i: vain allowlist. Ei perittyjä tokeneita, ei ses.env:iä, ei PAPERCLIP_SECRETS_*.
   ( cd "$WORKTREE" && ns_exec env -i \
       PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_HOME="$REH_HOME" \
       NODE_ENV=development HOST=127.0.0.1 PORT="$PORT" \
       PAPERCLIP_LISTEN_HOST=127.0.0.1 PAPERCLIP_LISTEN_PORT="$PORT" \
       PAPERCLIP_DEPLOYMENT_MODE=local_trusted \
+      PAPERCLIP_CONFIG="$REH_HOME/instances/default/config.json" \
+      PAPERCLIP_SECRETS_MASTER_KEY_FILE="$REH_HOME/secrets/master.key" \
       DATABASE_URL="$db_url" \
       HEARTBEAT_SCHEDULER_ENABLED=false \
       OUTREACH_SENDER_ENABLED=false OUTREACH_AUTO_PAUSE_ENABLED=false OUTREACH_DNSBL_ENABLED=false \
       PAPERCLIP_ANNOUNCEMENTS_ENABLED=false PAPERCLIP_QMD_WATCHDOG_ENABLED=false \
       PAPERCLIP_DB_BACKUP_ENABLED=false \
       bash -c "echo \$\$ >'$SERVER_PID_FILE'; exec $SERVER_CMD" ) >>"$SERVER_LOG" 2>&1 </dev/null &
-  local i
-  for i in $(seq 1 120); do
-    if [[ -s "$SERVER_PID_FILE" ]] && ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
+  for _ in $(seq 1 120); do
+    if server_alive && ns_exec bash -c "exec 3<>/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
       log "palvelin kuuntelee nimiavaruudessa 127.0.0.1:$PORT (pid $(cat "$SERVER_PID_FILE"))"
       verify_server_env "$(cat "$SERVER_PID_FILE")"
       return
@@ -251,17 +317,31 @@ save_state() { # avain=arvo...
   mkdir -p "$REH_HOME"
   local kv
   for kv in "$@"; do
-    grep -v "^${kv%%=*}=" "$STATE_FILE" 2>/dev/null >"$STATE_FILE.tmp" || true
-    printf '%s\n' "$kv" >>"$STATE_FILE.tmp"
+    { grep -v "^${kv%%=*}=" "$STATE_FILE" 2>/dev/null || true; printf '%s\n' "$kv"; } >"$STATE_FILE.tmp"
     mv "$STATE_FILE.tmp" "$STATE_FILE"
   done
 }
-load_state() { [[ -f "$STATE_FILE" ]] || die "ei tilaa ($STATE_FILE): aja ensin $0 <git-ref>"; . "$STATE_FILE"; }
+# Ei `source`a: refnimi voi sisältää shell-metamerkkejä.
+load_state() {
+  [[ -f "$STATE_FILE" ]] || die "ei tilaa ($STATE_FILE): aja ensin $0 <git-ref>"
+  local line k v
+  while IFS= read -r line; do
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      DUMP) DUMP="$v" ;; PRE_SHA) PRE_SHA="$v" ;; PORT) PORT="$v" ;;
+      WORKTREE) WORKTREE="$v" ;; COUNTS_RESTORED) COUNTS_RESTORED="$v" ;;
+    esac
+  done <"$STATE_FILE"
+  guard_names   # tilasta luetut arvot tarkistetaan uudelleen
+}
 
 cmd_run() {
   local ref="$1"
   guard_names
   SECONDS=0
+  DUMP_PART=""
+  # Virhe kesken ajon: siivoa osittainen dumppi ja pysäytä palvelin/nimiavaruus (fail closed).
+  trap 'rc=$?; [[ -n "${DUMP_PART:-}" ]] && rm -f -- "$DUMP_PART"; if (( rc != 0 )); then stop_all; fi' EXIT
   git -C "$REPO_ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null || die "ref '$ref' ei ole olemassa (git fetch --tags?)"
   local pre_sha; pre_sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"   # ENNEN checkoutia
   local stamp dump; stamp="$(date +%Y%m%d-%H%M%S)"; dump="$BACKUP_DIR/rehearsal-${stamp}.dump"
@@ -269,7 +349,9 @@ cmd_run() {
   stop_all
   check_disk_and_retention
   log "pg_dump -Fc $PROD_DB → $dump (vain luku)"
-  pg_dump -Fc --no-owner -d "$PROD_DB" -f "$dump.part" && mv "$dump.part" "$dump"
+  DUMP_PART="$dump.part"
+  pg_dump -Fc --no-owner --lock-wait-timeout=60s -d "$PROD_DB" -f "$DUMP_PART" || die "pg_dump epäonnistui"
+  mv "$DUMP_PART" "$dump"; DUMP_PART=""
   chmod 600 "$dump"
   pg_restore --list "$dump" >/dev/null || die "dumppi ei ole luettavissa: $dump"
   prune_dumps
@@ -287,7 +369,7 @@ cmd_run() {
   log "asennus: $INSTALL_CMD"
   ( cd "$WORKTREE" && bash -c "$INSTALL_CMD" )
 
-  save_state "DUMP=$dump" "PRE_SHA=$pre_sha" "REF=$ref" "COUNTS_RESTORED=\"$counts_restored\"" "PORT=$PORT"
+  save_state "DUMP=$dump" "PRE_SHA=$pre_sha" "REF=$ref" "COUNTS_RESTORED=$counts_restored" "PORT=$PORT" "WORKTREE=$WORKTREE"
   start_netns
   verify_isolation
   start_server
