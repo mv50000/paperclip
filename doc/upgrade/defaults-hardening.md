@@ -76,9 +76,12 @@ paikallinen nginx luottaa edgeen, ja Express luottaa vain paikalliseen nginxiin.
 - Todennus ennen mergeä: lisää portaan testiin supertest-sovellus, jossa
   `applyTrustProxy(app, parseTrustProxyEnv("loopback"))` ja reitti, joka palauttaa `req.ip`:n.
   Pyyntö otsakkeella `X-Forwarded-For: 203.0.113.7` palauttaa `203.0.113.7`. Ilman asetusta
-  sama pyyntö palauttaa `127.0.0.1`. Supertest yhdistää loopbackista, joten ero todistaa asetuksen.
-- Älä todenna pyyntölokista. Lokin `remoteAddress` on pino-http:n socket-osoite eikä `req.ip`,
-  joten se näyttää nginxin kautta tulleille pyynnöille aina `127.0.0.1`:n asetuksesta riippumatta.
+  sama pyyntö palauttaa loopback-osoitteen (Express 5 + dual-stack: `::ffff:127.0.0.1`), joten
+  testaa `not.toBe("203.0.113.7")` eikä tarkkaa arvoa. Supertest yhdistää loopbackista, joten ero
+  todistaa asetuksen.
+- Älä todenna pyyntölokista, vaikka upstreamin `trust-proxy.ts`:n kommentti neuvoo niin. Lokin
+  `remoteAddress` on pino-http:n socket-osoite eikä `req.ip`, joten se näyttää nginxin kautta
+  tulleille pyynnöille aina loopback-osoitteen asetuksesta riippumatta.
 - Todennus deployn jälkeen: kirjautuminen ja yksi board-mutaatio `https://paperclip.rk9.fi`:n
   kautta onnistuvat.
 - Paikallinen nginx kuuntelee porttia 80 kaikissa liitännöissä. LAN-asiakas voi siis ohittaa edgen.
