@@ -32,6 +32,7 @@ server/src/__tests__/email-svix-verify.test.ts
 server/src/__tests__/emit-approval-created.test.ts
 server/src/__tests__/github-webhook-routes.test.ts
 server/src/__tests__/heartbeat-idle-timer-skip.test.ts
+server/src/__tests__/hire-approval-policy.test.ts
 server/src/__tests__/human-proxy.test.ts
 server/src/__tests__/issue-outcome-requirements.test.ts
 server/src/__tests__/issues-checkout-race.test.ts
@@ -61,6 +62,7 @@ server/src/__tests__/outreach-scheduler-pause-gate.test.ts
 server/src/__tests__/outreach-sender-routes.test.ts
 server/src/__tests__/outreach-smtp-client.test.ts
 server/src/__tests__/outreach-unsubscribe-route.test.ts
+server/src/__tests__/resend-inbound-route.test.ts
 server/src/__tests__/risk-monitors.test.ts
 server/src/__tests__/slack-event-classifier.test.ts
 server/src/__tests__/slack-formatters.test.ts
