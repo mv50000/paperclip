@@ -348,18 +348,17 @@ tunnistuksen. Fallback laukeaa vain, kun **yksikään** hash ei tunnistu. Testit
 - muutettu 9001-hash → 9001 näkyy pendinginä, upstream-migraatiot ajetaan, ja 9001:n uudelleenajo kaatuu äänekkäästi
   (`CREATE TABLE` ilman `IF NOT EXISTS`); fork-taulun rivit säilyvät. Rivin `IF NOT EXISTS` sisältävät 9xxx-migraatiot
   ajettaisiin hiljaa uudelleen, siksi pinnaus on tarpeen.
-- nolla tunnistettua hashia → **aito vika**: `inspectMigrations` ottaa `journal.slice(0, rivimäärä)` ja raportoi
-  upstream-migraatiot (testissä 0071 ja 0072) ajetuiksi, vaikka ne eivät ole ajettu; pendingiksi jää vain 9xxx-häntä.
-  `applyPendingMigrations` ajaa silloin tuon hännän uudelleen ja heittää lopuksi `Failed to apply pending migrations`:
-  virhe on äänekäs, mutta sitä ennen ajetaan fork-häntä uudelleen. Merge-puussa vaikutus on pahempi: 85 historiarivillä
-  `slice(0, 85)` kuittaa 0000…0084 ajetuiksi (0075…0084 ei ole ajettu), ajuri ajaa 0085 ja kaatuu 0086:ssa, joka
-  viittaa taulun (`routine_revisions`, 0077), jota ei koskaan luotu. Sen jälkeen historiassa on yksi tunnistuva hash, joten
-  seuraava ajo pitää lähes kaiken pendingina. Tulos on siis sekava osittaisajo, ei vakaa aukko (ei ajettu, päätelty koodista). Testit:
-  `it.fails` (turvallinen käytös: `inspectMigrations` heittää tai pitää 0071 ja 0072 pendingeinä; kääntyy punaiseksi,
-  kun vika korjataan) ja tavallinen testi, joka lukitsee nykyisen äänekkään epäonnistumisen ilman että 0072 ajetaan.
+- nolla tunnistettua hashia, kun historiassa on rivejä → `loadAppliedMigrations` heittää virheen (RK9-348, korjattu).
+  Aiemmin `inspectMigrations` otti `journal.slice(0, rivimäärä)` ja raportoi upstream-migraatiot (testissä 0071 ja 0072)
+  ajetuiksi, vaikka ne eivät olleet ajettu. Merge-puussa 85 historiarivillä `slice(0, 85)` olisi kuitannut 0000…0084
+  ajetuiksi (0075…0084 ei ole ajettu), ajuri olisi ajanut 0085 ja kaatunut 0086:ssa. Virheviesti kertoo rivimäärän,
+  ensimmäisen tuntemattoman hashin ja ohjeen tarkistaa rivinvaihdot ja checkoutattu commit. `applyPendingMigrations`
+  hylkää ajon ennen kuin mitään ajetaan. Osittainen tunnistus (vähintään yksi hash) toimii ennallaan. Tyhjä historia
+  (0 riviä) on tuore kanta eikä heitä virhettä. Muutos on `client.ts`:ssä `// --- RK9 Custom (RK9-348) ---`
+  -markerin sisällä, koska upstream muuttaa tiedostoa 916.1:een mennessä: tarkista marker trial-mergessä.
   Realistinen laukaisija: kaikkien tiedostojen sisältö muuttuu kerralla (esim. rivinvaihtojen muunnos checkoutissa).
-  Ehdotettu korjaus (ei tehty tässä tiketissä, ajuria ei muutettu): kun historiassa on rivejä mutta yksikään hash ei
-  tunnistu, `loadAppliedMigrations` heittää virheen eikä arvaa `created_at`illa.
+  Testit: `it("throws when history has rows but no hash resolves")`, tyhjän historian testi ja
+  `applyPendingMigrations`-hylkäystesti. PR: RK9-348 (linkki lisätään PR:n avauksen jälkeen).
 
 **Nimitörmäys (estää portaan 916.1).** Upstreamin `0272_light_kate_bishop.sql` tekee `CREATE TABLE IF NOT EXISTS
 "email_messages"`. Forkin 9002 loi jo samannimisen taulun (50 528 riviä prodissa), joten `IF NOT EXISTS` ohittaa luonnin

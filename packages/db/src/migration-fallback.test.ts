@@ -103,32 +103,44 @@ describeEmbeddedPostgres("migration history identity (RK9-311)", () => {
     }
   }, 60_000);
 
-  // KNOWN DEFECT (client.ts loadAppliedMigrations, created_at fallback): when no recorded hash
-  // resolves (e.g. every file re-hashes differently after a line-ending rewrite), the driver takes
-  // the first `rows.length` journal entries as applied. Those include upstream entries that never
-  // ran (0071, 0072 here), and the tail of the fork's 9xxx entries is reported as pending instead.
-  // Safe behavior is to fail closed or to keep 0071/0072 pending. Remove `.fails` once fixed.
-  it.fails("does not report never-run upstream migrations as applied when no hash resolves", async () => {
+  // RK9-348: when history has rows but no recorded hash resolves (e.g. every file re-hashes
+  // differently after a line-ending rewrite), inspectMigrations fails closed instead of guessing
+  // from created_at that the first `rows.length` journal entries ran.
+  it("throws when history has rows but no hash resolves", async () => {
     const { url, sql } = await prodLikeDatabase();
     try {
+      const rowCount = (await sql.unsafe(`SELECT count(*)::int AS n FROM ${MIGRATIONS}`))[0].n;
       await sql.unsafe(`UPDATE ${MIGRATIONS} SET hash = 'unresolved-' || id`);
-      const safe = await inspectMigrations(url).then(
-        (state) =>
-          state.status === "needsMigrations" &&
-          state.pendingMigrations.includes("0071_default_hire_approval_off.sql") &&
-          state.pendingMigrations.includes("0072_large_sandman.sql"),
-        () => true, // throwing = failing closed
+      const error = await inspectMigrations(url).then(
+        () => null,
+        (err: unknown) => err as Error,
       );
-      expect(safe).toBe(true);
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toContain(`${rowCount} rows`);
+      expect(error?.message).toContain("first unknown hash: unresolved-");
+      expect(error?.message).toContain("line endings");
     } finally {
       await sql.end();
     }
   }, 60_000);
 
-  // On this tree (fork 9xxx applied, 0071/0072 pending) applyPendingMigrations replays the fork tail
-  // (the idempotent 9xxx ones) and then throws "Failed to apply pending migrations"; it never runs 0071/0072.
-  // On the merged tree the same fallback marks 0000..0084 applied, runs 0085 and fails at 0086 (its FK
-  // targets a table from the skipped 0077); a partial run, not a stable state (see doc/UPSTREAM-UPGRADE.md).
+  it("treats an empty migration history as a fresh database, not an error", async () => {
+    const { url, sql } = await prodLikeDatabase();
+    try {
+      await sql.unsafe(`DELETE FROM ${MIGRATIONS}`);
+      const state = await inspectMigrations(url);
+      expect(state.status).toBe("needsMigrations");
+      if (state.status === "needsMigrations") {
+        expect(state.appliedMigrations).toEqual([]);
+        expect(state.pendingMigrations).toEqual(state.availableMigrations);
+      }
+    } finally {
+      await sql.end();
+    }
+  }, 60_000);
+
+  // RK9-348: applyPendingMigrations now rejects before running anything, so neither the fork tail
+  // nor 0071/0072 are executed when no hash resolves.
   it("fails loudly, without running the skipped upstream migrations, when no hash resolves", async () => {
     const { url, sql } = await prodLikeDatabase();
     try {
