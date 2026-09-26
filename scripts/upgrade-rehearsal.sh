@@ -58,7 +58,8 @@ BACKUP_DIR="${REHEARSAL_BACKUP_DIR:-/var/backups/paperclip}"
 WORKTREE="${REHEARSAL_WORKTREE:-/tmp/paperclip-worktrees/rehearsal/RK9}"
 KEEP_DUMPS="${REHEARSAL_KEEP_DUMPS:-5}"
 FREE_FACTOR="${REHEARSAL_MIN_FREE_FACTOR:-3}"
-INSTALL_CMD="${REHEARSAL_INSTALL_CMD:-pnpm install --frozen-lockfile}"
+# plugin-sdk käännetään kuten prodin dev-runner (scripts/dev-runner.ts buildPluginSdk): server importtaa sen dist/-hakemistosta.
+INSTALL_CMD="${REHEARSAL_INSTALL_CMD:-pnpm install --frozen-lockfile && pnpm --filter @paperclipai/plugin-sdk build}"
 SERVER_CMD="${REHEARSAL_SERVER_CMD:-pnpm --filter @paperclipai/server exec tsx src/index.ts}"
 
 STATE_FILE="$REH_HOME/rehearsal-state.env"
@@ -288,15 +289,17 @@ JS
 }
 
 start_server() {
-  mkdir -p "$REH_HOME"
-  chmod 700 "$REH_HOME"
+  mkdir -p "$REH_HOME" "$REH_HOME/tmp"
+  chmod 700 "$REH_HOME" "$REH_HOME/tmp"
   local db_url="postgres://${PG_USER}@127.0.0.1:5432/${REH_DB}"
   : >"$SERVER_LOG"
   start_pg_bridge
   rm -f "$SERVER_PID_FILE"
   # env -i: vain allowlist. Ei perittyjä tokeneita eikä ses.env:iä; salaisuuksista vain master.key:n polku.
+  # TMPDIR: unshare -r näyttää uid 0:n, joten tsx yrittäisi IPC-socketia root-omisteiseen /tmp/tsx-0:aan (EACCES).
   NS_WD="$WORKTREE" ns_daemon "$SERVER_LOG" env -i \
       PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_HOME="$REH_HOME" \
+      TMPDIR="$REH_HOME/tmp" \
       NODE_ENV=development HOST=127.0.0.1 PORT="$PORT" \
       PAPERCLIP_LISTEN_HOST=127.0.0.1 PAPERCLIP_LISTEN_PORT="$PORT" \
       PAPERCLIP_DEPLOYMENT_MODE=local_trusted \
