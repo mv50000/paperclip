@@ -1032,7 +1032,13 @@ describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", ()
   it("pins claude_local to the CLI engine when no engine is configured", async () => {
     const serverModule: Record<string, unknown> = await import("@paperclipai/adapter-claude-local/server");
     const resolveEngine = serverModule.resolveClaudeExecutionEngine;
-    if (resolveEngine === undefined) return;
+    if (resolveEngine === undefined) {
+      // No resolver means no ACP engine yet. A renamed resolver must not let
+      // this gate pass vacuously: update the name here instead.
+      const engineExports = Object.keys(serverModule).filter((name) => /ExecutionEngine/i.test(name));
+      expect(engineExports).toEqual([]);
+      return;
+    }
 
     expect(typeof resolveEngine).toBe("function");
     const selection = (resolveEngine as (config: Record<string, unknown>) => { engine: string })({});
