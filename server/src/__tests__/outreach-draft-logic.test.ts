@@ -128,10 +128,10 @@ describe("outreach AI drafting — pure logic (RK9-196)", () => {
     expect(parseDraftResponse("SUBJECT: \nBODY:\n")).toBeNull();
   });
 
-  it("estimates cost from Sonnet 5 per-token pricing", () => {
-    // $2/1M input, $10/1M output (cached 2026-09-13).
-    expect(estimateCostUsd({ input_tokens: 1_000_000, output_tokens: 0 })).toBeCloseTo(2, 6);
-    expect(estimateCostUsd({ input_tokens: 0, output_tokens: 1_000_000 })).toBeCloseTo(10, 6);
-    expect(estimateCostUsd({ input_tokens: 500_000, output_tokens: 100_000 })).toBeCloseTo(1 + 1, 6);
+  it("estimates cost from Opus 5.5 per-token pricing", () => {
+    // $4/1M input, $20/1M output (cached 2026-09-26).
+    expect(estimateCostUsd({ input_tokens: 1_000_000, output_tokens: 0 })).toBeCloseTo(4, 6);
+    expect(estimateCostUsd({ input_tokens: 0, output_tokens: 1_000_000 })).toBeCloseTo(20, 6);
+    expect(estimateCostUsd({ input_tokens: 500_000, output_tokens: 100_000 })).toBeCloseTo(2 + 2, 6);
   });
 });

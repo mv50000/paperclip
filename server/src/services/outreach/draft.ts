@@ -1,7 +1,7 @@
 // RK9-196: AI-drafted outreach messages. Loads the versioned per-company
-// prompt/voice from docs/outreach/templates/<company>.md, asks Claude Sonnet 5
-// (effort low — this is light copywriting, not engineering work) for a first-
-// touch message, runs the quality gate, and stores the result as a draft
+// prompt/voice from docs/outreach/templates/<company>.md, asks Claude Opus 5.5
+// (effort medium — every message is RK9's first impression and volume is tiny;
+// RK9 26.9.2026: Opus 5.5 only) for a first-touch message, runs the quality gate, and stores the result as a draft
 // (gate pass) or a pre-rejected message (gate fail, so the reason feeds
 // prompt iteration — see docs/implementation-notes/outreach-enrichment.md).
 
@@ -17,12 +17,15 @@ import { createDraftMessage, rejectMessage } from "./messages.js";
 import { runQualityGate } from "./quality-gate.js";
 import { getSequence, listActiveSequencesForTemplate } from "./sequences.js";
 
-const CLAUDE_MODEL = "claude-sonnet-5";
-const MAX_TOKENS = 600;
-// $/1M tokens (Claude Sonnet 5, cached 2026-09-13 — reverify via the
+const CLAUDE_MODEL = "claude-opus-5-5";
+// Opus 5.5 always thinks and thinking counts against max_tokens, so the cap
+// leaves room for it on top of the short message itself.
+const MAX_TOKENS = 4000;
+const EFFORT = "medium";
+// $/1M tokens (Claude Opus 5.5, cached 2026-09-26 — reverify via the
 // `claude-api` skill if actual spend drifts noticeably from this estimate).
-const INPUT_USD_PER_MTOK = 2;
-const OUTPUT_USD_PER_MTOK = 10;
+const INPUT_USD_PER_MTOK = 4;
+const OUTPUT_USD_PER_MTOK = 20;
 
 function resolveTemplatesDir(): string | null {
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -230,7 +233,7 @@ async function callClaudeForDraft(system: string, user: string): Promise<ClaudeD
       model: CLAUDE_MODEL,
       max_tokens: MAX_TOKENS,
       system,
-      output_config: { effort: "low" },
+      output_config: { effort: EFFORT },
       messages: [{ role: "user", content: user }],
     }),
   });
