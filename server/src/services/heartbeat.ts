@@ -7,6 +7,7 @@ import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lte, notInArr
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
+  // --- RK9 Custom: global run concurrency cap ---
   INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   isEnvironmentDriverSupportedForAdapter,
@@ -22,6 +23,7 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   activityLog,
+  // --- RK9 Custom: company pause ---
   companies,
   companySkills as companySkillsTable,
   documentRevisions,
@@ -102,6 +104,7 @@ import {
   resolveExecutionWorkspaceMode,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+// --- RK9 Custom: knowledge-recall injection (RK9-18) ---
 import { buildKnowledgeContext } from "./knowledge-injection.js";
 import {
   RECOVERY_ORIGIN_KINDS,
@@ -113,6 +116,7 @@ import {
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
 import { recoveryService } from "./recovery/service.js";
+// --- RK9 Custom: human-proxy agents ---
 import { isHumanProxyAgent } from "./human-proxy.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
@@ -130,6 +134,7 @@ import { environmentService } from "./environments.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+// --- RK9 Custom: system pause ---
 import type { SystemPauseService } from "./system-pause.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
@@ -1980,12 +1985,14 @@ export type HeartbeatEnvironmentRuntime = ReturnType<typeof environmentRuntimeSe
 export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
+  // --- RK9 Custom: system pause + global run concurrency cap ---
   systemPause?: SystemPauseService;
   maxGlobalConcurrentRunsDefault?: number;
 }
 
 export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) {
   const instanceSettings = instanceSettingsService(db);
+  // --- RK9 Custom: system pause ---
   const systemPause = options.systemPause;
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
@@ -2008,6 +2015,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const workspaceOperationsSvc = workspaceOperationService(db);
   const activeRunExecutions = new Set<string>();
 
+  // --- RK9 Custom: company pause cache ---
   const companyPauseCache = new Map<string, { paused: boolean; expiresAt: number }>();
   const COMPANY_PAUSE_CACHE_TTL_MS = 10_000;
   async function isCompanyPaused(companyId: string): Promise<boolean> {
@@ -2024,6 +2032,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return paused;
   }
 
+  // --- RK9 Custom: global run concurrency cap ---
   const maxGlobalDefault = options.maxGlobalConcurrentRunsDefault
     ?? INSTANCE_DEFAULT_MAX_GLOBAL_CONCURRENT_RUNS;
   let globalLimitCache: { value: number; expiresAt: number } | null = null;
@@ -3721,6 +3730,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
   }
 
+  // --- RK9 Custom: skip idle timer heartbeats (RK9-231) ---
   /**
    * Mirrors what `GET /api/agents/me/inbox-lite` would show a timer-woken
    * agent: assigned issues in todo/in_progress (plus routine executions), and
@@ -3766,6 +3776,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: asBoolean(heartbeat.wakeOnDemand ?? heartbeat.wakeOnAssignment ?? heartbeat.wakeOnOnDemand ?? heartbeat.wakeOnAutomation, true),
+      // --- RK9 Custom: skip idle timer heartbeats ---
       // Timer heartbeats spawn a full adapter run even when the agent has nothing
       // assigned; those runs end with "no action taken" after a few turns. When
       // enabled (default), the scheduler checks the agent's inbox first and skips
@@ -3816,6 +3827,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect) {
     if (run.status !== "queued") return run;
+    // --- RK9 Custom: system/company pause gate on claim ---
     if (systemPause && (await systemPause.isPaused())) {
       return null;
     }
@@ -4551,6 +4563,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   }
 
   async function resumeQueuedRuns() {
+    // --- RK9 Custom: global run concurrency cap ---
     const globalMax = await getGlobalMaxConcurrentRuns();
     if (activeRunExecutions.size >= globalMax) return;
 
@@ -4560,6 +4573,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(eq(heartbeatRuns.status, "queued"));
 
     const agentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
+    // --- RK9 Custom: round-robin resume under global cap ---
     if (agentIds.length === 0) return;
 
     const offset = resumeRoundRobinOffset % agentIds.length;
@@ -4672,11 +4686,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   async function startNextQueuedRunForAgent(agentId: string) {
     return withAgentStartLock(agentId, async () => {
+      // --- RK9 Custom: system pause ---
       if (systemPause && (await systemPause.isPaused())) {
         return [];
       }
       const agent = await getAgent(agentId);
       if (!agent) return [];
+      // --- RK9 Custom: company pause ---
       if (await isCompanyPaused(agent.companyId)) {
         return [];
       }
@@ -4688,6 +4704,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
       if (availableSlots <= 0) return [];
 
+      // --- RK9 Custom: global run concurrency cap ---
       const globalMax = await getGlobalMaxConcurrentRuns();
       const globalAvailable = Math.max(0, globalMax - activeRunExecutions.size);
       if (globalAvailable <= 0) return [];
@@ -4739,6 +4756,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
+        // --- RK9 Custom: global run concurrency cap (effectiveSlots) ---
         if (claimedRuns.length >= effectiveSlots) break;
         const claimed = await claimQueuedRun(queuedRun);
         if (claimed) claimedRuns.push(claimed);
@@ -4966,6 +4984,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipTaskMarkdown;
     }
+    // --- RK9 Custom: knowledge-recall injection (RK9-18) ---
     // RK9-18 (C6): optional knowledge-recall preamble. Two gates (global kill-switch +
     // per-agent opt-in), both default-off. Hard-capped (~500 tok); never blocks the heartbeat.
     try {
@@ -6505,6 +6524,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
     };
 
+    // --- RK9 Custom: human-proxy agents ---
     if (isHumanProxyAgent(agent)) {
       await writeSkippedRequest("agent.human_proxy");
       return null;
@@ -6519,6 +6539,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .then((rows) => rows[0]?.projectId ?? null);
     }
 
+    // --- RK9 Custom: system/company pause wakeup gate ---
     if (systemPause && (await systemPause.isPaused())) {
       await writeSkippedRequest("system.paused");
       if (source === "timer" || source === "automation") {
@@ -6569,6 +6590,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled");
       return null;
     }
+    // --- RK9 Custom: skip idle timer heartbeats ---
     if (source === "timer" && policy.skipWhenIdle && !issueId) {
       const hasPendingWork = await agentHasPendingTimerWork(agent.companyId, agentId);
       if (!hasPendingWork) {
@@ -7636,6 +7658,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     resumeQueuedRuns,
 
+    // --- RK9 Custom: global run concurrency cap ---
     getGlobalRunningCount: () => activeRunExecutions.size,
     getGlobalMaxConcurrentRuns,
 
@@ -7666,6 +7689,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     buildRunOutputSilence,
 
     tickTimers: async (now = new Date()) => {
+      // --- RK9 Custom: system pause ---
       if (systemPause && (await systemPause.isPaused())) {
         return { checked: 0, enqueued: 0, skipped: 0 };
       }
@@ -7675,8 +7699,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       let skipped = 0;
 
       for (const agent of allAgents) {
+        // --- RK9 Custom: human-proxy agents ---
         if (isHumanProxyAgent(agent)) continue;
         if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") continue;
+        // --- RK9 Custom: company pause ---
         if (await isCompanyPaused(agent.companyId)) continue;
         const policy = parseHeartbeatPolicy(agent);
         if (!policy.enabled || policy.intervalSec <= 0) continue;

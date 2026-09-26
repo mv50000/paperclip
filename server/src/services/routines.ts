@@ -46,9 +46,11 @@ import { secretService } from "./secrets.js";
 import { parseCron, validateCron } from "./cron.js";
 import { heartbeatService } from "./heartbeat.js";
 import { queueIssueAssignmentWakeup, type IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
+// --- RK9 Custom: system pause ---
 import type { SystemPauseService } from "./system-pause.js";
 import { logActivity } from "./activity-log.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+// --- RK9 Custom: human-proxy agents ---
 import { isHumanProxyAgent } from "./human-proxy.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
@@ -366,6 +368,7 @@ export function routineService(
   deps: {
     heartbeat?: IssueAssignmentWakeupDeps;
     pluginWorkerManager?: PluginWorkerManager;
+    // --- RK9 Custom: system pause ---
     systemPause?: SystemPauseService;
   } = {},
 ) {
@@ -373,6 +376,7 @@ export function routineService(
   const secretsSvc = secretService(db);
   const heartbeat = deps.heartbeat ?? heartbeatService(db, {
     pluginWorkerManager: deps.pluginWorkerManager,
+    // --- RK9 Custom: system pause ---
     systemPause: deps.systemPause,
   });
   const systemPause = deps.systemPause;
@@ -403,6 +407,7 @@ export function routineService(
   async function assertAssignableAgent(companyId: string, agentId: string | null | undefined) {
     if (!agentId) return;
     const agent = await db
+      // --- RK9 Custom: human-proxy agents ---
       .select({
         id: agents.id,
         companyId: agents.companyId,
@@ -414,6 +419,7 @@ export function routineService(
       .then((rows) => rows[0] ?? null);
     if (!agent) throw notFound("Assignee agent not found");
     if (agent.companyId !== companyId) throw unprocessable("Assignee must belong to same company");
+    // --- RK9 Custom: human-proxy agents ---
     if (isHumanProxyAgent(agent)) {
       throw conflict("Cannot assign routines to human-proxy agents — they are picked up manually via /implement");
     }
@@ -829,6 +835,7 @@ export function routineService(
     if (!assigneeAgentId) {
       throw unprocessable("Default agent required");
     }
+    // --- RK9 Custom: human-proxy dispatch refusal ---
     const assigneeAgent = await db
       .select({ id: agents.id, adapterType: agents.adapterType })
       .from(agents)
@@ -1471,6 +1478,7 @@ export function routineService(
     },
 
     runRoutine: async (id: string, input: RunRoutine, actor?: Actor) => {
+      // --- RK9 Custom: system pause ---
       await systemPause?.assertNotPaused();
       const routine = await getRoutineById(id);
       if (!routine) throw notFound("Routine not found");
@@ -1506,6 +1514,7 @@ export function routineService(
       rawBody?: Buffer | null;
       payload?: Record<string, unknown> | null;
     }) => {
+      // --- RK9 Custom: system pause ---
       await systemPause?.assertNotPaused();
       const trigger = await db
         .select()
@@ -1660,6 +1669,7 @@ export function routineService(
     },
 
     tickScheduledTriggers: async (now: Date = new Date()) => {
+      // --- RK9 Custom: system pause ---
       if (systemPause && (await systemPause.isPaused(now))) {
         return { triggered: 0, skipped: "system_paused" as const };
       }
@@ -1716,6 +1726,7 @@ export function routineService(
         if (!claimed) continue;
 
         for (let i = 0; i < runCount; i += 1) {
+          // --- RK9 Custom: isolate per-routine dispatch failures ---
           try {
             await dispatchRoutineRun({
               routine: row.routine,

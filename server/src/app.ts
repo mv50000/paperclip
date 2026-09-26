@@ -24,8 +24,10 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { costRoutes } from "./routes/costs.js";
 import { activityRoutes } from "./routes/activity.js";
+// --- RK9 Custom: knowledge routes ---
 import { knowledgeRoutes } from "./routes/knowledge.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
+// --- RK9 Custom: agent metrics routes ---
 import { agentMetricsRoutes } from "./routes/agent-metrics.js";
 import { userProfileRoutes } from "./routes/user-profiles.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
@@ -40,6 +42,7 @@ import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
+// --- RK9 Custom: GitHub webhooks ---
 import { githubWebhookRoutes } from "./routes/github-webhooks.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
@@ -59,6 +62,7 @@ import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
+// --- RK9 Custom: system pause ---
 import type { SystemPauseService } from "./services/system-pause.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
@@ -148,6 +152,7 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    // --- RK9 Custom: Slack, system pause, outreach options ---
     slackSigningSecret?: string;
     systemPause?: SystemPauseService;
     outreachSenderApiKey?: string;
@@ -193,10 +198,12 @@ export async function createApp(
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
+  // --- RK9 Custom: public unsubscribe (RK9-194) ---
   // RK9-194: public, no company/`/api` scoping — a prospect who never signed
   // in must be able to reach `/u/:token` with one click.
   app.use(unsubscribeRoutes(db));
   app.use(llmRoutes(db));
+  // --- RK9 Custom: Prometheus /metrics (RK9-197) ---
   // RK9-197: `/metrics` at the root, not under `/api` — the conventional
   // path a Prometheus scrape target lives at. Bearer-gated (see
   // outreach-metrics.ts), not a Paperclip board/agent actor route.
@@ -227,6 +234,7 @@ export async function createApp(
     pluginWorkerManager: workerManager,
   }));
   api.use(issueTreeControlRoutes(db));
+  // --- RK9 Custom: system pause ---
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager, systemPause: opts.systemPause }));
   api.use(environmentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(executionWorkspaceRoutes(db));
@@ -235,13 +243,16 @@ export async function createApp(
   api.use(secretRoutes(db));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(activityRoutes(db));
+  // --- RK9 Custom: knowledge routes ---
   api.use(knowledgeRoutes(db));
   api.use(dashboardRoutes(db));
+  // --- RK9 Custom: agent metrics routes ---
   api.use(agentMetricsRoutes(db));
   api.use(userProfileRoutes(db));
   api.use(sidebarBadgeRoutes(db));
   api.use(sidebarPreferenceRoutes(db));
   api.use(inboxDismissalRoutes(db));
+  // --- RK9 Custom: system pause ---
   api.use(instanceSettingsRoutes(db, { systemPause: opts.systemPause }));
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
@@ -255,6 +266,7 @@ export async function createApp(
     db,
     jobStore,
     workerManager,
+    // --- RK9 Custom: system pause ---
     systemPause: opts.systemPause,
   });
   const toolDispatcher = createPluginToolDispatcher({
@@ -304,6 +316,7 @@ export async function createApp(
       },
     },
   );
+  // --- RK9 Custom: GitHub webhooks ---
   api.use(githubWebhookRoutes(db));
   api.use(
     pluginRoutes(
