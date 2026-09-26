@@ -229,14 +229,22 @@ export function analyzeJournal(entries: JournalEntry[]): JournalAnalysis {
 }
 
 /**
- * Scrub a database error message before it goes into the report: Postgres embeds offending row
- * values in quotes (`invalid input syntax for type uuid: "…"`). Quoted text survives only after
- * an identifier keyword (relation, column, table, ...). Only the first line is kept.
+ * Scrub a database error message before it goes into the report. Postgres embeds offending row
+ * values in quotes (`invalid input syntax for type uuid: "…"`), possibly with newlines or quotes
+ * of their own, so the message is cut at the first quote that does not belong to a plain
+ * identifier after an identifier keyword (relation "x", column "x", ...). Only the first line is kept.
  */
-export function redactDbError(message: string, maxLength = 200): string {
-  const firstLine = message.split("\n")[0] ?? "";
-  return firstLine
-    .replace(/(?<!\b(?:relation|column|table|constraint|index|function|type|schema|database|role|sequence)\s)"[^"]*"/gi, '"…"')
-    .replace(/'[^']*'/g, "'…'")
-    .slice(0, maxLength);
+export function redactDbError(message: unknown, maxLength = 200): string {
+  const text = String(message ?? "").replace(/\u0000/g, "");
+  const kept: string[] = [];
+  const masked = text.replace(
+    /\b(relation|column|table|constraint|index|function|type|schema|database|role|sequence) "([A-Za-z0-9_$.]{1,63})"/gi,
+    (_match, keyword: string, identifier: string) => {
+      kept.push(`${keyword} "${identifier}"`);
+      return `\u0000${kept.length - 1}\u0000`;
+    },
+  );
+  const quote = masked.search(/["']/);
+  const cut = quote === -1 ? masked : `${masked.slice(0, quote)}…`;
+  return (cut.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => kept[Number(index)] ?? "").split("\n")[0] ?? "").slice(0, maxLength);
 }

@@ -118,14 +118,28 @@ describe("analyzeJournal", () => {
 });
 
 describe("redactDbError", () => {
-  it("scrubs quoted values but keeps identifiers", () => {
-    expect(redactDbError('invalid input syntax for type uuid: "jane@example.com"')).toBe(
-      'invalid input syntax for type uuid: "…"',
-    );
-    expect(redactDbError('column "endpoint_id" referenced in foreign key constraint does not exist')).toBe(
-      'column "endpoint_id" referenced in foreign key constraint does not exist',
-    );
-    expect(redactDbError("duplicate key value violates unique constraint \"x\"\nDETAIL: Key (email)=(a@b.c) exists.")).not.toContain("a@b.c");
-    expect(redactDbError("bad value 'secret name'")).toBe("bad value '…'");
+  it("keeps identifiers after identifier keywords", () => {
+    const message = 'column "endpoint_id" referenced in foreign key constraint does not exist';
+    expect(redactDbError(message)).toBe(message);
+    expect(redactDbError('relation "email_messages" already exists')).toBe('relation "email_messages" already exists');
+  });
+
+  it.each([
+    ['invalid input syntax for type uuid: "jane@example.com"', "jane@example.com"],
+    ['invalid input syntax for type uuid: "Jane Doe\nKatu 1, Forssa"', "Katu 1"],
+    ['invalid input syntax for type integer: "Mikko "the" Virtanen"', "Virtanen"],
+    ['malformed array literal: "{"Jane Doe","jane@x.fi"}"', "jane@x.fi"],
+    ['pg_restore: error: COPY failed for table "prospects": ERROR:  invalid input syntax for type uuid: "jane@x.fi"', "jane@x.fi"],
+    ["bad value 'secret name'", "secret name"],
+    ['duplicate key value violates unique constraint "x"\nDETAIL: Key (email)=(a@b.c) already exists.', "a@b.c"],
+  ])("does not leak values from %s", (message, leaked) => {
+    const redacted = redactDbError(message);
+    expect(redacted).not.toContain(leaked);
+    expect(redacted).not.toContain("\n");
+  });
+
+  it("tolerates non-string input", () => {
+    expect(redactDbError(undefined)).toBe("");
+    expect(redactDbError(new Error("boom"))).toBe("Error: boom");
   });
 });

@@ -125,8 +125,10 @@ describeEmbeddedPostgres("migration history identity (RK9-311)", () => {
     }
   }, 60_000);
 
-  // What saves prod today in that case: applyPendingMigrations replays the fork tail (9xxx, idempotent
-  // ones) and then throws "Failed to apply pending migrations". It never runs 0071/0072.
+  // On this tree (fork 9xxx applied, 0071/0072 pending) applyPendingMigrations replays the fork tail
+  // (the idempotent 9xxx ones) and then throws "Failed to apply pending migrations"; it never runs 0071/0072.
+  // On the merged tree the same fallback marks 0000..0084 applied, runs 0085..0279 and only then fails at
+  // 9001, leaving a permanent gap (see doc/UPSTREAM-UPGRADE.md).
   it("fails loudly, without running the skipped upstream migrations, when no hash resolves", async () => {
     const { url, sql } = await prodLikeDatabase();
     try {

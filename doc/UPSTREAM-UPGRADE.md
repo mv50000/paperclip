@@ -289,7 +289,9 @@ tunnistuksen. Fallback laukeaa vain, kun **yksikään** hash ei tunnistu. Testit
 - nolla tunnistettua hashia → **aito vika**: `inspectMigrations` ottaa `journal.slice(0, rivimäärä)` ja raportoi
   upstream-migraatiot (testissä 0071 ja 0072) ajetuiksi, vaikka ne eivät ole ajettu; pendingiksi jää vain 9xxx-häntä.
   `applyPendingMigrations` ajaa silloin tuon hännän uudelleen ja heittää lopuksi `Failed to apply pending migrations`:
-  virhe on äänekäs, mutta upstream-migraatioita ei ajeta ja fork-häntä ajetaan prodia vasten uudelleen. Testit:
+  virhe on äänekäs, mutta sitä ennen ajetaan fork-häntä uudelleen. Merge-puussa vaikutus on pahempi: 85 historiarivillä
+  `slice(0, 85)` kuittaa 0000…0084 ajetuiksi (0075…0084 ei ole ajettu), ajuri ajaa 0085…0279 yksi kerrallaan ja kaatuu
+  vasta 9001:ssä, jolloin prodiin jää pysyvä aukko. Testit:
   `it.fails` (turvallinen käytös: `inspectMigrations` heittää tai pitää 0071 ja 0072 pendingeinä; kääntyy punaiseksi,
   kun vika korjataan) ja tavallinen testi, joka lukitsee nykyisen äänekkään epäonnistumisen ilman että 0072 ajetaan.
   Realistinen laukaisija: kaikkien tiedostojen sisältö muuttuu kerralla (esim. rivinvaihtojen muunnos checkoutissa).

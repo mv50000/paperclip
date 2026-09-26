@@ -18,7 +18,7 @@
  * Exit code: 0 = all assertions hold, 1 = an assertion failed or the run errored, 2 = bad usage.
  */
 import { execFile } from "node:child_process";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -436,7 +436,7 @@ async function main(): Promise<void> {
 
     out();
     out("## 3. Run result");
-    assertOk(applyError === null, `applyPendingMigrations completed${applyError ? `: ${redactDbError((applyError as Error).message)}` : ""}`);
+    assertOk(applyError === null, `applyPendingMigrations completed${applyError ? `: ${redactDbError(applyError)}` : ""}`);
 
     const after = newSql(args.database);
     openClients.push(after);
@@ -512,8 +512,8 @@ async function main(): Promise<void> {
     }
     await after.end({ timeout: 2 });
   } catch (error) {
-    failures.push(`script error: ${redactDbError((error as Error).message)}`);
-    out(`- FAIL: script error: ${redactDbError((error as Error).message)}`);
+    failures.push(`script error: ${redactDbError(error)}`);
+    out(`- FAIL: script error: ${redactDbError(error)}`);
   } finally {
     await Promise.all(openClients.map((client) => client.end({ timeout: 2 }).catch(() => {})));
     if (!args.keepDb) {
@@ -535,7 +535,10 @@ async function main(): Promise<void> {
   out(failures.length === 0 ? "**Result: all assertions hold.**" : `**Result: ${failures.length} assertion(s) failed.**`);
   const text = report.join("\n");
   console.log(text);
-  if (args.report) await writeFile(args.report, `${text}\n`, { mode: 0o600 });
+  if (args.report) {
+    await writeFile(args.report, `${text}\n`, { mode: 0o600 });
+    await chmod(args.report, 0o600); // mode only applies to new files
+  }
   process.exit(failures.length === 0 ? 0 : 1);
 }
 
