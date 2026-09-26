@@ -208,18 +208,30 @@ ja käytä väärennykseen hyökkääjän originia:
 2. `trust proxy` = `loopback`, vertaisosoite `10.90.10.20`, `Host: 127.0.0.1:3100`,
    `X-Forwarded-Host: evil.example` ja `Origin: https://evil.example` → 403 (epäluotettavan vertaisen
    `X-Forwarded-Host` ohitetaan). Supertest yhdistää aina loopbackista, joten tee tämä tapaus
-   mock-pyynnöllä, jossa on `socket.remoteAddress` ja `app.get("trust proxy fn")`.
+   mock-pyynnöllä, jossa on `socket.remoteAddress` ja `app.get("trust proxy fn")`. Tarkista
+   testissä, että `trust proxy fn` todella kutsuttiin. Ilman `app`-kenttää guard palaa
+   `Host`-otsakkeeseen, ja tapaus menee läpi väärästä syystä.
 3. Sama kuin tapaus 2, mutta ilman `trust proxy` -asetusta ja vertaisena `127.0.0.1` → 403.
    Upstreamin testi "ignores x-forwarded-host from an untrusted direct client" kattaa tämän jo.
 
-Todennus harjoitusinstanssissa: kirjautuminen ja yksi board-mutaatio `paperclip.rk9.fi`:n kautta
-onnistuvat. Tee sitten suora board-mutaatio (esim. kommentti) `curl`illa toiselta koneelta
-osoitteeseen `http://192.168.1.54:3100` voimassa olevalla istuntoevästeellä. Käytä hostnimeä, joka
-on `PAPERCLIP_ALLOWED_HOSTNAMES`-listalla mutta eri kuin `Host`:
-`X-Forwarded-Host: paperclip-01.rk9.fi` ja `Origin: https://paperclip-01.rk9.fi`.
+Todennus ennen mergeä: yllä olevat kolme testitapausta ovat portti. Harjoitusinstanssi ei sovi
+manuaaliseen väärennystarkistukseen. Se on eristetty (egress vain loopback), joten `curl` tulee
+sinne loopbackista, ja `TRUST_PROXY=loopback` luottaa siihen tarkoituksella.
 
-- Korjattu guard: 403 ja virhe "Board mutation requires trusted browser origin".
-- Vanha guard (nykyfork): mutaatio menee läpi.
+Todennus deployn jälkeen tuotannossa:
+
+1. Kirjaudu `https://paperclip.rk9.fi`:hin ja tee yksi board-mutaatio. Sen pitää onnistua.
+2. Luo kertakäyttöinen issue ilman assigneeta. Kommentti ei silloin herätä yhtään agenttia.
+3. Lähetä sille kommentti `curl`illa toiselta koneelta osoitteeseen `http://192.168.1.54:3100`
+   (paperclip-01:n oma `eth0`) voimassa olevalla istuntoevästeellä. Käytä hostnimeä, joka on
+   `PAPERCLIP_ALLOWED_HOSTNAMES`-listalla mutta eri kuin `Host`:
+   `X-Forwarded-Host: paperclip-01.rk9.fi` ja `Origin: https://paperclip-01.rk9.fi`.
+4. Odotettu tulos on 403 ja virhe "Board mutation requires trusted browser origin". Jos kommentti
+   syntyy, guard ei toimi: palauta edellinen porras ja peruuta issue.
+
+Huomiot:
+
+- Ennen 916.1:tä (nykyfork) sama pyyntö menee läpi. Älä siis aja tarkistusta ennen deployta.
 - Älä käytä vierasta nimeä kuten `evil.example`. `private-hostname-guard.ts` lukee
   `X-Forwarded-Host`-otsakkeen ilman proxy trustia (myös v2026.916.1:ssä) ja palauttaa 403
   "This hostname is not allowed for this Paperclip instance" ennen board-guardia. Tällainen 403
