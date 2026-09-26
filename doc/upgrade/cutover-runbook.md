@@ -243,7 +243,7 @@ R9, muut viennin taulut (`email_messages`, `outreach_events`, `outreach_prospect
 
 Vaiheen 6 kohdat 1–2 (jatko) sallitaan vasta, kun R8 antaa `VERIFY_OK`, R9:n suppressiot on tuotu ja R10:n smoke on vihreä. Jos palvelu ei ehtinyt kirjoittaa mitään, R2 tuottaa nolla riviä.
 
-**Node ja preflight rollbackissa.** Uusi preflight vaatii Node ≥ 24.11 myös vanhalle koodille. Jos vanha koodi ei toimi Node 24:llä, rollback vaatii Noden palautuksen ja vanhan preflightin (`git -C ~/.claude show f39caba~1:hosts/paperclip/paperclip-service/paperclip-preflight.sh`). `install.sh` hylkää vain uuden, Node-portilla varustetun preflightin, joten vanhan asennus onnistuu. Siitä päätetään RK9-310:ssä.
+**Node ja preflight rollbackissa.** Uusi preflight vaatii Node ≥ 24.11 myös vanhalle koodille. Jos vanha koodi ei toimi Node 24:llä, rollback vaatii Noden palautuksen ja vanhan preflightin (`git -C ~/.claude show f39caba~1:hosts/paperclip/paperclip-service/paperclip-preflight.sh`). `install.sh` hylkää vain uuden, Node-portilla varustetun preflightin, joten vanhan asennus onnistuu. **Päätös (RK9-310, 26.9.):** nykyinen fork-koodi toimii Node 24.21.0:lla (`doc/UPSTREAM-UPGRADE.md`, "Node 24"), joten koodin rollback ei palauta Nodea. Node palautetaan vain, jos vika on Node 24:ssä, ja silloin asennetaan myös vanha preflight. Apt-komennot ovat `doc/UPSTREAM-UPGRADE.md`:ssä.
 
 ## Preflightin todennus rikkinäisellä puulla
 
@@ -255,6 +255,6 @@ Käsin (kuiva, vain luku), kaikki paperclipina, koska kopio on paperclipin omist
 
 | Päivämäärä | Operaattori | Ympäristö | Tulos |
 |---|---|---|---|
-| — | — | Node 24 -dry-run | **Ei vielä ajettu.** Siirretty tikettiin [RK9-310](/RK9/issues/RK9-310). Runbookia ei käytetä ensimmäiseen oikeaan cutoveriin (`v2026.512.0`), ennen kuin tähän on kirjattu aikaleima, operaattori ja tulos. |
+| 26.9.2026 klo 19:49–20:04 (paperclip-01, UTC) | RK9-310-agentti (ei operaattori) | Harjoitusinstanssi (`upgrade-rehearsal.sh`, master `24f1f07b`, Node v24.21.0 tarballista, portti 3199) | **Läpi.** Putki 130 s, HTTP-smoke 10/10, fork-testit 768/769 (1 kuormaflake, läpi erikseen), rollback 49 s, `clean` ajettu. `pnpm install` 1 min, `pnpm -r typecheck` 7 min, `pnpm test:run` 15 min (1 ympäristöriippuva virhe, sama Node 22:lla). **Host-apt-vaihetta ei ajettu** (ei sudoa aptille): sen kesto on mittaamatta (todentamatta). Ikkunan mitoitukseen: varaa vaiheelle 0.3 (apt update + install + todennus) 10 min ja palvelun restartille vähintään preflightin + savutestin ajan (harjoitusputki 130 s + smoke ~3 min). Toteutus: [RK9-310](/RK9/issues/RK9-310). Operaattorin oma dry-run (apt + preflight) kirjataan tähän ikkunassa. |
 
 Dry-runissa mitataan vaiheiden todelliset kestot, ja tämän perusteella tämän dokumentin aikarajat ja ikkunan pituus tarkennetaan. Rehearsal-ajon "nolla nettohäviötä ja -kaksoiskappaletta" -todiste on `compare`-raportin tuloste (`ei löydöksiä`) sekä saapuvan vastauksen säilyminen ennen reititystä (RK9-234).
