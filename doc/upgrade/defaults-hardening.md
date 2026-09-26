@@ -73,13 +73,24 @@ paikallinen nginx luottaa edgeen, ja Express luottaa vain paikalliseen nginxiin.
 - Vaikutus tässä portaassa: `req.ip`, `req.protocol` ja `req.hostname` alkavat lukea
   `X-Forwarded-*`-otsakkeita paikalliselta nginxiltä. Board-mutation-guard ei vielä käytä asetusta
   (ks. 916.1).
-- Todennus: kirjaudu `https://paperclip.rk9.fi`:hin ja tee yksi board-mutaatio (esim. kommentti).
-  Tarkista pyyntölokista, että `req.ip` on asiakkaan osoite eikä `127.0.0.1` tai `192.168.1.17`.
+- Todennus ennen mergeä: lisää portaan testiin supertest-sovellus, jossa
+  `applyTrustProxy(app, parseTrustProxyEnv("loopback"))` ja reitti, joka palauttaa `req.ip`:n.
+  Pyyntö otsakkeella `X-Forwarded-For: 203.0.113.7` palauttaa `203.0.113.7`. Ilman asetusta
+  sama pyyntö palauttaa `127.0.0.1`. Supertest yhdistää loopbackista, joten ero todistaa asetuksen.
+- Älä todenna pyyntölokista. Lokin `remoteAddress` on pino-http:n socket-osoite eikä `req.ip`,
+  joten se näyttää nginxin kautta tulleille pyynnöille aina `127.0.0.1`:n asetuksesta riippumatta.
+- Todennus deployn jälkeen: kirjautuminen ja yksi board-mutaatio `https://paperclip.rk9.fi`:n
+  kautta onnistuvat.
 - Paikallinen nginx kuuntelee porttia 80 kaikissa liitännöissä. LAN-asiakas voi siis ohittaa edgen.
   `set_real_ip_from` estää sitä väärentämästä osoitettaan, mutta `Host`-otsakkeen se voi asettaa
   vapaasti. Porttien 80 ja 3100 rajaaminen (esim. `allow 192.168.1.17; deny all;` tai bindaus
-  127.0.0.1:een) on operaattorin päätös. Tailscale-kuuntelija `100.120.245.107:443` ei koske
-  Paperclipia: `tailscale serve status` näyttää vain polut `/qmd`, `/vault` ja `/vault-personal`.
+  127.0.0.1:een) on operaattorin päätös. Tailscale serve (`100.120.245.107:443`) ei välitä
+  Paperclipiin: `tailscale serve status` näyttää vain polut `/qmd`, `/vault` ja `/vault-personal`.
+- Porttiin 3100 tulee kuitenkin suoria asiakkaita. Verifierin haku palvelinlokista (2026-09-26,
+  kenttä `remoteAddress`) löysi osoitteet `100.103.149.19` ja `100.66.76.115` (tailnet),
+  `192.168.1.42` (LAN) ja `100.81.228.64`. Selvitä nämä asiakkaat ennen kuin rajaat portteja tai
+  poistat hostnimiä `PAPERCLIP_ALLOWED_HOSTNAMES`-listalta, muuten ne lukitaan ulos. Suora asiakas
+  ei kulje nginxin kautta, joten `TRUST_PROXY=loopback` ei luota sen `X-Forwarded-*`-otsakkeisiin.
 - Paikallinen nginx välittää asiakkaan oman `X-Forwarded-Proto`-otsakkeen sellaisenaan
   (`$http_x_forwarded_proto`). Kun `loopback` on luotettu, LAN-asiakas voi porttiin 80 tullessaan
   asettaa `req.protocol`- ja `req.secure`-arvot. Upstream käyttää niitä ainakin tiedostoissa
@@ -192,7 +203,8 @@ Nykytila 2026-09-26:
   `PAPERCLIP_ALLOWED_HOSTNAMES=100.120.245.107`. Se ei vaikuta, koska käynnistysskriptin `export`
   kirjoittaa sen yli. Poista rivi, jotta arvo on yhdessä paikassa.
 - Osoite `100.81.228.64` ei ole koneen nykyinen Tailscale-osoite (`tailscale ip -4` palauttaa
-  `100.120.245.107`). Se on todennäköisesti vanhentunut. Poista se, jos sitä ei tarvita.
+  `100.120.245.107`). Sama osoite näkyy kuitenkin lokissa suorana asiakkaana (ks. 720.0). Älä
+  poista sitä listalta ennen kuin tiedät, mikä sitä käyttää.
 
 Mergessä: ota upstreamin `board-mutation-guard.ts` ja sen testi sellaisenaan. Lisää forkin testiin
 kolme tapausta upstreamin `app.set("trust proxy", ...)`-mallilla:
