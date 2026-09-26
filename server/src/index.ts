@@ -33,11 +33,14 @@ import {
   heartbeatService,
   instanceSettingsService,
   reconcilePersistedRuntimeServicesOnStartup,
+  // --- RK9 Custom: risk monitor ---
   riskMonitorService,
   riskRegistryService,
   routineService,
+  // --- RK9 Custom: system pause ---
   systemPauseService,
 } from "./services/index.js";
+// --- RK9 Custom: Slack, risk, qmd, email, outreach services ---
 import { fetchAllQuotaWindows } from "./services/quota-windows.js";
 import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
@@ -548,6 +551,7 @@ export async function startServer(): Promise<StartedServer> {
     shareClient: createFeedbackTraceShareClientFromConfig(config),
   });
   const backupSettingsSvc = instanceSettingsService(db);
+  // --- RK9 Custom: system pause ---
   const systemPauseSlackNotifier = createSystemPauseSlackNotifier({
     db: db as any,
     listCompanyIds: () => backupSettingsSvc.listCompanyIds(),
@@ -640,6 +644,7 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler,
     resolveSession,
     pluginWorkerManager,
+    // --- RK9 Custom: Slack, system pause, outreach options ---
     slackSigningSecret: config.slackSigningSecret,
     systemPause: systemPauseSvc,
     outreachSenderApiKey: config.outreachSenderApiKey,
@@ -783,6 +788,7 @@ export async function startServer(): Promise<StartedServer> {
     });
   
   if (config.heartbeatSchedulerEnabled) {
+    // --- RK9 Custom: system pause + global run concurrency cap ---
     const heartbeat = heartbeatService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc, maxGlobalConcurrentRunsDefault: config.maxGlobalConcurrentRuns });
     const routines = routineService(db as any, { pluginWorkerManager, systemPause: systemPauseSvc });
   
@@ -884,6 +890,7 @@ export async function startServer(): Promise<StartedServer> {
     }, config.heartbeatSchedulerIntervalMs);
   }
 
+  // --- RK9 Custom: quota auto-pause monitor ---
   if (config.systemPauseAutoEnabled) {
     logger.info(
       {
@@ -1051,6 +1058,7 @@ export async function startServer(): Promise<StartedServer> {
         }
       }
 
+      // --- RK9 Custom: qmd MCP session shutdown ---
       await closeQmdMcpSession();
 
       process.exit(0);

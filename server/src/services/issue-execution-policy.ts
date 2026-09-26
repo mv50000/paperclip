@@ -5,6 +5,7 @@ import type {
   IssueExecutionStage,
   IssueExecutionStagePrincipal,
   IssueExecutionState,
+  // --- RK9 Custom: enforced outcomes (SEC-91) ---
   IssueOutcomeRequirement,
   IssueOutcomeRequirementFailure,
   IssueWorkProduct,
@@ -90,6 +91,7 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     })
     .filter((stage): stage is NonNullable<typeof stage> => stage !== null);
 
+  // --- RK9 Custom: enforced outcomes (SEC-91) ---
   const outcomeRequirements: IssueOutcomeRequirement[] = (parsed.data.outcomeRequirements ?? []).map((requirement) => ({
     ...requirement,
     id: requirement.id ?? randomUUID(),
@@ -101,10 +103,12 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     mode: parsed.data.mode ?? "normal",
     commentRequired: true,
     stages,
+    // --- RK9 Custom: enforced outcomes (SEC-91) ---
     outcomeRequirements,
   };
 }
 
+// --- RK9 Custom: enforced outcomes (SEC-91) ---
 export function evaluateIssueOutcomeRequirements(
   policy: IssueExecutionPolicy | null,
   workProducts: Pick<IssueWorkProduct, "type" | "healthStatus">[],

@@ -43,6 +43,7 @@ import {
   type IssueLivenessFinding,
 } from "./issue-graph-liveness.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+// --- RK9 Custom: human-proxy agents ---
 import { isHumanProxyAgent } from "../human-proxy.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
@@ -73,6 +74,7 @@ type RecoveryWakeup = (
 
 type LatestIssueRun = Pick<
   typeof heartbeatRuns.$inferSelect,
+  // --- RK9 Custom: run fields for succeeded-run skip ---
   | "id"
   | "agentId"
   | "status"
@@ -180,6 +182,7 @@ function formatIssueLinksForComment(relations: Array<{ identifier?: string | nul
 }
 
 function isAgentInvokable(agent: typeof agents.$inferSelect | null | undefined) {
+  // --- RK9 Custom: human-proxy + heartbeat-disabled agents are not invokable ---
   if (!agent) return false;
   // Human-proxy agents are assignment-target identities only — they never run
   // automatically (issues are picked up by humans via /implement). Auto-recovery
@@ -318,6 +321,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
         contextSnapshot: heartbeatRuns.contextSnapshot,
+        // --- RK9 Custom: run fields for succeeded-run skip ---
         issueCommentStatus: heartbeatRuns.issueCommentStatus,
         scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
       })
@@ -1578,6 +1582,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   }
 
   async function reconcileStrandedAssignedIssues() {
+    // --- RK9 Custom: recoveryStrictInProgressOnly ---
     const experimentalSettings = await instanceSettings.getExperimental();
     const strictInProgressOnly = asBoolean(
       experimentalSettings.recoveryStrictInProgressOnly,
@@ -1605,6 +1610,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       issueIds: [] as string[],
     };
 
+    // --- RK9 Custom: stranded-issue decision logging (every logCandidate call below is fork code) ---
     const logCandidate = (
       issue: typeof issues.$inferSelect,
       decision: string,
@@ -1675,6 +1681,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       }
 
       if (issue.status === "todo") {
+        // --- RK9 Custom: recoveryStrictInProgressOnly ---
         if (strictInProgressOnly) {
           result.skipped += 1;
           logCandidate(issue, "skipped_strict_in_progress_only", latestRun);
@@ -1765,6 +1772,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
 
+      // --- RK9 Custom: skip in_progress issue whose latest run succeeded ---
       if (latestRun && latestRun.status === "succeeded") {
         result.skipped += 1;
         logCandidate(issue, "skipped_latest_run_succeeded", latestRun, {

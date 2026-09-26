@@ -73,11 +73,13 @@ import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { executionWorkspaceService as executionWorkspaceServiceDirect } from "../services/execution-workspaces.js";
 import { feedbackService } from "../services/feedback.js";
+// --- RK9 Custom: human-proxy agents ---
 import { isHumanProxyAgent } from "../services/human-proxy.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { environmentService } from "../services/environments.js";
 import {
   applyIssueExecutionPolicyTransition,
+  // --- RK9 Custom: enforced outcomes (SEC-91) ---
   evaluateIssueOutcomeRequirements,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
@@ -553,6 +555,7 @@ export function issueRoutes(
     throw unauthorized();
   }
 
+  // --- RK9 Custom: optional agent run id for interactive sessions ---
   // Interactive agent sessions (Claude Code worktrees, local-cli) authenticate with a
   // long-lived agent API key and have no scheduler-issued heartbeat run — that's
   // expected, not an error. A real heartbeat run always carries a runId (the JWT is
@@ -624,6 +627,7 @@ export function issueRoutes(
       });
       return false;
     }
+    // --- RK9 Custom: optional agent run id ---
     const runId = getAgentRunId(req);
     const ownership = await svc.assertCheckoutOwner(issue.id, actorAgentId, runId);
     if (ownership.adoptedFromRunId) {
@@ -775,6 +779,7 @@ export function issueRoutes(
     if (!resolved.agent) {
       throw notFound("Agent not found");
     }
+    // --- RK9 Custom: human-proxy + paused/terminated assignee guard ---
     // Human-proxy agents are always assignable regardless of status — they exist
     // purely as assignment targets, and a human picks up the work via /implement.
     if (isHumanProxyAgent(resolved.agent)) {
@@ -831,6 +836,7 @@ export function issueRoutes(
   }
 
   async function normalizeIssueIdentifier(rawId: string): Promise<string> {
+    // --- RK9 Custom: alphanumeric issue prefixes ---
     if (/^[A-Z][A-Z0-9]*-\d+$/i.test(rawId)) {
       const issue = await svc.getByIdentifier(rawId);
       if (issue) {
@@ -957,6 +963,7 @@ export function issueRoutes(
       executionWorkspaceId: req.query.executionWorkspaceId as string | undefined,
       parentId: req.query.parentId as string | undefined,
       descendantOf: req.query.descendantOf as string | undefined,
+      // --- RK9 Custom: goalId filter ---
       goalId: req.query.goalId as string | undefined,
       labelId: req.query.labelId as string | undefined,
       originKind: req.query.originKind as string | undefined,
@@ -2057,6 +2064,7 @@ export function issueRoutes(
     }
     Object.assign(updateFields, transition.patch);
 
+    // --- RK9 Custom: enforced outcomes gate (SEC-91) ---
     // Enforced outcomes gate (SEC-91): when the final transition will land the issue
     // in `done`, evaluate the policy's outcomeRequirements against current work products.
     const willTransitionToDone = updateFields.status === "done";
@@ -2112,6 +2120,7 @@ export function issueRoutes(
     try {
       if (transition.decision && decisionId) {
         const decision = transition.decision;
+        // --- RK9 Custom: assertKnownActorRunId ---
         await svc.assertKnownActorRunId(actor.runId ?? null, existing.companyId);
         issue = await db.transaction(async (tx) => {
           const updated = await svc.update(
@@ -2753,6 +2762,7 @@ export function issueRoutes(
       return;
     }
 
+    // --- RK9 Custom: optional agent run id ---
     const checkoutRunId = getAgentRunId(req);
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
@@ -2802,6 +2812,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    // --- RK9 Custom: optional agent run id ---
     const actorRunId = getAgentRunId(req);
 
     const released = await svc.release(
@@ -2936,6 +2947,7 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    // --- RK9 Custom: optional agent run id ---
     const agentSourceRunId = getAgentRunId(req);
 
     const interaction = await issueThreadInteractionService(db).create(issue, {
