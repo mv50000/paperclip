@@ -82,8 +82,28 @@ tuotannon systemd-palvelun Node. Toteutus ja tarkka porras: kirjataan tähän os
 
 ## Oletusten kovennus
 
-Varattu lapselle, joka tarkistaa upstreamin muuttuneet oletusarvot (esim. hire approval,
-auth-tila, heartbeat-ajastimet) ja kiinnittää forkin tarvitsemat arvot eksplisiittisiksi.
+Upstream tuo portaissa uusia oletuksia, jotka avaavat ulkoisia yhteyksiä tai laajentavat
+oikeuksia. Alla oleva taulukko kertoo RK9:n arvon ja portaan, jossa arvo asetetaan.
+Tarkistuslista porrasta kohden, todennuskomennot, webhook-reittien tarkistus ja preflightin
+lisäykset (omistaja RK9-307) ovat tiedostossa
+[`doc/upgrade/defaults-hardening.md`](upgrade/defaults-hardening.md) (RK9-309).
+
+Mikään näistä ei muuta nykyforkin käytöstä. Asetus otetaan käyttöön siinä portaassa, jossa
+upstream tuo sen.
+
+### RK9-oletukset
+
+| Asetus | RK9-arvo | Upstream-oletus | Tulee tagissa | Sijainti |
+|---|---|---|---|---|
+| Announcement feed | `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false` (opt-out) | päällä, hakee `pages.paperclip.ing` | v2026.916.1 | env, systemd-drop-in |
+| Cloud sync | ei konfiguroida (`enableCloudSync` pysyy `false`) | `false` | v2026.609.0, poistuu v2026.817.0:ssa (migraatio 0196) | instanssiasetus `experimental`, ei kirjoiteta |
+| Standard-trust-agentin hire-oikeus | vain board, CEO tai eksplisiittinen grantti; `requireBoardApprovalForNewAgents` yrityskohtaisesti (0071) | `canCreateAgents` päällä standard-trust-agenteille | v2026.916.1 | koodi: RK9 Custom -pinnaus `agent-permissions.ts`:ään, lukitsee `hire-approval-policy.test.ts` |
+| Proxy trust | `TRUST_PROXY=192.168.1.17` (nginx-edge); `PAPERCLIP_ALLOWED_HOSTNAMES` ja `PAPERCLIP_PUBLIC_URL` kattavat `paperclip.rk9.fi`:n | `TRUST_PROXY` asettamatta | `TRUST_PROXY` v2026.720.0, guardin `X-Forwarded-Host`-rajaus v2026.916.1 | env, systemd-drop-in |
+| Native runner | `enableNativeRunner=false`, `claude_local` pinnattu CLI-moottoriin (RK9-305) | `false` 831.1:ssä, `true` 916.0:sta alkaen | v2026.831.1 | instanssiasetus `experimental`, kirjoitetaan eksplisiittisesti |
+
+Tietoturvakorjaukset: #11400 (CWE-78, CLI-ohjeet) tulee portaassa v2026.831.1 ja #12776
+(etuoikeutetut rajapinnat, SSRF) portaassa v2026.916.1. Forkin webhook-reittien tarkistus
+korjauksia vasten on tiedostossa `doc/upgrade/defaults-hardening.md`.
 
 ## Harjoitusinstanssi
 
