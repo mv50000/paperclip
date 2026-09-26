@@ -121,6 +121,7 @@ Kirjaa pre-upgrade-SHA pysyvään paikkaan, ei `/tmp`:hen: lisää rivi osioon
 "Porrasloki" (SHA, päiväys, tag) ja luo lisäksi git-tagi, joka säilyy uudelleenkäynnistysten yli:
 
 ```bash
+git fetch origin
 PRE=$(git rev-parse origin/master)
 git tag "rk9/pre-upgrade-v2026.NNN.N" "$PRE"
 git push origin "rk9/pre-upgrade-v2026.NNN.N"

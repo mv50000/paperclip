@@ -2,6 +2,7 @@
 # Pakollisesti vihreä jokaisessa upstream-portaassa. Ajo: scripts/upgrade-smoke.sh --offline --fork-tests
 # Lähtötila 2026-09-26 @ 9ed8e7704: 69 tiedostoa, 752 testiä. email-routes.test.ts on vihreä CI:n
 # verify-jobissa, mutta aikakatkaistuu paikallisesti paperclip-01:llä (ks. regression-matrix.md).
+# Rivin pääte "# ci-only" ohittaa tiedoston paikallisesti; skripti ajaa sen, kun CI on asetettu.
 cli/src/__tests__/outreach.test.ts
 packages/adapters/claude-local/src/server/execute.tools.test.ts
 packages/adapters/cursor-local/src/server/parse.test.ts
@@ -20,7 +21,7 @@ server/src/__tests__/email-inbound-wakeup.test.ts
 server/src/__tests__/email-junk-guard.test.ts
 server/src/__tests__/email-mime.test.ts
 server/src/__tests__/email-render.test.ts
-server/src/__tests__/email-routes.test.ts
+server/src/__tests__/email-routes.test.ts  # ci-only
 server/src/__tests__/email-sanitize.test.ts
 server/src/__tests__/email-ses-inbound-route.test.ts
 server/src/__tests__/email-ses-inbound.test.ts

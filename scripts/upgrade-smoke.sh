@@ -142,10 +142,11 @@ check_http() {
   # Unsubscribe: tuntematon token palauttaa aina saman vahvistussivun eikä muuta dataa.
   expect "unsubscribe" "200" GET /u/upgrade-smoke-nonexistent-token 'peruuttanut'
 
-  # Risk management: tokenilla 200/403 (yritysrajaus), ilman 200/401/403. 404 = reittiä ei ole mountattu.
+  # Risk management: tokenilla summary 200/403 (yritysrajaus) ja board 200, ilman 200/401/403. 404 = reittiä ei ole mountattu.
   if [[ ${#auth[@]} -gt 0 ]]; then
     expect "risk-summary" "200 403" GET "/api/companies/$company/risks/summary" - "${auth[@]}"
-    expect "risk-board" "200 403" GET /api/board/risks - "${auth[@]}"
+    # Board-reitti (assertBoard): board-tokenilla 403 on auth-regressio, ei yritysrajaus.
+    expect "risk-board" "200" GET /api/board/risks - "${auth[@]}"
   else
     expect "risk-summary" "200 401 403" GET "/api/companies/$company/risks/summary" -
     expect "risk-board" "200 401 403" GET /api/board/risks -
@@ -154,10 +155,21 @@ check_http() {
 
 check_fork_tests() {
   local list="$REPO_ROOT/doc/upgrade/fork-tests.txt"
-  local files=()
+  local files=() path
   while IFS= read -r line; do
     [[ -z "$line" || "$line" == \#* ]] && continue
-    if [[ -f "$REPO_ROOT/$line" ]]; then files+=("$line"); else fail "fork-testi puuttuu: $line"; fi
+    path="${line%%#*}"
+    path="${path%"${path##*[![:space:]]}"}"
+    if [[ ! -f "$REPO_ROOT/$path" ]]; then
+      fail "fork-testi puuttuu: $path"
+      continue
+    fi
+    # "# ci-only": tiedosto tulkitaan CI:n verify-jobin mukaan (ks. regression-matrix.md).
+    if [[ "$line" == *"# ci-only"* && -z "${CI:-}" ]]; then
+      echo "skip  $path (ci-only, tulkitaan CI:n mukaan)"
+      continue
+    fi
+    files+=("$path")
   done <"$list"
   if [[ ${#files[@]} -eq 0 ]]; then
     fail "fork-testit: lista on tyhjä"
