@@ -30,4 +30,9 @@ has "polku vaihtuu ja query säilyy" "$OUT" "postgresql://u:pw@h:1/scratch%20db?
 V=$(pg_with 'postgresql://u:pw@h:1/d' bash -c 'echo "$PGDATABASE/$PGPORT"')
 [ "$V" = "d/1" ] && ok "pg_with asettaa ympäristön" || bad "pg_with: $V"
 [ -z "${PGDATABASE:-}" ] && ok "ympäristö ei vuoda kutsujaan" || bad "PGDATABASE vuosi"
+V=$(PGSERVICE=foo PGHOSTADDR=1.2.3.4 PGDATABASE=other pg_with 'postgresql://u@h:1/d' bash -c 'echo "${PGSERVICE:-none}/${PGHOSTADDR:-none}/$PGDATABASE"')
+[ "$V" = "none/none/d" ] && ok "kutsujan PGSERVICE/PGHOSTADDR/PGDATABASE eivät ohita URL:ia" || bad "ympäristö vuoti: $V"
+OUT=$(pg_url_env 'postgres://app:Secr3tPart#rest@db/paperclip' 2>&1); RC=$?
+[ "$RC" != 0 ] && ok "koodaamaton # hylätään" || bad "hyväksyttiin"
+case "$OUT" in *Secr3tPart*|*rest*) bad "virheviesti vuotaa salasanaa: $OUT" ;; *) ok "virheviesti ei sisällä salasanaa" ;; esac
 echo "yhteensä: $PASS ok, $FAIL virhettä"; [ "$FAIL" = 0 ]

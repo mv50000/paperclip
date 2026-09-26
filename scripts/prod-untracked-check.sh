@@ -10,9 +10,9 @@
 #               kohteessa versioituna: reset --hard ylikirjoittaisi sen.
 #   --backup    tallentaa hakemistoon (0700): local-changes.patch (versioidut paikalliset muutokset,
 #               jotka reset --hard hävittäisi) ja untracked-preserved.tar (luokat preserve, secret,
-#               runtime; tar 0600). Lukematon tiedosto tai tar-virhe = exit 3 (varmuuskopio epätäydellinen).
-#   --tar-as    pakkaa `sudo -n -u <käyttäjä> tar`illa: osa tuotannon tiedostoista (data/secrets,
-#               cli/.paperclip) on vain palvelun käyttäjän luettavissa. Tiedosto kirjoitetaan silti
+#               runtime; tar 0600). Polut tulevat manifestista, myös gitignoratut (data/, .paperclip/, .env). Lukematon tiedosto tai tar-virhe = exit 3 (varmuuskopio epätäydellinen).
+#   --tar-as    pakkaa `sudo -n -u <käyttäjä> tar`illa: osa tuotannon tiedostoista on vain rootin luettavissa
+#               (cli/.paperclip/.env, server/data/secrets/master.key; käytä `root`). Tiedosto kirjoitetaan silti
 #               kutsujan oikeuksilla (0600).
 #
 # Poistumiskoodi: 0 = kaikki luokiteltu, ei törmäyksiä eikä versioituja paikallisia muutoksia;
@@ -60,7 +60,6 @@ class_of() { # <polku> -> luokka tai tyhjä
 
 FAILS=0
 mapfile -t UNTRACKED < <(git -C "$REPO" ls-files --others --exclude-standard --directory --no-empty-directory)
-KEEP=()
 for p in "${UNTRACKED[@]}"; do
   c=$(class_of "$p")
   if [ -z "$c" ]; then
@@ -68,12 +67,26 @@ for p in "${UNTRACKED[@]}"; do
     FAILS=$((FAILS + 1)); continue
   fi
   echo "$LOGTAG $c: $p"
-  case "$c" in preserve|secret|runtime) KEEP+=("$p") ;; esac
 done
+
+# Varmuuskopioitavat polut tulevat manifestista, eivät git-listauksesta: master-.gitignore ohittaa
+# data/, .paperclip/ ja .env-tiedostot, joten `ls-files --others --exclude-standard` ei listaisi niitä
+# (juuri salaisuudet jäisivät pois). Jokainen preserve/secret/runtime-rivi, jonka polku on olemassa
+# (jokerikuvio laajennetaan), otetaan mukaan riippumatta siitä, onko se ignoroitu vai ei.
+KEEP=()
+for i in "${!PATTERN[@]}"; do
+  case "${CLASS[$i]}" in preserve|secret|runtime) ;; *) continue ;; esac
+  pat=${PATTERN[$i]%/}
+  while IFS= read -r m; do [ -z "$m" ] || KEEP+=("$m"); done < <(cd "$REPO" && compgen -G "$pat" || true)
+done
+if [ "${#KEEP[@]}" -gt 0 ]; then mapfile -t KEEP < <(printf '%s\n' "${KEEP[@]}" | LC_ALL=C sort -u); fi
 
 if [ -n "$TARGET" ]; then
   git -C "$REPO" rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null || die "--target $TARGET ei ratkea"
-  for p in "${UNTRACKED[@]}"; do
+  # Törmäys koskee myös gitignorattuja tiedostoja: reset --hard ylikirjoittaa ne yhtä lailla.
+  mapfile -t IGNORED < <(git -C "$REPO" ls-files --others --ignored --exclude-standard --directory --no-empty-directory)
+  for p in "${UNTRACKED[@]}" "${IGNORED[@]}"; do
+    [ -n "$p" ] || continue
     hit=$(git -C "$REPO" ls-tree -r --name-only "$TARGET" -- "$p" | head -n 1)
     if [ -n "$hit" ]; then
       echo "$LOGTAG TÖRMÄYS: $p on versioitu kohteessa $TARGET ($hit); reset --hard ylikirjoittaisi sen" >&2

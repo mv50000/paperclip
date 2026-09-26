@@ -73,6 +73,25 @@ chmod 644 "$R/data/d"
 [ "$RC" = 3 ] && ok "lukematon tiedosto -> exit 3" || bad "exit $RC: $(cat "$TMP/o3")"
 has "virheilmoitus neuvoo --tar-as" "$(cat "$TMP/o3")" "--tar-as"
 
+echo "== gitignoratut salaisuudet ja runtime-data päätyvät tariin (master-.gitignore ohittaa ne)"
+R2="$TMP/repo2"; git init -q "$R2"; R=$R2
+printf 'data/\n.paperclip/\n.env\n' >"$R2/.gitignore"; mkdir -p "$R2/ui"; echo u >"$R2/ui/app.ts"
+G add -A; G commit -q -m base
+mkdir -p "$R2/data/secrets" "$R2/cli/.paperclip" "$R2/server/data/secrets"
+echo k1 >"$R2/data/secrets/master.key"; echo k2 >"$R2/server/data/secrets/master.key"; echo e >"$R2/cli/.paperclip/.env"
+echo vg >"$R2/decrypt-secret.cjs"
+OUT=$("$SUT" --repo "$R2" --backup "$TMP/bk3" 2>&1); RC=$?
+[ "$RC" = 0 ] && ok "exit 0" || bad "exit $RC: $OUT"
+TARL=$(tar -tf "$TMP/bk3/untracked-preserved.tar")
+has "master.key mukana" "$TARL" "data/secrets/master.key"
+has "server master.key mukana" "$TARL" "server/data/secrets/master.key"
+has "cli/.paperclip/.env mukana" "$TARL" "cli/.paperclip/.env"
+G checkout -q -b t2; echo x >"$R2/data/newfile"; git -C "$R2" add -f data/newfile; G commit -q -m "target tracks data/newfile"; G checkout -q -
+git -C "$R2" rm -q --cached -f data/newfile 2>/dev/null; echo x >"$R2/data/newfile"
+OUT=$("$SUT" --repo "$R2" --target t2 2>&1); RC=$?
+[ "$RC" = 1 ] && has "törmäys gitignoratun tiedoston kanssa" "$OUT" "TÖRMÄYS: data/" || bad "ignored-törmäys: exit $RC: $OUT"
+R="$TMP/repo"
+
 echo "== reset --hard -kuivaharjoitus: versioimattomat säilyvät, versioitu muutos häviää"
 rm "$R/wh.psd1.template"
 G reset -q --hard master

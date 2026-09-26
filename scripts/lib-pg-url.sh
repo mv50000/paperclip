@@ -16,14 +16,20 @@ pg_url_env() {
   python3 - "$1" <<'PY'
 import sys, shlex
 from urllib.parse import urlsplit, unquote, parse_qsl
-u = urlsplit(sys.argv[1])
+try:
+    u = urlsplit(sys.argv[1])
+    port = u.port
+    hostname, username, password = u.hostname, u.username, u.password
+except ValueError:
+    # Virheviesti ei saa sisältää URL:n osia: jäsentäjän poikkeus voisi lainata salasanaa.
+    sys.exit("pg-url: URL:ia ei voitu jäsentää (onko salasanassa koodaamaton # tai /?)")
 if u.scheme not in ("postgres", "postgresql"):
     sys.exit("pg-url: URL:n pitää alkaa postgres:// tai postgresql://")
 env = {}
-if u.hostname: env["PGHOST"] = u.hostname
-if u.port: env["PGPORT"] = str(u.port)
-if u.username: env["PGUSER"] = unquote(u.username)
-if u.password: env["PGPASSWORD"] = unquote(u.password)
+if hostname: env["PGHOST"] = hostname
+if port: env["PGPORT"] = str(port)
+if username: env["PGUSER"] = unquote(username)
+if password: env["PGPASSWORD"] = unquote(password)
 db = unquote(u.path.lstrip("/"))
 if db: env["PGDATABASE"] = db
 allowed = {"host": "PGHOST", "port": "PGPORT", "user": "PGUSER", "password": "PGPASSWORD", "sslmode": "PGSSLMODE",
@@ -42,7 +48,10 @@ PY
 pg_with() { # <url> <komento> [arg...]
   local url=$1 envs; shift
   envs=$(pg_url_env "$url") || return 2
-  ( eval "$envs"; exec "$@" )
+  # Kutsujan ympäristö ei saa ohittaa URL:ia (PGSERVICE ja PGHOSTADDR voittaisivat URL:n isännän).
+  ( unset PGSERVICE PGSERVICEFILE PGHOSTADDR PGHOST PGPORT PGUSER PGPASSWORD PGPASSFILE PGDATABASE PGSSLMODE \
+          PGSSLROOTCERT PGSSLCERT PGSSLKEY PGCONNECT_TIMEOUT
+    eval "$envs"; exec "$@" )
 }
 
 pg_url_with_db() { # <url> <kanta>
