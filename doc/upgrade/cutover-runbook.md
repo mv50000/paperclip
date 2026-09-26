@@ -27,7 +27,7 @@ vastauksia. Kaksi tosiasiaa ohjaa koko järjestystä:
 
 ## Työkalut
 
-Aja skriptit masterin kloonista (esim. `/home/rk9admin/paperclip`), ei `/opt/paperclip`ista: tuotantopuu ei sisällä niitä ennen kuin tämä PR on deployattu.
+Aja skriptit masterin kloonista (operaattorin masterin klooni), ei `/opt/paperclip`ista: tuotantopuu ei sisällä niitä ennen kuin tämä PR on deployattu.
 Kaikki skriptit ovat vain luku -tilassa lähdekantaan; snapshot kirjoittaa vain omaan hakemistoonsa ja väliaikaiseen scratch-kantaan.
 
 | Työkalu | Tehtävä |
@@ -57,7 +57,7 @@ Nämä ovat tuotantomuutoksia, ja **operaattori ajaa ne itse**. Tämä tiketti e
 | 0.2 | `sudo ~/.claude/hosts/paperclip/paperclip-update/install.sh --apply <commit>` | Asentaa hold-tuen `paperclip-update.sh`:iin. Commit on `~/.claude`-repon commit `f39caba` tai myöhempi. | `grep -c update-hold /usr/local/bin/paperclip-update.sh` ≥ 1 |
 | 0.3 | Node 24 asennetaan ([RK9-310](/RK9/issues/RK9-310)). | Uusi preflight estää palvelun käynnistyksen, jos Node < 24.11. paperclip-01 ajaa 26.9. Node 22.22.1:tä, joten **älä asenna preflightia ennen Node 24:ää**. | `sudo -u paperclip env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin node --version` |
 | 0.4 | `sudo ~/.claude/hosts/paperclip/paperclip-service/install.sh` (tarkistus), sitten `sudo ./install.sh --apply <commit>` | Asentaa uuden `paperclip-preflight.sh`:n. Aja vain, kun 0.3 on tehty. Asennin ei restarttaa. | `sudo -u paperclip /usr/local/bin/paperclip-preflight.sh; echo $?` tulostaa `OK`-rivin ja `0` |
-| 0.5 | `sudo mkdir -p /var/backups/paperclip-pre-upgrade && sudo chown rk9admin: /var/backups/paperclip-pre-upgrade` | Snapshotien kohde (hakemisto 0700, tiedostot 0600). Tarkista levytila: `df -h /var/backups` (dump + scratch-palautus vaativat 2 × kannan koon). | `df -BG --output=avail /var/backups` |
+| 0.5 | `sudo mkdir -p /var/backups/paperclip-pre-upgrade && sudo chown "$USER": /var/backups/paperclip-pre-upgrade` | Snapshotien kohde (hakemisto 0700, tiedostot 0600). Tarkista levytila: `df -h /var/backups` (dump + scratch-palautus vaativat 2 × kannan koon). | `df -BG --output=avail /var/backups` |
 | 0.6 | Anna käyttäjälle, jolla `DATABASE_URL` yhdistää, `CREATEDB` (scratch-kantaa varten), tai aseta `SNAPSHOT_ADMIN_URL` toiselle käyttäjälle. | `pre-upgrade-snapshot.sh` luo ja pudottaa kannan `pcp_restore_check_*`. | `psql "$DATABASE_URL" -c "select rolcreatedb from pg_roles where rolname = current_user"` |
 
 **Versioimattomat ja paikalliset tiedostot** (`/opt/paperclip`, tarkistettu 26.9.). `git fetch && git reset --hard` ei poista versioimattomia tiedostoja, koska vain `git clean` poistaa. Se **hävittää versioidut paikalliset muutokset** ja ylikirjoittaa polun, joka on kohde-refissä versioituna. Luokitus on tiedostossa `scripts/prod-untracked.manifest`; yhteenveto:
