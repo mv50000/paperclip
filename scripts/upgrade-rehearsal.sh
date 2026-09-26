@@ -186,7 +186,7 @@ verify_server_env() {
     n=$((n + 1))
     leaked="$(printf '%s\n' "$envtxt" | cut -d= -f1 \
       | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
-      | grep -v -E '^PAPERCLIP_SECRETS_MASTER_KEY_FILE$' || true)"
+      | grep -v -E '^PAPERCLIP_SECRETS_(MASTER_KEY_FILE|PROVIDER|STRICT_MODE)$' || true)"
     [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr '\n' ' ')"
     # Ei -q: pipefail + SIGPIPE.
     if [[ -n "$(printf '%s\n' "$envtxt" | grep -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@' || true)" ]]; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
