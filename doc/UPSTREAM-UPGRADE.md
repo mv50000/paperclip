@@ -222,7 +222,8 @@ Kirjaa rollbackin kesto Porraslokiin.
 ## Migraatioiden dry-run prod-kopioon (RK9-311)
 
 `packages/db/scripts/migration-dry-run.ts` ajaa puun migraatiot prod-dumpin kopiota vasten ja kirjoittaa
-raportin, jossa on vain rivimääriä ja tunnisteita (dump sisältää prospektien henkilötietoja). Jokainen
+raportin, jossa on vain rivimääriä, tunnisteita ja muutama asetusarvo (dump sisältää prospektien henkilötietoja;
+tietokannan virheilmoitukset siistitään raporttiin, ja raporttitiedosto kirjoitetaan oikeuksilla 0600). Jokainen
 porras (RK9-312…317) ajaa sen omassa portaassaan. Työkalu käyttää **ajettavan puun omaa** `client.ts`:ää,
 joten aja se portaan worktreessä, ei masterissa.
 
@@ -235,7 +236,8 @@ sudo -u paperclip env PGHOST=/var/run/postgresql PGUSER=paperclip \
 
 Työkalu palauttaa dumpin kantaan `paperclip_migdryrun`, ajaa `applyPendingMigrations`in ja pudottaa kannan
 lopuksi (`--keep-db` jättää sen; pudota käsin, kanta sisältää prod-dataa). Fail closed: kannan nimi on
-`paperclip_migdryrun[_x]`, se ei voi olla `paperclip`, ja yhteys menee vain unix-socketin kautta.
+`paperclip_migdryrun[_x]`, se ei voi olla `paperclip`, yhteys menee vain unix-socketin kautta, ja työkalu kieltäytyy,
+jos `PGHOSTADDR`, `PGSERVICE`, `PGSERVICEFILE`, `PGDATABASE` tai `PGPORT` on asetettu.
 RK9-310:n harness käyttää omaa kantaansa `paperclip_rehearsal`, joten ajot eivät törmää.
 
 Raportti tarkistaa ja kirjaa:
@@ -269,7 +271,9 @@ upstreamin puolelta). Ei pushattu. Prod-kopio: `rehearsal-20260926-142518.dump`.
 (numeroissa on aukko, ei tiedostoa). `check-migration-numbering.ts` hyväksyy aukot: se vaatii vain, että tiedostonimet ja
 journalin tagit ovat samat, lajitellussa järjestyksessä ja ilman kaksoisnumeroita. Ajo merge-puussa läpäisi. Sama vaatimus
 tarkoittaa, että 9xxx-migraatiot ovat aina journalin lopussa: fork-migraatiota ei voi sijoittaa upstream-migraation
-väliin. Slotit 0126 ja 0130 ovat vapaat, jos fork-migraatio pitää ajaa ennen 0272:ta.
+väliin. Slotit 0126 ja 0130 ovat vapaat, jos fork-migraatio pitää ajaa ennen 0272:ta. Slotin tiedosto ei ole 9xxx, mutta
+hash-pinnaus kattaa sen, kun sen nimi kirjataan `fork-migration-hashes.json`iin (pinnaus ja dry-runin fork-assertit käsittelevät
+pinnatut nimet fork-tiedostoina).
 
 **Hash-identiteetti.** Prod-historiassa on 85 riviä. Kaikki 85 hashia tunnistuvat merge-puun tiedostoihin, ja kaikki
 kymmenen pinnattua 9xxx-hashia ovat historiassa. Prodissa on jo 0073 ja 0074 (forkin puu päättyy 0072:een), joten
@@ -282,8 +286,12 @@ tunnistuksen. Fallback laukeaa vain, kun **yksikään** hash ei tunnistu. Testit
 - muutettu 9001-hash → 9001 näkyy pendinginä, upstream-migraatiot ajetaan, ja 9001:n uudelleenajo kaatuu äänekkäästi
   (`CREATE TABLE` ilman `IF NOT EXISTS`); fork-taulun rivit säilyvät. Rivin `IF NOT EXISTS` sisältävät 9xxx-migraatiot
   ajettaisiin hiljaa uudelleen, siksi pinnaus on tarpeen.
-- nolla tunnistettua hashia → **aito vika**: fallback ottaa `journal.slice(0, rivimäärä)` ja kuittaa upstream-migraatiot
-  ajetuiksi ajamatta niitä; 9xxx-hännän se jättää pendingiksi. Testi on `it.fails` ja kääntyy punaiseksi, kun vika korjataan.
+- nolla tunnistettua hashia → **aito vika**: `inspectMigrations` ottaa `journal.slice(0, rivimäärä)` ja raportoi
+  upstream-migraatiot (testissä 0071 ja 0072) ajetuiksi, vaikka ne eivät ole ajettu; pendingiksi jää vain 9xxx-häntä.
+  `applyPendingMigrations` ajaa silloin tuon hännän uudelleen ja heittää lopuksi `Failed to apply pending migrations`:
+  virhe on äänekäs, mutta upstream-migraatioita ei ajeta ja fork-häntä ajetaan prodia vasten uudelleen. Testit:
+  `it.fails` (turvallinen käytös: `inspectMigrations` heittää tai pitää 0071 ja 0072 pendingeinä; kääntyy punaiseksi,
+  kun vika korjataan) ja tavallinen testi, joka lukitsee nykyisen äänekkään epäonnistumisen ilman että 0072 ajetaan.
   Realistinen laukaisija: kaikkien tiedostojen sisältö muuttuu kerralla (esim. rivinvaihtojen muunnos checkoutissa).
   Ehdotettu korjaus (ei tehty tässä tiketissä, ajuria ei muutettu): kun historiassa on rivejä mutta yksikään hash ei
   tunnistu, `loadAppliedMigrations` heittää virheen eikä arvaa `created_at`illa.

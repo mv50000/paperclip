@@ -22,7 +22,11 @@ export type ScratchTargetInput = {
   prodDatabase?: string;
   socketDir: string | undefined;
   envDatabaseUrl?: string | undefined;
+  /** Other libpq variables that can redirect createdb/dropdb/pg_restore away from the socket (pass process.env). */
+  env?: Record<string, string | undefined>;
 };
+
+const REDIRECTING_PG_ENV = ["PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGDATABASE", "PGPORT"] as const;
 
 /**
  * Fail closed: the dry run drops and recreates its target database, so the target must
@@ -40,6 +44,10 @@ export function scratchTargetViolations(input: ScratchTargetInput): string[] {
   }
   if (!input.socketDir || !input.socketDir.startsWith("/")) {
     violations.push("PGHOST must be an absolute unix socket directory (TCP targets are refused)");
+  }
+  if (input.socketDir?.includes(",")) violations.push("PGHOST must be a single socket directory (no comma list)");
+  for (const name of REDIRECTING_PG_ENV) {
+    if (input.env?.[name]) violations.push(`${name} is set; unset it (libpq tools and postgres.js would disagree on the target)`);
   }
   if (input.envDatabaseUrl) {
     const dbInUrl = databaseNameFromUrl(input.envDatabaseUrl);
@@ -75,7 +83,8 @@ export function checkPinnedForkHashes(
   files: Array<{ file: string; content: string }>,
   baseline: Record<string, string>,
 ): PinnedHashCheck {
-  const forkFiles = files.filter((entry) => isForkMigrationFile(entry.file));
+  // Fork files are the 9xxx files plus any file that was pinned by name (e.g. a fork migration in a free upstream slot).
+  const forkFiles = files.filter((entry) => isForkMigrationFile(entry.file) || entry.file in baseline);
   const result: PinnedHashCheck = { missingBaseline: [], changed: [], staleBaseline: [] };
   for (const { file, content } of forkFiles) {
     const expected = baseline[file];
@@ -217,4 +226,17 @@ export function analyzeJournal(entries: JournalEntry[]): JournalAnalysis {
     (entry) => !entry.tag.startsWith(FORK_MIGRATION_PREFIX) && entry.when < forkMax,
   ).length;
   return { entries: entries.length, maxWhen, maxWhenTag, nonMonotonic, upstreamBelowForkMax };
+}
+
+/**
+ * Scrub a database error message before it goes into the report: Postgres embeds offending row
+ * values in quotes (`invalid input syntax for type uuid: "…"`). Quoted text survives only after
+ * an identifier keyword (relation, column, table, ...). Only the first line is kept.
+ */
+export function redactDbError(message: string, maxLength = 200): string {
+  const firstLine = message.split("\n")[0] ?? "";
+  return firstLine
+    .replace(/(?<!\b(?:relation|column|table|constraint|index|function|type|schema|database|role|sequence)\s)"[^"]*"/gi, '"…"')
+    .replace(/'[^']*'/g, "'…'")
+    .slice(0, maxLength);
 }

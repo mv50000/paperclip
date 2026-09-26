@@ -4,7 +4,8 @@
  * Restores a prod dump into a scratch database, applies every pending migration with the
  * tree's own driver (packages/db/src/client.ts, so run it from the MERGED tree), and writes a
  * counts-only report: journal order, hash identity, data impact, lock/duration figures.
- * The report never contains row values (the dump holds prospect PII): only row counts and names.
+ * The report never contains personal data (the dump holds prospect PII): only row counts, names and
+ * a few configuration values; database error text is redacted.
  *
  * Usage (from the tree under test, as a user that may connect to the local Postgres socket):
  *   PGHOST=/var/run/postgresql PGUSER=paperclip \
@@ -18,6 +19,7 @@
  */
 import { execFile } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
@@ -30,6 +32,7 @@ import {
   forkTableReferencesIn,
   isForkMigrationFile,
   migrationSha256,
+  redactDbError,
   scratchTargetViolations,
   tablesCreatedIn,
   type JournalEntry,
@@ -65,7 +68,11 @@ function parseArgs(argv: string[]): Args {
       if (next === undefined) usage(`${flag} needs a value`);
       return next;
     };
-    if (flag === "--dump") args.dump = value();
+    if (flag === "--dump") {
+      const file = value();
+      if (file.startsWith("-")) usage("--dump must be a file path");
+      args.dump = path.resolve(file);
+    }
     else if (flag === "--database") args.database = value();
     else if (flag === "--report") args.report = value();
     else if (flag === "--keep-db") args.keepDb = true;
@@ -94,8 +101,9 @@ async function pgTool(tool: string, args: string[]): Promise<void> {
   try {
     await execFileAsync(tool, args, { env: process.env, maxBuffer: 16 * 1024 * 1024 });
   } catch (error) {
-    const stderr = String((error as { stderr?: string }).stderr ?? "").split("\n").slice(0, 15).join("\n");
-    throw new Error(`${tool} failed:\n${stderr}`);
+    // stderr can quote row values (COPY errors), so only a redacted first line reaches the report.
+    const stderr = String((error as { stderr?: string }).stderr ?? "");
+    throw new Error(`${tool} failed: ${redactDbError(stderr.split("\n").find((line) => line.trim()) ?? "no output")}`);
   }
 }
 
@@ -298,7 +306,7 @@ async function main(): Promise<void> {
   process.env.PGHOST = socketDir;
   process.env.PGUSER ??= "paperclip";
 
-  const violations = scratchTargetViolations({ database: args.database, socketDir, envDatabaseUrl: process.env.DATABASE_URL });
+  const violations = scratchTargetViolations({ database: args.database, socketDir, envDatabaseUrl: process.env.DATABASE_URL, env: process.env });
   if (violations.length > 0) {
     console.error(`REFUSED (fail closed):\n- ${violations.join("\n- ")}`);
     process.exit(2);
@@ -314,14 +322,16 @@ async function main(): Promise<void> {
   };
   const runStarted = Date.now();
   let freshDb: string | null = null;
-  let dropped = true;
+  const notDropped: string[] = [];
+  const openClients: postgres.Sql[] = [];
 
   try {
     // 1. Restore
     console.log(`Restoring dump into ${args.database} ...`);
     await recreateDatabase(args.database);
-    await pgTool("pg_restore", ["--no-owner", "--no-acl", "--dbname", args.database, args.dump]);
+    await pgTool("pg_restore", ["--no-owner", "--no-acl", "--dbname", args.database, "--", args.dump]);
     const sql = newSql(args.database);
+    openClients.push(sql);
     const [{ db }] = await sql<{ db: string }[]>`select current_database() as db`;
     if (db !== args.database) throw new Error(`connected to '${db}', expected '${args.database}'`);
 
@@ -330,14 +340,15 @@ async function main(): Promise<void> {
     const contents = await Promise.all(files.map(async (file) => ({ file, content: await readFile(`${migrationsDir}/${file}`, "utf8") })));
     const journal = (JSON.parse(await readFile(journalPath, "utf8")) as { entries: JournalEntry[] }).entries;
     const baseline = JSON.parse(await readFile(baselinePath, "utf8")) as Record<string, string>;
+    const isFork = (file: string) => isForkMigrationFile(file) || file in baseline;
     const hashByFile = new Map(contents.map(({ file, content }) => [file, migrationSha256(content)]));
     const fileByHash = new Map([...hashByFile].map(([file, hash]) => [hash, file]));
     const analysis = analyzeJournal(journal);
-    const forkTables = new Set(contents.filter((c) => isForkMigrationFile(c.file)).flatMap((c) => tablesCreatedIn(c.content)));
+    const forkTables = new Set(contents.filter((c) => isFork(c.file)).flatMap((c) => tablesCreatedIn(c.content)));
 
     out("# Migration dry-run report");
     out();
-    out(`Date: ${new Date().toISOString()}  ·  scratch db: \`${args.database}\`  ·  counts only, no row values.`);
+    out(`Date: ${new Date().toISOString()}  ·  scratch db: \`${args.database}\`  ·  counts and configuration values only, no personal data.`);
     out();
     out("## 1. Journal order and hash identity");
     out(`- Journal entries: ${journal.length}; migration files: ${files.length}; last tag: \`${journal[journal.length - 1]?.tag}\`.`);
@@ -357,14 +368,14 @@ async function main(): Promise<void> {
     const pinnedMissingInDb = Object.entries(baseline).filter(([, hash]) => !dbHashes.has(hash)).map(([file]) => file);
     out(`- Prod copy history rows: ${dbRows.length}; last created_at: ${dbRows[dbRows.length - 1]?.created_at}; rows whose hash matches no file in this tree: ${unresolved.length}.`);
     assertOk(unresolved.length === 0, "every prod history hash resolves to a migration file (otherwise client.ts falls back to created_at / partial resolution)");
-    const upstreamApplied = preInspect.appliedMigrations.filter((f) => !isForkMigrationFile(f));
+    const upstreamApplied = preInspect.appliedMigrations.filter((f) => !isFork(f));
     out(`- Upstream migrations already applied in the prod copy: ${upstreamApplied.length} (last: \`${upstreamApplied[upstreamApplied.length - 1] ?? "-"}\`; the fork tree itself ends at 0072).`);
     out(`- Pinned fork hashes absent from the prod history (would be replayed as pending): ${pinnedMissingInDb.join(", ") || "none"}.`);
     out(`- Driver view before the run: status \`${preInspect.status}\`, applied ${preInspect.appliedMigrations.length}, pending ${preInspect.status === "needsMigrations" ? preInspect.pendingMigrations.length : 0}.`);
     const pendingFiles = preInspect.status === "needsMigrations" ? preInspect.pendingMigrations : [];
-    const pendingForkFiles = pendingFiles.filter(isForkMigrationFile);
+    const pendingForkFiles = pendingFiles.filter(isFork);
     assertOk(pendingForkFiles.length === 0, `no fork 9xxx migration is pending before the run (pending fork: ${pendingForkFiles.join(", ") || "none"})`);
-    const upstreamPending = pendingFiles.filter((f) => !isForkMigrationFile(f));
+    const upstreamPending = pendingFiles.filter((f) => !isFork(f));
     out(`- Pending upstream migrations: ${upstreamPending.length} (${upstreamPending[0] ?? "-"} .. ${upstreamPending[upstreamPending.length - 1] ?? "-"}).`);
     const pendingContents = contents.filter((c) => pendingFiles.includes(c.file));
 
@@ -377,7 +388,7 @@ async function main(): Promise<void> {
     }
     out();
     out("### Upstream DDL touching fork tables");
-    const refs = pendingContents.filter((c) => !isForkMigrationFile(c.file)).flatMap((c) =>
+    const refs = pendingContents.filter((c) => !isFork(c.file)).flatMap((c) =>
       forkTableReferencesIn(c.content, forkTables).map((r) => ({ file: c.file, ...r })));
     if (refs.length === 0) out("- None: no pending upstream statement alters, drops or references a fork table.");
     for (const ref of refs) out(`- \`${ref.file}\` (${ref.via}) ${ref.table}: \`${ref.statement}\``);
@@ -385,7 +396,7 @@ async function main(): Promise<void> {
     out();
     out("### Name collisions: objects a pending upstream migration creates that already exist in the prod copy");
     const collisions: string[] = [];
-    for (const { file, content } of pendingContents.filter((c) => !isForkMigrationFile(c.file))) {
+    for (const { file, content } of pendingContents.filter((c) => !isFork(c.file))) {
       const created = createdObjectsIn(content);
       for (const table of created.tables) {
         if (await tableExists(sql, table)) collisions.push(`\`${file}\` creates table \`${table}\`, which exists (${before.get(table) ?? 0} rows)${forkTables.has(table) ? " [FORK TABLE]" : ""}`);
@@ -425,9 +436,10 @@ async function main(): Promise<void> {
 
     out();
     out("## 3. Run result");
-    assertOk(applyError === null, `applyPendingMigrations completed${applyError ? `: ${(applyError as Error).message.slice(0, 300)}` : ""}`);
+    assertOk(applyError === null, `applyPendingMigrations completed${applyError ? `: ${redactDbError((applyError as Error).message)}` : ""}`);
 
     const after = newSql(args.database);
+    openClients.push(after);
     const postInspect = await inspectMigrations(urlFor(args.database));
     assertOk(postInspect.status === "upToDate", `inspectMigrations reports upToDate after the run (pending: ${postInspect.status === "needsMigrations" ? postInspect.pendingMigrations.length : 0})`);
     const historyCount = await scalar(after, `select count(*)::text n from ${migrationTable}`);
@@ -500,18 +512,19 @@ async function main(): Promise<void> {
     }
     await after.end({ timeout: 2 });
   } catch (error) {
-    failures.push(`script error: ${(error as Error).message.slice(0, 400)}`);
-    out(`- FAIL: script error: ${(error as Error).message.slice(0, 400)}`);
+    failures.push(`script error: ${redactDbError((error as Error).message)}`);
+    out(`- FAIL: script error: ${redactDbError((error as Error).message)}`);
   } finally {
+    await Promise.all(openClients.map((client) => client.end({ timeout: 2 }).catch(() => {})));
     if (!args.keepDb) {
       for (const name of [args.database, freshDb].filter((n): n is string => Boolean(n))) {
         await dropDatabase(name).catch((e) => {
-          dropped = false;
+          notDropped.push(name);
           console.error(`could not drop ${name}: ${(e as Error).message}`);
         });
       }
       out();
-      out(dropped ? `Scratch database dropped: yes (${args.database}).` : `**Scratch database NOT dropped (${args.database}): contains prod data; run dropdb ${args.database}.**`);
+      out(notDropped.length === 0 ? `Scratch database dropped: yes (${args.database}).` : `**Scratch database NOT dropped (${notDropped.join(", ")}): contains prod data; run dropdb for each.**`);
     } else {
       out();
       out(`Scratch database kept: ${args.database} (contains prod data; drop it: dropdb ${args.database}).`);
@@ -522,7 +535,7 @@ async function main(): Promise<void> {
   out(failures.length === 0 ? "**Result: all assertions hold.**" : `**Result: ${failures.length} assertion(s) failed.**`);
   const text = report.join("\n");
   console.log(text);
-  if (args.report) await writeFile(args.report, `${text}\n`);
+  if (args.report) await writeFile(args.report, `${text}\n`, { mode: 0o600 });
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   analyzeJournal,
+  redactDbError,
   checkPinnedForkHashes,
   destructiveStatementsIn,
   forkTableReferencesIn,
@@ -30,6 +31,15 @@ describe("scratchTargetViolations", () => {
     expect(scratchTargetViolations({ database: "paperclip_migdryrun", socketDir: undefined })).not.toEqual([]);
   });
 
+  it("refuses libpq variables that redirect the tools away from the socket", () => {
+    for (const name of ["PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGDATABASE", "PGPORT"]) {
+      expect(
+        scratchTargetViolations({ database: "paperclip_migdryrun", socketDir: SOCKET, env: { [name]: "x" } }),
+      ).not.toEqual([]);
+    }
+    expect(scratchTargetViolations({ database: "paperclip_migdryrun", socketDir: `${SOCKET},db.internal` })).not.toEqual([]);
+  });
+
   it("refuses when DATABASE_URL names the scratch database", () => {
     expect(
       scratchTargetViolations({
@@ -56,6 +66,13 @@ describe("checkPinnedForkHashes", () => {
       "9002_rk9_y.sql",
     ]);
     expect(checkPinnedForkHashes([], baseline).staleBaseline).toEqual(["9001_rk9_x.sql"]);
+  });
+
+  it("also pins a fork migration that sits in an upstream number slot", () => {
+    const slot = { file: "0126_rk9_slot.sql", content: "SELECT 1;" };
+    const pinned = { "0126_rk9_slot.sql": migrationSha256(slot.content) };
+    expect(checkPinnedForkHashes([slot], pinned).changed).toEqual([]);
+    expect(checkPinnedForkHashes([{ ...slot, content: "SELECT 2;" }], pinned).changed).toHaveLength(1);
   });
 
   it("matches the pinned baseline for the real fork migrations", () => {
@@ -97,5 +114,18 @@ describe("analyzeJournal", () => {
     expect(result.upstreamBelowForkMax).toBe(3);
     expect(result.nonMonotonic.map((e) => e.tag)).toEqual(["0002_d"]);
     expect(result.maxWhenTag).toBe("9001_rk9_c");
+  });
+});
+
+describe("redactDbError", () => {
+  it("scrubs quoted values but keeps identifiers", () => {
+    expect(redactDbError('invalid input syntax for type uuid: "jane@example.com"')).toBe(
+      'invalid input syntax for type uuid: "…"',
+    );
+    expect(redactDbError('column "endpoint_id" referenced in foreign key constraint does not exist')).toBe(
+      'column "endpoint_id" referenced in foreign key constraint does not exist',
+    );
+    expect(redactDbError("duplicate key value violates unique constraint \"x\"\nDETAIL: Key (email)=(a@b.c) exists.")).not.toContain("a@b.c");
+    expect(redactDbError("bad value 'secret name'")).toBe("bad value '…'");
   });
 });

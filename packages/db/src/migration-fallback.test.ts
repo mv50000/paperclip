@@ -33,7 +33,8 @@ async function createDatabase(): Promise<string> {
     await dropper.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
     await dropper.end();
   });
-  return `postgres:///${name}`; // host from PGHOST
+  process.env.PGHOST ??= hostSocket; // postgres.js reads the socket directory from PGHOST
+  return `postgres:///${name}`;
 }
 
 const STRANDED_INDEX = "issues_active_stranded_issue_recovery_uq"; // created by 0072
@@ -104,19 +105,34 @@ describeEmbeddedPostgres("migration history identity (RK9-311)", () => {
 
   // KNOWN DEFECT (client.ts loadAppliedMigrations, created_at fallback): when no recorded hash
   // resolves (e.g. every file re-hashes differently after a line-ending rewrite), the driver takes
-  // the first `rows.length` journal entries as applied. Those are upstream entries that never ran,
-  // and it then treats the tail of the fork's 9xxx entries as pending. This test states the SAFE
-  // behavior and is expected to fail until the driver is fixed; then remove `.fails`.
-  it.fails("does not mark unexecuted upstream migrations as applied when no hash resolves", async () => {
+  // the first `rows.length` journal entries as applied. Those include upstream entries that never
+  // ran (0071, 0072 here), and the tail of the fork's 9xxx entries is reported as pending instead.
+  // Safe behavior is to fail closed or to keep 0071/0072 pending. Remove `.fails` once fixed.
+  it.fails("does not report never-run upstream migrations as applied when no hash resolves", async () => {
     const { url, sql } = await prodLikeDatabase();
     try {
       await sql.unsafe(`UPDATE ${MIGRATIONS} SET hash = 'unresolved-' || id`);
-      try {
-        await applyPendingMigrations(url);
-      } catch {
-        // A loud failure is acceptable; a silent skip is not.
-      }
-      expect(await indexPresent(sql)).toBe(true);
+      const safe = await inspectMigrations(url).then(
+        (state) =>
+          state.status === "needsMigrations" &&
+          state.pendingMigrations.includes("0071_default_hire_approval_off.sql") &&
+          state.pendingMigrations.includes("0072_large_sandman.sql"),
+        () => true, // throwing = failing closed
+      );
+      expect(safe).toBe(true);
+    } finally {
+      await sql.end();
+    }
+  }, 60_000);
+
+  // What saves prod today in that case: applyPendingMigrations replays the fork tail (9xxx, idempotent
+  // ones) and then throws "Failed to apply pending migrations". It never runs 0071/0072.
+  it("fails loudly, without running the skipped upstream migrations, when no hash resolves", async () => {
+    const { url, sql } = await prodLikeDatabase();
+    try {
+      await sql.unsafe(`UPDATE ${MIGRATIONS} SET hash = 'unresolved-' || id`);
+      await expect(applyPendingMigrations(url)).rejects.toThrow();
+      expect(await indexPresent(sql)).toBe(false);
     } finally {
       await sql.end();
     }
