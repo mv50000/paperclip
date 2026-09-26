@@ -202,6 +202,8 @@ tarkistukset on kirjattu Porraslokiin.
 
 ### 7. Rollback
 
+> **Älä käytä alla olevia komentoja.** `pg_restore --clean` jättää uuden version lisäämät sarakkeet ja taulut, eikä `git reset --hard` yksin kata versioimattomia tiedostoja. Käytä [cutover-runbookin](upgrade/cutover-runbook.md) osiota Rollback R1–R11.
+
 ```bash
 # Koodi: git reset --hard rk9/pre-upgrade-v2026.NNN.N   (tai Porraslokin SHA)
 # DB: pg_restore -d paperclip --clean /var/backups/paperclip-pre-upgrade-XXXXXXXX.dump
