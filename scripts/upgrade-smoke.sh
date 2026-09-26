@@ -32,7 +32,7 @@ for arg in "$@"; do
   case "$arg" in
     --offline) OFFLINE=1 ;;
     --fork-tests) FORK_TESTS=1 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     -*) echo "tuntematon valitsin: $arg" >&2; exit 2 ;;
     *) BASE_URL="$arg" ;;
   esac
@@ -142,9 +142,9 @@ check_http() {
   # Unsubscribe: tuntematon token palauttaa aina saman vahvistussivun eikä muuta dataa.
   expect "unsubscribe" "200" GET /u/upgrade-smoke-nonexistent-token 'peruuttanut'
 
-  # Risk management: tokenilla 200/403/404 (yritysrajaus), ilman 401/403. 404 ilman tokenia = ei mountattu.
+  # Risk management: tokenilla 200/403 (yritysrajaus), ilman 200/401/403. 404 = reittiä ei ole mountattu.
   if [[ ${#auth[@]} -gt 0 ]]; then
-    expect "risk-summary" "200 403 404" GET "/api/companies/$company/risks/summary" - "${auth[@]}"
+    expect "risk-summary" "200 403" GET "/api/companies/$company/risks/summary" - "${auth[@]}"
     expect "risk-board" "200 403" GET /api/board/risks - "${auth[@]}"
   else
     expect "risk-summary" "200 401 403" GET "/api/companies/$company/risks/summary" -
@@ -159,6 +159,10 @@ check_fork_tests() {
     [[ -z "$line" || "$line" == \#* ]] && continue
     if [[ -f "$REPO_ROOT/$line" ]]; then files+=("$line"); else fail "fork-testi puuttuu: $line"; fi
   done <"$list"
+  if [[ ${#files[@]} -eq 0 ]]; then
+    fail "fork-testit: lista on tyhjä"
+    return
+  fi
   if (cd "$REPO_ROOT" && npx vitest run "${files[@]}"); then
     ok "fork-testit (${#files[@]} tiedostoa)"
   else
