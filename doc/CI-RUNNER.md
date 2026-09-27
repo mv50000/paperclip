@@ -80,7 +80,8 @@ Varsinainen suoja on nämä viisi:
    token-komento tarkistaa asetuksen ja kieltäytyy muuten. Hyväksyjä lukee `.github/`-diffin
    ennen kuin hyväksyy ajon.
 3. **Runneri ajaa omana käyttäjänään** (`ghrunner-pc`). Käyttäjällä ei ole sudoa, docker-ryhmää
-   eikä pääsyä org-runnerien (`ghrunner`) hakemistoihin ja cacheihin. Docker on rootless.
+   eikä kirjoitusoikeutta org-runnerien (`ghrunner`) kotiin ja cacheihin. Asennusskripti
+   tarkistaa tämän ja varoittaa, jos cache on luettavissa. Docker on rootless.
 4. **Root ei aja eikä kirjoita mitään runner-hakemistossa asennuksen jälkeen.** Hakemisto
    on runner-käyttäjän kirjoitettavissa. Skripti kirjoittaa systemd-unitin suoraan
    (`svc.sh`ää ei ajeta rootina), päivittää `.env`:n runner-käyttäjänä, ja poisto tehdään
@@ -99,8 +100,9 @@ Varsinainen suoja on nämä viisi:
   koskee luotettua koodia, koska hook tappaa fork-jobin ennen sen ensimmäistä askelta.
   Poisto-ohje siivoaa käyttäjän kokonaan.
 - **Uusi `workflow_run`-workflow.** Hook sallii `workflow_run`in, koska se ajaa masterin koodia.
-  Jos tällainen workflow checkoutaa PR:n headin, fork-koodi ajaisi runnerilla.
-  `scripts/upgrade-smoke.sh --offline` kieltää checkoutin `workflow_run`-workflowssa.
+  Jos tällainen workflow hakee PR:n koodin tai artefaktit, fork-koodi ajaisi runnerilla.
+  `scripts/upgrade-smoke.sh --offline` kieltää `workflow_run`-workflowssa checkoutin,
+  `gh pr checkout`in, `refs/pull/`-haun ja `actions/download-artifact`in.
 
 Jos jäännösriskit eivät kelpaa, valitse Ubicloud (ks. alla). Sen runnerit ovat
 kertakäyttöisiä VM:iä, joten pysyvyysriskiä ei ole.
@@ -127,8 +129,9 @@ gh api repos/mv50000/paperclip/actions/permissions/fork-pr-contributor-approval
 Org-runnerit `builder`/`builder-fast` kuuluvat orgille `rk9-ai`. Henkilökohtaisen tilin
 repo ei näe niitä, joten tarvitaan repo-tason runneri. builder-02 on luonteva paikka:
 siellä on jo `ci-runners.slice`, rootless Docker -paketit ja Playwrightin kirjastot.
-Uusi runneri on neljäs slotti samassa slicessa, joten sen muisti kuuluu slicen yhteiseen
-kattoon.
+Uusi runneri on neljäs slotti samassa slicessa, joten runner-unitin muisti kuuluu slicen
+yhteiseen kattoon. Rootless Docker ajaa käyttäjän user-sessiossa slicen ulkopuolella, joten
+skripti antaa sille oman katon (`user-<uid>.slice`, 6 G).
 
 Repoa ei ole kloonattu build-hosteille. Kopioi skripti hostille, esim.
 `scp scripts/ci/install-paperclip-runner.sh <host>:`, ja aja se siellä.
@@ -178,6 +181,8 @@ Skripti tekee nämä:
 - kirjoittaa `.env`:iin hookin, `NODE_OPTIONS=--max-old-space-size=4096`,
   `PAPERCLIP_CI_NO_SUDO=1` ja rootless-`DOCKER_HOST`in
 - asentaa rootless Dockerin käyttäjän user-sessioon (linger päällä)
+- rajaa rootless Dockerin muistin: `user-<uid>.slice` saa `MemoryHigh=5G`, `MemoryMax=6G`
+  (dockerd ja kontit ajavat user-sessiossa, eivät runner-unitissa)
 - kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` (`KillMode=mixed`) drop-inillä
   `Slice=ci-runners.slice`, `MemoryHigh=6G`, `MemoryMax=7G`, `Restart=on-failure`,
   `OOMPolicy=continue`
@@ -247,11 +252,16 @@ sudo rm -f "/etc/systemd/system/$UNIT"
 sudo rm -rf "/etc/systemd/system/$UNIT.d"
 sudo systemctl daemon-reload
 # Käyttäjän kaikki prosessit, user-unitit ja rootless-kontit pois.
+RUID="$(id -u "$RUSER")"
 sudo loginctl disable-linger "$RUSER"
-sudo systemctl stop "user@$(id -u "$RUSER").service"
+sudo systemctl stop "user@${RUID:?}.service"
 sudo pkill -KILL -u "$RUSER" || true
 sudo rm -rf "/srv/ci/actions-runners/${NAME:?}"
-sudo userdel -r "$RUSER"   # poistaa kodin /srv/ci/ghrunner-pc; tarkista /etc/subuid ja /etc/subgid
+sudo find /tmp -maxdepth 1 -uid "$RUID" -exec rm -rf {} +
+sudo userdel -r "$RUSER"   # poistaa kodin /srv/ci/ghrunner-pc
+sudo sed -i "/^${RUSER}:/d" /etc/subuid /etc/subgid
+sudo rm -rf "/etc/systemd/system/user-${RUID}.slice.d" /usr/local/lib/paperclip-runner
+sudo systemctl daemon-reload
 ```
 
 Poista rekisteröinti GitHubista koneella, jolla `gh` on kirjautunut:

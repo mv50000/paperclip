@@ -84,7 +84,7 @@ NODE
 # --- CI-runner-vipu (RK9-350): jokainen jobi valitsee runnerinsa vars.CI_RUNNERista ---
 # Upstream-porras tuo `runs-on: ubuntu-latest` -rivit takaisin. Ks. doc/CI-RUNNER.md.
 # pull_request-workflowissa vivun pitää sisältää fork-suoja. pull_request_targetia ei sallita,
-# eikä workflow_run-workflow saa checkoutata koodia (se ajaisi fork-PR:n koodia runnerilla).
+# eikä workflow_run-workflow saa hakea PR:n koodia tai artefakteja (fork-koodi ajaisi runnerilla).
 check_ci_runners() {
   local errors=() f line uses labels
   for f in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
@@ -94,8 +94,8 @@ check_ci_runners() {
       errors+=("$name: pull_request_target ei ole sallittu")
     fi
     if grep -qE '^[[:space:]]*(-[[:space:]]*)?workflow_run[[:space:]]*:?[[:space:]]*$|on:.*workflow_run' "$f" \
-      && grep -q 'actions/checkout' "$f"; then
-      errors+=("$name: workflow_run-workflow ei saa checkoutata koodia")
+      && grep -qE 'actions/checkout|actions/download-artifact|gh pr checkout|refs/pull/' "$f"; then
+      errors+=("$name: workflow_run-workflow ei saa hakea PR:n koodia eikä artefakteja")
     fi
     local is_pr=0
     grep -qE '^[[:space:]]*(-[[:space:]]*)?pull_request[[:space:]]*:?[[:space:]]*$|on:.*pull_request' "$f" && is_pr=1

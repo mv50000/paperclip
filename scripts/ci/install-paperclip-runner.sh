@@ -77,6 +77,12 @@ fail() { echo "VIRHE: $*" >&2; exit 1; }
 warn() { echo "VAROITUS: $*" >&2; }
 info() { echo "==> $*"; }
 
+# Luo root-omisteinen hakemisto vain, jos sitä ei ole. install -d muuttaisi myös
+# olemassa olevan hakemiston omistajan ja oikeudet (org-runnerit asuvat samassa puussa).
+ensure_root_dir() {
+  [ -d "$1" ] || install -d -o root -g root -m 755 "$1"
+}
+
 # Arvot päätyvät polkuihin ja unit-nimeen, joten sallitaan vain turvalliset merkit.
 [[ "$RUNNER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$ ]] || fail "--name: sallittu [A-Za-z0-9._-], enintään 40 merkkiä."
 [[ "$RUNNER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "--user: virheellinen käyttäjänimi."
@@ -147,7 +153,7 @@ preflight() {
 ensure_user() {
   if ! id "$RUNNER_USER" >/dev/null 2>&1; then
     info "Luodaan järjestelmäkäyttäjä $RUNNER_USER (koti $RUNNER_HOME)."
-    install -d -o root -g root -m 755 "$(dirname "$RUNNER_HOME")"
+    ensure_root_dir "$(dirname "$RUNNER_HOME")"
     useradd --system --user-group --create-home --home-dir "$RUNNER_HOME" --shell /bin/bash "$RUNNER_USER"
     passwd -l "$RUNNER_USER" >/dev/null
     chmod 750 "$RUNNER_HOME"
@@ -161,6 +167,18 @@ ensure_user() {
       fail "$RUNNER_USER kuuluu ryhmään '$g'. Poista jäsenyys ennen jatkoa."
     fi
   done
+
+  # Org-runnerien (ghrunner) koti ja cachet eivät saa olla tämän käyttäjän
+  # kirjoitettavissa. Luettavuus on varoitus: vain saman repon koodi ajaa täällä.
+  local p
+  for p in /srv/ci/ghrunner /opt/cache/*; do
+    [ -e "$p" ] || continue
+    if as_runner test -w "$p"; then
+      fail "$RUNNER_USER voi kirjoittaa polkuun $p. Korjaa oikeudet ennen jatkoa."
+    elif as_runner test -r "$p" -a -x "$p"; then
+      warn "$RUNNER_USER voi lukea polun $p (org-runnerien cache)."
+    fi
+  done
 }
 
 # --- Job-started-hook ------------------------------------------------------
@@ -170,7 +188,7 @@ ensure_user() {
 # hook tappaa jobin Runner.Worker-prosessin, joten jobin askeleet eivät aja.
 install_hook() {
   info "Asennetaan job-started-hook $HOOK."
-  install -d -o root -g root -m 755 "$HOOK_DIR"
+  ensure_root_dir "$HOOK_DIR"
   local tmp
   tmp="$(mktemp)"
   cat >"$tmp" <<EOF
@@ -185,7 +203,8 @@ reject() {
   # Nollasta poikkeava paluuarvo ei yksin riitä: runneri ajaa silti askeleet,
   # joiden ehto on always() tai failure(). Runnerilla on yksi slotti, joten
   # tämän käyttäjän ainoa Runner.Worker on tämä jobi. Tapetaan se.
-  pkill -KILL -x -u "\$(id -u)" Runner.Worker
+  # Varalla: hook on Runner.Workerin suora lapsiprosessi.
+  pkill -KILL -x -u "\$(id -u)" Runner.Worker || kill -KILL "\$PPID"
   exit 1
 }
 
@@ -236,7 +255,7 @@ install_runner() {
 
   # Hakemisto luodaan tyhjänä (esitarkistus hylkää keskeneräisen), joten root
   # purkaa paketin hakemistoon, jota jobi ei ole vielä koskaan nähnyt.
-  install -d -o root -g root -m 755 "$BASE_DIR"
+  ensure_root_dir "$BASE_DIR"
   install -d -o "$RUNNER_USER" -g "$RUNNER_USER" -m 750 "$RUNNER_DIR"
   chmod 644 "$tmp/$tarball"
   chmod 711 "$tmp"
@@ -315,6 +334,14 @@ setup_rootless_docker() {
     info "Varataan subgid-alue $range käyttäjälle $RUNNER_USER."
     usermod --add-subgids "$range" "$RUNNER_USER"
   fi
+
+  # Rootless dockerd ja kontit ajavat user@<uid>.servicessä, eivät runner-unitissa.
+  # Ilman omaa kattoa ne ohittaisivat ci-runners.slicen ja runner-unitin MemoryMaxin.
+  local slice_dropin="/etc/systemd/system/user-${uid}.slice.d"
+  ensure_root_dir "$slice_dropin"
+  printf '[Slice]\nMemoryHigh=5G\nMemoryMax=6G\nCPUWeight=20\n' >"$slice_dropin/override.conf"
+  chmod 644 "$slice_dropin/override.conf"
+  systemctl daemon-reload
 
   loginctl enable-linger "$RUNNER_USER"
   systemctl start "user@${uid}.service"
