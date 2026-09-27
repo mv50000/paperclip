@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockSendEmail = vi.hoisted(() => vi.fn(async () => ({
   ok: true,
@@ -72,6 +72,13 @@ async function createApp(db: ReturnType<typeof makeDb>, actor: Record<string, un
 }
 
 describe("email routes", () => {
+  // The cold import of the route graph can take over 5 s on a loaded CI runner. Warm it here so the
+  // first test's timeout covers only the request; a timed-out request would otherwise keep running
+  // and call the send mock during the next test (RK9-314).
+  beforeAll(async () => {
+    await import("../routes/email.js");
+  }, 60_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
