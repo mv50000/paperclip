@@ -79,6 +79,9 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
   `recoveryStrictInProgressOnly`) ovat RK9 Custom -lohkossa (RK9-315).
 - `server/src/routes/issues.ts` — forkin RK9-76 tekee run id:stä valinnaisen checkoutissa ja interaktion
   luonnissa. Upstreamin interaktioiden resolve- ja withdraw-reitit vaativat sen yhä (`requireAgentRunId`, RK9-315).
+  817:n `assertCrossIssueInfluenceWithinRunCap` vaatii run id:n jokaiselta agentin kommentilta ja muutokselta;
+  fork päästää runittoman human proxy -agentin läpi oman yrityksensä issueihin. `services/issues.ts`:n
+  `assertKnownActorRunId` pysyy `addComment`issa (422 ennen tallennusta, RK9-76, RK9-315).
 - `scripts/provision-worktree.sh`
 - `server/src/services/index.ts`, `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/constants.ts` — exportit
 
