@@ -1238,7 +1238,52 @@ describe("IssueProperties", () => {
         mode: "normal",
         commentRequired: true,
         stages: [],
+        outcomeRequirements: [],
       },
+    });
+
+    act(() => root.unmount());
+  });
+
+  // --- RK9 Custom: enforced outcomes (SEC-91) survive a monitor change ---
+  it("keeps outcome requirements when clearing a monitor", async () => {
+    const onUpdate = vi.fn();
+    const outcomeRequirements = [
+      { kind: "work_product_present" as const, id: "req-1", workProductType: "pull_request" },
+    ];
+    const root = renderProperties(container, {
+      issue: createIssue({
+        status: "in_progress",
+        assigneeAgentId: "agent-1",
+        executionPolicy: createExecutionPolicy({
+          outcomeRequirements,
+          monitor: {
+            nextCheckAt: "2026-04-11T12:30:00.000Z",
+            notes: "Check deployment",
+            scheduledBy: "board",
+          },
+        }),
+      }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+    });
+    await flush();
+
+    const monitorTrigger = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Next check"));
+    await act(async () => {
+      monitorTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const clearButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Clear"));
+    act(() => {
+      clearButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith({
+      executionPolicy: expect.objectContaining({ outcomeRequirements }),
     });
 
     act(() => root.unmount());

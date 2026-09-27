@@ -871,6 +871,8 @@ export function IssueProperties({
         mode: basePolicy?.mode ?? issue.executionPolicy?.mode ?? "normal",
         commentRequired: true,
         stages: basePolicy?.stages ?? [],
+        // --- RK9 Custom: enforced outcomes (SEC-91) — setting or clearing a monitor keeps them ---
+        outcomeRequirements: basePolicy?.outcomeRequirements ?? issue.executionPolicy?.outcomeRequirements ?? [],
         ...(nextMonitor ? { monitor: nextMonitor } : {}),
       },
     });

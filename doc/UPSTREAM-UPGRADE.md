@@ -190,6 +190,7 @@ upstream tuo sen.
 | Cloud sync | ei konfiguroida (`enableCloudSync` pysyy `false`) | `false` | v2026.609.0, poistuu v2026.817.0:ssa (migraatio 0196) | instanssiasetus `experimental`, ei kirjoiteta |
 | Standard-trust-agentin hire-oikeus | vain board, CEO tai eksplisiittinen grantti; `requireBoardApprovalForNewAgents` yrityskohtaisesti (0071) | `canCreateAgents` päällä standard-trust-agenteille | v2026.916.1 | koodi: RK9 Custom -pinnaus `agent-permissions.ts`:ään, lukitsee `hire-approval-policy.test.ts` |
 | Proxy trust | `TRUST_PROXY=loopback`: Express luottaa vain paikalliseen nginxiin, joka luottaa vain edgeen `192.168.1.17` (`set_real_ip_from`); `PAPERCLIP_ALLOWED_HOSTNAMES` ja `PAPERCLIP_PUBLIC_URL` kattavat `paperclip.rk9.fi`:n (asetettu jo nyt) | `TRUST_PROXY` asettamatta | `TRUST_PROXY` v2026.720.0, guardin `X-Forwarded-Host`-rajaus v2026.916.0 (porras 916.1) | env, `export` tiedostossa `paperclip-start.sh` |
+| Cloud tenant -actor | `PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN` jää asettamatta: kun se on asetettu, `middleware/auth.ts` (`resolveCloudTenantActor`) luo `instance_admin`-actorin luotetuista headereista | asettamatta | v2026.512.0 | env, ei `paperclip-start.sh`:ssä |
 | Native runner | `enableNativeRunner=false`, `claude_local` pinnattu CLI-moottoriin (RK9-305) | `false` 831.1:ssä, `true` 916.0:sta alkaen | v2026.831.1 | instanssiasetus `experimental`, kirjoitetaan eksplisiittisesti |
 
 Tietoturvakorjaukset: #11400 (CWE-78, CLI-ohjeet, ensimmäinen tagi v2026.824.0) tulee portaassa v2026.831.1 ja #12776

@@ -33,7 +33,8 @@ jobs:
       - name: Block manual lockfile edits
         # --- RK9 Custom (RK9-312) --- upstream-porrasbranchit (upgrade/v*) tuovat upstreamin
         # lockfilen + pnpm install. Ks. doc/UPSTREAM-UPGRADE.md, "Ratkaise konfliktit".
-        if: github.head_ref != 'chore/refresh-lockfile' && !startsWith(github.head_ref, 'upgrade/v')
+        # Poikkeus koskee vain saman repon brancheja, ei fork-PR:iä.
+        if: github.head_ref != 'chore/refresh-lockfile' && !(startsWith(github.head_ref, 'upgrade/v') && github.event.pull_request.head.repo.full_name == github.repository)
         run: |
           # Diff the PR branch against its merge base so recent base-branch commits
           # do not masquerade as changes made by the PR itself.

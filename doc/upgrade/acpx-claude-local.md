@@ -33,7 +33,7 @@ Todennettu paikallisista upstream-tageista komennoilla `git show <tag>:<polku>`.
 
 | Tagi | Muutos | Vaikutus `claude_local`-ajoon |
 |---|---|---|
-| v2026.512.0 | Uusi erillinen adapteri `packages/adapters/acpx-local/` | Ei vaikutusta: `claude_local` ajaa yhä CLI:llä |
+| v2026.512.0 | Uusi erillinen adapteri `packages/adapters/acpx-local/` | `claude_local` ajaa yhä CLI:llä. `acpx_local` ohittaisi avainvartijan (ACP-runtime käynnistää agentin koko `process.env`:llä), joten `server/src/adapters/registry.ts` estää sen ajot ja ympäristötestit, kun palvelimen envissä on `ANTHROPIC_API_KEY` ilman opt-iniä (RK9-312, `acpx-host-key-guard.test.ts`). |
 | v2026.609.0, v2026.707.0 | `acpx-local` jatkuu | Ei vaikutusta |
 | **v2026.720.0** | ACP-moottori siirtyy `packages/adapter-utils/src/acpx-engine/`:iin. `claude_local` saa `engine`-kentän, oletus `acp`. Migraatio `0136_acpx_default_engine_migration.sql` kääntää `acpx_local`-rivit `claude_local`/`codex_local` + `engine: 'acp'`. | **Kriittinen porras.** Asettamaton `engine` ajaa ACP:llä. Jos ACP ei ole saatavilla, ajo putoaa CLI:lle (vain lokirivi, ei virhettä). |
 | v2026.831.0 | `enableNativeRunner` tulee instanssiasetuksiin, oletus `false` | Ei vaikutusta `claude_local`-ajoon |

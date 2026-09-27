@@ -80,3 +80,4 @@ packages/db/src/migration-dry-run-lib.test.ts
 packages/db/src/migration-fallback.test.ts
 server/src/__tests__/claude-local-adapter-environment.test.ts
 server/src/__tests__/claude-local-execute.test.ts
+server/src/__tests__/acpx-host-key-guard.test.ts

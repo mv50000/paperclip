@@ -375,7 +375,7 @@ ratkaisu on porras-PR:n kuvauksessa. Upstream siirsi `RoutineListRow`n komponent
 |---|---|---|
 | `pnpm-lock.yaml` | 27 | upstream + `pnpm install`; forkin riippuvuudet masterin versioissa |
 | `packages/db/src/migrations/meta/_journal.json` | 10 | upstream 0000–0083, sitten 9001–9010 (idx 84–93) |
-| `server/src/__tests__/heartbeat-process-recovery.test.ts` | 7 | forkin RK9-87-testit; upstreamin productive-continuation-testit pois (fork ohittaa ne) |
+| `server/src/__tests__/heartbeat-process-recovery.test.ts` | 7 | forkin RK9-87-testit; upstreamin productive-continuation-testit pois (recoveryn RK9-87-ohitus varjostaa requeuen). Huom.: upstreamin `heartbeat.ts` jonoaa silti yhden korjaavan ajon onnistuneen ajon jälkeen, jos issue jää `in_progress`-tilaan (successful-run handoff, `DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS = 1`), ja recovery eskaloi sen jälkeen `blocked`-tilaan. Kustannus on rajattu, ja system/company pause koskee ajoa. |
 | `server/src/routes/agents.ts` | 5 | upstreamin `normalizeIssueIdentifier` ja `normalizedRuntimeConfig`; `human_proxy`-adapterityyppi välitetään |
 | `server/src/services/issue-execution-policy.ts` | 4 | outcome requirements + upstreamin monitor |
 | `packages/adapters/claude-local/src/server/test.ts` | 3 | upstreamin sandbox-asennus + `considerHostEnv`; RK9-228-haarat säilyvät |
@@ -383,6 +383,14 @@ ratkaisu on porras-PR:n kuvauksessa. Upstream siirsi `RoutineListRow`n komponent
 | `server/src/services/recovery/service.ts` | 3 | handoff-eskalointi, sitten RK9-87-ohitus, sitten upstreamin continuation |
 | `ui/src/pages/Routines.tsx`, `Routines.test.tsx` | 3 + 3 | upstream; system pause -vartija `RoutineList.tsx`:ään |
 | muut 21 tiedostoa | 1–2 | ks. PR-kuvaus |
+
+Porras-512:n muut fork-sovitukset (ei konfliktia, verifierin löydökset):
+
+- `acpx_local` (uusi upstream-adapteri) käynnistää agentin koko `process.env`:llä. `server/src/adapters/registry.ts`
+  estää ajon ja ympäristötestin, kun palvelimen envissä on `ANTHROPIC_API_KEY` ilman opt-iniä (RK9-228).
+  Testi: `acpx-host-key-guard.test.ts`.
+- `ui/src/components/IssueProperties.tsx` `updateMonitor` säilyttää SEC-91-vaatimukset. Testi:
+  `IssueProperties.test.tsx` ("keeps outcome requirements when clearing a monitor").
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
