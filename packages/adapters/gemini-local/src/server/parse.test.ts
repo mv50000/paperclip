@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   parseGeminiJsonl,
-  isGeminiUnknownSessionError,
   describeGeminiFailure,
   detectGeminiAuthRequired,
   detectGeminiQuotaExhausted,
@@ -350,30 +349,30 @@ describe("parseGeminiJsonl", () => {
   });
 });
 
-describe("isGeminiUnknownSessionError", () => {
+describe("isGeminiSessionUnrecoverableError (fork cases, renamed from isGeminiUnknownSessionError upstream)", () => {
   it("detects 'unknown session'", () => {
-    expect(isGeminiUnknownSessionError("unknown session abc", "")).toBe(true);
+    expect(isGeminiSessionUnrecoverableError("unknown session abc", "")).toBe(true);
   });
 
   it("detects 'session ... not found'", () => {
-    expect(isGeminiUnknownSessionError("", "session abc not found")).toBe(true);
+    expect(isGeminiSessionUnrecoverableError("", "session abc not found")).toBe(true);
   });
 
   it("detects 'checkpoint ... not found'", () => {
-    expect(isGeminiUnknownSessionError("checkpoint chk_1 not found", "")).toBe(true);
+    expect(isGeminiSessionUnrecoverableError("checkpoint chk_1 not found", "")).toBe(true);
   });
 
   it("detects 'cannot resume'", () => {
-    expect(isGeminiUnknownSessionError("", "cannot resume session")).toBe(true);
+    expect(isGeminiSessionUnrecoverableError("", "cannot resume session")).toBe(true);
   });
 
   it("detects 'failed to resume'", () => {
-    expect(isGeminiUnknownSessionError("failed to resume", "")).toBe(true);
+    expect(isGeminiSessionUnrecoverableError("failed to resume", "")).toBe(true);
   });
 
   it("does not classify unrelated failures as stale sessions", () => {
-    expect(isGeminiUnknownSessionError("model overloaded", "")).toBe(false);
-    expect(isGeminiUnknownSessionError("", "rate limit exceeded")).toBe(false);
+    expect(isGeminiSessionUnrecoverableError("model overloaded", "")).toBe(false);
+    expect(isGeminiSessionUnrecoverableError("", "rate limit exceeded")).toBe(false);
   });
 });
 
