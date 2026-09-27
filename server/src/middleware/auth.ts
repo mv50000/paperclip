@@ -328,6 +328,16 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     if (!key) {
       const claims = verifyLocalAgentJwt(token);
       if (!claims) {
+        // --- RK9 Custom: fork routes authenticate their own static bearer keys (outreach sender,
+        // metrics/digest, inbound: OUTREACH_*_API_KEY). Those keys are not JWTs, so hand them to the
+        // route as an anonymous request, as before v2026.831.1. Never keep the implicit local-board
+        // actor here; JWT-shaped tokens that fail verification still get upstream's 401. ---
+        if (token.split(".").length !== 3) {
+          req.actor = { type: "none", source: "none" };
+          next();
+          return;
+        }
+        // --- end RK9 Custom ---
         next(unauthorized(invalidAgentTokenMessage(token)));
         return;
       }
