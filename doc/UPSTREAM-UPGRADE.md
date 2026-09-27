@@ -168,6 +168,16 @@ sudo apt-get install -y --allow-downgrades nodejs=22.22.1-1nodesource1
 # Asenna vanha preflight, koska uusi vaatii Node ≥ 24.11 (ks. cutover-runbook, "Node ja preflight rollbackissa").
 ```
 
+**Hostin globaalit natiivimoduulit (27.9.2026, [RK9-347](/RK9/issues/RK9-347)).** Node-majorin vaihto rikkoo moduulit, jotka on käännetty lähteestä (`build/Release/*.node`, ei N-API-prebuildia). paperclip-01:llä niitä oli kaksi: qmd:n ja obsidian-headlessin `better-sqlite3`. Etsi ne ennen vaihtoa ja käännä vaihdon jälkeen uudelleen:
+
+```bash
+sudo find /usr/lib/node_modules /var/lib/paperclip/.npm-global/lib/node_modules -name "*.node" -path "*build/Release*"
+cd /usr/lib/node_modules/@tobilu/qmd && sudo npm rebuild better-sqlite3 && sudo systemctl restart qmd-mcp mvvault-qmd-mcp
+sudo -u paperclip env HOME=/var/lib/paperclip bash -c 'cd ~/.npm-global/lib/node_modules/obsidian-headless && npm rebuild better-sqlite3'
+```
+
+Pitkäikäiset palvelut jäävät vanhalle Nodelle restarttiin asti: `for p in $(pgrep -x node); do sudo readlink /proc/$p/exe | grep -q deleted && sed "s#.*/##" /proc/$p/cgroup; done | sort -u`.
+
 Tuotannon 48 h seuranta Node 24:llä ilman muita fork-koodimuutoksia: heartbeat-ajot, outreach-lähetys ja saapuva posti
 (`resend-inbound`, `ses-inbound`) ilman regressioita. Toteutus on seurantatiketissä (RK9-303:n lapsi).
 
