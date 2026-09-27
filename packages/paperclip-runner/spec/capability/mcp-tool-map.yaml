@@ -21,10 +21,10 @@
     {
       "id": "mcp:paperclipInboxLite",
       "name": "paperclipInboxLite",
-      "description": "Get the current authenticated agent inbox-lite assignment list",
+      "description": "Get the compact list of issues assigned to the current agent (id, identifier, title, status, priority, wake hints) for heartbeat prioritization. Use this instead of paperclipListIssues at the start of a heartbeat; fall back to paperclipListIssues only when you need full issue objects. Not needed on a scoped wake that already names the issue.",
       "sourceKind": "legacy_mcp_alias",
       "sourceAnchor": "packages/mcp-server/src/tools.ts:296",
-      "expectedSemantics": "Get the current authenticated agent inbox-lite assignment list",
+      "expectedSemantics": "Get the compact list of issues assigned to the current agent (id, identifier, title, status, priority, wake hints) for heartbeat prioritization. Use this instead of paperclipListIssues at the start of a heartbeat; fall back to paperclipListIssues only when you need full issue objects. Not needed on a scoped wake that already names the issue.",
       "foldedInto": "eval:hb-inbox-lite-01",
       "evidenceId": "mcp:paperclipInboxLite"
     },
@@ -43,7 +43,7 @@
       "name": "paperclipListSkills",
       "description": "List the company skill library (all installed skills, independent of which agents have them enabled)",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:308",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:323",
       "expectedSemantics": "List the company skill library (all installed skills, independent of which agents have them enabled)",
       "foldedInto": "eval:rf-cskill-audit-01",
       "evidenceId": "mcp:paperclipListSkills"
@@ -53,7 +53,7 @@
       "name": "paperclipGetAgent",
       "description": "Get a single agent by id",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:314",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:329",
       "expectedSemantics": "Get a single agent by id",
       "foldedInto": "eval:rf-api-mgr-heartbeat-01",
       "evidenceId": "mcp:paperclipGetAgent"
@@ -63,7 +63,7 @@
       "name": "paperclipListIssues",
       "description": "List issues for a company with optional filters",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:323",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:338",
       "expectedSemantics": "List issues for a company with optional filters",
       "foldedInto": "eval:se-q-filters-01",
       "evidenceId": "mcp:paperclipListIssues"
@@ -73,7 +73,7 @@
       "name": "paperclipGetIssue",
       "description": "Get a single issue by UUID or identifier",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:338",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:353",
       "expectedSemantics": "Get a single issue by UUID or identifier",
       "foldedInto": "eval:se-get-issue-01",
       "evidenceId": "mcp:paperclipGetIssue"
@@ -81,10 +81,10 @@
     {
       "id": "mcp:paperclipGetHeartbeatContext",
       "name": "paperclipGetHeartbeatContext",
-      "description": "Get compact heartbeat context for an issue",
+      "description": "Get compact context for one issue: current state, ancestor summaries, goal/project info, and comment-cursor metadata, without replaying the whole comment thread. Call this before fetching comments; then use paperclipListComments with `after` for the delta. Does not return comment bodies.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:344",
-      "expectedSemantics": "Get compact heartbeat context for an issue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:359",
+      "expectedSemantics": "Get compact context for one issue: current state, ancestor summaries, goal/project info, and comment-cursor metadata, without replaying the whole comment thread. Call this before fetching comments; then use paperclipListComments with `after` for the delta. Does not return comment bodies.",
       "foldedInto": "eval:hb-context-01",
       "evidenceId": "mcp:paperclipGetHeartbeatContext"
     },
@@ -93,7 +93,7 @@
       "name": "paperclipListComments",
       "description": "List issue comments with incremental options",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:353",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:368",
       "expectedSemantics": "List issue comments with incremental options",
       "foldedInto": "eval:se-get-issue-01",
       "evidenceId": "mcp:paperclipListComments"
@@ -103,7 +103,7 @@
       "name": "paperclipGetComment",
       "description": "Get a specific issue comment by id",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:366",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:381",
       "expectedSemantics": "Get a specific issue comment by id",
       "foldedInto": "eval:hb-wake-comment-01",
       "evidenceId": "mcp:paperclipGetComment"
@@ -113,7 +113,7 @@
       "name": "paperclipListIssueApprovals",
       "description": "List approvals linked to an issue",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:373",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:388",
       "expectedSemantics": "List approvals linked to an issue",
       "foldedInto": "eval:ap-board-approval-01",
       "evidenceId": "mcp:paperclipListIssueApprovals"
@@ -123,7 +123,7 @@
       "name": "paperclipListDocuments",
       "description": "List issue documents",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:379",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:394",
       "expectedSemantics": "List issue documents",
       "foldedInto": "eval:dp-base-revision-01",
       "evidenceId": "mcp:paperclipListDocuments"
@@ -133,7 +133,7 @@
       "name": "paperclipGetDocument",
       "description": "Get one issue document by key",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:385",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:400",
       "expectedSemantics": "Get one issue document by key",
       "foldedInto": "eval:dp-base-revision-01",
       "evidenceId": "mcp:paperclipGetDocument"
@@ -143,7 +143,7 @@
       "name": "paperclipListDocumentRevisions",
       "description": "List revisions for an issue document",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:392",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:407",
       "expectedSemantics": "List revisions for an issue document",
       "foldedInto": "eval:dp-base-revision-01",
       "evidenceId": "mcp:paperclipListDocumentRevisions"
@@ -153,7 +153,7 @@
       "name": "paperclipListProjects",
       "description": "List projects in a company",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:402",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:417",
       "expectedSemantics": "List projects in a company",
       "foldedInto": "eval:rf-wf-project-setup-01",
       "evidenceId": "mcp:paperclipListProjects"
@@ -163,7 +163,7 @@
       "name": "paperclipGetProject",
       "description": "Get a project by id or company-scoped short reference",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:408",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:423",
       "expectedSemantics": "Get a project by id or company-scoped short reference",
       "foldedInto": "eval:rf-wf-project-setup-01",
       "evidenceId": "mcp:paperclipGetProject"
@@ -173,7 +173,7 @@
       "name": "paperclipGetIssueWorkspaceRuntime",
       "description": "Get the current execution workspace and runtime services for an issue, including service URLs",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:417",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:432",
       "expectedSemantics": "Get the current execution workspace and runtime services for an issue, including service URLs",
       "foldedInto": "eval:rf-iws-start-url-01",
       "evidenceId": "mcp:paperclipGetIssueWorkspaceRuntime"
@@ -183,7 +183,7 @@
       "name": "paperclipControlIssueWorkspaceServices",
       "description": "Start, stop, or restart the current issue execution workspace runtime services",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:423",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:438",
       "expectedSemantics": "Start, stop, or restart the current issue execution workspace runtime services",
       "foldedInto": "eval:rf-iws-start-url-01",
       "evidenceId": "mcp:paperclipControlIssueWorkspaceServices"
@@ -193,7 +193,7 @@
       "name": "paperclipWaitForIssueWorkspaceService",
       "description": "Wait until an issue execution workspace runtime service is running and has a URL when one is exposed",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:440",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:455",
       "expectedSemantics": "Wait until an issue execution workspace runtime service is running and has a URL when one is exposed",
       "foldedInto": "eval:rf-iws-target-restart-01",
       "evidenceId": "mcp:paperclipWaitForIssueWorkspaceService"
@@ -203,7 +203,7 @@
       "name": "paperclipListGoals",
       "description": "List goals in a company",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:466",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:481",
       "expectedSemantics": "List goals in a company",
       "foldedInto": "eval:su-parent-goal-01",
       "evidenceId": "mcp:paperclipListGoals"
@@ -213,7 +213,7 @@
       "name": "paperclipGetGoal",
       "description": "Get a goal by id",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:472",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:487",
       "expectedSemantics": "Get a goal by id",
       "foldedInto": "eval:su-parent-goal-01",
       "evidenceId": "mcp:paperclipGetGoal"
@@ -223,7 +223,7 @@
       "name": "paperclipListApprovals",
       "description": "List approvals in a company",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:478",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:493",
       "expectedSemantics": "List approvals in a company",
       "foldedInto": "eval:ap-approval-wake-01",
       "evidenceId": "mcp:paperclipListApprovals"
@@ -233,7 +233,7 @@
       "name": "paperclipCreateApproval",
       "description": "Create a board approval request, optionally linked to one or more issues",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:487",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:502",
       "expectedSemantics": "Create a board approval request, optionally linked to one or more issues",
       "foldedInto": "eval:ap-board-approval-01",
       "evidenceId": "mcp:paperclipCreateApproval"
@@ -243,7 +243,7 @@
       "name": "paperclipGetApproval",
       "description": "Get an approval by id",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:496",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:511",
       "expectedSemantics": "Get an approval by id",
       "foldedInto": "eval:ap-approval-wake-01",
       "evidenceId": "mcp:paperclipGetApproval"
@@ -253,7 +253,7 @@
       "name": "paperclipGetApprovalIssues",
       "description": "List issues linked to an approval",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:502",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:517",
       "expectedSemantics": "List issues linked to an approval",
       "foldedInto": "eval:ap-approval-wake-01",
       "evidenceId": "mcp:paperclipGetApprovalIssues"
@@ -263,7 +263,7 @@
       "name": "paperclipListApprovalComments",
       "description": "List comments for an approval",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:508",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:523",
       "expectedSemantics": "List comments for an approval",
       "foldedInto": "eval:ap-approval-deny-01",
       "evidenceId": "mcp:paperclipListApprovalComments"
@@ -271,30 +271,30 @@
     {
       "id": "mcp:paperclipCreateIssue",
       "name": "paperclipCreateIssue",
-      "description": "Create a new issue",
+      "description": "Create an issue, or a subtask when parentId is set. For delegated work set parentId and goalId; child issues inherit the parent's execution workspace. Set blockedByIssueIds for dependencies so the assignee is woken automatically when all blockers reach done (cancelled blockers do not count). Set billingCode for cross-team work. Assigning to a paused or terminated agent fails with 409.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:514",
-      "expectedSemantics": "Create a new issue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:529",
+      "expectedSemantics": "Create an issue, or a subtask when parentId is set. For delegated work set parentId and goalId; child issues inherit the parent's execution workspace. Set blockedByIssueIds for dependencies so the assignee is woken automatically when all blockers reach done (cancelled blockers do not count). Set billingCode for cross-team work. Assigning to a paused or terminated agent fails with 409.",
       "foldedInto": "eval:su-parent-goal-01",
       "evidenceId": "mcp:paperclipCreateIssue"
     },
     {
       "id": "mcp:paperclipUpdateIssue",
       "name": "paperclipUpdateIssue",
-      "description": "Patch an issue, optionally including a comment; include resume=true when intentionally requesting follow-up on resumable closed work",
+      "description": "Update issue fields (status, title, description, priority, assignee, projectId, goalId, parentId, billingCode, blockedByIssueIds) and optionally post a comment in the same request. blockedByIssueIds replaces the whole set — send [] to clear. Status semantics: `blocked` needs the unblock owner named in the comment; `in_review` hands work to a reviewer and is not a synonym for done; on an issue in an execution review stage, `done` = approve and `in_progress` = request changes, and actors other than currentParticipant get 422. For an issue already `done`, prefer paperclipAddComment — a PATCH can reopen it. Set resume=true only when intentionally restarting follow-up on closed work.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:521",
-      "expectedSemantics": "Patch an issue, optionally including a comment; include resume=true when intentionally requesting follow-up on resumable closed work",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:536",
+      "expectedSemantics": "Update issue fields (status, title, description, priority, assignee, projectId, goalId, parentId, billingCode, blockedByIssueIds) and optionally post a comment in the same request. blockedByIssueIds replaces the whole set — send [] to clear. Status semantics: `blocked` needs the unblock owner named in the comment; `in_review` hands work to a reviewer and is not a synonym for done; on an issue in an execution review stage, `done` = approve and `in_progress` = request changes, and actors other than currentParticipant get 422. For an issue already `done`, prefer paperclipAddComment — a PATCH can reopen it. Set resume=true only when intentionally restarting follow-up on closed work.",
       "foldedInto": "eval:st-done-comment-01",
       "evidenceId": "mcp:paperclipUpdateIssue"
     },
     {
       "id": "mcp:paperclipCheckoutIssue",
       "name": "paperclipCheckoutIssue",
-      "description": "Checkout an issue for an agent",
+      "description": "Claim an issue for the current agent before working on it; moves it to in_progress and links it to this run. Returns normally if this agent already holds it. Returns 409 when another agent owns it — pick different work, do not retry. expectedStatuses limits which statuses may be claimed (default todo/backlog/blocked; add in_review when addressing review feedback). On scoped wakes the harness may have already checked the issue out; call this only when switching issues or when the wake did not claim it.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:528",
-      "expectedSemantics": "Checkout an issue for an agent",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:543",
+      "expectedSemantics": "Claim an issue for the current agent before working on it; moves it to in_progress and links it to this run. Returns normally if this agent already holds it. Returns 409 when another agent owns it — pick different work, do not retry. expectedStatuses limits which statuses may be claimed (default todo/backlog/blocked; add in_review when addressing review feedback). On scoped wakes the harness may have already checked the issue out; call this only when switching issues or when the wake did not claim it.",
       "foldedInto": "eval:co-body-contract-01",
       "evidenceId": "mcp:paperclipCheckoutIssue"
     },
@@ -303,7 +303,7 @@
       "name": "paperclipReleaseIssue",
       "description": "Release an issue checkout",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:540",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:555",
       "expectedSemantics": "Release an issue checkout",
       "foldedInto": "eval:er-release-01",
       "evidenceId": "mcp:paperclipReleaseIssue"
@@ -311,10 +311,10 @@
     {
       "id": "mcp:paperclipAddComment",
       "name": "paperclipAddComment",
-      "description": "Add a comment to an issue; include resume=true when intentionally requesting follow-up on resumable closed work",
+      "description": "Post a markdown comment on an issue. Keep real newlines in the body — do not flatten markdown into one line. Link ticket ids as [PREFIX-N](/PREFIX/issues/PREFIX-N) and mention agents as [@Name](agent://<agent-id>); a mention wakes that agent and costs budget. Comments on closed issues are inert unless resume=true.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:546",
-      "expectedSemantics": "Add a comment to an issue; include resume=true when intentionally requesting follow-up on resumable closed work",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:561",
+      "expectedSemantics": "Post a markdown comment on an issue. Keep real newlines in the body — do not flatten markdown into one line. Link ticket ids as [PREFIX-N](/PREFIX/issues/PREFIX-N) and mention agents as [@Name](agent://<agent-id>); a mention wakes that agent and costs budget. Comments on closed issues are inert unless resume=true.",
       "foldedInto": "eval:cm-multiline-01",
       "evidenceId": "mcp:paperclipAddComment"
     },
@@ -323,7 +323,7 @@
       "name": "paperclipSuggestTasks",
       "description": "Create a suggest_tasks interaction on an issue",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:553",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:568",
       "expectedSemantics": "Create a suggest_tasks interaction on an issue",
       "foldedInto": "eval:ix-suggest-tasks-01",
       "evidenceId": "mcp:paperclipSuggestTasks"
@@ -333,7 +333,7 @@
       "name": "paperclipAskUserQuestions",
       "description": "Create an ask_user_questions interaction on an issue",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:565",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:580",
       "expectedSemantics": "Create an ask_user_questions interaction on an issue",
       "foldedInto": "eval:ix-questions-01",
       "evidenceId": "mcp:paperclipAskUserQuestions"
@@ -341,10 +341,10 @@
     {
       "id": "mcp:paperclipRequestConfirmation",
       "name": "paperclipRequestConfirmation",
-      "description": "Create a request_confirmation interaction on an issue",
+      "description": "Ask the board/user for an explicit yes/no decision on an issue instead of asking in markdown. For plan approval, target the latest `plan` document revision and use idempotencyKey confirmation:{issueId}:plan:{revisionId}, then wait for acceptance before creating implementation subtasks. continuationPolicy wake_assignee resumes you only after acceptance. supersedeOnUserComment makes a later user comment invalidate the pending request.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:577",
-      "expectedSemantics": "Create a request_confirmation interaction on an issue",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:592",
+      "expectedSemantics": "Ask the board/user for an explicit yes/no decision on an issue instead of asking in markdown. For plan approval, target the latest `plan` document revision and use idempotencyKey confirmation:{issueId}:plan:{revisionId}, then wait for acceptance before creating implementation subtasks. continuationPolicy wake_assignee resumes you only after acceptance. supersedeOnUserComment makes a later user comment invalidate the pending request.",
       "foldedInto": "eval:ix-confirmation-plan-01",
       "evidenceId": "mcp:paperclipRequestConfirmation"
     },
@@ -353,7 +353,7 @@
       "name": "paperclipRequestCheckboxConfirmation",
       "description": "Create a request_checkbox_confirmation interaction on an issue",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:589",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:604",
       "expectedSemantics": "Create a request_checkbox_confirmation interaction on an issue",
       "foldedInto": "eval:ix-checkbox-01",
       "evidenceId": "mcp:paperclipRequestCheckboxConfirmation"
@@ -363,7 +363,7 @@
       "name": "paperclipUpsertIssueDocument",
       "description": "Create or update an issue document",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:601",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:616",
       "expectedSemantics": "Create or update an issue document",
       "foldedInto": "eval:dp-plan-doc-01",
       "evidenceId": "mcp:paperclipUpsertIssueDocument"
@@ -373,7 +373,7 @@
       "name": "paperclipRestoreIssueDocumentRevision",
       "description": "Restore a prior revision of an issue document",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:612",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:627",
       "expectedSemantics": "Restore a prior revision of an issue document",
       "foldedInto": "eval:dp-base-revision-01",
       "evidenceId": "mcp:paperclipRestoreIssueDocumentRevision"
@@ -383,7 +383,7 @@
       "name": "paperclipLinkIssueApproval",
       "description": "Link an approval to an issue",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:627",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:642",
       "expectedSemantics": "Link an approval to an issue",
       "foldedInto": "eval:ap-board-approval-01",
       "evidenceId": "mcp:paperclipLinkIssueApproval"
@@ -393,7 +393,7 @@
       "name": "paperclipUnlinkIssueApproval",
       "description": "Unlink an approval from an issue",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:636",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:651",
       "expectedSemantics": "Unlink an approval from an issue",
       "foldedInto": "eval:ap-board-approval-01",
       "evidenceId": "mcp:paperclipUnlinkIssueApproval"
@@ -403,7 +403,7 @@
       "name": "paperclipApprovalDecision",
       "description": "Approve, reject, request revision, or resubmit an approval",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:646",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:661",
       "expectedSemantics": "Approve, reject, request revision, or resubmit an approval",
       "foldedInto": "eval:ap-approval-wake-01",
       "evidenceId": "mcp:paperclipApprovalDecision"
@@ -413,7 +413,7 @@
       "name": "paperclipAddApprovalComment",
       "description": "Add a comment to an approval",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:668",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:683",
       "expectedSemantics": "Add a comment to an approval",
       "foldedInto": "eval:ap-approval-deny-01",
       "evidenceId": "mcp:paperclipAddApprovalComment"
@@ -421,10 +421,10 @@
     {
       "id": "mcp:paperclipApiRequest",
       "name": "paperclipApiRequest",
-      "description": "Make a JSON request to an existing Paperclip /api endpoint for unsupported operations",
+      "description": "Escape hatch for Paperclip API endpoints that have no dedicated tool. path is relative to /api and must start with /. jsonBody is a JSON string. Prefer the dedicated tools when one exists — this tool performs no schema validation, so mistakes surface only as server errors.",
       "sourceKind": "legacy_mcp_alias",
-      "sourceAnchor": "packages/mcp-server/src/tools.ts:677",
-      "expectedSemantics": "Make a JSON request to an existing Paperclip /api endpoint for unsupported operations",
+      "sourceAnchor": "packages/mcp-server/src/tools.ts:692",
+      "expectedSemantics": "Escape hatch for Paperclip API endpoints that have no dedicated tool. path is relative to /api and must start with /. jsonBody is a JSON string. Prefer the dedicated tools when one exists — this tool performs no schema validation, so mistakes surface only as server errors.",
       "foldedInto": "eval:rf-api-404-report-01",
       "evidenceId": "mcp:paperclipApiRequest"
     }

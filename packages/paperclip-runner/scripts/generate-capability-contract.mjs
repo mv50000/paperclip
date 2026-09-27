@@ -70,13 +70,22 @@ async function readSkillHeadings(paths) {
   return rows;
 }
 
+// --- RK9 Custom (RK9-17): fork-only tools in packages/mcp-server/src/tools.ts ---
+const RK9_FORK_MCP_TOOLS = new Set(["paperclipRecallKnowledge"]);
+// --- /RK9 Custom ---
+
 async function readLegacyTools() {
   const path = "packages/mcp-server/src/tools.ts";
   const contents = await readFile(resolve(repositoryRoot, path), "utf8");
-  return [...contents.matchAll(/makeTool\(\s*\n?\s*"(paperclip[A-Za-z0-9]+)"/g)].map((match) => ({
-    name: match[1],
-    sourceAnchor: sourceAnchor(path, contents.slice(0, match.index).split("\n").length, match[1]),
-  }));
+  return [...contents.matchAll(/makeTool\(\s*\n?\s*"(paperclip[A-Za-z0-9]+)"/g)]
+    // --- RK9 Custom (RK9-17, RK9-317): fork-only MCP tools are not part of upstream's legacy
+    // replacement map; the native runner that consumes this contract is off in RK9. ---
+    .filter((match) => !RK9_FORK_MCP_TOOLS.has(match[1]))
+    // --- /RK9 Custom ---
+    .map((match) => ({
+      name: match[1],
+      sourceAnchor: sourceAnchor(path, contents.slice(0, match.index).split("\n").length, match[1]),
+    }));
 }
 
 function parseCase(entry, group, contract) {

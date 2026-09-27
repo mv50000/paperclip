@@ -157,8 +157,15 @@ function parseCase(source, sourceAnchor) {
   };
 }
 
+// --- RK9 Custom (RK9-17, RK9-317): fork-only MCP tools stay out of upstream's legacy alias
+// inventory; the native runner that consumes it is off in RK9. ---
+const RK9_FORK_MCP_TOOLS = new Set(["paperclipRecallKnowledge"]);
+// --- /RK9 Custom ---
+
 function parseMcpTools(source) {
-  return [...source.matchAll(/makeTool\(\s*"([^"]+)"\s*,\s*"([^"]+)"/g)].map((match) => {
+  return [...source.matchAll(/makeTool\(\s*"([^"]+)"\s*,\s*"([^"]+)"/g)]
+    .filter((match) => !RK9_FORK_MCP_TOOLS.has(match[1])) // RK9 Custom, see above
+    .map((match) => {
     const [name, description] = [match[1], match[2]];
     const foldedInto = legacyMcpFoldTargets[name];
     return {
