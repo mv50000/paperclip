@@ -9,8 +9,9 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 | Asia | Arvo |
 |---|---|
 | Pre-upgrade-SHA (`origin/master`) | `9ed8e7704bd49da4064499de8477ae0a42e593e7` |
+| Freeze päivitetty (porras 512, RK9-312) | `3e7ff932008e8feb99e45553ab0ba74945417c9e` (2026-09-27), commitit 143–159 alla |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
-| Ei-merge-committeja `d0bdbe11a..origin/master` | 142 |
+| Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
 | Koemerge `origin/master` + `v2026.916.1` | 93 konfliktitiedostoa (ks. alla) |
 | Forkin omat vitest-tiedostot | 69 tiedostoa, 752 testiä — lista `doc/upgrade/fork-tests.txt` |
@@ -90,7 +91,7 @@ eivät muuta ajonaikaista käytöstä.
 
 Tarkistus: `scripts/upgrade-smoke.sh --offline` (järjestys, `idx`, tiedostot, ei upstream-rivejä 9xxx:n jälkeen).
 
-## Commitit (142, vanhin ensin)
+## Commitit (159, vanhin ensin)
 
 Kyky on commitin pääkyky; sulkeissa oleva "+" nimeää toissijaisen kyvyn. Tiedostoista näytetään
 neljä ensimmäistä. Verifiointi on joko commitin oma yhä olemassa oleva testi tai manuaalinen
@@ -240,6 +241,23 @@ tarkistus.
 | 140 | `486ac30ee` | feat(outreach): count an unthreadable reply instead of losing it silently (RK9-235) (#104) | outreach (+ email) | `docs/implementation-notes/outreach-inbound.md`, `docs/implementation-notes/outreach-metrics.md`, `server/src/__tests__/outreach-inbound-logic.test.ts`, `server/src/__tests__/outreach-inbound-unmatched-reply.test.ts` (+2) | `npx vitest run server/src/__tests__/outreach-inbound-logic.test.ts server/src/__tests__/outreach-inbound-unmatched-reply.test.ts` |
 | 141 | `82a394fb6` | fix(infra): stop dropping SES bounce DSNs on a dangling nested MIME boundary (RK9-236) (#105) | email/support/escalation (+ outreach) | `infra/ses-forwarder/.gitignore`, `infra/ses-forwarder/README.md`, `infra/ses-forwarder/deploy.sh`, `infra/ses-forwarder/fixtures/virus-quarantine-dsn.eml` (+3) | _manuaalinen:_ smoke: SES/Resend inbound -tarkistus; manuaalinen: yksi testiviesti harjoitusinstanssin SES-reitille |
 | 142 | `9ed8e7704` | feat(claude-local): add Claude Opus 5.5 to the model list and drift allow-list (#106) | claude-local | `packages/adapters/claude-local/src/index.ts`, `server/src/services/risk-monitors.ts` | _manuaalinen:_ yksi claude_local-heartbeat; tarkista ettei ANTHROPIC_API_KEY periydy (RK9-228) |
+| 143 | `623789953` | test(claude-local): lock RK9-228 billing-key guard for the ACPX upgrade steps (RK9-305) (#107) | claude-local | `doc/upgrade/acpx-claude-local.md`, `packages/adapter-utils/src/server-utils.ts`, `packages/adapters/claude-local/src/server/execute.ts`, `packages/adapters/claude-local/src/server/host-env.ts` (+5) | `npx vitest run server/src/__tests__/claude-local-adapter-environment.test.ts server/src/__tests__/claude-local-execute.test.ts server/src/__tests__/risk-monitors.test.ts` |
+| 144 | `f4ce112a8` | chore(upgrade): add RK9 Custom markers to upstream-merge hotspots (RK9-304) (#109) | ci/tooling | `server/src/app.ts`, `server/src/index.ts`, `server/src/routes/issues.ts`, `server/src/services/heartbeat.ts` (+3) | _manuaalinen:_ ei ajonaikaista käytöstä — tarkista, että merkit säilyvät mergessä |
+| 145 | `b847acd30` | docs(upgrade): baseline regression matrix, upgrade smoke script and runbook refresh (RK9-304) (#108) | docs (+ ci/tooling) | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/fork-tests.txt`, `doc/upgrade/regression-matrix.md`, `scripts/upgrade-smoke.sh` | `scripts/upgrade-smoke.sh --offline` |
+| 146 | `c6f22bd0d` | docs(upgrade): defaults-hardening checklist and hire/webhook guard tests (RK9-309) (#110) | core api (+ email) | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/defaults-hardening.md`, `doc/upgrade/fork-tests.txt`, `server/src/__tests__/hire-approval-policy.test.ts` (+1) | `npx vitest run server/src/__tests__/hire-approval-policy.test.ts server/src/__tests__/resend-inbound-route.test.ts` |
+| 147 | `b15ca00de` | docs(upgrade): heartbeat/recovery fork-fix decision table and system-pause threshold test (RK9-308) (#113) | heartbeat | `doc/UPSTREAM-UPGRADE.md`, `doc/regression/heartbeat-recovery-fork-inventory.md`, `doc/upgrade/fork-tests.txt`, `server/src/__tests__/system-pause-threshold.test.ts` | `npx vitest run server/src/__tests__/system-pause-threshold.test.ts` |
+| 148 | `35adb45d9` | feat(upgrade): rehearsal instance with netns egress isolation and rollback drill (RK9-306) (#111) | ci/tooling | `doc/UPSTREAM-UPGRADE.md`, `scripts/upgrade-rehearsal.sh` | _manuaalinen:_ `scripts/upgrade-rehearsal.sh <ref>` + `smoke` + `rollback` |
+| 149 | `460a637d4` | fix(upgrade): rehearsal server starts — TMPDIR and plugin-sdk build (RK9-306) (#114) | ci/tooling | `scripts/upgrade-rehearsal.sh` | _manuaalinen:_ harjoituspalvelin käynnistyy (`scripts/upgrade-rehearsal.sh <ref>`) |
+| 150 | `d86511d1c` | feat(upgrade): deploy/rollback-työkalut, outreach-ikkunaraportti ja cutover-runbook (RK9-307) (#112) | ci/tooling (+ outreach) | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/cutover-runbook.md`, `scripts/lib-pg-url-test.sh`, `scripts/lib-pg-url.sh` (+8) | `bash scripts/lib-pg-url-test.sh` |
+| 151 | `b968359a3` | docs(upgrade): upstream refs per row and missing commits in heartbeat fork inventory (RK9-336) (#115) | docs | `doc/regression/heartbeat-recovery-fork-inventory.md` | _manuaalinen:_ ei ajonaikaista käytöstä — tarkista linkit |
+| 152 | `24f1f07b1` | docs(upgrade): heartbeat fork inventory — explicit file list, repro command, 10 missing commits (RK9-337) (#116) | docs | `doc/regression/heartbeat-recovery-fork-inventory.md` | _manuaalinen:_ ei ajonaikaista käytöstä — tarkista linkit |
+| 153 | `32f03a868` | feat(db): migration dry-run tool, fork hash pinning, 916.1 trial-merge findings (RK9-311) (#117) | migrations 9001-9010 | `doc/UPSTREAM-UPGRADE.md`, `package.json`, `packages/db/package.json`, `packages/db/scripts/migration-dry-run.ts` (+6) | `npx vitest run packages/db/src/migration-dry-run-lib.test.ts packages/db/src/migration-fallback.test.ts` + `pnpm --filter @paperclipai/db check:migrations` |
+| 154 | `d80243681` | RK9-310: Node 24 -valmistelu — CI, dokumentaatio ja harjoitustodiste (#118) | ci/tooling | `.github/workflows/e2e.yml`, `.github/workflows/refresh-lockfile.yml`, `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/cutover-runbook.md` (+1) | _manuaalinen:_ PR-checkit ajautuvat Node 24:llä |
+| 155 | `57881ed99` | fix(db): migration driver throws when no hash resolves (RK9-348) (#119) | migrations 9001-9010 | `doc/UPSTREAM-UPGRADE.md`, `packages/db/src/client.ts`, `packages/db/src/migration-fallback.test.ts` | `npx vitest run packages/db/src/migration-fallback.test.ts` |
+| 156 | `1db844938` | feat(outreach): RK9 template — per-template link host and user message (RK9-349) (#120) | outreach | `docs/implementation-notes/outreach-enrichment.md`, `docs/outreach/templates/rk9.md`, `packages/shared/src/constants.ts`, `server/src/__tests__/outreach-draft-logic.test.ts` (+3) | `npx vitest run server/src/__tests__/outreach-draft-logic.test.ts server/src/__tests__/outreach-quality-gate.test.ts` |
+| 157 | `b50a83d24` | outreach: AI-luonnokset Opus 5.5:llä (effort medium) (#121) | outreach | `server/src/__tests__/outreach-draft-logic.test.ts`, `server/src/services/outreach/draft.ts` | `npx vitest run server/src/__tests__/outreach-draft-logic.test.ts` |
+| 158 | `b73e6611b` | fix(outreach): rk9 template B — sell maintenance, never claim the site is broken (RK9-349) (#122) | outreach (docs) | `docs/outreach/templates/rk9.md` | _manuaalinen:_ ei ajonaikaista käytöstä — pohjateksti |
+| 159 | `3e7ff9320` | ci: move fork CI behind vars.CI_RUNNER lever (RK9-350) (#123) | ci/tooling | `.github/workflows/ai-auto-merge.yml`, `.github/workflows/deploy-dev.yml`, `.github/workflows/docker.yml`, `.github/workflows/e2e.yml` (+8) | `scripts/upgrade-smoke.sh --offline` (runner-vipu-tarkistus) |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 
@@ -345,6 +363,26 @@ Yleissääntö: upstreamin koodi ensin, sitten forkin lohko `// --- RK9 Custom -
 | 91 | `.github/workflows/pr.yml` | 1 | ci/tooling | Upstreamin versio ensin; forkin rivit `# --- RK9 Custom ---` -merkin alle. |
 | 92 | `ui/src/pages/InstanceSettings.tsx` | 0 (modify/delete) | heartbeat | Upstream poisti tai siirsi tiedoston. Siirrä forkin system pause- ja concurrency-asetukset upstreamin uuteen asetusnäkymään `// --- RK9 Custom ---` -merkin alle. |
 | 93 | `skills/paperclip-dev/SKILL.md` | 0 (modify/delete) | skills, github-webhooks | Upstreamin teksti ensin; forkin lisäykset omaan osioon `<!-- RK9 Custom -->` -merkin alle. |
+
+## Konfliktit portaassa 512 (`origin/master` `3e7ff9320` + `v2026.512.0`, RK9-312)
+
+Todellinen merge 2026-09-27: 31 konfliktitiedostoa (koemerge 916.1:een antoi 93). `server/src/app.ts` ja
+`server/src/index.ts` automergautuivat, ja niiden RK9 Custom -merkit säilyivät (15 ja 9). Tiedostokohtainen
+ratkaisu on porras-PR:n kuvauksessa. Upstream siirsi `RoutineListRow`n komponenttiin
+`ui/src/components/RoutineList.tsx`, joten forkin system pause -vartija on nyt siellä.
+
+| Tiedosto | Lohkoja | Ratkaisu |
+|---|---|---|
+| `pnpm-lock.yaml` | 27 | upstream + `pnpm install`; forkin riippuvuudet masterin versioissa |
+| `packages/db/src/migrations/meta/_journal.json` | 10 | upstream 0000–0083, sitten 9001–9010 (idx 84–93) |
+| `server/src/__tests__/heartbeat-process-recovery.test.ts` | 7 | forkin RK9-87-testit; upstreamin productive-continuation-testit pois (fork ohittaa ne) |
+| `server/src/routes/agents.ts` | 5 | upstreamin `normalizeIssueIdentifier` ja `normalizedRuntimeConfig`; `human_proxy`-adapterityyppi välitetään |
+| `server/src/services/issue-execution-policy.ts` | 4 | outcome requirements + upstreamin monitor |
+| `packages/adapters/claude-local/src/server/test.ts` | 3 | upstreamin sandbox-asennus + `considerHostEnv`; RK9-228-haarat säilyvät |
+| `server/src/services/heartbeat.ts` | 3 | molemmat (importit, idle-timer-funktio + retry-now) |
+| `server/src/services/recovery/service.ts` | 3 | handoff-eskalointi, sitten RK9-87-ohitus, sitten upstreamin continuation |
+| `ui/src/pages/Routines.tsx`, `Routines.test.tsx` | 3 + 3 | upstream; system pause -vartija `RoutineList.tsx`:ään |
+| muut 21 tiedostoa | 1–2 | ks. PR-kuvaus |
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

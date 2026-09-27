@@ -75,3 +75,8 @@ server/src/services/knowledge-recall.test.ts
 server/src/services/qmd-mcp-client.test.ts
 server/src/services/qmd-orphan-watchdog.test.ts
 server/src/services/webhook-monitor-alerting.test.ts
+# Lisätty portaassa 512 (RK9-312): freeze 9ed8e7704..3e7ff9320. claude-local-tiedostot ovat upstreamin, forkin RK9-228-tapaukset niissä.
+packages/db/src/migration-dry-run-lib.test.ts
+packages/db/src/migration-fallback.test.ts
+server/src/__tests__/claude-local-adapter-environment.test.ts
+server/src/__tests__/claude-local-execute.test.ts

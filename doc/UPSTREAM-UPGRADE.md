@@ -469,6 +469,16 @@ git tag "rk9/pre-upgrade-v2026.NNN.N" "$PRE"
 git push origin "rk9/pre-upgrade-v2026.NNN.N"
 ```
 
+Päivitä regressiomatriisi ennen mergeä (RK9-312). Lisää `doc/upgrade/regression-matrix.md`:n
+committaulukkoon kaikki fork-commitit edellisen jäädytyksen jälkeen:
+
+```bash
+git log --no-merges --reverse --format='%h %s' <edellinen-freeze>..origin/master
+```
+
+Päivitä samalla Lähtötila-taulukon freeze-SHA ja lisää portaan todellinen konfliktilista.
+Lisää uudet forkin testitiedostot `doc/upgrade/fork-tests.txt`:hen.
+
 Aja lähtötilan savutesti: `scripts/upgrade-smoke.sh --offline --fork-tests`.
 Aja harjoitusinstanssi porrasrefillä (osio "Harjoitusinstanssi") ennen mergeä:
 `sudo -u paperclip scripts/upgrade-rehearsal.sh <ref>`, sen jälkeen `smoke` ja kerran `rollback`.
@@ -492,7 +502,10 @@ git merge v2026.NNN.N --no-commit
 
 - Journal (`_journal.json`): upstream-migraatiot ensin, custom 9001+ jälkeen
 - Hotspot-tiedostot: pidä molemmat puolet, upstream ylös, custom merkin alle
-- `pnpm-lock.yaml`: hyväksy upstream, aja `pnpm install`
+- `pnpm-lock.yaml`: hyväksy upstream, aja `pnpm install`. Pidä forkin omat riippuvuudet masterin
+  versioissa: pinnaa ne hetkeksi tarkkaan versioon, aja `pnpm install`, palauta `^`-specifier ja aja
+  `pnpm install` uudelleen. Lockfile saa muuttua vain `upgrade/v*`-branchissa: pre-commit-hook ja
+  `pr.yml`:n "Block manual lockfile edits" sallivat sen niissä (`# --- RK9 Custom (RK9-312) ---`).
 - Muut: regressiomatriisin konfliktitaulukon ratkaisusarake
 
 ### 5. Validoi
