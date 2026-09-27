@@ -1,13 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { planArtifacts } from "./preview-artifacts.mjs";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { execFileSync, spawnSync } from "node:child_process";
 import { previewManifest, assertMetadata, validateRequest, versionFor, tarManifest, packageExists, imageExists, publishPreview, publishImage } from "./preview-artifacts.mjs";
+// --- RK9 Custom (RK9-317): the fork deletes upstream's cloud workflows (docker-cloud, cloud-readiness) ---
+const hasCloudWorkflows = ["docker-cloud.yml", "cloud-readiness.yml"].every((name) => existsSync(new URL(`../.github/workflows/${name}`, import.meta.url)));
+// --- /RK9 Custom ---
 
 const sha = "a".repeat(40);
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -223,7 +226,7 @@ test("commits sharing a short prefix use separate full-SHA image addresses", asy
   assert.deepEqual(urls.filter((url) => url.includes("/manifests/")), [sha, other].map((commit) => `https://ghcr.io/v2/paperclipai/paperclip/manifests/sha-${commit}-cloud`));
 });
 
-test("cloud builds start per commit and preserve tag promotion dependencies", () => {
+test("cloud builds start per commit and preserve tag promotion dependencies", { skip: !hasCloudWorkflows && "upstream-only workflow is not in the fork (RK9-317)" }, () => {
   const docker = readFileSync(new URL("../.github/workflows/docker.yml", import.meta.url), "utf8");
   const cloud = readFileSync(new URL("../.github/workflows/docker-cloud.yml", import.meta.url), "utf8");
   const readiness = readFileSync(new URL("../.github/workflows/cloud-readiness.yml", import.meta.url), "utf8");
@@ -244,7 +247,7 @@ test("cloud builds start per commit and preserve tag promotion dependencies", ()
   assert.ok(reaping < cloud.indexOf("      - name: Publish verified full-SHA cloud tag"));
 });
 
-test("cloud builds bake the managed runtime identity and verify it before publication", () => {
+test("cloud builds bake the managed runtime identity and verify it before publication", { skip: !hasCloudWorkflows && "upstream-only workflow is not in the fork (RK9-317)" }, () => {
   const workflow = readFileSync(new URL("../.github/workflows/docker-cloud.yml", import.meta.url), "utf8");
   const build = workflow.split("      - name: Build and push (cloud)")[1].split("      - name:")[0];
   assert.match(build, /build-args: \|\n\s+USER_UID=1001\n\s+USER_GID=1001\n/);
@@ -262,7 +265,7 @@ test("cloud builds bake the managed runtime identity and verify it before public
   assert.ok(step.includes('test -w "$PAPERCLIP_HOME"'));
 });
 
-test("cloud cache imports are bounded, follow master ancestry, and retain the legacy fallback", () => {
+test("cloud cache imports are bounded, follow master ancestry, and retain the legacy fallback", { skip: !hasCloudWorkflows && "upstream-only workflow is not in the fork (RK9-317)" }, () => {
   const workflow = readFileSync(new URL("../.github/workflows/docker-cloud.yml", import.meta.url), "utf8");
   const selector = workflow.indexOf("      - name: Select cloud cache ancestry");
   assert.ok(selector > workflow.indexOf("      - name: Login to GitHub Container Registry"));
@@ -309,7 +312,7 @@ if (process.argv.at(-1) !== process.env.AVAILABLE_CACHE) {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("normal cloud builds publish the checked digest only when source and platform match", () => {
+test("normal cloud builds publish the checked digest only when source and platform match", { skip: !hasCloudWorkflows && "upstream-only workflow is not in the fork (RK9-317)" }, () => {
   const workflow = readFileSync(new URL("../.github/workflows/docker-cloud.yml", import.meta.url), "utf8");
   const cloud = workflow.split("  build-and-push-cloud:")[1];
   const verify = cloud.indexOf("      - name: Verify the pushed image resolves the declared Sentry version");

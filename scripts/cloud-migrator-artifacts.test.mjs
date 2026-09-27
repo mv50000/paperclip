@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import { artifactBase, assertManifest, assertLockfile, buildBundle, descriptor, validateBundle, verifyPublished, publishBundle } from "./cloud-migrator-artifacts.mjs";
 import { previewManifest, versionFor } from "./preview-artifacts.mjs";
+// --- RK9 Custom (RK9-317): the fork deletes upstream's cloud-migrator-artifacts workflow ---
+const hasCloudMigratorWorkflow = existsSync(new URL("../.github/workflows/cloud-migrator-artifacts.yml", import.meta.url));
+// --- /RK9 Custom ---
 
 const sha = "a".repeat(40);
 function fixture(t) {
@@ -128,7 +131,7 @@ test("real npm ci installs the new pair from pinned archives with an empty cache
   for (const name of ["db", "shared"]) assert.equal(JSON.parse(readFileSync(path.join(dir, `node_modules/@paperclipai/${name}/package.json`))).version, manifest.packageVersion);
 });
 
-test("AWS trust is master-only and publication policy cannot overwrite objects", () => {
+test("AWS trust is master-only and publication policy cannot overwrite objects", { skip: !hasCloudMigratorWorkflow && "upstream-only workflow is not in the fork (RK9-317)" }, () => {
   const read = (name) => JSON.parse(readFileSync(new URL(`../.github/cloud-migrator-deploy/${name}.json`, import.meta.url)));
   assert.equal(read("trust-policy").Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"], "repo:paperclipai/paperclip:ref:refs/heads/master");
   const policy = read("upload-policy").Statement;
