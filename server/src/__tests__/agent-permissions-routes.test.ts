@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
+import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
@@ -909,7 +910,8 @@ describe.sequential("agent permission routes", () => {
           heartbeat: {
             enabled: false,
             intervalSec: 3600,
-            maxConcurrentRuns: 20,
+            // --- RK9 Custom: fork default is 5, upstream 20 (packages/shared/src/constants.ts) ---
+            maxConcurrentRuns: AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
           },
         },
       }),
@@ -1019,7 +1021,8 @@ describe.sequential("agent permission routes", () => {
           heartbeat: {
             enabled: false,
             intervalSec: 3600,
-            maxConcurrentRuns: 20,
+            // --- RK9 Custom: fork default is 5, upstream 20 (packages/shared/src/constants.ts) ---
+            maxConcurrentRuns: AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
           },
         },
       }),
