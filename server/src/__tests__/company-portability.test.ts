@@ -5855,7 +5855,8 @@ describe("company portability", () => {
         },
         heartbeat: {
           enabled: false,
-          maxConcurrentRuns: 20,
+          // --- RK9 Custom: the fork keeps AGENT_DEFAULT_MAX_CONCURRENT_RUNS at 5 (upstream 20) ---
+          maxConcurrentRuns: AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
         },
       },
     }));

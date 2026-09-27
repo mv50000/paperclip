@@ -7,7 +7,9 @@ const originalVersion = process.version;
 afterEach(() => Object.defineProperty(process, "version", { value: originalVersion }));
 
 describe("claude engine availability", () => {
-  it.each([undefined, "auto", "acp"])("reports a setup failure for engine=%s without starting a process", async (engine) => {
+  // --- RK9 Custom (RK9-305): an unset or "auto" engine runs the CLI, so only an explicit
+  // engine=acp reports the ACP setup failure (upstream also checks undefined and "auto"). ---
+  it.each(["acp"])("reports a setup failure for engine=%s without starting a process", async (engine) => {
     Object.defineProperty(process, "version", { value: "v18.0.0" });
     const config = { engine };
     const onSpawn = vi.fn();
@@ -35,9 +37,18 @@ describe("claude engine availability", () => {
 
   it("keeps an unavailable ACP command as a failure, not a CLI selection", async () => {
     Object.defineProperty(process, "version", { value: "v24.11.0" });
-    const result = await resolveClaudeExecutionEngineForRun({
+    // --- RK9 Custom (RK9-305): an unset engine is the CLI; the failure applies to engine=acp ---
+    await expect(resolveClaudeExecutionEngineForRun({
       config: { agentCommand: "/nonexistent/paperclip-test/acp", command: "/nonexistent/paperclip-test/acp" },
+    })).resolves.toEqual({ engine: "cli", explicit: false });
+    const result = await resolveClaudeExecutionEngineForRun({
+      config: {
+        engine: "acp",
+        agentCommand: "/nonexistent/paperclip-test/acp",
+        command: "/nonexistent/paperclip-test/acp",
+      },
     });
+    // --- /RK9 Custom ---
     expect(result.engine).toBe("acp");
     expect(result.unavailableReason).toContain("not available");
   });

@@ -340,38 +340,44 @@ describe("claude_local ACP lane", () => {
   });
 
   it("requires explicit CLI selection for local filesystem or network scope", async () => {
+    // --- RK9 Custom (RK9-305): an unset engine is already the CLI, which supports confinement ---
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { filesystemScope: "workspace" },
         executionTarget: null,
       }),
-    ).resolves.toMatchObject({
-      engine: "acp",
-      explicit: false,
-      unavailableReason: expect.stringContaining("confinement"),
-    });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
+    // --- /RK9 Custom ---
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { engine: "acp", filesystemScope: "workspace" },
         executionTarget: null,
       }),
     ).resolves.toMatchObject({ engine: "acp", unavailableReason: expect.stringContaining("ACP confinement is not supported") });
+    // --- RK9 Custom (RK9-305): the unset engine is the CLI; the ACP checks need engine=acp ---
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { networkScope: "deny" },
         executionTarget: null,
       }),
+    ).resolves.toEqual({ engine: "cli", explicit: false });
+    await expect(
+      resolveClaudeExecutionEngineForRun({
+        config: { engine: "acp", networkScope: "deny" },
+        executionTarget: null,
+      }),
     ).resolves.toMatchObject({
       engine: "acp",
-      explicit: false,
+      explicit: true,
       unavailableReason: expect.stringContaining("confinement"),
     });
     await expect(
       resolveClaudeExecutionEngineForRun({
-        config: { networkScope: "public" },
+        config: { engine: "acp", networkScope: "public" },
         executionTarget: null,
       }),
     ).rejects.toThrow('networkScope must be "deny" or "allowlist"');
+    // --- /RK9 Custom ---
   });
 
   // --- RK9 Custom (RK9-305): fork pin, see the first test in this describe ---

@@ -741,7 +741,7 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 9ebd60b33 v2
 | `.env.example`, `package.json`, `server/package.json`, `pnpm-lock.yaml`, `doc/DEVELOPING.md`, `doc/DOCKER.md` | molemmat; lockfile upstreamista + `pnpm install --lockfile-only`. Forkin riippuvuudet pysyivät samoissa versioissa. |
 | testit (`adapter-models`, `agent-permissions-routes`, `heartbeat-comment-wake-batching`, `heartbeat-process-recovery`, `instance-settings-*`, `issue-comment-reopen-routes`, `issues-service`, `openapi-routes`, `acp`, `spawn-smoke`) | upstreamin versio + forkin lisäykset; `openapi-routes`in forkkilista sai `rk9-email.ts`:n |
 
-Mergen jälkeen koko vitest-ajo löysi 16 kaatuvaa testiä. Ne sovitettiin forkin käytökseen näin:
+Mergen jälkeen koko vitest-ajo löysi 38 kaatuvaa testiä ja kaksi ajoituksesta riippuvaa upstream-testiä. Ne sovitettiin forkin käytökseen näin:
 
 | Testi | Syy | Sovitus |
 |---|---|---|
@@ -755,13 +755,26 @@ Mergen jälkeen koko vitest-ajo löysi 16 kaatuvaa testiä. Ne sovitettiin forki
 | `adapters/registry.test.ts` | forkin `human_proxy`-adapteri | RK9 Custom: `human_proxy` → `undefined` |
 | `cloud-image-bundled-plugins`, `cloud-image-sentry`, `docker-build-stamp` | lukevat `docker-cloud.yml`:n, joka on poistettu forkista | RK9 Custom: pilvityönkulkua vaativat tarkistukset ohitetaan, kun tiedosto puuttuu |
 | `native-codex-runner.integration.test.ts` | builder-02:lla ei ole `cargo`a | ei muutosta; CI:ssä on `cargo` |
+| `ui/src/components/Sidebar.test.tsx` (streamlined-navi) | forkin Risks-sivu on Org-osiossa | RK9 Custom: odottaa `Risks`-kohtaa |
+| `packages/db/src/migration-snapshot-drift.test.ts` | `rk9_email_messages` syntyy uudelleennimeämällä (0126/9011), ei `CREATE TABLE`lla | fork-taulujen joukkoon pinnatut tiedostot ja `rk9_`-uudelleennimeämiset; `email_messages` on taas upstreamin, joten sen drift kaataa testin edelleen |
+| `company-portability.test.ts` (replace-import) | forkin `AGENT_DEFAULT_MAX_CONCURRENT_RUNS` on 5 (upstream 20) | RK9 Custom: odottaa vakiota |
+| `adapters/claude-local`: `acp.test.ts`, `engine-availability.test.ts`, `execute.acp-host-key-guard.test.ts` (5 testiä) | 916:ssa asettamaton ja `auto`-moottori tarkoittavat ACP:tä ilman CLI-fallbackia; fork ajaa ne CLI:llä (RK9-305) | RK9 Custom: asettamaton → `{ engine: "cli", explicit: false }`; ACP-tarkistukset ajetaan `engine: "acp"`:lla. Host key -vartijan mock palauttaa asettamattomalle CLI:n. |
+| `adapter-utils`: `execution-target-stdin-race.test.ts` (T22), `sandbox-callback-bridge.test.ts` (HTTP/2) | ajoituksesta riippuvia; builder-02:lla vuoroin läpi ja vuoroin kaatuu. Fork ei koske niihin. | ei muutosta |
+| `heartbeat-process-recovery.test.ts` (14 testiä) | RK9-87 ohittaa onnistuneen ajon ennen productive-continuation-requeueta | masterin RK9-87-testit palautettu, upstreamin requeue-testit skipattu (ks. alla) |
 
-Markkerit: 326 → 384 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Kaksi markkeria katosi:
+Markkerit: 326 → 419 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Markkerimuutokset, jotka eivät ole pelkkiä lisäyksiä:
 
 - `agent-permissions-routes.test.ts`: testi "creates agents when optional adapter model profile discovery fails".
   Upstream poisti halvat model profilet (#12683), joten testi ja sen RK9-rivi poistuivat.
-- `heartbeat-process-recovery.test.ts` (10 → 8): upstream kirjoitti tiedoston uudelleen. Forkin
-  RK9-316-disposition-testi ja `recoveryStrictInProgressOnly`-testi lisättiin takaisin.
+- `heartbeat-process-recovery.test.ts`: upstream kirjoitti tiedoston uudelleen, ja merge pudotti
+  ensin masterin RK9-87-korvaavat testit. Ne palautettiin masterista (productive-but-stranded,
+  "does not re-enqueue … already succeeded", local-background-wait ja GGU-809 RK9-87:n alla,
+  succeeded+satisfied). Upstreamin 12 uutta tai uudelleennimettyä requeue-testiä (chat,
+  shared workspace, productive terminal, GGU-809) ajetaan skipattuina aliaksella
+  `itUpstreamProductiveContinuation`, koska RK9-87 ohittaa onnistuneen ajon ennen sitä polkua.
+  Legacy summary -testi säilyi: se odottaa nyt `continuationRequeued` 0, ja sen tietoturva-assertiot
+  pysyvät. Forkin merkitty `instanceSettingsService`-import poistui, koska upstream lisäsi saman
+  importin tiedoston alkuun. Markkereita 10 → 16.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
