@@ -289,10 +289,11 @@ describe.sequential("closed isolated workspace issue routes", () => {
     expect(mockIssueService.checkout).not.toHaveBeenCalled();
   });
 
-  it("does not reopen the workspace when a checkout fails the run-id gate", async () => {
-    // An agent checkout without a run id is rejected before the reopen runs. The
-    // reopen must not rebuild and republish the workspace, or the still-terminal
-    // issue keeps a leaked active workspace that the reaper skips.
+  // --- RK9 Custom (RK9-316): the fork has no run-id gate on checkout (RK9-76) ---
+  // Upstream rejects a run-less agent checkout with 401 before the reopen. In the
+  // fork, interactive agent sessions check out without a heartbeat run, so the
+  // reopen runs and the checkout is recorded with a null run id.
+  it("reopens the workspace for a run-less agent checkout (RK9-76)", async () => {
     const agentActorWithoutRunId = {
       type: "agent",
       agentId,
@@ -308,12 +309,18 @@ describe.sequential("closed isolated workspace issue routes", () => {
         expectedStatuses: ["todo", "backlog", "blocked"],
       });
 
-    expect(res.status).toBe(401);
+    expect(res.status).not.toBe(401);
     expect(
       mockExecutionWorkspaceService.reopenClosedIsolatedExecutionWorkspaceForIssue,
-    ).not.toHaveBeenCalled();
-    expect(mockIssueService.checkout).not.toHaveBeenCalled();
+    ).toHaveBeenCalledTimes(1);
+    expect(mockIssueService.checkout).toHaveBeenCalledWith(
+      issueId,
+      agentId,
+      ["todo", "backlog", "blocked"],
+      null,
+    );
   });
+  // --- /RK9 Custom ---
 
   it("clears the reopen-pending flag when the comment update returns null after a reopen", async () => {
     // The workspace reopens, but the issue update then returns null. The issue

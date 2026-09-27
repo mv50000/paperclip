@@ -46,6 +46,15 @@ export function InstanceGeneralSettings({ embedded = false }: { embedded?: boole
     queryFn: () => healthApi.get(),
     retry: false,
   });
+  // --- RK9 Custom: live global run count. Upstream v2026.831.1 removed the instance
+  // Heartbeats page that showed it, so it lives next to the cap (RK9-316).
+  // Declared before the early returns below so the hook order stays stable. ---
+  const concurrencyQuery = useQuery({
+    queryKey: queryKeys.instance.concurrency,
+    queryFn: () => instanceSettingsApi.getConcurrency(),
+    refetchInterval: 10_000,
+  });
+  // --- /RK9 Custom ---
 
   const updateGeneralMutation = useMutation({
     mutationFn: instanceSettingsApi.updateGeneral,
@@ -98,13 +107,6 @@ export function InstanceGeneralSettings({ embedded = false }: { embedded?: boole
     ? `${visibleTopics.slice(0, -1).join(", ")}, and ${visibleTopics[visibleTopics.length - 1]}`
     : visibleTopics.join(" and ");
   const maxGlobalConcurrentRuns = generalQuery.data?.maxGlobalConcurrentRuns ?? null;
-  // --- RK9 Custom: live global run count. Upstream v2026.831.1 removed the instance
-  // Heartbeats page that showed it, so it lives next to the cap (RK9-316). ---
-  const concurrencyQuery = useQuery({
-    queryKey: queryKeys.instance.concurrency,
-    queryFn: () => instanceSettingsApi.getConcurrency(),
-    refetchInterval: 10_000,
-  });
   const visibleActionError = signOutMutation.error instanceof Error
     ? signOutMutation.error.message
     : signOutMutation.error

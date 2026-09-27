@@ -99,7 +99,6 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
-import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import {
   INTERACTION_CONTINUATION_INFRA_RETRY_REASON,

@@ -21,7 +21,10 @@ async function readNewestSnapshot(): Promise<{ file: string; snapshot: Record<st
   const journal = JSON.parse(
     await readFile(path.join(migrationsDir, "meta", "_journal.json"), "utf8"),
   ) as { entries: JournalEntry[] };
-  const newest = journal.entries.at(-1);
+  // --- RK9 Custom (RK9-316): fork 9xxx migrations are hand-written and have no
+  // snapshots, so the newest snapshot is the newest upstream (< 9000) entry.
+  const newest = journal.entries.filter((entry) => !isForkMigrationTag(entry.tag)).at(-1);
+  // --- /RK9 Custom ---
   if (!newest) throw new Error("migration journal has no entries");
   const file = `${String(newest.idx).padStart(4, "0")}_snapshot.json`;
   const snapshot = JSON.parse(await readFile(path.join(migrationsDir, "meta", file), "utf8")) as Record<
@@ -30,6 +33,35 @@ async function readNewestSnapshot(): Promise<{ file: string; snapshot: Record<st
   >;
   return { file, snapshot };
 }
+
+// --- RK9 Custom (RK9-316) ---
+// Tables created by the fork's hand-written 9xxx migrations are not in any
+// upstream snapshot. Drift on them is expected here and is covered by the fork
+// migration hash pins and the upgrade dry-run; drift on every other table
+// still fails this test.
+function isForkMigrationTag(tag: string): boolean {
+  return Number.parseInt(tag.slice(0, 4), 10) >= 9000;
+}
+
+async function readForkTables(): Promise<Set<string>> {
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql") && isForkMigrationTag(file));
+  const tables = new Set<string>();
+  for (const file of files) {
+    const sql = await readFile(path.join(migrationsDir, file), "utf8");
+    for (const match of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?"?([a-z0-9_]+)"?/gi)) {
+      tables.add(match[1]!);
+    }
+  }
+  return tables;
+}
+
+function statementTable(statement: string): string | null {
+  const match =
+    /^\s*(?:CREATE TABLE|ALTER TABLE)\s+(?:"public"\.)?"([^"]+)"/i.exec(statement) ??
+    /^\s*CREATE (?:UNIQUE )?INDEX\b[^;]*?\bON\s+(?:"public"\.)?"([^"]+)"/i.exec(statement);
+  return match?.[1] ?? null;
+}
+// --- /RK9 Custom ---
 
 // drizzle.config.ts points drizzle-kit at every module in the schema directory,
 // so the test imports the same set rather than the hand-maintained barrel — a
@@ -66,8 +98,17 @@ describe("migration snapshot drift", () => {
       current as Parameters<typeof generateMigration>[1],
     );
 
+    // --- RK9 Custom (RK9-316): ignore statements that only touch fork tables ---
+    const forkTables = await readForkTables();
+    expect(forkTables.size).toBeGreaterThan(0);
+    const upstreamStatements = statements.filter((statement) => {
+      const table = statementTable(statement);
+      return table === null || !forkTables.has(table);
+    });
+    // --- /RK9 Custom ---
+
     expect(
-      statements,
+      upstreamStatements,
       `${file} no longer matches src/schema. Run \`pnpm --filter @paperclipai/db generate\` and commit the migration it emits; do not hand-edit the snapshot.`,
     ).toEqual([]);
   });
