@@ -11,7 +11,7 @@
 #   scripts/upgrade-smoke.sh [--offline] [--fork-tests] [BASE_URL]
 #
 #   BASE_URL       oletus $PAPERCLIP_SMOKE_URL tai http://127.0.0.1:3100
-#   --offline      vain repo-tarkistukset (migraatiojournal), ei HTTP:tä
+#   --offline      vain repo-tarkistukset (migraatiojournal, CI-runner-vipu), ei HTTP:tä
 #   --fork-tests   aja lisäksi doc/upgrade/fork-tests.txt:n vitest-tiedostot
 #
 # Valinnaiset ympäristömuuttujat:
@@ -78,6 +78,50 @@ NODE
     ok "migraatiojournal 9001–9010 ($out)"
   else
     fail "migraatiojournal: $out"
+  fi
+}
+
+# --- CI-runner-vipu (RK9-350): jokainen jobi valitsee runnerinsa vars.CI_RUNNERista ---
+# Upstream-porras tuo `runs-on: ubuntu-latest` -rivit takaisin. Ks. doc/CI-RUNNER.md.
+# pull_request-workflowissa vivun pitää sisältää fork-suoja. pull_request_targetia ei sallita,
+# eikä workflow_run-workflow saa hakea PR:n koodia tai artefakteja (fork-koodi ajaisi runnerilla).
+check_ci_runners() {
+  local errors=() f line uses labels
+  for f in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
+    [[ -f "$f" ]] || continue
+    local name="${f#"$REPO_ROOT"/}"
+    if grep -q 'pull_request_target' "$f"; then
+      errors+=("$name: pull_request_target ei ole sallittu")
+    fi
+    if grep -qE '^[[:space:]]*(-[[:space:]]*)?workflow_run[[:space:]]*:?[[:space:]]*$|on:.*workflow_run' "$f" \
+      && grep -qE 'actions/checkout|actions/download-artifact|gh pr checkout|refs/pull/' "$f"; then
+      errors+=("$name: workflow_run-workflow ei saa hakea PR:n koodia eikä artefakteja")
+    fi
+    local is_pr=0
+    grep -qE '^[[:space:]]*(-[[:space:]]*)?pull_request[[:space:]]*:?[[:space:]]*$|on:.*pull_request' "$f" && is_pr=1
+    while IFS= read -r line; do
+      local trimmed="${line#"${line%%[![:space:]]*}"}"
+      if [[ "$line" != *vars.CI_RUNNER* ]]; then
+        errors+=("$name: $trimmed")
+      elif [[ "$trimmed" == runs-on:* && "$line" != *"fromJSON("* ]]; then
+        errors+=("$name: runs-on ilman fromJSONia: $trimmed")
+      elif [[ $is_pr -eq 1 && "$line" != *"head.repo.full_name == github.repository"* ]]; then
+        errors+=("$name: fork-suoja puuttuu: $trimmed")
+      fi
+    done < <(grep -E '^[[:space:]]*(runs-on|runner_label):' "$f" || true)
+    # Jobitason reusable workflow (`uses:` 4 välilyönnin sisennyksellä) tarvitsee runner_labelin.
+    uses="$(grep -cE '^    uses:' "$f" || true)"
+    labels="$(grep -cE '^[[:space:]]*runner_label:' "$f" || true)"
+    if (( uses > labels )); then
+      errors+=("$name: reusable-workflow-kutsu ilman runner_labelia")
+    fi
+  done
+  if [[ ${#errors[@]} -eq 0 ]]; then
+    ok "CI-runner-vipu: kaikki jobit käyttävät vars.CI_RUNNERia, PR-jobit fork-suojalla"
+  else
+    local joined
+    joined="$(printf '%s; ' "${errors[@]}")"
+    fail "CI-runner-vipu (doc/CI-RUNNER.md): ${joined%; }"
   fi
 }
 
@@ -184,6 +228,7 @@ check_fork_tests() {
 
 echo "upgrade-smoke: repo=$REPO_ROOT"
 check_journal
+check_ci_runners
 if [[ $OFFLINE -eq 0 ]]; then
   echo "upgrade-smoke: BASE_URL=$BASE_URL"
   check_http

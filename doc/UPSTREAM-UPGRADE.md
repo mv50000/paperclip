@@ -60,6 +60,27 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
 - `scripts/provision-worktree.sh`
 - `server/src/services/index.ts`, `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/constants.ts` — exportit
 
+### CI-runner-vipu (RK9-350)
+
+Forkin jobit valitsevat runnerinsa repo-muuttujasta `vars.CI_RUNNER` (ks.
+[`doc/CI-RUNNER.md`](CI-RUNNER.md)). Upstream käyttää `runs-on: ubuntu-latest`, joten
+jokainen porras tuo rivit takaisin, jos upstream muuttaa niitä. Muutokset on merkitty YAMLissa
+`# --- RK9 Custom (RK9-350) ---` -kommentilla.
+
+- `.github/workflows/pr.yml` — `runs-on` neljässä jobissa fork-suojalla ja secret-scanin
+  `runner_label`. Playwright-askel ajaa `--with-deps` vain, jos sudo toimii.
+- `.github/workflows/release.yml` — `runs-on` viidessä jobissa.
+- `.github/workflows/docker.yml`, `refresh-lockfile.yml` — `runs-on`.
+- `.github/workflows/e2e.yml`, `release-smoke.yml` — `runs-on` ja Playwright-askel.
+- `.github/workflows/ai-auto-merge.yml` (vain forkissa) — `runs-on`, deploy-dev-dispatch pois,
+  `actions: read`.
+- `.github/workflows/deploy-dev.yml` (vain forkissa) — poistettu. Älä palauta mergessä.
+
+Ratkaisu: ota upstreamin muutos ja palauta `runs-on`-rivi vivun muotoon. Uusi upstream-jobi
+saa saman vivun: `pull_request`-jobit fork-suojalla, muut ilman. Tarkistus:
+`scripts/upgrade-smoke.sh --offline` epäonnistuu, jos jokin `runs-on`- tai
+`runner_label`-rivi ei käytä `vars.CI_RUNNER`ia.
+
 ### Heartbeat/Recovery/Routines/Execution-Policy hotspot resolution
 
 Päätöstaulukko (drop / re-port / redesign per forkin korjaus, upstream-vertailu tagia
