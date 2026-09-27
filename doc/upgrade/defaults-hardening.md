@@ -180,7 +180,7 @@ Upstream siirsi `activeRunExecutions`in moduulitasolle. Forkin cap (`maxGlobalCo
 |---|---|
 | Muutos | `claude_local`, `codex_local` ja `gemini_local` saavat `engine`-kentän. Upstreamin oletus asettamattomalle kentälle on ACP. ACP käynnistää agentin koko palvelimen envillä. `acpx_local` poistui (hautakivi, ajo epäonnistuu `acpx_local_retired`). `0136` muuntaa `acpx_local`-rivit muotoon `claude_local`/`codex_local` + `engine: "acp"` ja poistaa niiden sessiot. |
 | RK9-arvo, `claude_local` | asettamaton `engine` ajaa CLI:llä (RK9-305, `acp.ts`). Eksplisiittinen `engine: "acp"` epäonnistuu koodilla `claude_acp_host_key_blocked`, kun palvelimen envissä on `ANTHROPIC_API_KEY` ilman `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY`-opt-iniä (RK9-228, RK9-312). |
-| RK9-arvo, `codex_local`, `gemini_local` | upstreamin oletus (ACP, CLI-fallback). CLI-polkukaan ei suodata `OPENAI_API_KEY`:tä tai `GEMINI_API_KEY`:tä, joten avainten näkyvyys ei muutu. Vain käynnistyspolku muuttuu. |
+| RK9-arvo, `codex_local`, `gemini_local` | upstreamin oletus (ACP, CLI-fallback). Kumpikaan polku ei suodata `OPENAI_API_KEY`:tä, `GEMINI_API_KEY`:tä tai `ANTHROPIC_API_KEY`:tä (sama kuin 707:n CLI-polulla). Upstreamin ACP-moottori antoi lapselle myös palvelimen omat `PAPERCLIP_*`-asetukset, esimerkiksi `PAPERCLIP_AGENT_JWT_SECRET`in; fork poistaa ne kuten CLI-polku (`acpx-engine/execute.ts`, RK9-314). |
 | Prod-kopio (2026-09-27) | `acpx_local`-agentteja 0. Yhdelläkään agentilla ei ole `engine`-asetusta. `codex_local`: 2, molemmat terminoituja. `gemini_local`: 0. `0136` on prodissa no-op. |
 
 ### Built-in-agentit
@@ -190,7 +190,7 @@ Upstream siirsi `activeRunExecutions`in moduulitasolle. Forkin cap (`maxGlobalCo
 | Muutos | `reconcileBuiltInAgentsOnStartup` luo Reflection Coachin ja Summarizerin (`claude_local`, paused, routinet pois) jokaiseen yritykseen joka käynnistyksessä ja yrityksen luonnissa. Jos yritys vaatii hyväksynnän uusille agenteille, syntyy palkkaushyväksyntä. |
 | Löydös | prod-kopiossa ensimmäinen käynnistys loi 16 agenttia 8 yritykseen; 8 odotti hyväksyntää. Hylätty tai terminoitu agentti syntyy uudelleen seuraavassa käynnistyksessä, koska haku ohittaa terminoidut rivit. |
 | RK9-arvo | luodaan vain, kun `enableBuiltInAgents` on päällä (oletus pois; sama lippu portittaa built-in-agenttien reitit). Fork-harjoituksessa (ref `4db8db584`): 0 uutta agenttia, 0 hyväksyntää. |
-| Oletusgrantit | ajetaan silti joka käynnistyksessä: yrityksen ainoa juuri-CEO-agentti saa `agents:configure`n ja `skills:create`n. Prod-kopiossa 7 agenttia. Agentin oikeudet leikataan vastuukäyttäjän oikeuksilla (707). |
+| Oletusgrantit | ajetaan silti joka käynnistyksessä ja agentin palkkauksessa: yrityksen ainoa juuri-CEO-agentti saa `agents:configure`n ja `skills:create`n. Prod-kopiossa 7 agenttia. 720:ssä `agent_config:update` vaatii `agents:configure`-grantin (707:ssä `agents:create` tai CEO-rooli), joten grantit pidetään. Fork lisää vain puuttuvat rivit: upstream aktivoisi jäädytetyn jäsenyyden ja nollaisi grantin rajauksen joka käynnistyksessä. Poistettu grantti palaa seuraavassa käynnistyksessä. Agentin oikeudet leikataan vastuukäyttäjän oikeuksilla (707). |
 
 ### Työtilan haarakorjaukset
 

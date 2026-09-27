@@ -89,3 +89,6 @@ server/src/__tests__/trust-proxy-rk9.test.ts
 packages/adapters/claude-local/src/server/execute.acp-host-key-guard.test.ts
 packages/adapters/claude-local/src/server/acp.test.ts
 server/src/__tests__/companies-service.test.ts
+# Verifier-korjaukset portaassa 720: oletusgrantit vain lisäävät rivejä, ACP-lapsi ei peri palvelimen PAPERCLIP_*-asetuksia.
+server/src/__tests__/built-in-agents.test.ts
+packages/adapter-utils/src/acpx-engine/execute.test.ts
