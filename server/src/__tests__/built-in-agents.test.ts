@@ -41,6 +41,7 @@ import {
 } from "../services/built-in-agents.ts";
 import { readBuiltInAgentMarker, withBuiltInAgentMarker } from "../services/built-in-agent-metadata.ts";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.ts";
+import { instanceSettingsService } from "../services/instance-settings.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -523,6 +524,8 @@ describeEmbeddedPostgres("built-in agents", () => {
   });
 
   it("auto-provisions a paused Reflection Coach bundle with skill sync and a disabled routine", async () => {
+    // --- RK9 Custom (RK9-314): bundled agents are provisioned only with built-in agents enabled ---
+    await instanceSettingsService(db).updateExperimental({ enableBuiltInAgents: true });
     const companyId = await seedCompany({ requireApproval: false });
     const root = await agentService(db).create(companyId, {
       name: "CEO",
@@ -647,6 +650,8 @@ describeEmbeddedPostgres("built-in agents", () => {
   });
 
   it("preserves new-agent approval gates during automatic Reflection Coach provisioning", async () => {
+    // --- RK9 Custom (RK9-314): bundled agents are provisioned only with built-in agents enabled ---
+    await instanceSettingsService(db).updateExperimental({ enableBuiltInAgents: true });
     const companyId = await seedCompany({ requireApproval: true });
     const root = await agentService(db).create(companyId, {
       name: "CEO",

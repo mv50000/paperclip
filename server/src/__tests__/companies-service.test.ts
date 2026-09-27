@@ -25,6 +25,7 @@ import {
 import { companyService } from "../services/companies.js";
 import { readBuiltInAgentMarker } from "../services/built-in-agent-metadata.js";
 import { reconcileBuiltInAgentsOnStartup } from "../services/built-in-agents.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -81,7 +82,21 @@ describeEmbeddedPostgres("companyService", () => {
     expect(rows.map((row) => row.issuePrefix).sort()).toEqual(["ARO", "AROA"]);
   });
 
+  // --- RK9 Custom (RK9-314) ---
+  it("does not auto-provision bundled agents while built-in agents are disabled", async () => {
+    const created = await companyService(db).create({
+      name: "Fork Company",
+    });
+    await reconcileBuiltInAgentsOnStartup(db);
+
+    const agentRows = await db.select().from(agents).where(eq(agents.companyId, created.id));
+    expect(agentRows.filter((row) => readBuiltInAgentMarker(row.metadata))).toHaveLength(0);
+  });
+  // --- /RK9 Custom ---
+
   it("auto-provisions one paused Reflection Coach bundle for a freshly created company", async () => {
+    // --- RK9 Custom (RK9-314): bundled agents are provisioned only with built-in agents enabled ---
+    await instanceSettingsService(db).updateExperimental({ enableBuiltInAgents: true });
     const created = await companyService(db).create({
       name: "Fresh Company",
     });

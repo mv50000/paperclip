@@ -21,6 +21,7 @@ import {
 import { companySkillService } from "./company-skills.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
+import { instanceSettingsService } from "./instance-settings.js";
 import { listAdapterModels } from "../adapters/registry.js";
 
 export type BuiltInAgentStatus = "not_provisioned" | "pending_approval" | "needs_setup" | "ready" | "paused";
@@ -1842,6 +1843,16 @@ export function builtInAgentService(db: Db) {
     const company = await ensureCompany(companyId);
     let autoEnsured = 0;
     let pendingApprovals = 0;
+    // --- RK9 Custom (RK9-314): bundled agents only when the operator enables built-in agents ---
+    // Upstream creates them in every company on each boot. A rejected or terminated one is
+    // created again with a new hire approval on the next boot, so the fork keeps them behind
+    // the same experimental flag that gates the built-in agent routes.
+    const experimental = await instanceSettingsService(db).getExperimental();
+    if (experimental.enableBuiltInAgents !== true) {
+      const defaultGrantsEnsured = await ensureCompanyDefaultAgentGrants(companyId);
+      return { autoEnsured, pendingApprovals, defaultGrantsEnsured };
+    }
+    // --- /RK9 Custom ---
     for (const definition of DEFINITIONS.filter((entry) => entry.bundle)) {
       if (company.requireBoardApprovalForNewAgents) {
         const result = await provision(companyId, definition.key);
