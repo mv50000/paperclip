@@ -508,6 +508,7 @@ allekirjoituksen tarkistusta.
 | `enableStreamlinedUi` (uusi) | Oletus `true` (`packages/shared/src/validators/instance.ts`). Board saa upstreamin uuden sivupalkin ja routines-näkymän. Forkin Risks-navikohta on kummassakin sivupalkissa. Ei tietoturvavaikutusta. Vanhan näkymän saa pitämällä avaimen arvossa `false`. |
 | #12776 | Forkin reittitiedostoja ei muutettu. `redact-sensitive.ts` tekee lokille kopion eikä muuta pyynnön runkoa, joten webhookien raakatavut säilyvät. Ulkoisten ohjeiden hallinta API:n kautta vaatii nyt instanssiadminin. |
 | JWT-TTL | `agent-auth-jwt.ts` ei muuttunut 831.1:stä. Drop-inin `PAPERCLIP_AGENT_JWT_TTL_SECONDS=3600` toimii kuten ennen. |
+| Chatin `create_task` (RK9-313) | Upstreamin agenttichat luo tehtävän kutsumalla `POST /companies/:id/issues` agenttina (`services/project-tools.ts`). Forkissa tehtävän osoitus vaatii `tasks:assign`-grantin tai vanhan luojaoikeuden (`canCreateAgents`), jonka 916.1:ssä saa oletuksena vain CEO. Ilman grantia chatin tehtävän luonti palauttaa 403. `enableAgentChat` on oletuksena `false`, joten prodissa vaikutusta ei ole. Jos chat kytketään päälle, anna chat-agentille `tasks:assign` ensin. Testi `chat-project-tools.test.ts` antaa fixture-agentille `canCreateAgents`-oikeuden. |
 
 Deployta edeltävä SQL (`experimental`-avaimet, jotka puuttuvat, kirjoitetaan eksplisiittisesti):
 

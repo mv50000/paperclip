@@ -352,9 +352,12 @@ jobs:
     # julkaisematta, EI lisata NPM_TOKENia — token joko epaonnistuisi samoin
     # tai julkaisisi vieraaseen nimiavaruuteen.
     #
-    # `verify_canary` jaa ajoon: se on hyodyllinen build-signaali master-pushille.
-    # Jos tama fork joskus julkaisee omalla nimiavaruudellaan, vaihda ehdoksi
-    # `github.event_name == 'push'` ja lisaa julkaisuavain.
+    # --- RK9 Custom (RK9-317) --- `verify_canary` ei aja forkissa: 916.1:sta
+    # alkaen se vain tarkistaa upstreamin cloud-readiness.yml-ajon, jota forkissa
+    # ei ole, ja upstreamin repository-ehto rajaa sen pois. Forkin porttina on
+    # PR-CI (pr.yml) ennen mergea. Jos tama fork joskus julkaisee omalla
+    # nimiavaruudellaan, palauta build-signaali (release-verify.yml) ja
+    # julkaisuavain ennen kuin poistat `if: false` -ehdon.
     if: false
     needs: verify_canary
     # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
