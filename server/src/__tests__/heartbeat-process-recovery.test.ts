@@ -3388,7 +3388,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(secondResult.continuationRequeued).toBe(0);
   });
 
-  it("exempts stranded-recovery escalation when assignee posted a recent comment (GGU-809)", async () => {
+  // --- RK9 Custom (RK9-314): upstream GGU-809 tests follow RK9-87 ---
+  // Upstream v2026.618.0 lets a recent assignee comment exempt a repeated productive
+  // continuation from escalation and requeue it. RK9-87 skips every in_progress issue
+  // whose latest run succeeded before that branch runs, so neither the exemption nor
+  // the escalation fires: the issue stays in_progress and no new run is queued.
+  it("skips a succeeded repeated continuation even when the assignee posted a recent comment (GGU-809 under RK9-87)", async () => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "succeeded",
@@ -3396,8 +3401,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       runSource: "issue.productive_terminal_continuation_recovery",
       livenessState: "advanced",
     });
-    // Recent agent-authored comment should suppress the repeat-productive
-    // escalation and let the normal continuation-retry path proceed.
     await db.insert(issueComments).values({
       companyId,
       issueId,
@@ -3408,9 +3411,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
     expect(result.escalated).toBe(0);
-    expect(result.recentProgressExempted).toBe(1);
-    expect(result.continuationRequeued).toBe(1);
-    expect(result.issueIds).toEqual([issueId]);
+    expect(result.recentProgressExempted).toBe(0);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.issueIds).not.toContain(issueId);
 
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
     expect(issue?.status).toBe("in_progress");
@@ -3422,24 +3425,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(recoveryIssues).toHaveLength(0);
 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
-    expect(runs).toHaveLength(2);
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(retryRun?.contextSnapshot as Record<string, unknown> | undefined).toMatchObject({
-      issueId,
-      retryReason: "issue_continuation_needed",
-      source: "issue.productive_terminal_continuation_recovery",
-    });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
   });
 
-  it("still escalates stranded-recovery work when the recent comment is older than the exemption window (GGU-809)", async () => {
-    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+  it("skips a succeeded repeated continuation with only an old comment instead of escalating (GGU-809 under RK9-87)", async () => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "succeeded",
       retryReason: "issue_continuation_needed",
       runSource: "issue.productive_terminal_continuation_recovery",
       livenessState: "advanced",
     });
-    // Comment older than the exemption window must NOT suppress escalation.
     const stale = new Date(Date.now() - 24 * 60 * 60 * 1000);
     await db.insert(issueComments).values({
       companyId,
@@ -3452,13 +3449,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
-    expect(result.escalated).toBe(1);
+    expect(result.escalated).toBe(0);
     expect(result.recentProgressExempted).toBe(0);
     expect(result.continuationRequeued).toBe(0);
 
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
-    expect(issue?.status).toBe("blocked");
+    expect(issue?.status).toBe("in_progress");
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
   });
+  // --- /RK9 Custom (RK9-314) ---
 
   it("does not reconcile user-assigned work through the agent stranded-work recovery path", async () => {
     const { issueId, runId } = await seedStrandedIssueFixture({
