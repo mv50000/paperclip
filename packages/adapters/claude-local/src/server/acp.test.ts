@@ -219,20 +219,22 @@ describe("claude_local ACP lane", () => {
     expect(nodeVersionMeetsClaudeAcpMinimum()).toBe(true);
   });
 
-  it("defaults to ACP when prerequisites pass and falls back to CLI only for auto resolution", async () => {
+  // --- RK9 Custom (RK9-228, RK9-305): the fork pins an unset engine to the CLI, so the upstream
+  // auto-ACP expectations below read "cli, not explicit" and carry no fallback reason ---
+  it("keeps an unset engine on the CLI even when ACP prerequisites pass (fork pin)", async () => {
     const root = await makeTempRoot("paperclip-claude-acp-default-");
     const commandPath = path.join(root, "bin", "claude-agent-acp");
     await fs.mkdir(path.dirname(commandPath), { recursive: true });
     await fs.writeFile(commandPath, "#!/usr/bin/env sh\n", "utf8");
     setNodeVersion("v22.12.0");
 
-    expect(resolveClaudeExecutionEngine({})).toEqual({ engine: "acp", explicit: false });
+    expect(resolveClaudeExecutionEngine({})).toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { agentCommand: commandPath },
         executionTarget: null,
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { engine: "cli", agentCommand: commandPath },
@@ -246,11 +248,7 @@ describe("claude_local ACP lane", () => {
         config: { agentCommand: commandPath },
         executionTarget: null,
       }),
-    ).resolves.toMatchObject({
-      engine: "cli",
-      explicit: false,
-      fallbackReason: expect.stringContaining("Node"),
-    });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
     await expect(
       resolveClaudeExecutionEngineForRun({
         config: { engine: "acp", agentCommand: "/missing/claude-agent-acp" },
@@ -294,7 +292,8 @@ describe("claude_local ACP lane", () => {
     ).rejects.toThrow('networkScope must be "deny" or "allowlist"');
   });
 
-  it("uses ACP for bridged sandbox auto runs when the ACP command is configured as a shell command", async () => {
+  // --- RK9 Custom (RK9-305): fork pin, see the first test in this describe ---
+  it("keeps bridged sandbox runs with an unset engine on the CLI (fork pin)", async () => {
     setNodeVersion("v22.12.0");
     await expect(
       resolveClaudeExecutionEngineForRun({
@@ -317,7 +316,7 @@ describe("claude_local ACP lane", () => {
           },
         },
       }),
-    ).resolves.toEqual({ engine: "acp", explicit: false });
+    ).resolves.toEqual({ engine: "cli", explicit: false });
   });
 
   it("falls back to the CLI lane for one-shot sandbox auto runs", async () => {
@@ -332,11 +331,8 @@ describe("claude_local ACP lane", () => {
           remoteCwd: "/work",
         },
       }),
-    ).resolves.toMatchObject({
-      engine: "cli",
-      explicit: false,
-      fallbackReason: expect.stringContaining("bidirectional remote process"),
-    });
+    // --- RK9 Custom (RK9-305): fork pin, no fallback reason for an unset engine ---
+    ).resolves.toEqual({ engine: "cli", explicit: false });
   });
 
   it("falls back to the CLI lane for non-sandbox remote auto runs", async () => {
@@ -360,11 +356,8 @@ describe("claude_local ACP lane", () => {
           },
         },
       }),
-    ).resolves.toMatchObject({
-      engine: "cli",
-      explicit: false,
-      fallbackReason: expect.stringContaining("sandbox remote targets only"),
-    });
+    // --- RK9 Custom (RK9-305): fork pin, no fallback reason for an unset engine ---
+    ).resolves.toEqual({ engine: "cli", explicit: false });
   });
 
   it("reports ACP prerequisites for the ACP lane", async () => {

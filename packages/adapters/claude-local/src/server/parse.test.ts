@@ -579,8 +579,10 @@ describe("isClaudeMaxTurnsResult", () => {
     expect(isClaudeMaxTurnsResult({ stop_reason: "max_turns" })).toBe(true);
   });
 
-  it("detects max turns in result text", () => {
-    expect(isClaudeMaxTurnsResult({ result: "Reached maximum turns limit" })).toBe(true);
+  // --- RK9 Custom: v2026.720.0 detects max turns from structured fields only, so the fork's
+  // free-text case now expects false ---
+  it("ignores max-turns wording in free result text", () => {
+    expect(isClaudeMaxTurnsResult({ result: "Reached maximum turns limit" })).toBe(false);
   });
 
   it("returns false for normal results", () => {

@@ -106,7 +106,9 @@ describe("claude sandbox hello probe diagnostics", () => {
       exitCode: 1,
       stdout: [
         initLine,
-        '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude usage limit reached. Please try again later.","session_id":"abc"}',
+        // --- RK9 Custom: upstream test is red at v2026.720.0 (usage-limit text is provider quota, not
+        // transient); overload input backported from v2026.817.0 ---
+        '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 529 overloaded_error","session_id":"abc"}',
       ].join("\n"),
       stderr: "",
     };

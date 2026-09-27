@@ -169,7 +169,9 @@ describe("claude remote execution", () => {
       localDir: workspaceDir,
       remoteDir: managedRemoteWorkspace,
     }));
-    expect(syncDirectoryToSsh).toHaveBeenCalledTimes(1);
+    // --- RK9 Custom: backport from v2026.817.0, upstream test is red at v2026.720.0 ---
+    // One sync per registered runtime asset: skills and mcp-config.
+    expect(syncDirectoryToSsh).toHaveBeenCalledTimes(2);
     expect(syncDirectoryToSsh).toHaveBeenCalledWith(expect.objectContaining({
       remoteDir: `${managedRemoteWorkspace}/.paperclip-runtime/claude/skills`,
       followSymlinks: true,
