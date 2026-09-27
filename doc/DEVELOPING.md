@@ -56,6 +56,18 @@ pnpm build-storybook
 
 These run the `@paperclipai/ui` Storybook on port `6006` and build the static output to `ui/storybook-static/`.
 
+## UI Fonts And Screenshots
+
+The board UI ships its own sans-serif webfont assets in `ui/public/fonts/`.
+`ui/src/index.css` declares Inter v4.1 variable regular and italic faces and wires
+the Tailwind `font-sans` token to those bundled files before system fallbacks.
+Linux screenshot or Storybook capture jobs should not install host Inter packages
+or inject external font CSS to make Paperclip text render correctly.
+
+Font assets live in Vite's public directory so `pnpm --filter @paperclipai/ui build`
+emits them under `ui/dist/fonts/`. The server package copies the same output into
+`server/ui-dist/fonts/` through `scripts/prepare-server-ui-dist.sh`.
+
 Inspect or stop the current repo's managed dev runner:
 
 ```sh
@@ -282,6 +294,11 @@ Local adapters require their corresponding CLI/session setup on the machine runn
 Paperclip supports API-billed adapters and subscription-backed local CLIs such as Claude Code or Codex. For subscription-backed runs, `cost_events.cost_cents` may legitimately be `0` because the provider is not returning per-run cents to Paperclip. In that mode, the control signal is provider quota windows plus instance `systemPause`, not the monthly cents rollup.
 
 When quota polling reports a configured threshold breach, Paperclip can set an automatic system pause. A system pause blocks new agent/routine work, leaves active work visible, and lets scheduled routines remain due until the instance resumes. Operators should not treat overdue routine `nextRunAt` values as scheduler corruption while `systemPause` is active; they are waiting for the provider quota window to recover.
+## Config Freshness
+
+Agent, project, environment, secret, skill, and workspace config edits are sampled at the next run boundary. A heartbeat that is already running finishes with the config it started with.
+
+When effective run config changes, Paperclip may intentionally skip a saved adapter session, refresh persisted workspace runtime config, replace a reused execution workspace, or avoid reusing a sandbox/environment lease. Fresh execution can lose adapter-specific session, workspace, or sandbox state; correctness of the next run's config takes priority over continuity. Plain environment values affect freshness through value hashes; run result JSON and workspace operation logs expose only the non-sensitive freshness decision categories, without storing secret values, full env maps, provider credentials, or private path details.
 
 ## Worktree-local Instances
 
@@ -621,6 +638,14 @@ Environment overrides:
 - `PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES=<minutes>`
 - `PAPERCLIP_DB_BACKUP_RETENTION_DAYS=<days>`
 - `PAPERCLIP_DB_BACKUP_DIR=/absolute/or/~/path`
+- `PAPERCLIP_DB_BACKUP_MAX_AGE_HOURS=<hours>` controls the `/api/health`
+  stale-backup warning threshold
+- `PAPERCLIP_DB_BACKUP_ALERT_FILE=/path/to/failure-marker` lets external cron
+  wrappers surface the last failed backup in `/api/health`
+
+Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
+`db-backup-to-s3.failure` in the backup directory, beside the backup directory,
+and in the default sibling `health/` directory.
 
 DB backups are not full instance filesystem backups. For full local disaster
 recovery, also back up local storage files and the local encrypted secrets key if
@@ -715,6 +740,13 @@ The board UI generates agent onboarding prompts from the add-agent modal (`+` in
 - `GET /api/invites/:token/onboarding.txt` returns a plain-text onboarding doc intended for both human operators and agents (llm.txt-style handoff), including optional inviter message and suggested network host candidates.
 - `GET /api/skills/index` lists available skill documents.
 - `GET /api/skills/paperclip` returns the Paperclip heartbeat skill markdown.
+
+Hermes gateway agents use this same generic agent invite flow with
+`adapterType=hermes_gateway` and `agentDefaultsPayload.apiBaseUrl` /
+`agentDefaultsPayload.apiKey`. See
+[HERMES_GATEWAY_ONBOARDING.md](./HERMES_GATEWAY_ONBOARDING.md) for the full
+operator path, including Hermes credentials, invite approval, key claim, and
+fresh-state Docker smoke setup.
 
 ## OpenClaw Join Smoke Test
 

@@ -367,7 +367,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         ),
       )
       .then((rows) => rows[0] ?? null);
-    if (existing) return existing;
+    if (existing) return { incident: existing, created: false };
 
     const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
     const payload = buildApprovalPayload({
@@ -398,7 +398,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       emitApprovalCreated(approval);
     }
 
-    return db
+    const incident = await db
       .insert(budgetIncidents)
       .values({
         companyId: policy.companyId,
@@ -417,6 +417,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       })
       .returning()
       .then((rows) => rows[0] ?? null);
+    return incident ? { incident, created: true } : null;
   }
 
   async function resolveOpenSoftIncidents(policyId: string) {
@@ -677,14 +678,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
         if (policy.notifyEnabled && observedAmount >= softThreshold) {
           const softIncident = await createIncidentIfNeeded(policy, "soft", observedAmount);
-          if (softIncident) {
+          if (softIncident?.created) {
             await logActivity(db, {
               companyId: policy.companyId,
               actorType: "system",
               actorId: "budget_service",
               action: "budget.soft_threshold_crossed",
               entityType: "budget_incident",
-              entityId: softIncident.id,
+              entityId: softIncident.incident.id,
               details: {
                 scopeType: policy.scopeType,
                 scopeId: policy.scopeId,
@@ -699,20 +700,20 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           await resolveOpenSoftIncidents(policy.id);
           const hardIncident = await createIncidentIfNeeded(policy, "hard", observedAmount);
           await pauseAndCancelScopeForBudget(policy);
-          if (hardIncident) {
+          if (hardIncident?.created) {
             await logActivity(db, {
               companyId: policy.companyId,
               actorType: "system",
               actorId: "budget_service",
               action: "budget.hard_threshold_crossed",
               entityType: "budget_incident",
-              entityId: hardIncident.id,
+              entityId: hardIncident.incident.id,
               details: {
                 scopeType: policy.scopeType,
                 scopeId: policy.scopeId,
                 amountObserved: observedAmount,
                 amountLimit: policy.amount,
-                approvalId: hardIncident.approvalId ?? null,
+                approvalId: hardIncident.incident.approvalId ?? null,
               },
             });
           }

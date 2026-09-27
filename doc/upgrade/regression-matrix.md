@@ -12,6 +12,7 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 | Freeze päivitetty (porras 512, RK9-312) | `3e7ff932008e8feb99e45553ab0ba74945417c9e` (2026-09-27), commitit 143–159 alla |
 | Freeze päivitetty (porras 609, RK9-313) | `e3aa869c6334993bc13e72c0dcf17c5f61ec356b` (2026-09-27), commitit 160–165 alla |
 | Freeze päivitetty (porras 618, RK9-314) | `06b877ab7f687028e205021df6a5216e8cfa9a1b` (2026-09-27), commitit 166–174 alla |
+| Freeze päivitetty (porras 707, RK9-314) | `a0ae4d43b` (2026-09-27, PR #128 merge), commitit 175–180 alla |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
 | Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
@@ -275,6 +276,12 @@ tarkistus.
 | 172 | `c23fcd163` | docs(upgrade): stage 609 log, conflict log and defaults review (RK9-313) | docs | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/defaults-hardening.md`, `doc/upgrade/regression-matrix.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
 | 173 | `4328c3ffa` | chore(upgrade): gitleaks false positives from v2026.609.0 upstream commits (RK9-313) | ci/tooling | `.gitleaksignore` | PR-checkin gitleaks-ajo |
 | 174 | `8b71bf803` | docs(upgrade): verifier notes for stage 609 — claude-local model listing egress, assignability, dependabot (RK9-313) | docs | `doc/upgrade/defaults-hardening.md`, `doc/upgrade/regression-matrix.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 175 | `5035179e9` | test(upgrade): fork gemini session tests target upstream's renamed isGeminiSessionUnrecoverableError (RK9-314) | gemini-local | `packages/adapters/gemini-local/src/server/parse.test.ts` | `npx vitest run packages/adapters/gemini-local/src/server/parse.test.ts` |
+| 176 | `417d48068` | test(upgrade): upstream GGU-809 stranded-recovery tests follow RK9-87 on v2026.618.0 (RK9-314) | heartbeat/recovery | `server/src/__tests__/heartbeat-process-recovery.test.ts` | `npx vitest run server/src/__tests__/heartbeat-process-recovery.test.ts` |
+| 177 | `31bd1ac41` | docs(upgrade): stage 618 log, conflict log, TRUST_PROXY loopback test (RK9-314) | docs (+ proxy) | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/regression-matrix.md`, `server/src/__tests__/trust-proxy-rk9.test.ts` (+3) | `npx vitest run server/src/__tests__/trust-proxy-rk9.test.ts` |
+| 178 | `7a70d90b5` | chore(upgrade): gitleaks false positive from v2026.618.0 upstream redaction test (RK9-314) | ci/tooling | `.gitleaksignore` | PR-checkin gitleaks-ajo |
+| 179 | `ea8ffec40` | test(upgrade): warm the email route import before the first email-routes test (RK9-314) | email | `server/src/__tests__/email-routes.test.ts` | `npx vitest run server/src/__tests__/email-routes.test.ts` |
+| 180 | `7d5f268ad` | docs(upgrade): secrets:read gets its first callers in v2026.618.0 (RK9-314) | docs | `doc/upgrade/defaults-hardening.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 
@@ -495,6 +502,56 @@ Porras-618:n muut fork-sovitukset (ei konfliktia):
   virheellisellä arvolla. Prodissa muuttujaa ei ole asetettu, joten käytös ei muutu.
 - RK9-231 (idle timer -ohitus, `heartbeat.ts`) ja RK9-87 (`recovery/service.ts`) säilyivät ennallaan; kumpikaan ei
   ollut konfliktissa.
+
+## Konfliktit portaassa 707 (`origin/master` `a0ae4d43b` + `v2026.707.0`, RK9-314)
+
+Porras 720:n osa 2. Koemerge 618:n päälle: 626 → 23 konfliktia ja 22 migraatiota, 707 → 39 ja 31,
+720 → 57 ja 77. 707 valittiin, koska se jää rajojen alle ja jättää 720:lle 46 migraatiota.
+Todellinen merge 2026-09-27: 39 konfliktitiedostoa, migraatiot 0103–0135 (31 tiedostoa; upstreamista
+puuttuvat 0126 ja 0130, ks. alla).
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0135 tavu tavulta, sitten 9001–9010 idx:llä 136–145. Upstreamin idx on sama kuin migraation numero, joten 0126:n ja 0130:n kohdalla on aukko. Paikkaan perustuva numerointi olisi antanut 9001:lle ja 9002:lle saman idx:n kuin 0134:lle ja 0135:lle; `client.ts` järjestää idx:n mukaan. `upgrade-smoke.sh` vaatii nyt tiukasti kasvavan idx:n. |
+| `server/src/services/heartbeat.ts` (5 lohkoa) | molemmat. Forkin `systemPause`- ja `maxGlobalConcurrentRunsDefault`-optiot + upstreamin `runtimeEnv` ja `resolveHeartbeatSchedulingSuppression`. Upstream siirsi `activeRunExecutions`in moduulitasolle; forkin instanssikohtainen kopio poistettiin, joten globaali concurrency cap laskee nyt kaikkien `heartbeatService`-instanssien ajot. Käynnistyspolulla ensin upstreamin suppression-tarkistus, sitten forkin cap. Timer-tickissä ensin forkin system pause, sitten suppression. Knowledge recall (RK9-18) + upstreamin `requestedExecutionWorkspaceId`. |
+| `server/src/index.ts` | forkin risk-palvelut ja system pause + upstreamin DB-backup-hälytys ja `resolveHeartbeatSchedulingSuppression`; heartbeat- ja routine-palvelu saavat forkin optiot |
+| `server/src/services/agents.ts` | upstreamin transaktio ja secret binding -luonti; human proxy -agentin budjetti pysyy nollana (RK9 Custom) |
+| `server/src/services/recovery/service.ts` | `LatestIssueRun` pitää forkin kentät (`issueCommentStatus`, `scheduledRetryReason`); upstreamin uusi `getLatestIssueRunForAgent` valitsee ne myös (RK9-87) |
+| `server/src/services/approvals.ts`, `budgets.ts` | upstreamin `findOpenHireApprovalForAgent` + forkin `emitApprovalCreated` |
+| `packages/adapters/claude-local/src/server/test.ts` | upstreamin rakenne; hello-probe ajetaan RK9-228:n `inheritableHostEnv()`-ympäristöllä |
+| `packages/adapter-utils/src/execution-target.ts`, `claude-local/src/server/execute.ts` | molemmat (`doNotInheritEnvKeys` + upstreamin `runLogTail`) |
+| `ui/src/components/IssueProperties.tsx` | upstream pilkkoi komponentin hakemistoon `issue-properties/`. Forkin ainoa muutos (SEC-91: monitorin muutos säilyttää `outcomeRequirements`in) siirrettiin tiedostoon `issue-properties/IssueProperties.tsx`. Testi siirrettiin upstreamin testitiedoston loppuun. |
+| `ui/src/components/StatusBadge.tsx` | upstreamin `--sc`-värijärjestelmä; forkin `adapterType`-propi ja human proxy -haara `StatusBadge`- ja `AgentStatusBadge`-komponenteissa. Upstream poisti Conference Room Chat -paletin. |
+| `ui/src/pages/Agents.tsx` | upstreamin `renderAgentRow`; `AgentStatusBadge` saa `adapterType`in |
+| `ui/src/components/Sidebar.tsx` | upstream siirsi Skillsin Work-osioon; Company-osioon jäivät forkin Risks ja upstreamin Timeline |
+| `ui/src/lib/new-agent-runtime-config.ts` | vain forkin `skipWhenIdle: true` (ks. alla) |
+| `pnpm-lock.yaml` | upstreamin lockfile + `pnpm install --lockfile-only` (forkin sesv2, Slack, mailparser, `@types/node` 24) |
+| `skills/paperclip-dev/SKILL.md` | upstream poisti (#7029); forkin versio pidettiin |
+| `.github/workflows/commitperclip-review.yml` | pysyy poistettuna (RK9-313) |
+| muut 21 tiedostoa | molemmat puolet (importit, validaattorit, instanssiasetukset, testit, dokumentaatio) |
+
+Porras-707:n fork-päätökset ja testisovitukset:
+
+- **RK9-231 vs. upstreamin `skipTimerWhenNoActionableWork`.** Molemmat ohittavat ajastetun heartbeatin, kun
+  agentilla ei ole työtä. Forkin `skipWhenIdle` (oletus päällä, UI-kytkin) laskee työksi myös routine-ajot ja
+  blokatut issuet, joiden blokkerit ovat ratkenneet. Upstreamin tarkistus (oletus pois, ei UI-kytkintä) katsoo vain
+  `todo`- ja `in_progress`-issuet. Forkin portti pidettiin ensisijaisena, joten prodin käytös ei muutu. Upstreamin
+  portti toimii lisänä, kun agentin konfiguraatiossa on `skipTimerWhenNoActionableWork: true`. Uuden agentin
+  oletuksiin ei kirjoiteta upstreamin avainta, koska silloin forkin kytkimen kääntäminen pois ei palauttaisi ajoja.
+  Upstreamin timer-testit (`heartbeat-stale-queue-invalidation`, `heartbeat-process-recovery`) ajavat
+  `skipWhenIdle: false` -asetuksella.
+- **Vastuukäyttäjä.** 707 kieltäytyy käynnistämästä ajoa, jos vastuukäyttäjää ei löydy (`responsible_user_unresolved`).
+  Ketju: konteksti → routine → issue → yläissue → yrityksen `defaultResponsibleUserId` → omistaja → ensimmäinen
+  aktiivinen käyttäjäjäsen. Forkin `heartbeat-idle-timer-skip.test.ts`:n yritys sai `defaultResponsibleUserId`n.
+- **`tasks:assign`.** Upstreamin vastuukäyttäjätesti antaa agentille grantin, koska RK9-313-sääntö hylkää ilman grantia
+  ennen vastuukäyttäjätarkistusta. Päätös on kummassakin tapauksessa "ei sallittu".
+- **Ajastuksen esto.** `resolveHeartbeatSchedulingSuppression` estää ajastuksen, kun `PAPERCLIP_IN_WORKTREE`,
+  `PAPERCLIP_DATABASE_RESTORE_IN_PROGRESS` tai `PAPERCLIP_RESTORE_IN_PROGRESS` on tosi. Prodin prosessissa ja
+  env-tiedostoissa näitä ei ole.
+- `heartbeat-worktree-suppression.test.ts`: siivous yrittää uudelleen, kun valmis ajo kirjoittaa myöhäisen run-eventin
+  (flake 1/3 builder-02:lla, korjauksen jälkeen 5/5).
+- RK9-313:n `waitForValue`-korjauksen markkeri poistui `heartbeat-process-recovery.test.ts`:stä, koska upstream korjasi
+  saman kohdan. GGU-809-sovitus (RK9-314) säilyi.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

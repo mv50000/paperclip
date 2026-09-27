@@ -62,16 +62,21 @@ export const patchInstanceGeneralSettingsSchema = instanceGeneralSettingsSchema.
 export const instanceExperimentalSettingsSchema = z.object({
   enableEnvironments: z.boolean().default(false),
   enableIsolatedWorkspaces: z.boolean().default(false),
-  enableStreamlinedLeftNavigation: z.boolean().default(false),
+  enableStreamlinedLeftNavigation: z.boolean().default(true),
+  enablePipelines: z.boolean().default(false),
   enableConferenceRoomChat: z.boolean().default(false),
+  enableTaskWatchdogs: z.boolean().default(false),
   enableIssuePlanDecompositions: z.boolean().default(false),
   enableExperimentalFileViewer: z.boolean().default(false),
   enableCloudSync: z.boolean().default(false),
+  enableExternalObjects: z.boolean().default(false),
+  enableServerInfoDebugView: z.boolean().default(false),
   autoRestartDevServerWhenIdle: z.boolean().default(false),
   enableIssueGraphLivenessAutoRecovery: z.boolean().default(false),
   // RK9-18 (C6): global kill-switch for heartbeat knowledge-recall injection. Default off;
   // even when on, injection still requires per-agent opt-in (agents.runtimeConfig.knowledgeRecall.enabled).
   knowledgeRecallInjectionEnabled: z.boolean().default(false),
+  enableWorkspaceBranchReconcileForward: z.boolean().default(false),
   issueGraphLivenessAutoRecoveryLookbackHours: z
     .number()
     .int()
@@ -82,6 +87,10 @@ export const instanceExperimentalSettingsSchema = z.object({
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();
+
+export const patchInstanceSettingsSchema = z.object({
+  defaultEnvironmentId: z.string().uuid().nullable().optional(),
+}).strict();
 
 export const issueGraphLivenessAutoRecoveryRequestSchema = z.object({
   lookbackHours: z
@@ -97,6 +106,16 @@ export type PatchInstanceGeneralSettings = z.infer<typeof patchInstanceGeneralSe
 export type InstanceExperimentalSettings = z.infer<typeof instanceExperimentalSettingsSchema>;
 export type PatchInstanceExperimentalSettings = z.infer<typeof patchInstanceExperimentalSettingsSchema>;
 export type ManualPauseRequest = z.infer<typeof manualPauseRequestSchema>;
+export type PatchInstanceSettings = z.infer<typeof patchInstanceSettingsSchema>;
 export type IssueGraphLivenessAutoRecoveryRequest = z.infer<
   typeof issueGraphLivenessAutoRecoveryRequestSchema
 >;
+
+export const instanceSettingsSchema = z.object({
+  id: z.string().uuid(),
+  defaultEnvironmentId: z.string().uuid().nullable(),
+  general: instanceGeneralSettingsSchema,
+  experimental: instanceExperimentalSettingsSchema,
+  createdAt: z.union([z.date(), z.string().datetime()]),
+  updatedAt: z.union([z.date(), z.string().datetime()]),
+}).strict();
