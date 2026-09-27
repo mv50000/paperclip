@@ -8,6 +8,7 @@ export {
   createDb,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
+  resetPostgresDatabase,
   inspectMigrations,
   applyPendingMigrations,
   reconcilePendingMigrationHistory,

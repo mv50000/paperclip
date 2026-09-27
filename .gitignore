@@ -45,6 +45,7 @@ diagnostics/
 .vscode/
 .claude/settings.local.json
 .paperclip-local/
+.paperclip-runtime/
 /.idea/
 /.agents/
 
@@ -59,6 +60,11 @@ tests/release-smoke/playwright-report/
 tests/e2e-companies/test-results/
 tests/e2e-companies/playwright-report/
 tests/e2e-companies/.last-run.json
+tests/storybook-visual/.cache/
+tests/storybook-visual/.snapshots/
+tests/storybook-visual/baseline-review/
+tests/storybook-visual/test-results/
+tests/storybook-visual/playwright-report/
 .superset/
 .superpowers/
 .claude/worktrees/

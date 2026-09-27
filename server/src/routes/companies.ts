@@ -361,6 +361,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       entityId: result.company.id,
       agentId: actor.agentId,
       runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
       action: "company.imported",
       details: {
         include: body.include ?? null,
@@ -481,6 +482,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
         actorId: actor.actorId,
         agentId: actor.agentId,
         runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
         action: "company.updated",
         entityType: "company",
         entityId: companyId,
@@ -506,6 +508,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
       action: "company.branding_updated",
       entityType: "company",
       entityId: companyId,

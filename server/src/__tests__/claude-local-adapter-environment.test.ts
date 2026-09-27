@@ -147,6 +147,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd: process.cwd(),
       },
@@ -172,6 +173,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd: process.cwd(),
         env: {
@@ -199,6 +201,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd: process.cwd(),
       },
@@ -226,6 +229,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd: process.cwd(),
         env: {
@@ -256,6 +260,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd: process.cwd(),
       },
@@ -280,6 +285,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
         cwd,
       },
@@ -297,6 +303,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: process.execPath,
       },
       executionTarget: {
@@ -337,6 +344,7 @@ describe("claude_local environment diagnostics", () => {
       companyId: "company-1",
       adapterType: "claude_local",
       config: {
+        engine: "cli",
         command: "claude",
       },
       executionTarget: {
@@ -447,6 +455,7 @@ console.log(JSON.stringify({ type: "result", result: "hello", usage: { input_tok
         companyId: "company-1",
         adapterType: "claude_local",
         config: {
+          engine: "cli",
           command: commandPath,
           env: { HOME: remoteHome },
         },
@@ -482,6 +491,7 @@ console.log(JSON.stringify({ type: "result", result: "hello", usage: { input_tok
         companyId: "company-1",
         adapterType: "claude_local",
         config: {
+          engine: "cli",
           command: commandPath,
           cwd: workspace,
           effort: "low",

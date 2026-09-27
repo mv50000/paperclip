@@ -96,6 +96,14 @@ describe("onboard", () => {
     execFileSyncMock.mockImplementation(() => {
       throw new Error("tailscale unavailable");
     });
+    delete process.env.PAPERCLIP_DB_BACKUP_DIR;
+    delete process.env.PAPERCLIP_DB_BACKUP_ENABLED;
+    delete process.env.PAPERCLIP_DB_BACKUP_INTERVAL_MINUTES;
+    delete process.env.PAPERCLIP_DB_BACKUP_RETENTION_DAYS;
+    delete process.env.PAPERCLIP_STORAGE_PROVIDER;
+    delete process.env.PAPERCLIP_STORAGE_LOCAL_DIR;
+    delete process.env.PAPERCLIP_SECRETS_PROVIDER;
+    delete process.env.PAPERCLIP_SECRETS_STRICT_MODE;
     delete process.env.PAPERCLIP_HOME;
     delete process.env.PAPERCLIP_CONFIG;
     delete process.env.PAPERCLIP_INSTANCE_ID;

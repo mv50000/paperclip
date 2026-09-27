@@ -81,10 +81,17 @@ describe("instance settings routes", () => {
         enableIssuePlanDecompositions: false,
         enableExperimentalFileViewer: false,
         enableCloudSync: false,
+        enableExternalObjects: false,
+        enableBuiltInAgents: false,
+        enableGoalsSidebarLink: false,
         enableServerInfoDebugView: false,
         autoRestartDevServerWhenIdle: false,
         enableIssueGraphLivenessAutoRecovery: true,
-        enableWorkspaceBranchReconcileForward: false,
+        enableWorkspaceBranchReconcileForward: true,
+        enableWorkspaceDirtyQuarantineRepair: true,
+        enableWorktreeRunExecution: false,
+        worktreeRunExecutionActivatedAt: null,
+        worktreeRunExecutionActivationInstanceId: null,
         issueGraphLivenessAutoRecoveryLookbackHours: 24,
       },
       createdAt: "2026-06-20T00:00:00.000Z",
@@ -103,11 +110,17 @@ describe("instance settings routes", () => {
       enableTaskWatchdogs: false,
       enableCloudSync: false,
       enableExternalObjects: false,
+      enableBuiltInAgents: false,
+      enableGoalsSidebarLink: false,
       enableServerInfoDebugView: false,
       autoRestartDevServerWhenIdle: false,
       enableIssueGraphLivenessAutoRecovery: true,
       knowledgeRecallInjectionEnabled: false,
-      enableWorkspaceBranchReconcileForward: false,
+      enableWorkspaceBranchReconcileForward: true,
+      enableWorkspaceDirtyQuarantineRepair: true,
+      enableWorktreeRunExecution: false,
+      worktreeRunExecutionActivatedAt: null,
+      worktreeRunExecutionActivationInstanceId: null,
       issueGraphLivenessAutoRecoveryLookbackHours: 24,
       recoveryStrictInProgressOnly: false,
     });
@@ -125,10 +138,17 @@ describe("instance settings routes", () => {
         enableIssuePlanDecompositions: true,
         enableExperimentalFileViewer: true,
         enableCloudSync: true,
+        enableExternalObjects: false,
+        enableBuiltInAgents: false,
+        enableGoalsSidebarLink: false,
         enableServerInfoDebugView: false,
         autoRestartDevServerWhenIdle: false,
         enableIssueGraphLivenessAutoRecovery: true,
-        enableWorkspaceBranchReconcileForward: false,
+        enableWorkspaceBranchReconcileForward: true,
+        enableWorkspaceDirtyQuarantineRepair: true,
+        enableWorktreeRunExecution: false,
+        worktreeRunExecutionActivatedAt: null,
+        worktreeRunExecutionActivationInstanceId: null,
         issueGraphLivenessAutoRecoveryLookbackHours: 24,
       },
       createdAt: "2026-06-20T00:00:00.000Z",
@@ -152,11 +172,17 @@ describe("instance settings routes", () => {
         enableTaskWatchdogs: true,
         enableCloudSync: true,
         enableExternalObjects: false,
+        enableBuiltInAgents: true,
+        enableGoalsSidebarLink: false,
         enableServerInfoDebugView: true,
         autoRestartDevServerWhenIdle: false,
         enableIssueGraphLivenessAutoRecovery: true,
         knowledgeRecallInjectionEnabled: false,
-        enableWorkspaceBranchReconcileForward: false,
+        enableWorkspaceBranchReconcileForward: true,
+        enableWorkspaceDirtyQuarantineRepair: true,
+        enableWorktreeRunExecution: false,
+        worktreeRunExecutionActivatedAt: null,
+        worktreeRunExecutionActivationInstanceId: null,
         issueGraphLivenessAutoRecoveryLookbackHours: 24,
         recoveryStrictInProgressOnly: false,
       },
@@ -209,11 +235,17 @@ describe("instance settings routes", () => {
       enableTaskWatchdogs: false,
       enableCloudSync: false,
       enableExternalObjects: false,
+      enableBuiltInAgents: false,
+      enableGoalsSidebarLink: false,
       enableServerInfoDebugView: false,
       autoRestartDevServerWhenIdle: false,
       enableIssueGraphLivenessAutoRecovery: true,
       knowledgeRecallInjectionEnabled: false,
-      enableWorkspaceBranchReconcileForward: false,
+      enableWorkspaceBranchReconcileForward: true,
+      enableWorkspaceDirtyQuarantineRepair: true,
+      enableWorktreeRunExecution: false,
+      worktreeRunExecutionActivatedAt: null,
+      worktreeRunExecutionActivationInstanceId: null,
       issueGraphLivenessAutoRecoveryLookbackHours: 24,
       recoveryStrictInProgressOnly: false,
     });
@@ -228,6 +260,28 @@ describe("instance settings routes", () => {
     });
     expect(mockLogActivity).toHaveBeenCalledTimes(2);
   }, 10_000);
+
+  it("strips server-managed worktree run execution fields before updating experimental settings", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    await request(app)
+      .patch("/api/instance/settings/experimental")
+      .send({
+        enableWorktreeRunExecution: true,
+        worktreeRunExecutionActivatedAt: "2026-07-10T12:00:00.000Z",
+        worktreeRunExecutionActivationInstanceId: "copied-instance",
+      })
+      .expect(200);
+
+    expect(mockInstanceSettingsService.updateExperimental).toHaveBeenCalledWith({
+      enableWorktreeRunExecution: true,
+    });
+  });
 
   it("allows local board users to read and update the instance default environment", async () => {
     const app = await createApp({
@@ -305,6 +359,42 @@ describe("instance settings routes", () => {
 
     expect(mockInstanceSettingsService.updateExperimental).toHaveBeenCalledWith({
       enableExternalObjects: true,
+    });
+  });
+
+  it("allows local board users to update built-in agents", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    await request(app)
+      .patch("/api/instance/settings/experimental")
+      .send({ enableBuiltInAgents: true })
+      .expect(200);
+
+    expect(mockInstanceSettingsService.updateExperimental).toHaveBeenCalledWith({
+      enableBuiltInAgents: true,
+    });
+  });
+
+  it("allows local board users to update the goals sidebar link", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    await request(app)
+      .patch("/api/instance/settings/experimental")
+      .send({ enableGoalsSidebarLink: true })
+      .expect(200);
+
+    expect(mockInstanceSettingsService.updateExperimental).toHaveBeenCalledWith({
+      enableGoalsSidebarLink: true,
     });
   });
 
