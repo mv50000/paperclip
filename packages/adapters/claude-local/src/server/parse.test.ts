@@ -6,7 +6,6 @@ import {
   extractClaudeRetryNotBefore,
   isClaudeProviderQuotaError,
   isClaudeTransientUpstreamError,
-  parseClaudeStreamJson,
   extractClaudeLoginUrl,
   describeClaudeFailure,
   isClaudeMaxTurnsResult,
@@ -616,6 +615,9 @@ describe("isClaudeUnknownSessionError", () => {
   it("does not classify unrelated failures as stale sessions", () => {
     expect(isClaudeUnknownSessionError({ result: "model overloaded" })).toBe(false);
     expect(isClaudeUnknownSessionError({ errors: ["rate limited"] })).toBe(false);
+  });
+});
+
 describe("claudeModelUsageTotals", () => {
   it("sums per-model usage across models and counts cache writes as input", () => {
     const totals = claudeModelUsageTotals({

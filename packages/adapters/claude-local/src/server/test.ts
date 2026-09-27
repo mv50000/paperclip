@@ -27,6 +27,7 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   INHERIT_OPT_IN_ENV_KEY,
+  acpHostKeyBlockReason,
   hostEnvKeysNotInherited,
   inheritableHostEnv,
   inheritsHostAnthropicApiKey,
@@ -99,7 +100,18 @@ export async function testEnvironment(
     config: parseObject(ctx.config),
     executionTarget: ctx.executionTarget,
   });
-  if (engineSelection.engine === "acp") {
+  // --- RK9 Custom (RK9-228, RK9-312): no ACP probe while a server-wide ANTHROPIC_API_KEY is present ---
+  const acpBlockReason = engineSelection.engine === "acp" ? acpHostKeyBlockReason() : null;
+  if (acpBlockReason && engineSelection.explicit) {
+    return {
+      adapterType: ctx.adapterType,
+      status: "fail",
+      checks: [{ code: "claude_acp_host_key_blocked", level: "error", message: acpBlockReason }],
+      testedAt: new Date().toISOString(),
+    };
+  }
+  // --- /RK9 Custom ---
+  if (engineSelection.engine === "acp" && !acpBlockReason) {
     return testClaudeAcpEnvironment(ctx);
   }
 

@@ -985,6 +985,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
         contextSnapshot: heartbeatRuns.contextSnapshot,
+        // --- RK9 Custom: run fields for succeeded-run skip ---
+        issueCommentStatus: heartbeatRuns.issueCommentStatus,
+        scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
         livenessState: heartbeatRuns.livenessState,
         resultJson: heartbeatRuns.resultJson,
       })
@@ -3422,7 +3425,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       ? "the active review participant"
       : "the original assignee";
     const policy = {
-      ...(previousPolicy ?? { mode: "normal" as const, commentRequired: true, stages: [] }),
+      // --- RK9 Custom: SEC-91 policies always carry outcomeRequirements ---
+      ...(previousPolicy ?? { mode: "normal" as const, commentRequired: true, stages: [], outcomeRequirements: [] }),
       monitor: {
         nextCheckAt: input.classification.retryAt.toISOString(),
         notes: input.classification.parsedResetTime

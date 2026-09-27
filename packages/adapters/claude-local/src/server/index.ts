@@ -11,6 +11,7 @@ export {
   resolveClaudeEffectiveEnv,
   inheritsHostAnthropicApiKey,
   INHERIT_OPT_IN_ENV_KEY,
+  acpHostKeyBlockReason,
 } from "./host-env.js";
 export * from "./acp.js";
 export { getConfigSchema } from "./config-schema.js";

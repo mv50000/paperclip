@@ -74,3 +74,29 @@ export function hostEnvKeysNotInherited(
 ): string[] {
   return inheritsHostAnthropicApiKey(hostEnv) ? [] : [...HOST_ENV_KEYS_NOT_INHERITED];
 }
+
+/**
+ * Why the ACP engine may not start on this server, or null when it may.
+ *
+ * The ACP engine (`adapter-utils/src/acpx-engine`) starts the agent with the
+ * whole server environment and ignores `doNotInheritEnvKeys`, so it would hand
+ * a server-wide `ANTHROPIC_API_KEY` to every ACP run (RK9-228). Until the guard
+ * is ported into the engine itself, ACP runs refuse to start while such a key is
+ * present and the deployment has not opted in. This replaces the acpx_local
+ * guard (RK9-312): upstream retired acpx_local in v2026.720.0 and migration 0136
+ * moved its agents to claude_local with `engine: "acp"`.
+ */
+export function acpHostKeyBlockReason(
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const present = hostEnvKeysNotInherited(hostEnv).filter((key) => {
+    const value = hostEnv[key];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+  if (present.length === 0) return null;
+  return (
+    `The Claude ACP engine is disabled on this server: it passes the whole server environment ` +
+    `to the agent, including ${present.join(", ")}, which would bill runs against metered API credit ` +
+    `(RK9-228). Set engine=cli, or remove the key from the server environment.`
+  );
+}

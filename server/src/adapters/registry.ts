@@ -18,7 +18,6 @@ import {
   testEnvironment as claudeTestEnvironment,
   sessionCodec as claudeSessionCodec,
   getQuotaWindows as claudeGetQuotaWindows,
-  hostEnvKeysNotInherited,
   getConfigSchema as getClaudeConfigSchema,
 } from "@paperclipai/adapter-claude-local/server";
 import {
@@ -212,47 +211,6 @@ const claudeLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: claudeAgentConfigurationDoc,
   getConfigSchema: getClaudeConfigSchema,
   getQuotaWindows: claudeGetQuotaWindows,
-};
-
-// --- RK9 Custom (RK9-228, RK9-312): acpx_local must not see a server-wide ANTHROPIC_API_KEY ---
-// The ACP runtime (acpx) spawns the agent with `{ ...process.env }` and ignores the
-// fork's `doNotInheritEnvKeys`, so a server-wide key would move every acpx run onto
-// metered API billing. Until the guard is ported into the ACP engine (step 720, see
-// doc/upgrade/acpx-claude-local.md), acpx runs and probes refuse to start while such a
-// key is present and PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY does not opt in.
-export function acpxHostKeyBlockReason(hostEnv: NodeJS.ProcessEnv = process.env): string | null {
-  const present = hostEnvKeysNotInherited(hostEnv).filter((key) => {
-    const value = hostEnv[key];
-    return typeof value === "string" && value.trim().length > 0;
-  });
-  if (present.length === 0) return null;
-  return (
-    `acpx_local is disabled on this server: the ACP runtime passes the whole server environment ` +
-    `to the agent, including ${present.join(", ")}, which would bill runs against metered API credit ` +
-    `(RK9-228). Use claude_local, or remove the key from the server environment.`
-  );
-}
-
-const guardedAcpxExecute: ServerAdapterModule["execute"] = async (ctx) => {
-  const reason = acpxHostKeyBlockReason();
-  if (reason) {
-    await ctx.onLog("stderr", `[paperclip] ${reason}\n`);
-    return { exitCode: 1, signal: null, timedOut: false, errorMessage: reason, errorCode: "acpx_host_key_blocked" };
-  }
-  return acpxExecute(ctx);
-};
-
-const guardedAcpxTestEnvironment: ServerAdapterModule["testEnvironment"] = async (ctx) => {
-  const reason = acpxHostKeyBlockReason();
-  if (reason) {
-    return {
-      adapterType: "acpx_local",
-      status: "fail",
-      checks: [{ code: "acpx_host_key_blocked", level: "error", message: reason }],
-      testedAt: new Date().toISOString(),
-    };
-  }
-  return acpxTestEnvironment(ctx);
 };
 
 const acpxLocalAdapter: ServerAdapterModule = {

@@ -78,6 +78,7 @@ import { claudeCommandSupportsEffortFlag } from "./cli-capabilities.js";
 import { resolveClaudeDesiredSkillNames } from "./skills.js";
 import { isBedrockModelId } from "./models.js";
 import {
+  acpHostKeyBlockReason,
   hostEnvKeysNotInherited,
   inheritableHostEnv,
   resolveClaudeEffectiveEnv,
@@ -402,7 +403,22 @@ export async function runClaudeLogin(input: {
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const engineSelection = await resolveClaudeExecutionEngineForRun(ctx);
-  if (engineSelection.engine === "acp") {
+  // --- RK9 Custom (RK9-228, RK9-312): no ACP run while a server-wide ANTHROPIC_API_KEY is present ---
+  const acpBlockReason = engineSelection.engine === "acp" ? acpHostKeyBlockReason() : null;
+  if (acpBlockReason) {
+    await ctx.onLog("stderr", `[paperclip] ${acpBlockReason}\n`);
+    if (engineSelection.explicit) {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: acpBlockReason,
+        errorCode: "claude_acp_host_key_blocked",
+      };
+    }
+  }
+  // --- /RK9 Custom ---
+  if (engineSelection.engine === "acp" && !acpBlockReason) {
     try {
       return await executeClaudeAcp(ctx);
     } catch (err) {
