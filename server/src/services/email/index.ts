@@ -6,7 +6,7 @@
 //   5. Render markdown → html+text, build From: address
 //   6. Resolve resend.api_key from company secrets
 //   7. Send via the configured provider (createMailProvider; default resend)
-//   8. Persist to email_messages + email_outbound_audit
+//   8. Persist to rk9_email_messages + email_outbound_audit
 // Each blocking step also writes a row to email_outbound_audit so we have a
 // complete audit trail (rate limits, suppression, header injection attempts).
 
@@ -14,7 +14,7 @@ import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   companyEmailConfig,
-  emailMessages,
+  rk9EmailMessages,
   emailOutboundAudit,
   emailRoutes,
 } from "@paperclipai/db";
@@ -247,12 +247,12 @@ export function createEmailService(db: Db): EmailService {
     const threadingHeaders: Record<string, string> = {};
     if (input.inReplyToMessageId) {
       const [parentRow] = await db
-        .select({ headers: emailMessages.headers })
-        .from(emailMessages)
+        .select({ headers: rk9EmailMessages.headers })
+        .from(rk9EmailMessages)
         .where(
           and(
-            eq(emailMessages.companyId, input.companyId),
-            eq(emailMessages.id, input.inReplyToMessageId),
+            eq(rk9EmailMessages.companyId, input.companyId),
+            eq(rk9EmailMessages.id, input.inReplyToMessageId),
           ),
         );
       const parentMid = (parentRow?.headers as Record<string, string> | null)?.["message-id"];
@@ -309,7 +309,7 @@ export function createEmailService(db: Db): EmailService {
 
     // 8. Persist
     const [persisted] = await db
-      .insert(emailMessages)
+      .insert(rk9EmailMessages)
       .values({
         companyId: input.companyId,
         direction: "outbound",
@@ -329,9 +329,9 @@ export function createEmailService(db: Db): EmailService {
         sentAt: new Date(),
       })
       .onConflictDoNothing({
-        target: [emailMessages.companyId, emailMessages.providerMessageId],
+        target: [rk9EmailMessages.companyId, rk9EmailMessages.providerMessageId],
       })
-      .returning({ id: emailMessages.id });
+      .returning({ id: rk9EmailMessages.id });
 
     const messageId = persisted?.id;
     await audit({
@@ -356,11 +356,11 @@ export function createEmailService(db: Db): EmailService {
   async function replyToMessage(input: ReplyEmailInput): Promise<ReplyEmailResult> {
     const [parent] = await db
       .select()
-      .from(emailMessages)
+      .from(rk9EmailMessages)
       .where(
         and(
-          eq(emailMessages.companyId, input.companyId),
-          eq(emailMessages.id, input.inReplyToMessageId),
+          eq(rk9EmailMessages.companyId, input.companyId),
+          eq(rk9EmailMessages.id, input.inReplyToMessageId),
         ),
       );
     if (!parent) return { ok: false, reason: "parent_not_found" };

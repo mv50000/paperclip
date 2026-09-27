@@ -82,6 +82,7 @@ interface IssueUpdateOptions extends BaseClientOptions {
 interface IssueCommentOptions extends BaseClientOptions {
   body?: string;
   bodyFile?: string;
+  attachmentId?: string[];
   reopen?: boolean;
   resume?: boolean;
 }
@@ -364,6 +365,10 @@ export function registerIssueCommands(program: Command): void {
       .argument("<issueId>", "Issue ID")
       .option("--body <text>", "Comment body (mutually exclusive with --body-file)")
       .option("--body-file <path>", "Read the comment body from a file (use '-' for stdin)")
+      .option(
+        "--attachment-id <id...>",
+        "Bind uploaded issue attachments to this comment",
+      )
       .option("--reopen", "Reopen if issue is done/cancelled")
       .option("--resume", "Request explicit follow-up and wake the assignee when resumable")
       .action(async (issueId: string, opts: IssueCommentOptions) => {
@@ -378,6 +383,7 @@ export function registerIssueCommands(program: Command): void {
               : opts.body;
           const payload = addIssueCommentSchema.parse({
             body,
+            attachmentIds: opts.attachmentId,
             reopen: opts.reopen,
             resume: opts.resume,
           });

@@ -6,7 +6,7 @@
 
 import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companies, companyEmailConfig, emailMessages } from "@paperclipai/db";
+import { companies, companyEmailConfig, rk9EmailMessages } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import type { EmailService } from "./index.js";
 
@@ -71,19 +71,19 @@ async function gatherStats(db: Db, sinceMs: number): Promise<DeliverabilityStats
 
   const rows = await db
     .select({
-      companyId: emailMessages.companyId,
-      status: emailMessages.status,
+      companyId: rk9EmailMessages.companyId,
+      status: rk9EmailMessages.status,
       count: sql<number>`count(*)::int`,
     })
-    .from(emailMessages)
+    .from(rk9EmailMessages)
     .where(
       and(
-        inArray(emailMessages.companyId, ids),
-        eq(emailMessages.direction, "outbound"),
-        gt(emailMessages.createdAt, since),
+        inArray(rk9EmailMessages.companyId, ids),
+        eq(rk9EmailMessages.direction, "outbound"),
+        gt(rk9EmailMessages.createdAt, since),
       ),
     )
-    .groupBy(emailMessages.companyId, emailMessages.status);
+    .groupBy(rk9EmailMessages.companyId, rk9EmailMessages.status);
 
   const byCompany = new Map<string, { sent: number; bounced: number; complained: number; total: number }>();
   for (const c of enabledCompanies) {

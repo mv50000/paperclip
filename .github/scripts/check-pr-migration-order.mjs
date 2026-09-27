@@ -24,7 +24,18 @@ function formatMigrationNumber(number) {
   return String(number).padStart(4, '0');
 }
 
-export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles) {
+// --- RK9 Custom (RK9-317) --- pinnedForkFiles: basenames pinned in the head's
+// packages/db/src/fork-migration-hashes.json. A pinned fork file may sit in a free number below
+// the series maximum (0126 in the upstream gap, 9000 before 9001) when the target branch has no
+// file with that number. The hash pin and check:migrations guard these files.
+const FORK_MIGRATION_HASHES_PATH = 'packages/db/src/fork-migration-hashes.json';
+
+function basename(file) {
+  return file.slice(file.lastIndexOf('/') + 1);
+}
+// --- end RK9 Custom ---
+
+export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles, pinnedForkFiles = new Set()) {
   const invalidFiles = [...baseMigrationFiles, ...prMigrationFiles]
     .filter((file) => !parseMigration(file));
 
@@ -54,8 +65,11 @@ export function checkMigrationOrder(baseMigrationFiles, prMigrationFiles) {
       (latest, migration) => migration.number > latest.number ? migration : latest,
       { file: '(none)', number: series === FORK_SERIES ? FORK_SERIES_START - 1 : -1 },
     );
+  const baseNumbers = new Set(baseMigrations.map((migration) => migration.number));
   const outOfOrder = prMigrations.filter(
-    (migration) => migration.number <= latestInSeries(migrationSeries(migration.number)).number,
+    (migration) => migration.number <= latestInSeries(migrationSeries(migration.number)).number
+      // RK9 Custom (RK9-317): a pinned fork file in a free slot is not out of order.
+      && !(pinnedForkFiles.has(basename(migration.file)) && !baseNumbers.has(migration.number)),
   );
   const latestBaseMigration = latestInSeries(
     migrationSeries((outOfOrder[0] ?? prMigrations[0]).number),
@@ -113,7 +127,16 @@ function main() {
     'diff', '--name-only', '--diff-filter=A', '-z', `${baseSha}...${headSha}`, '--',
     MIGRATIONS_DIRECTORY,
   ]).filter((file) => file.endsWith('.sql'));
-  const result = checkMigrationOrder(baseMigrationFiles, prMigrationFiles);
+  // --- RK9 Custom (RK9-317) ---
+  let pinnedForkFiles = new Set();
+  try {
+    const pinned = execFileSync('git', ['show', `${headSha}:${FORK_MIGRATION_HASHES_PATH}`], { encoding: 'utf8' });
+    pinnedForkFiles = new Set(Object.keys(JSON.parse(pinned)));
+  } catch {
+    pinnedForkFiles = new Set();
+  }
+  const result = checkMigrationOrder(baseMigrationFiles, prMigrationFiles, pinnedForkFiles);
+  // --- end RK9 Custom ---
 
   if (result.passed) {
     console.log(result.message);

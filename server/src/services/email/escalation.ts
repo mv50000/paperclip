@@ -7,14 +7,14 @@
 // scale to dozens of companies with high inbound volume we can switch to a
 // per-company scheduled routine.
 //
-// Persistence: `email_messages.escalated_at` is the marker. Set it BEFORE
+// Persistence: `rk9_email_messages.escalated_at` is the marker. Set it BEFORE
 // sending so a restart in the middle does not double-escalate.
 
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   companyEmailConfig,
-  emailMessages,
+  rk9EmailMessages,
   emailRoutes,
   issues,
 } from "@paperclipai/db";
@@ -42,37 +42,37 @@ async function findCandidates(db: Db): Promise<EscalationCandidate[]> {
   // Inbound messages with a linked issue still open AND past escalate_after_hours.
   const rows = await db
     .select({
-      companyId: emailMessages.companyId,
-      emailMessageId: emailMessages.id,
-      issueId: emailMessages.issueId,
+      companyId: rk9EmailMessages.companyId,
+      emailMessageId: rk9EmailMessages.id,
+      issueId: rk9EmailMessages.issueId,
       issueTitle: issues.title,
       issueStatus: issues.status,
-      fromAddress: emailMessages.fromAddress,
-      subject: emailMessages.subject,
-      receivedAt: emailMessages.receivedAt,
-      routeKey: emailMessages.routeKey,
+      fromAddress: rk9EmailMessages.fromAddress,
+      subject: rk9EmailMessages.subject,
+      receivedAt: rk9EmailMessages.receivedAt,
+      routeKey: rk9EmailMessages.routeKey,
       escalateAfterHours: emailRoutes.escalateAfterHours,
       sendingDomain: companyEmailConfig.sendingDomain,
     })
-    .from(emailMessages)
-    .leftJoin(issues, eq(emailMessages.issueId, issues.id))
+    .from(rk9EmailMessages)
+    .leftJoin(issues, eq(rk9EmailMessages.issueId, issues.id))
     .leftJoin(
       emailRoutes,
       and(
-        eq(emailRoutes.companyId, emailMessages.companyId),
-        eq(emailRoutes.routeKey, emailMessages.routeKey),
+        eq(emailRoutes.companyId, rk9EmailMessages.companyId),
+        eq(emailRoutes.routeKey, rk9EmailMessages.routeKey),
       ),
     )
-    .leftJoin(companyEmailConfig, eq(companyEmailConfig.companyId, emailMessages.companyId))
+    .leftJoin(companyEmailConfig, eq(companyEmailConfig.companyId, rk9EmailMessages.companyId))
     .where(
       and(
-        eq(emailMessages.direction, "inbound"),
-        isNull(emailMessages.escalatedAt),
+        eq(rk9EmailMessages.direction, "inbound"),
+        isNull(rk9EmailMessages.escalatedAt),
         // Automated (noreply/bulk) mail never escalates — the Instagram-spam
         // path that flooded the CEO inbox (RK9-81).
-        isNull(emailMessages.classification),
+        isNull(rk9EmailMessages.classification),
         // received_at + escalate_after_hours hours <= now()
-        sql`${emailMessages.receivedAt} + (${emailRoutes.escalateAfterHours} * interval '1 hour') <= now()`,
+        sql`${rk9EmailMessages.receivedAt} + (${emailRoutes.escalateAfterHours} * interval '1 hour') <= now()`,
       ),
     );
 
@@ -103,9 +103,9 @@ async function escalateOne(
 ): Promise<void> {
   // Mark escalated_at FIRST to prevent double-fire on a restart mid-flight.
   await db
-    .update(emailMessages)
+    .update(rk9EmailMessages)
     .set({ escalatedAt: new Date() })
-    .where(eq(emailMessages.id, candidate.emailMessageId));
+    .where(eq(rk9EmailMessages.id, candidate.emailMessageId));
 
   const ageHours = candidate.receivedAt
     ? Math.round((Date.now() - candidate.receivedAt.getTime()) / (60 * 60 * 1000))
@@ -150,9 +150,9 @@ async function escalateOne(
     );
     // Roll back the marker so the next tick will retry.
     await db
-      .update(emailMessages)
+      .update(rk9EmailMessages)
       .set({ escalatedAt: null })
-      .where(eq(emailMessages.id, candidate.emailMessageId));
+      .where(eq(rk9EmailMessages.id, candidate.emailMessageId));
   } else {
     logger.info(
       {

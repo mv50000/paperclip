@@ -188,7 +188,7 @@ async function attemptCsAgentHandoff(db: Db, companyId: string, parsed: ParsedIn
     return;
   }
   if (result.status === "stored_unrouted") {
-    // The body is safe (email_messages), but nobody owns it. Surfaced as
+    // The body is safe (rk9_email_messages), but nobody owns it. Surfaced as
     // `outreach_inbound_unrouted` in /metrics and as a line in the daily
     // digest — this repo does not call Telegram itself (see
     // docs/implementation-notes/outreach-metrics.md).

@@ -16,7 +16,7 @@ import {
   createDb,
   companies,
   companyEmailConfig,
-  emailMessages,
+  rk9EmailMessages,
   emailRoutes,
   outreachEvents,
   outreachProspects,
@@ -69,7 +69,7 @@ describe("outreach inbound: a prospect reply is never dropped", () => {
   }, 120_000);
 
   beforeEach(async () => {
-    await db.delete(emailMessages);
+    await db.delete(rk9EmailMessages);
     await db.delete(emailRoutes);
     await db.delete(outreachEvents);
     await db.delete(outreachMessages);
@@ -114,7 +114,7 @@ describe("outreach inbound: a prospect reply is never dropped", () => {
     const result = await processOutreachInboundMail(db, replyMime(), { ownDomains: [OUTREACH_DOMAIN] });
     expect(result.outcome).toBe("reply_recorded");
 
-    const stored = await db.select().from(emailMessages).where(eq(emailMessages.companyId, companyId));
+    const stored = await db.select().from(rk9EmailMessages).where(eq(rk9EmailMessages.companyId, companyId));
     expect(stored).toHaveLength(1);
     expect(stored[0].bodyText).toContain(REPLY_BODY);
     expect(stored[0].fromAddress).toContain(PROSPECT_EMAIL);
@@ -135,7 +135,7 @@ describe("outreach inbound: a prospect reply is never dropped", () => {
     const result = await processOutreachInboundMail(db, replyMime(), { ownDomains: [OUTREACH_DOMAIN] });
     expect(result.outcome).toBe("reply_recorded");
 
-    const stored = await db.select().from(emailMessages).where(eq(emailMessages.companyId, companyId));
+    const stored = await db.select().from(rk9EmailMessages).where(eq(rk9EmailMessages.companyId, companyId));
     expect(stored).toHaveLength(1);
     expect(stored[0].bodyText).toContain(REPLY_BODY);
     expect(stored[0].routeKey).toBe("outreach");

@@ -3,6 +3,16 @@ name: Storybook Visual
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: "Repository branch to publish (deployment only; empty uses the selected workflow branch)"
+        required: false
+        type: string
+        default: ""
+      deploy_preview:
+        description: "Publish this branch to S3/CloudFront instead of running visual tests (CODEOWNERS only)"
+        required: false
+        type: boolean
+        default: false
       update_snapshots:
         description: "Generate updated snapshots and a baseline review bundle"
         required: false
@@ -18,7 +28,7 @@ on:
       - labeled
 
 concurrency:
-  group: storybook-visual-${{ github.event.pull_request.number || github.ref }}
+  group: storybook-visual-${{ inputs.deploy_preview && github.run_id || 'visual' }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -28,7 +38,7 @@ jobs:
   visual:
     name: Storybook visual regression
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.deploy_preview) ||
       (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'storybook-visual'))
     # --- RK9 Custom (RK9-350) --- runner-vipu; PR-ajo fork-PR:stä pysyy GitHubin runnerilla, ks. doc/CI-RUNNER.md
     runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || github.event_name == 'workflow_dispatch' && vars.CI_RUNNER || '["ubuntu-latest"]') }}
@@ -101,3 +111,6 @@ jobs:
           path: tests/storybook-visual/baseline-review/snapshots.tgz
           retention-days: 30
           if-no-files-found: error
+
+  # --- RK9 Custom (RK9-317) --- upstreamin preview-jobi (storybook-deploy.yml, AWS) on vain upstreamille;
+  # storybook-deploy.yml on poistettu forkista.

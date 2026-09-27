@@ -57,7 +57,7 @@ function makeDb(row: Record<string, unknown> | null) {
 }
 
 async function createApp(db: ReturnType<typeof makeDb>, actor: Record<string, unknown>) {
-  const { emailRoutes } = await import("../routes/email.js");
+  const { rk9EmailRoutes: emailRoutes } = await import("../routes/rk9-email.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -76,7 +76,7 @@ describe("email routes", () => {
   // first test's timeout covers only the request; a timed-out request would otherwise keep running
   // and call the send mock during the next test (RK9-314).
   beforeAll(async () => {
-    await import("../routes/email.js");
+    await import("../routes/rk9-email.js");
   }, 60_000);
 
   beforeEach(() => {

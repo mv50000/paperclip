@@ -42,12 +42,12 @@ CREATE TABLE instance_settings (singleton_key text, general jsonb NOT NULL DEFAU
 INSERT INTO instance_settings VALUES ('default', '{"systemPause": {"reason": "x"}}');
 CREATE TABLE companies (id serial primary key, status text);
 INSERT INTO companies (status) VALUES ('active'), ('paused');
-CREATE TABLE email_messages (id serial primary key, direction text, route_key text, issue_id int, created_at timestamptz DEFAULT now());
+CREATE TABLE rk9_email_messages (id serial primary key, direction text, route_key text, issue_id int, created_at timestamptz DEFAULT now());
 CREATE TABLE activity_log (id serial primary key, action text);
 INSERT INTO outreach_messages (status, message_id, sent_at, updated_at) VALUES
   ('sent', 'm1', '2026-10-01T10:00:00Z', '2026-10-01'), ('queued', NULL, NULL, '2026-10-01'), ('queued', NULL, NULL, '2026-10-01'),
   ('queued', NULL, NULL, '2026-10-01'), ('approved', NULL, NULL, '2026-10-01'), ('approved', NULL, NULL, '2026-10-01');
-INSERT INTO email_messages (direction, route_key, issue_id, created_at) VALUES ('inbound', 'k', 1, '2026-10-01'), ('inbound', NULL, NULL, '2026-10-01');
+INSERT INTO rk9_email_messages (direction, route_key, issue_id, created_at) VALUES ('inbound', 'k', 1, '2026-10-01'), ('inbound', NULL, NULL, '2026-10-01');
 INSERT INTO outreach_suppressions (email, created_at) VALUES ('old@example.test', '2026-09-01');
 SQL
 ARGV_LOG="$TMP/argv.log"; WRAP="$TMP/wrap"; mkdir -p "$WRAP"
@@ -70,7 +70,7 @@ if grep -q s3cretpw "$ARGV_LOG"; then bad "salasana argv:ssä"; else ok "salasan
 echo "== normaali päivä: 1 lähetetty jonosta, uusi luonnos hyväksytty ja lähetetty, uusi vastaus"
 sql "UPDATE outreach_messages SET status='sent', message_id='m2', sent_at=now(), updated_at=now() WHERE id=2"
 sql "INSERT INTO outreach_messages (status, message_id, sent_at) VALUES ('sent', 'm7', now())"
-sql "INSERT INTO email_messages (direction, route_key, issue_id) VALUES ('inbound','k',2)"
+sql "INSERT INTO rk9_email_messages (direction, route_key, issue_id) VALUES ('inbound','k',2)"
 A="$TMP/after.json"; "$SUT" snapshot --label after --out "$A" >/dev/null
 OUT=$("$SUT" compare "$B" "$A" 2>&1); RC=$?
 [ "$RC" = 0 ] && ok "normaali päivä -> exit 0" || bad "exit $RC: $OUT"
@@ -103,7 +103,7 @@ sql "INSERT INTO outreach_messages (status, message_id, sent_at) VALUES ('sent',
 OUT=$("$SUT" compare "$B" "$A" 2>&1); has "KAKSOIS (message_id)" "$OUT" "message_id:tä esiintyy"
 
 echo "== vastaus katoaa"
-sql "DELETE FROM email_messages"
+sql "DELETE FROM rk9_email_messages"
 "$SUT" snapshot --out "$A" >/dev/null
 OUT=$("$SUT" compare "$B" "$A" 2>&1); has "INBOUND" "$OUT" "INBOUND"
 

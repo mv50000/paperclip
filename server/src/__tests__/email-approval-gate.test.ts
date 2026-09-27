@@ -108,7 +108,7 @@ function makeDb(selectResults: unknown[][]) {
 }
 
 async function createApp(db: unknown, actor: Record<string, unknown>) {
-  const { emailRoutes } = await import("../routes/email.js");
+  const { rk9EmailRoutes: emailRoutes } = await import("../routes/rk9-email.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {

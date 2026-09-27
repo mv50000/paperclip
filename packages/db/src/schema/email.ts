@@ -1,209 +1,135 @@
+import { sql } from "drizzle-orm";
 import {
-  type AnyPgColumn,
   pgTable,
   uuid,
   text,
   timestamp,
-  integer,
-  boolean,
   jsonb,
-  index,
+  boolean,
+  foreignKey,
   uniqueIndex,
-  primaryKey,
+  index,
+  check,
 } from "drizzle-orm/pg-core";
-import { companies } from "./companies.js";
-import { agents } from "./agents.js";
-import { issues } from "./issues.js";
+import type {
+  EmailEnvelope,
+  EmailDeliveryOutcome,
+  EmailSendInput,
+} from "@paperclipai/shared";
+import {
+  chatEndpoints,
+  chatConversations,
+  chatPublications,
+} from "./chat_channels.js";
 
-export const companyEmailConfig = pgTable(
-  "company_email_config",
+/** Email-specific state; conversations, delivery queues and send outboxes remain shared. */
+export const emailEndpoints = pgTable(
+  "email_endpoints",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    primaryDomain: text("primary_domain").notNull(),
-    sendingDomain: text("sending_domain").notNull(),
-    mailProvider: text("mail_provider").notNull().default("resend"),
-    resendDomainId: text("resend_domain_id"),
-    defaultFromName: text("default_from_name"),
-    status: text("status").notNull().default("pending"),
-    maxPerAgentPerDay: integer("max_per_agent_per_day").notNull().default(50),
-    maxPerCompanyPerDay: integer("max_per_company_per_day").notNull().default(500),
-    verifiedAt: timestamp("verified_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    endpointId: uuid("endpoint_id").primaryKey(),
+    companyId: uuid("company_id").notNull(),
+    receiveMode: text("receive_mode")
+      .$type<"websocket" | "webhook">()
+      .notNull(),
+    webhookId: text("webhook_id"),
+    ownedApiKeyId: text("owned_api_key_id"),
+    activationAt: timestamp("activation_at", { withTimezone: true }),
+    syncCheckpoint: timestamp("sync_checkpoint", { withTimezone: true }),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
   },
-  (table) => ({
-    companyUq: uniqueIndex("company_email_config_company_unique_idx").on(table.companyId),
-    primaryDomainUq: uniqueIndex("company_email_config_primary_domain_unique_idx").on(table.primaryDomain),
-    statusIdx: index("company_email_config_status_idx").on(table.status),
-  }),
-);
-
-export const emailTemplates = pgTable(
-  "email_templates",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    key: text("key").notNull(),
-    locale: text("locale").notNull().default("fi"),
-    subjectTpl: text("subject_tpl"),
-    bodyMdTpl: text("body_md_tpl").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    companyKeyLocaleUq: uniqueIndex("email_templates_company_key_locale_unique_idx").on(
-      table.companyId,
-      table.key,
-      table.locale,
+  (t) => [
+    check(
+      "email_endpoints_receive_mode_check",
+      sql`${t.receiveMode} in ('websocket', 'webhook')`,
     ),
-  }),
-);
-
-export const emailRoutes = pgTable(
-  "email_routes",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    localPart: text("local_part").notNull(),
-    domain: text("domain").notNull(),
-    routeKey: text("route_key").notNull(),
-    assignedAgentId: uuid("assigned_agent_id").references(() => agents.id, { onDelete: "set null" }),
-    autoReplyTemplateId: uuid("auto_reply_template_id").references(() => emailTemplates.id, {
-      onDelete: "set null",
-    }),
-    escalateAfterHours: integer("escalate_after_hours").notNull().default(24),
-    // Trust ramp: agent-initiated send/reply on this route is parked behind an
-    // `email_send` approval (RK9-82). Flip to false per route once trusted.
-    approvalRequired: boolean("approval_required").notNull().default(true),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    companyLocalDomainUq: uniqueIndex("email_routes_company_local_domain_unique_idx").on(
-      table.companyId,
-      table.localPart,
-      table.domain,
-    ),
-    domainIdx: index("email_routes_domain_idx").on(table.domain),
-  }),
+    foreignKey({
+      columns: [t.companyId, t.endpointId],
+      foreignColumns: [chatEndpoints.companyId, chatEndpoints.id],
+    }).onDelete("cascade"),
+  ],
 );
 
 export const emailMessages = pgTable(
   "email_messages",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    direction: text("direction").notNull(),
+    companyId: uuid("company_id").notNull(),
+    endpointId: uuid("endpoint_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
     providerMessageId: text("provider_message_id").notNull(),
-    inReplyToId: uuid("in_reply_to_id").references((): AnyPgColumn => emailMessages.id, {
-      onDelete: "set null",
-    }),
-    fromAddress: text("from_address").notNull(),
-    toAddresses: text("to_addresses").array().notNull(),
-    ccAddresses: text("cc_addresses").array().notNull().default([] as unknown as string[]),
-    subject: text("subject"),
-    bodyText: text("body_text"),
-    bodyHtmlSanitized: text("body_html_sanitized"),
-    attachments: jsonb("attachments").notNull().default([]),
-    headers: jsonb("headers").notNull().default({}),
-    routeKey: text("route_key"),
-    assignedAgentId: uuid("assigned_agent_id").references(() => agents.id, { onDelete: "set null" }),
-    issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
-    status: text("status").notNull(),
-    // 'automated' = noreply/bulk sender (junk-guard): no auto-reply, no agent
-    // wakeup, no escalation. Null = presumed human.
-    classification: text("classification"),
-    errorMessage: text("error_message"),
-    receivedAt: timestamp("received_at", { withTimezone: true }),
-    sentAt: timestamp("sent_at", { withTimezone: true }),
-    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
-    autoRepliedAt: timestamp("auto_replied_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    envelope: jsonb("envelope").$type<EmailEnvelope>().notNull(),
+    text: text("text").notNull(),
+    fullText: text("full_text").notNull().default(""),
+    direction: text("direction").$type<"inbound" | "outbound">().notNull(),
+    automatic: boolean("automatic").notNull().default(false),
+    attachmentIds: jsonb("attachment_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
   },
-  (table) => ({
-    companyProviderMsgUq: uniqueIndex("email_messages_company_provider_message_unique_idx").on(
-      table.companyId,
-      table.providerMessageId,
+  (t) => [
+    check(
+      "email_messages_direction_check",
+      sql`${t.direction} in ('inbound', 'outbound')`,
     ),
-    companyDirectionReceivedIdx: index("email_messages_company_direction_received_idx").on(
-      table.companyId,
-      table.direction,
-      table.receivedAt,
+    uniqueIndex("email_messages_provider_uq").on(
+      t.endpointId,
+      t.providerMessageId,
     ),
-    companyAssignedStatusIdx: index("email_messages_company_assigned_status_idx").on(
-      table.companyId,
-      table.assignedAgentId,
-      table.status,
+    index("email_messages_conversation_idx").on(
+      t.companyId,
+      t.conversationId,
+      t.timestamp,
     ),
-    providerMsgIdx: index("email_messages_provider_message_idx").on(table.providerMessageId),
-  }),
+    foreignKey({
+      columns: [t.companyId, t.endpointId],
+      foreignColumns: [chatEndpoints.companyId, chatEndpoints.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.companyId, t.conversationId],
+      foreignColumns: [chatConversations.companyId, chatConversations.id],
+    }).onDelete("cascade"),
+  ],
 );
 
-export const emailOutboundAudit = pgTable(
-  "email_outbound_audit",
+export const emailSends = pgTable(
+  "email_sends",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
-    runId: uuid("run_id"),
-    toAddresses: text("to_addresses").array().notNull(),
-    fromAddress: text("from_address").notNull(),
-    subject: text("subject"),
-    templateKey: text("template_key"),
-    suppressionHit: boolean("suppression_hit").notNull().default(false),
-    rateLimitHit: boolean("rate_limit_hit").notNull().default(false),
-    providerMessageId: text("provider_message_id"),
-    status: text("status").notNull(),
-    errorCode: text("error_code"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    publicationId: uuid("publication_id").primaryKey(),
+    companyId: uuid("company_id").notNull(),
+    endpointId: uuid("endpoint_id").notNull(),
+    request: jsonb("request").$type<EmailSendInput>().notNull(),
+    actor: jsonb("actor")
+      .$type<{
+        userId?: string;
+        agentId?: string;
+        runId?: string;
+        localImplicit?: boolean;
+      }>()
+      .notNull(),
+    digest: text("digest").notNull(),
+    outcome: text("outcome")
+      .$type<EmailDeliveryOutcome>()
+      .notNull()
+      .default("queued"),
+    firstAttemptAt: timestamp("first_attempt_at", { withTimezone: true }),
   },
-  (table) => ({
-    companyAgentCreatedIdx: index("email_outbound_audit_company_agent_created_idx").on(
-      table.companyId,
-      table.agentId,
-      table.createdAt,
+  (t) => [
+    foreignKey({
+      columns: [t.companyId, t.endpointId],
+      foreignColumns: [chatEndpoints.companyId, chatEndpoints.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [t.companyId, t.publicationId],
+      foreignColumns: [chatPublications.companyId, chatPublications.id],
+    }).onDelete("cascade"),
+    check(
+      "email_sends_outcome_check",
+      sql`${t.outcome} in ('queued', 'sent', 'delivered', 'failed', 'uncertain')`,
     ),
-    companyStatusCreatedIdx: index("email_outbound_audit_company_status_created_idx").on(
-      table.companyId,
-      table.status,
-      table.createdAt,
-    ),
-  }),
-);
-
-export const emailSuppressionList = pgTable(
-  "email_suppression_list",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    address: text("address").notNull(),
-    reason: text("reason").notNull(),
-    sourceMessageId: uuid("source_message_id").references((): AnyPgColumn => emailMessages.id, {
-      onDelete: "set null",
-    }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    companyAddressUq: uniqueIndex("email_suppression_list_company_address_unique_idx").on(
-      table.companyId,
-      table.address,
-    ),
-  }),
-);
-
-export const emailRateLimits = pgTable(
-  "email_rate_limits",
-  {
-    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    agentId: uuid("agent_id").notNull(),
-    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
-    count: integer("count").notNull().default(0),
-  },
-  (table) => ({
-    pk: primaryKey({
-      name: "email_rate_limits_pk",
-      columns: [table.companyId, table.agentId, table.windowStart],
-    }),
-  }),
+    index("email_sends_pending_idx")
+      .on(t.endpointId, t.outcome)
+      .where(sql`${t.outcome} in ('queued', 'uncertain')`),
+  ],
 );

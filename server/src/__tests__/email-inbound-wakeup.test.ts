@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   companyEmailConfig,
-  emailMessages,
+  rk9EmailMessages,
   emailRoutes,
   issueComments,
   issues,
@@ -139,7 +139,7 @@ describe("inbound wakeup", () => {
     const { db, selectQueue, inserts, insertReturning } = fakeDb();
     selectQueue.push([config]); // company_email_config
     selectQueue.push([route]); // exact route
-    insertReturning.push([{ id: "msg-1" }]); // email_messages insert
+    insertReturning.push([{ id: "msg-1" }]); // rk9_email_messages insert
     insertReturning.push([{ id: "issue-1" }]); // issues insert
 
     const router = createInboundRouter(db, { heartbeat: { wakeup } });
@@ -244,7 +244,7 @@ describe("inbound reply threading", () => {
     expect(comment?.values.issueId).toBe("issue-1");
     expect(String(comment?.values.body)).not.toContain("Tarvitsen apua");
     // The linked message rides the thread.
-    const msg = inserts.find((i) => i.table === emailMessages);
+    const msg = inserts.find((i) => i.table === rk9EmailMessages);
     expect(msg?.values.issueId).toBe("issue-1");
     expect(msg?.values.inReplyToId).toBe("msg-out-1");
 
@@ -322,7 +322,7 @@ describe("junk guard integration (RK9-81)", () => {
     const issue = inserts.find((i) => i.table === issues);
     expect(issue?.values.status).toBe("backlog");
     expect(String(issue?.values.title)).toContain("📧🤖");
-    const msg = inserts.find((i) => i.table === emailMessages);
+    const msg = inserts.find((i) => i.table === rk9EmailMessages);
     expect(msg?.values.classification).toBe("automated");
 
     await flushImmediates();

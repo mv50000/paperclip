@@ -200,9 +200,16 @@ verify_server_env() {
 
 table_counts() { # db → "taulu=n" riveittäin; puuttuva taulu = -1; virhe keskeyttää
   local db="$1" t n
+  local src
   for t in "${KEY_TABLES[@]}"; do
-    if [[ "$(psql_q -d "$db" -c "select to_regclass('public.$t') is null")" == "t" ]]; then n=-1
-    else n="$(psql_q -d "$db" -c "select count(*) from \"$t\"")"; fi
+    # RK9-317: 0126 renames the fork mail table to rk9_email_messages, and upstream 0272 creates its
+    # own empty email_messages. The key email_messages always counts the fork mail table.
+    src="$t"
+    if [[ "$t" == email_messages && "$(psql_q -d "$db" -c "select to_regclass('public.rk9_email_messages') is not null")" == "t" ]]; then
+      src=rk9_email_messages
+    fi
+    if [[ "$(psql_q -d "$db" -c "select to_regclass('public.$src') is null")" == "t" ]]; then n=-1
+    else n="$(psql_q -d "$db" -c "select count(*) from \"$src\"")"; fi
     [[ "$n" =~ ^-?[0-9]+$ ]] || die "rivimäärän luku epäonnistui: $db.$t"
     echo "$t=$n"
   done
