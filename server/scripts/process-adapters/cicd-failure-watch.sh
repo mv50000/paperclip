@@ -12,11 +12,12 @@ LOOKBACK="${LOOKBACK_HOURS:-24}"
 SINCE=$(date -u -d "$LOOKBACK hours ago" +%Y-%m-%dT%H:%M:%SZ)
 
 REPOS=(
-  "mv50000/saatavilla"
-  "mv50000/alli-audit"
-  "mv50000/quantimodo-rust"
-  "mv50000/bk"
-  "mv50000/sunspot"
+  # päivitetty 10.9.2026 org-siirron jälkeen (mv50000 -> rk9-ai). Triage: ~/bin/ci-failure-poller.sh -> rk9claude
+  "rk9-ai/saatavilla"
+  "rk9-ai/alli-audit"
+  "rk9-ai/quantimodo-rust"
+  "rk9-ai/bk"
+  "rk9-ai/sunspot"
 )
 
 failures=()
