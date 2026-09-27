@@ -696,7 +696,7 @@ CI:n löytämät sovitukset (RK9-316):
 | `packages/db/src/migration-snapshot-drift.test.ts` (upstream, 831) | forkin 9xxx-migraatioilla ei ole snapshotteja. Testi vertaa uusimpaan upstream-snapshotiin ja ohittaa lauseet, jotka koskevat 9xxx-migraatioiden luomia tauluja. |
 | `.gitleaksignore` (ei konfliktia) | upstreamin RFC 6455 -esimerkkiavain `durable-prp-control-plane.test.ts`:ssä on väärä positiivinen |
 
-RK9 Custom -markkerit: 294 → 309 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Yksi markkeri katosi:
+RK9 Custom -markkerit: 294 → 322 portaan lopussa (`git grep -c 'RK9 Custom' -- . ':!doc'`). Yksi markkeri katosi:
 `companies-service.test.ts`:n Reflection Coach -testin RK9-314-rivi. Upstream korvasi koko testin testillä,
 joka odottaa, ettei bundled-agentteja luoda lainkaan, joten forkin lippurivillä ei ole enää kohdetta.
 `InstanceSettings.tsx`:n laskurilla ei ollut markkeria; siirretty koodi on nyt markkerien sisällä.

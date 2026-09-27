@@ -21,8 +21,9 @@ async function readNewestSnapshot(): Promise<{ file: string; snapshot: Record<st
   const journal = JSON.parse(
     await readFile(path.join(migrationsDir, "meta", "_journal.json"), "utf8"),
   ) as { entries: JournalEntry[] };
-  // --- RK9 Custom (RK9-316): fork 9xxx migrations are hand-written and have no
-  // snapshots, so the newest snapshot is the newest upstream (< 9000) entry.
+  // --- RK9 Custom (RK9-316): fork 9xxx migrations are hand-written. Only
+  // 9001-9003 have (stale, pre-upgrade) snapshots and 9004-9010 have none, so
+  // the newest snapshot is the newest upstream (< 9000) entry.
   const newest = journal.entries.filter((entry) => !isForkMigrationTag(entry.tag)).at(-1);
   // --- /RK9 Custom ---
   if (!newest) throw new Error("migration journal has no entries");
