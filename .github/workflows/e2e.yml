@@ -10,7 +10,8 @@ on:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 30
     env:
       PAPERCLIP_E2E_SKIP_LLM: ${{ inputs.skip_llm && 'true' || 'false' }}
@@ -29,7 +30,15 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: npx playwright install --with-deps chromium
+      - name: Install Playwright
+        # --- RK9 Custom (RK9-350) --- --with-deps ajaa aptin sudolla. Self-hosted-runnerin
+        # käyttäjällä ei ole sudoa, joten järjestelmäriippuvuudet asennetaan hostille etukäteen.
+        run: |
+          if sudo -n true 2>/dev/null; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
 
       - name: Run e2e tests
         run: pnpm run test:e2e

@@ -11,7 +11,7 @@
 #   scripts/upgrade-smoke.sh [--offline] [--fork-tests] [BASE_URL]
 #
 #   BASE_URL       oletus $PAPERCLIP_SMOKE_URL tai http://127.0.0.1:3100
-#   --offline      vain repo-tarkistukset (migraatiojournal), ei HTTP:tä
+#   --offline      vain repo-tarkistukset (migraatiojournal, CI-runner-vipu), ei HTTP:tä
 #   --fork-tests   aja lisäksi doc/upgrade/fork-tests.txt:n vitest-tiedostot
 #
 # Valinnaiset ympäristömuuttujat:
@@ -78,6 +78,19 @@ NODE
     ok "migraatiojournal 9001–9010 ($out)"
   else
     fail "migraatiojournal: $out"
+  fi
+}
+
+# --- CI-runner-vipu (RK9-350): jokainen jobi valitsee runnerinsa vars.CI_RUNNERista ---
+# Upstream-porras tuo `runs-on: ubuntu-latest` -rivit takaisin. Ks. doc/CI-RUNNER.md.
+check_ci_runners() {
+  local bad
+  bad="$(cd "$REPO_ROOT" || exit 1
+    grep -nE '^[[:space:]]*(runs-on|runner_label):' .github/workflows/*.yml | grep -v 'vars\.CI_RUNNER' || true)"
+  if [[ -z "$bad" ]]; then
+    ok "CI-runner-vipu: kaikki runs-on- ja runner_label-rivit käyttävät vars.CI_RUNNERia"
+  else
+    fail "CI-runner-vipu puuttuu (doc/CI-RUNNER.md): ${bad//$'\n'/; }"
   fi
 }
 
@@ -184,6 +197,7 @@ check_fork_tests() {
 
 echo "upgrade-smoke: repo=$REPO_ROOT"
 check_journal
+check_ci_runners
 if [[ $OFFLINE -eq 0 ]]; then
   echo "upgrade-smoke: BASE_URL=$BASE_URL"
   check_http

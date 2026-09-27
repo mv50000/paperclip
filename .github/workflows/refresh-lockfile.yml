@@ -12,7 +12,8 @@ concurrency:
 
 jobs:
   refresh:
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     permissions:
       contents: write

@@ -37,7 +37,8 @@ on:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 45
 
     steps:
@@ -59,7 +60,14 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+        # --- RK9 Custom (RK9-350) --- --with-deps ajaa aptin sudolla. Self-hosted-runnerin
+        # käyttäjällä ei ole sudoa, joten järjestelmäriippuvuudet asennetaan hostille etukäteen.
+        run: |
+          if sudo -n true 2>/dev/null; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
 
       - name: Launch Docker smoke harness
         run: |

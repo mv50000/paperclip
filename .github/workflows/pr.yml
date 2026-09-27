@@ -15,10 +15,13 @@ jobs:
     # Reusable lives in mv50000/cicd; pinned @main (decoupled from the v1 deploy pin).
     uses: mv50000/cicd/.github/workflows/secret-scan.yml@main
     with:
-      runner_label: '["ubuntu-latest"]'
+      # --- RK9 Custom (RK9-350) --- sama runner-vipu kuin muilla jobeilla (JSON-taulukko).
+      runner_label: ${{ github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]' }}
 
   policy:
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 5
 
     steps:
@@ -60,7 +63,9 @@ jobs:
 
   verify:
     needs: [policy]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
 
     steps:
@@ -98,7 +103,9 @@ jobs:
 
   e2e:
     needs: [policy]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 30
 
     steps:
@@ -123,7 +130,14 @@ jobs:
         run: pnpm build
 
       - name: Install Playwright
-        run: npx playwright install --with-deps chromium
+        # --- RK9 Custom (RK9-350) --- --with-deps ajaa aptin sudolla. Self-hosted-runnerin
+        # käyttäjällä ei ole sudoa, joten järjestelmäriippuvuudet asennetaan hostille etukäteen.
+        run: |
+          if sudo -n true 2>/dev/null; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
 
       - name: Generate Paperclip config
         run: |
