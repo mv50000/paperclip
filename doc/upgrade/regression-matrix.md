@@ -11,6 +11,7 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 | Pre-upgrade-SHA (`origin/master`) | `9ed8e7704bd49da4064499de8477ae0a42e593e7` |
 | Freeze päivitetty (porras 512, RK9-312) | `3e7ff932008e8feb99e45553ab0ba74945417c9e` (2026-09-27), commitit 143–159 alla |
 | Freeze päivitetty (porras 609, RK9-313) | `e3aa869c6334993bc13e72c0dcf17c5f61ec356b` (2026-09-27), commitit 160–165 alla |
+| Freeze päivitetty (porras 618, RK9-314) | `06b877ab7f687028e205021df6a5216e8cfa9a1b` (2026-09-27), commitit 166–174 alla |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
 | Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
@@ -265,6 +266,15 @@ tarkistus.
 | 163 | `6610d0e76` | fix(upgrade): guard acpx_local against the host API key, keep SEC-91 outcomes on monitor edits (RK9-312) | claude-local (+ SEC-91) | `.github/workflows/pr.yml`, `doc/upgrade/acpx-claude-local.md`, `doc/upgrade/fork-tests.txt`, `server/src/__tests__/acpx-host-key-guard.test.ts` (+2) | `npx vitest run server/src/__tests__/acpx-host-key-guard.test.ts` |
 | 164 | `4a2f21f71` | fix: cicd-failure-watch repos after org transfer, firecrawl hint in prh-prospector (#126) | ci/tooling | `server/scripts/process-adapters/cicd-failure-watch.sh`, `skills/prh-prospector/SKILL.md` | _manuaalinen:_ `cicd-failure-watch.sh` löytää repot |
 | 165 | `e3aa869c6` | docs(upgrade): Node 24 prod cutover notes and native-module rebuild step (RK9-347) (#124) | docs | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/cutover-runbook.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 166 | `c411b346f` | fix(upgrade): runner lever for upstream's split verify jobs, drop commitperclip-review workflow, Chrome-or-Playwright e2e step (RK9-313) | ci/tooling | `.github/workflows/commitperclip-review.yml`, `.github/workflows/pr.yml` | `scripts/upgrade-smoke.sh --offline` |
+| 167 | `c000a2f07` | test(upgrade): fork tests on v2026.609.0 — hire authz via access.decide, RK9-87 in the new classifier test (RK9-313) | heartbeat/recovery (+ hire) | `doc/upgrade/fork-tests.txt`, `server/src/__tests__/heartbeat-process-recovery.test.ts`, `server/src/__tests__/hire-authorization-rk9.test.ts` (+5) | `npx vitest run server/src/__tests__/heartbeat-process-recovery.test.ts server/src/__tests__/hire-authorization-rk9.test.ts` |
+| 168 | `7ab149048` | test(upgrade): upstream's run-id-required upload test follows RK9-76 (optional agent run id) (RK9-313) | issues (RK9-76) | `server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts` | `npx vitest run server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts` |
+| 169 | `b0c544f4d` | test(upgrade): wait for the workspace-validation recovery comment instead of one read (RK9-313) | heartbeat/recovery | `server/src/__tests__/heartbeat-process-recovery.test.ts` | `npx vitest run server/src/__tests__/heartbeat-process-recovery.test.ts` |
+| 170 | `d87137790` | test(upgrade): keep fork routes out of upstream's exact OpenAPI coverage check (RK9-313) | ci/tooling | `server/src/__tests__/openapi-routes.test.ts` | `npx vitest run server/src/__tests__/openapi-routes.test.ts` |
+| 171 | `79b57ef48` | fix(upgrade): keep the fork tasks:assign rule for agents on v2026.609.0 (RK9-313) | authz | `server/src/services/authorization.ts`, `server/src/__tests__/authorization-service.test.ts`, `server/src/__tests__/permissions-upgrade-boundary-routes.test.ts` (+1) | `npx vitest run server/src/__tests__/authorization-service.test.ts server/src/__tests__/permissions-upgrade-boundary-routes.test.ts` |
+| 172 | `c23fcd163` | docs(upgrade): stage 609 log, conflict log and defaults review (RK9-313) | docs | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/defaults-hardening.md`, `doc/upgrade/regression-matrix.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 173 | `4328c3ffa` | chore(upgrade): gitleaks false positives from v2026.609.0 upstream commits (RK9-313) | ci/tooling | `.gitleaksignore` | PR-checkin gitleaks-ajo |
+| 174 | `8b71bf803` | docs(upgrade): verifier notes for stage 609 — claude-local model listing egress, assignability, dependabot (RK9-313) | docs | `doc/upgrade/defaults-hardening.md`, `doc/upgrade/regression-matrix.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 
@@ -445,6 +455,46 @@ Porras-609:n muut fork-sovitukset (ei konfliktia):
   Merkitystä on vain, jos human proxy raportoi lopetetulle tai puuttuvalle esihenkilölle. Ei muutettu.
 - Upstream lisäsi `.github/dependabot.yml`:n. Se on forkissa inertti (automaattiset tietoturvakorjaukset pois
   päältä), ja `pr.yml`:n dependabot-poikkeus on vaaraton.
+
+## Konfliktit portaassa 618 (`origin/master` `06b877ab7` + `v2026.618.0`, RK9-314)
+
+Porras 720 pilkottiin: suora koemerge `v2026.720.0` antoi 60 konfliktitiedostoa ja 83 migraatiota
+(0099–0181), mikä ylittää operaattorin rajan (yli ~40 konfliktia tai yli ~60 migraatiota). Välitagit
+koemergellä masteria vasten: 618 → 18 konfliktia ja 4 migraatiota, 626 → 33 ja 26, 707 → 44 ja 37.
+Todellinen merge 2026-09-27: 18 konfliktitiedostoa, 76 upstream-committia, migraatiot 0099–0102.
+`pnpm-lock.yaml` automergautui (upstreamin uusi `novita`-sandbox-plugin). `recovery/service.ts`,
+`routines.ts` (palvelu ja reitti) automergautuivat.
+
+| Tiedosto | Lohkoja | Ratkaisu |
+|---|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | 4 | upstream 0000–0102, sitten 9001–9010 (idx 103–112), rivit muuten tavu tavulta ennallaan |
+| `server/src/index.ts` | 3 | upstreamin `await`attu käynnistyksen reap (2 yritystä) ennen ajastimia + forkin `systemPause`- ja `maxGlobalConcurrentRunsDefault`-optiot; forkin importit; sammutuksessa sekä `closeQmdMcpSession` että upstreamin `shutdownInstrumentation` |
+| `server/src/__tests__/claude-local-execute.test.ts` | 2 | upstreamin versio + forkin lisäykset tiedoston loppuun (SIGTERM-success-testi, RK9-228-describe) |
+| `packages/adapters/gemini-local/src/server/parse.test.ts` | 2 | molemmat; upstream nimesi `isGeminiUnknownSessionError`in muotoon `isGeminiSessionUnrecoverableError`, forkin testit kohdistettiin uuteen nimeen |
+| `packages/shared/src/types/instance.ts` | 2 | molemmat (forkin system pause + concurrency cap, upstreamin `executionMode`) |
+| `server/src/services/issues.ts` | 2 | upstreamin `clearCheckoutRunIfTerminal` + `loadCurrent`; forkin `companyId` lisättiin selectiin (RK9-76 `assertKnownActorRunId`) |
+| `server/src/services/heartbeat.ts` | 1 | molemmat (forkin company pause -välimuisti ja concurrency cap, upstreamin `liveRunExecutions`) |
+| `ui/src/pages/Routines.tsx` | 1 | upstreamin uusi ryhmärakenne + forkin `systemPaused`-propi riville |
+| `ui/src/components/StatusBadge.tsx` | 1 | forkin `adapterType`-propi ja human proxy -haara + upstreamin Conference Room Chat -paletti |
+| `packages/adapters/claude-local/src/server/execute.ts` | 1 | upstreamin järjestys (poisoned message id -vartija); forkin SIGTERM-success-ehto (`parsedReportedSuccess`) siirrettiin upstreamin `failed`-riville RK9 Custom -merkin alle |
+| `server/src/app.ts` | 1 | upstreamin `fileResourceRoutes` + forkin `routineRoutes(..., systemPause)` |
+| `.github/workflows/commitperclip-review.yml` | modify/delete | pysyy poistettuna (RK9-313) |
+| muut 6 tiedostoa | 1 | molemmat puolet (importit, exportit, validaattorit, instanssiasetukset) |
+
+Porras-618:n muut fork-sovitukset (ei konfliktia):
+
+- Upstream lisäsi `agent-runtime-images.yml`:n (push masteriin, julkaisee `ghcr.io/paperclipai`-kuviin). Jobi sai
+  runner-vivun ja ehdon `github.repository == 'paperclipai/paperclip'`, joten se ei aja forkissa.
+- Upstreamin GGU-809 (`hasRecentVisibleProgress`) lisäsi kaksi recovery-testiä, joissa onnistuneen ajon jälkeen
+  toistuva continuation joko vapautetaan tuoreen kommentin takia tai eskaloidaan. RK9-87 ohittaa jokaisen
+  `in_progress`-issuen, jonka viimeisin ajo onnistui, ennen tätä haaraa. Testit mukautettiin: ei jatkoajoa,
+  ei eskalointia, issue pysyy `in_progress`-tilassa.
+- `TRUST_PROXY` (`middleware/trust-proxy.ts`) tulee jo tässä tagissa, ei 720:ssä. Uusi `trust-proxy-rk9.test.ts`
+  todentaa `loopback`-arvon (ks. `defaults-hardening.md`).
+- `bootstrapExecutionPolicyFromEnv` (upstream) lukee pakotetun suorituspolitiikan envistä ja kaatuu äänekkäästi
+  virheellisellä arvolla. Prodissa muuttujaa ei ole asetettu, joten käytös ei muutu.
+- RK9-231 (idle timer -ohitus, `heartbeat.ts`) ja RK9-87 (`recovery/service.ts`) säilyivät ennallaan; kumpikaan ei
+  ollut konfliktissa.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

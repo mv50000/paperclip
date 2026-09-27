@@ -59,7 +59,7 @@ v2026.512.0 ja forkin master `69ae3ff5`, joissa tarkistukset olivat reiteissä.
 | `tasks:assign`, agentti | eksplisiittinen `tasks:assign`-grantti tai CEO/`canCreateAgents` | **jokainen aktiivinen saman yrityksen agentti** (`allow_simple_company_member`) | **Kovennettu.** RK9 Custom -lohko `authorization.ts`:ssä palauttaa 512:n säännön. Restricted- ja private-kohteet toimivat upstreamin tapaan (vain grantti). Lukitsevat `authorization-service.test.ts` ja `permissions-upgrade-boundary-routes.test.ts`. |
 | `tasks:assign`, board-käyttäjä | `canUser(tasks:assign)` | aktiivinen jäsen (ei viewer); 0088 antaa member-käyttäjille operator-roolin ja `tasks:assign`-grantin | Pidetään. Käytännössä sama kuin ennen: jäsen sai grantin jo aiemmin. |
 | `runtime:manage`, agentti | reittikohtainen `workspace-runtime-service-authz` | saman yrityksen agentti sallitaan | Pidetään. Uusi tarkistus on lisäportti vanhan reittitarkistuksen edessä, ei korvaa sitä. |
-| `secrets:read`, agentti | ei vastinetta | saman yrityksen agentti sallitaan | Pidetään toistaiseksi. 609:ssä yksikään reitti ei kysy tätä oikeutta. Tarkista myöhemmissä portaissa (`git grep '"secrets:read"' server/src/routes`). |
+| `secrets:read`, agentti | ei vastinetta | saman yrityksen agentti sallitaan | Pidetään toistaiseksi. 609:ssä yksikään reitti ei kysy tätä oikeutta. **618 (RK9-314):** ensimmäiset kutsujat `routes/environments.ts` ja `services/secrets.ts`; lisäksi board-jäsen (ei viewer) saa `runtime:manage`n ja `secrets:read`in ilman granttia (`authorization.ts`, `allow_simple_company_member`). Aiemmin vain instance admin. Arvioidaan portaan 720 lopussa; tarkista (`git grep '"secrets:read"' server/src/routes`). |
 | `agent_config:update`, oma agentti | sallittu (`assertCanUpdateAgent`, `actorAgent.id === targetAgent.id`) | sallittu (`allow_self`) | Pidetään. Ei muutosta. |
 | Jäsenyydet (0087, 0088) | ei | 0088 antaa jokaiselle agentille aktiivisen jäsenyyden ilman grantteja; 0087 antaa owner/admin-käyttäjille `environments:manage`n | Pidetään. Agentit eivät saa grantteja, joten yllä oleva kovennus pätee. |
 
@@ -79,7 +79,8 @@ toiselle agentille. CEO-agentti saa 201.
 ## Porras v2026.720.0 — `TRUST_PROXY` tulee mukaan
 
 `server/src/middleware/trust-proxy.ts` ja `applyTrustProxy(app, parseTrustProxyEnv(process.env.TRUST_PROXY))`
-tulevat tässä tagissa. Oletus on asettamaton: Express ei luota yhteenkään proxyyn.
+tulevat jo välitagissa `v2026.618.0`, joka on portaan 720 ensimmäinen osa (RK9-314). Supertest-todennus alla on
+tiedostossa `server/src/__tests__/trust-proxy-rk9.test.ts`. Oletus on asettamaton: Express ei luota yhteenkään proxyyn.
 
 Proxyketju paperclip-01:llä (todennettu 2026-09-26, `/etc/nginx/sites-enabled/paperclip`):
 

@@ -29,6 +29,7 @@ runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
 | `release.yml` | `verify_canary`, `publish_canary` (`if: false`), `verify_stable`, `preview_stable`, `publish_stable` | push masteriin, `workflow_dispatch` |
 | `docker.yml` | `build-and-push` | push masteriin ja `v*`-tageihin |
 | `refresh-lockfile.yml` | `refresh` | push masteriin, `workflow_dispatch` |
+| `agent-runtime-images.yml` | `build-and-sign` (ajaa vain upstreamissa, `if: github.repository == 'paperclipai/paperclip'`) | push masteriin (polut `docker/agent-runtime/**`), `workflow_dispatch` |
 | `ai-auto-merge.yml` | `auto-merge` | `workflow_run` (PR-workflow valmis) |
 | `e2e.yml` | `e2e` | `workflow_dispatch` |
 | `release-smoke.yml` | `smoke` | `workflow_dispatch`, `workflow_call` |

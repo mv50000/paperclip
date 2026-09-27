@@ -56,6 +56,8 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
 - `server/src/routes/instance-settings.ts` (5), `server/src/services/instance-settings.ts` (3), `ui/src/pages/InstanceSettings.tsx` (modify/delete) — system pause, concurrency limit
 - `server/src/routes/agents.ts` (5) — external-runs, human_proxy
 - `server/src/services/issue-execution-policy.ts` (4) — outcome requirements (SEC-91)
+- `server/src/__tests__/claude-local-execute.test.ts` ja `packages/adapters/gemini-local/src/server/parse.test.ts` —
+  forkin testit tiedostojen lopussa; porras 618 (RK9-314) konfliktoi molemmissa. Ota upstream ja lisää forkin lohkot perään.
 - `skills/paperclip/SKILL.md` (3) ja `skills/paperclip-dev/SKILL.md` (modify/delete)
 - `scripts/provision-worktree.sh`
 - `server/src/services/index.ts`, `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/constants.ts` — exportit
@@ -77,6 +79,8 @@ jokainen porras tuo rivit takaisin, jos upstream muuttaa niitä. Muutokset on me
 - `.github/workflows/deploy-dev.yml` (vain forkissa) — poistettu. Älä palauta mergessä.
 - `.github/workflows/commitperclip-review.yml` (upstream, v2026.609.0) — poistettu forkista (RK9-313).
   Se ajaa `pull_request_target`illa upstreamin botin salaisuuksilla, ja `pull_request_target` on kielletty. Älä palauta mergessä.
+- `.github/workflows/agent-runtime-images.yml` (upstream, v2026.618.0) — runner-vipu ja ehto
+  `github.repository == 'paperclipai/paperclip'` (RK9-314). Jobi julkaisee `ghcr.io/paperclipai`-kuvia, joten forkissa se ei aja.
 - `e2e`-askeleet (`pr.yml`, `e2e.yml`, `release-smoke.yml`): upstream käyttää runnerin Chromea
   (`PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome`). Fork käyttää Chromea, jos se löytyy, muuten Playwrightin chromiumia (RK9-313).
 
@@ -99,6 +103,10 @@ Upstream päivitetään tagi kerrallaan, ei suoraan `upstream/master`iin. Vahvis
 porrastus (tagit ja commitit: regressiomatriisi, osio "Lähtötila"):
 
 `v2026.512.0` → `v2026.609.0` → `v2026.720.0` → `v2026.817.0` → `v2026.831.1` → `v2026.916.1`
+
+Porras 720 pilkotaan välitageihin (RK9-314, operaattorin sääntö: yli ~40 konfliktitiedostoa tai yli ~60
+migraatiota). Suora koemerge 720 antoi 60 konfliktia ja 83 migraatiota, joten järjestys on
+`v2026.618.0` → `v2026.626.0` tai `v2026.707.0` → `v2026.720.0`. Jokainen välitagi on oma branch, PR ja cutover.
 
 Jokainen porras on oma branch (`upgrade/v2026.NNN.N`) ja oma PR. Porras mergetään
 masteriin vasta, kun regressiomatriisin pakolliset tarkistukset ovat vihreitä
@@ -204,7 +212,7 @@ upstream tuo sen.
 | Cloud sync | ei konfiguroida (`enableCloudSync` pysyy `false`) | `false` | v2026.609.0, poistuu v2026.817.0:ssa (migraatio 0196) | instanssiasetus `experimental`, ei kirjoiteta |
 | Standard-trust-agentin hire-oikeus | vain board, CEO tai eksplisiittinen grantti; `requireBoardApprovalForNewAgents` yrityskohtaisesti (0071) | `canCreateAgents` päällä standard-trust-agenteille | v2026.916.1 | koodi: RK9 Custom -pinnaus `agent-permissions.ts`:ään, lukitsee `hire-approval-policy.test.ts` |
 | Agentin tehtävänanto (`tasks:assign`) | vain eksplisiittinen grantti tai CEO/`canCreateAgents` | jokainen aktiivinen saman yrityksen agentti (simple mode) | v2026.609.0 | koodi: RK9 Custom -lohko `authorization.ts`:ään (RK9-313), lukitsevat `authorization-service.test.ts` ja `permissions-upgrade-boundary-routes.test.ts` |
-| Proxy trust | `TRUST_PROXY=loopback`: Express luottaa vain paikalliseen nginxiin, joka luottaa vain edgeen `192.168.1.17` (`set_real_ip_from`); `PAPERCLIP_ALLOWED_HOSTNAMES` ja `PAPERCLIP_PUBLIC_URL` kattavat `paperclip.rk9.fi`:n (asetettu jo nyt) | `TRUST_PROXY` asettamatta | `TRUST_PROXY` v2026.720.0, guardin `X-Forwarded-Host`-rajaus v2026.916.0 (porras 916.1) | env, `export` tiedostossa `paperclip-start.sh` |
+| Proxy trust | `TRUST_PROXY=loopback`: Express luottaa vain paikalliseen nginxiin, joka luottaa vain edgeen `192.168.1.17` (`set_real_ip_from`); `PAPERCLIP_ALLOWED_HOSTNAMES` ja `PAPERCLIP_PUBLIC_URL` kattavat `paperclip.rk9.fi`:n (asetettu jo nyt) | `TRUST_PROXY` asettamatta | `TRUST_PROXY` v2026.618.0 (porras 720, RK9-314), guardin `X-Forwarded-Host`-rajaus v2026.916.0 (porras 916.1) | env, `export` tiedostossa `paperclip-start.sh` |
 | Cloud tenant -actor | `PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN` jää asettamatta: kun se on asetettu, `middleware/auth.ts` (`resolveCloudTenantActor`) luo `instance_admin`-actorin luotetuista headereista | asettamatta | v2026.512.0 | env, ei `paperclip-start.sh`:ssä |
 | Native runner | `enableNativeRunner=false`, `claude_local` pinnattu CLI-moottoriin (RK9-305) | `false` 831.1:ssä, `true` 916.0:sta alkaen | v2026.831.1 | instanssiasetus `experimental`, kirjoitetaan eksplisiittisesti |
 
@@ -568,6 +576,7 @@ tarkistukset on kirjattu Porraslokiin.
 | 2026-09-26 | lähtötila (ennen 512.0) | `9ed8e7704bd49da4064499de8477ae0a42e593e7` | 93 (koemerge 916.1) | 10/10 ok, fork-testit 68/69 paikallisesti | RK9-304; email-routes.test.ts vihreä vain CI:ssä |
 | 2026-09-27 | v2026.512.0 | `3e7ff932008e8feb99e45553ab0ba74945417c9e` (tagi `rk9/pre-upgrade-v2026.512.0`) | 31 | HTTP 10/10, offline 2/2, fork-testit 73/75 harjoituksessa (2 korjattu, ks. huomiot) | RK9-312. Harjoitus prod-kopiolla (`rehearsal-20260927-054907.dump`): putki 154 s, käynnistyksen migraatiot 0075–0083 noin 4 s. Dry-run: 9 pendingiä 2,46 s, pisin AccessExclusiveLock 1,90 s, journal- ja hash-assertit OK; schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja (`_sqlx_migrations`, bookings, tenants…), tuoreesta kannasta ei puutu mitään. Rollback 60 s, rivimäärät ja skeemasormenjälki täsmäsivät. Korjatut fork-testit: gemini `isGeminiTurnLimitResult` (upstream tunnistaa vain rakenteiset syyt) ja outreach-draft-sequence (hook-aikakatkaisu kuormassa, yksin 8/8). |
 | 2026-09-27 | v2026.609.0 | `e3aa869c6334993bc13e72c0dcf17c5f61ec356b` (tagi `rk9/pre-upgrade-v2026.609.0`) | 34 | HTTP 11/11, offline 3/3, fork-testit 77/77 harjoituksessa ja 78/78 builder-02:lla | RK9-313. Harjoitus prod-kopiolla (`rehearsal-20260927-080758.dump`, ref `d8713779`): putki 152 s, käynnistyksen migraatiot 0084–0098 (historia 94 → 109). Dry-run: 15 pendingiä 0,49 s, pisin AccessExclusiveLock 0,02 s (hitain `0085` 0,28 s), journal-, hash- ja fork-rivimääräassertit OK; schema-diffin 3 FAILia ovat taas jaetun kannan vieraita tauluja (`ai_conversations`, `bookings`, `_sqlx_migrations`…). Rollback 49 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. Koko vitest-sarja builder-02:lla (`pcp-remote-verify.sh`): general 245/246 → korjattu, serialized vihreä. Korjatut testit: ks. regressiomatriisi, osio "Konfliktit portaassa 609". Upstreamin `tasks:assign`-laajennus kovennettiin (ks. `defaults-hardening.md`). |
+| 2026-09-27 | v2026.618.0 (porras 720, osa 1) | `06b877ab7f687028e205021df6a5216e8cfa9a1b` (tagi `rk9/pre-upgrade-v2026.618.0`) | 18 | HTTP 11/11, offline 3/3, fork-testit 79/79 harjoituksessa (ennen `trust-proxy-rk9.test.ts`:tä) ja 81/81 builder-02:lla | RK9-314. Koko vitest-sarja builder-02:lla: general-server 266/266, workspaces-a 272/272, workspaces-b vihreä (`ssh-fixture.test.ts` flakkasi kerran, yksin 3/3), serialized 106/106 tiedostoa GGU-809-sovituksen jälkeen. Harjoitus prod-kopiolla (`rehearsal-20260927-093718.dump`, ref `5035179e9`): putki 144 s, käynnistyksen migraatiot 0099–0102 (historia 109 → 113). Routine-API prod-kopiolla: list (12 routinea), create, edit ja run-now; paussatun agentin run-now epäonnistui oikein ("Agent is not invokable"), `process`-no-op-agentin run-now loi yhden routine runin, yhden issuen ja yhden assignment-ajon (lisäksi upstreamin `missing_issue_comment`-jatkoajo, joka on jo masterissa), ei kaksoisajoja 30 s seurannassa. Dry-run: 4 pendingiä 0,35 s, pisin AccessExclusiveLock 0,02 s (hitain `0100` 0,30 s), journal-, hash- ja fork-rivimääräassertit OK; schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 50 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. Korjatut testit: ks. regressiomatriisi, osio "Konfliktit portaassa 618". |
 
 ## Upgrade-loki
 
@@ -576,3 +585,4 @@ tarkistukset on kirjattu Porraslokiin.
 | 2026-04-28 | v2026.427.0 | Ensimmäinen upgrade; 9000-renumbering; 2 konflikti (journal, test) |
 | 2026-09-27 | v2026.512.0 | Porras 1/6 (RK9-312). 31 konfliktia, migraatiot 0075–0083 (prodissa jo 0073–0074), migraatioiden kesto prod-kopiolla 2,5–4 s. Upstream toi `pr.yml`:ään jobit `verify_serialized_server` ja `canary_dry_run` rivillä `runs-on: ubuntu-latest` (automerge ohitti vivun, `upgrade-smoke.sh --offline` löysi). Gitleaks skannaa porras-PR:n upstream-commitit: väärät positiiviset `.gitleaksignore`en sormenjäljellä. PR mergetään merge-commitilla, ei squashilla. |
 | 2026-09-27 | v2026.609.0 | Porras 2/6 (RK9-313). 34 konfliktia, migraatiot 0084–0098, kesto prod-kopiolla 0,49 s (pisin lukko 0,02 s). Upstream toi `commitperclip-review.yml`:n (`pull_request_target`), joka poistettiin, ja jakoi `verify`-jobin neljään; kaikki saivat runner-vivun. Oikeusmalli siirtyi `access.decide`en: hire-sääntö ennallaan, agenttien `tasks:assign`-laajennus kovennettiin RK9 Custom -lohkolla. Pre-push-hookin koko typecheck ajettiin builder-02:lla (`pcp-remote-verify.sh`) ja push `--no-verify`. PR mergetään merge-commitilla. |
+| 2026-09-27 | v2026.618.0 | Porras 3/6, osa 1 (RK9-314). Suora 720-merge olisi antanut 60 konfliktia ja 83 migraatiota, joten porras pilkottiin (618 → 626/707 → 720). 18 konfliktia, migraatiot 0099–0102, kesto prod-kopiolla 0,35 s. Upstream toi `agent-runtime-images.yml`:n (runner-vipu + upstream-only-ehto) ja `TRUST_PROXY`n (asetus `loopback`, testi `trust-proxy-rk9.test.ts`). GGU-809-recovery-testit mukautettiin RK9-87:ään. PR mergetään merge-commitilla. |

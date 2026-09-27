@@ -19,6 +19,7 @@ import {
   Pin,
   // --- RK9 Custom: Risks nav ---
   Shield,
+  MessagesSquare,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
@@ -63,6 +64,10 @@ export function Sidebar() {
   // (top-level Projects link). Issue/Task wording is split to PR #7651.
   // Gating is navigation-only; all routes stay registered in both modes.
   const streamlined = experimentalSettings?.enableStreamlinedLeftNavigation === true;
+  // Conference Room Chat flag (PAP-136/PAP-137): the Conference Room nav item
+  // is a new surface, hidden entirely while the flag is off (same no-flash
+  // pattern as showWorkspacesLink above).
+  const conferenceRoomChatEnabled = experimentalSettings?.enableConferenceRoomChat === true;
 
   const pluginContext = {
     companyId: selectedCompanyId,
@@ -163,6 +168,9 @@ export function Sidebar() {
             badgeTone={inboxBadge.failedRuns > 0 ? "danger" : "default"}
             alert={inboxBadge.failedRuns > 0}
           />
+          {conferenceRoomChatEnabled ? (
+            <SidebarNavItem to="/board-chat" label="Conference Room" icon={MessagesSquare} />
+          ) : null}
         </div>
 
         <SidebarSection label="Work">
