@@ -485,9 +485,11 @@ describe("isGeminiTurnLimitResult", () => {
     expect(isGeminiTurnLimitResult({ status: "max_turns" })).toBe(true);
   });
 
-  it("detects turn limit in error text", () => {
-    expect(isGeminiTurnLimitResult({ error: "Turn limit reached" })).toBe(true);
-    expect(isGeminiTurnLimitResult({ error: "maximum turns exceeded" })).toBe(true);
+  // Upstream v2026.512.0 detects the turn limit only from structured stop reasons, not from error text.
+  it("detects turn limit from structured stop reasons, not from error text", () => {
+    expect(isGeminiTurnLimitResult({ status: "turn_limit" })).toBe(true);
+    expect(isGeminiTurnLimitResult({ stopReason: "max_turns" })).toBe(true);
+    expect(isGeminiTurnLimitResult({ error: "Turn limit reached" })).toBe(false);
   });
 
   it("returns false for normal results", () => {

@@ -114,7 +114,9 @@ jobs:
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -157,7 +159,9 @@ jobs:
   canary_dry_run:
     name: Canary Dry Run
     needs: [policy]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
 
     steps:

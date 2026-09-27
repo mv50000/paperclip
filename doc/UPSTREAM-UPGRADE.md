@@ -523,6 +523,10 @@ scripts/upgrade-smoke.sh http://<harjoitusinstanssi>:<portti>
 
 ### 6. Commit & deploy
 
+Porras-PR mergetään **merge-commitilla** (`gh pr merge --merge`), ei squashilla. Squash hävittää
+upstream-historian, jolloin seuraava porras konfliktoi samoista muutoksista uudelleen ja
+`git merge-base --is-ancestor v2026.NNN.N origin/master` on epätosi.
+
 ```bash
 git commit -m "Merge upstream v2026.NNN.N"
 git push origin upgrade/v2026.NNN.N
@@ -546,9 +550,11 @@ tarkistukset on kirjattu Porraslokiin.
 | Päivämäärä | Porras / tag | Pre-upgrade-SHA | Konflikteja | Smoke | Huomiot |
 |-----------|--------------|-----------------|-------------|-------|---------|
 | 2026-09-26 | lähtötila (ennen 512.0) | `9ed8e7704bd49da4064499de8477ae0a42e593e7` | 93 (koemerge 916.1) | 10/10 ok, fork-testit 68/69 paikallisesti | RK9-304; email-routes.test.ts vihreä vain CI:ssä |
+| 2026-09-27 | v2026.512.0 | `3e7ff932008e8feb99e45553ab0ba74945417c9e` (tagi `rk9/pre-upgrade-v2026.512.0`) | 31 | HTTP 10/10, offline 2/2, fork-testit 73/75 harjoituksessa (2 korjattu, ks. huomiot) | RK9-312. Harjoitus prod-kopiolla (`rehearsal-20260927-054907.dump`): putki 154 s, käynnistyksen migraatiot 0075–0083 noin 4 s. Dry-run: 9 pendingiä 2,46 s, pisin AccessExclusiveLock 1,90 s, journal- ja hash-assertit OK; schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja (`_sqlx_migrations`, bookings, tenants…), tuoreesta kannasta ei puutu mitään. Rollback 60 s, rivimäärät ja skeemasormenjälki täsmäsivät. Korjatut fork-testit: gemini `isGeminiTurnLimitResult` (upstream tunnistaa vain rakenteiset syyt) ja outreach-draft-sequence (hook-aikakatkaisu kuormassa, yksin 8/8). |
 
 ## Upgrade-loki
 
 | Päivämäärä | Versio | Huomiot |
 |-----------|--------|---------|
 | 2026-04-28 | v2026.427.0 | Ensimmäinen upgrade; 9000-renumbering; 2 konflikti (journal, test) |
+| 2026-09-27 | v2026.512.0 | Porras 1/6 (RK9-312). 31 konfliktia, migraatiot 0075–0083 (prodissa jo 0073–0074), migraatioiden kesto prod-kopiolla 2,5–4 s. Upstream toi `pr.yml`:ään jobit `verify_serialized_server` ja `canary_dry_run` rivillä `runs-on: ubuntu-latest` (automerge ohitti vivun, `upgrade-smoke.sh --offline` löysi). Gitleaks skannaa porras-PR:n upstream-commitit: väärät positiiviset `.gitleaksignore`en sormenjäljellä. PR mergetään merge-commitilla, ei squashilla. |
