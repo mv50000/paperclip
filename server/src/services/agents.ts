@@ -898,7 +898,8 @@ export function agentService(db: Db) {
       const uniqueName = deduplicateAgentName(data.name, existingAgents);
 
       const role = data.role ?? "general";
-      const normalizedPermissions = normalizeAgentPermissions(data.permissions, { context: "create" });
+      // RK9 Custom (RK9-317): role feeds the fork hire pin in agent-permissions.ts.
+      const normalizedPermissions = normalizeAgentPermissions(data.permissions, { context: "create", role });
       const adapterType = data.adapterType ?? "process";
       const runtimeConfig = normalizeRuntimeConfigForNewAgent(data.runtimeConfig, adapterType);
       // --- RK9 Custom: human-proxy agents never spend budget ---
@@ -1144,7 +1145,11 @@ export function agentService(db: Db) {
         if (patch.permissions !== undefined) {
           // The pending-approval activation replays the original hire
           // request, so the new-agent creation default applies.
-          patch.permissions = normalizeAgentPermissions(patch.permissions, { context: "create" });
+          // RK9 Custom (RK9-317): role feeds the fork hire pin in agent-permissions.ts.
+          patch.permissions = normalizeAgentPermissions(patch.permissions, {
+            context: "create",
+            role: (patch.role as string | undefined) ?? existing.role,
+          });
         }
         const updated = await tx
           .update(agents)

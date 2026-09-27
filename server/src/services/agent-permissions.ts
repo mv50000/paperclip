@@ -39,22 +39,33 @@ export function permissionsImplyLowTrust(permissions: unknown): boolean {
  */
 export type AgentPermissionsContext = "create" | "stored";
 
+// --- RK9 Custom (RK9-309, RK9-317): upstream v2026.916 grants canCreateAgents by default to every
+// standard-trust agent on the hire/create path. The fork keeps hire rights with the board, the CEO
+// role and explicit canCreateAgents / agents:create grants, as before 916 (defaultPermissionsForRole).
+// The create default therefore applies only to role "ceo". See doc/upgrade/defaults-hardening.md. ---
+function isCeoRole(role: string | null | undefined): boolean {
+  return typeof role === "string" && role.trim().toLowerCase() === "ceo";
+}
+// --- end RK9 Custom ---
+
 export function defaultAgentPermissions(
-  options?: { lowTrust?: boolean; context?: AgentPermissionsContext },
+  options?: { lowTrust?: boolean; context?: AgentPermissionsContext; role?: string | null },
 ): NormalizedAgentPermissions {
   return {
-    canCreateAgents: options?.context === "create" && options?.lowTrust !== true,
+    // RK9 Custom (RK9-317): `&& isCeoRole(...)` is the fork pin.
+    canCreateAgents: options?.context === "create" && options?.lowTrust !== true && isCeoRole(options?.role),
     canCreateSkills: true,
   };
 }
 
 export function normalizeAgentPermissions(
   permissions: unknown,
-  options?: { context?: AgentPermissionsContext },
+  options?: { context?: AgentPermissionsContext; role?: string | null },
 ): NormalizedAgentPermissions {
   const defaults = defaultAgentPermissions({
     lowTrust: permissionsImplyLowTrust(permissions),
     context: options?.context ?? "stored",
+    role: options?.role,
   });
   const record = asRecord(permissions);
   if (!record) {
