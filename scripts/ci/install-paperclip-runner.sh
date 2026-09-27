@@ -80,7 +80,17 @@ info() { echo "==> $*"; }
 # Luo root-omisteinen hakemisto vain, jos sitä ei ole. install -d muuttaisi myös
 # olemassa olevan hakemiston omistajan ja oikeudet (org-runnerit asuvat samassa puussa).
 ensure_root_dir() {
-  [ -d "$1" ] || install -d -o root -g root -m 755 "$1"
+  if [ ! -d "$1" ]; then
+    install -d -o root -g root -m 755 "$1"
+    return
+  fi
+  # Olemassa olevan hakemiston pitää olla rootin ja muiden kirjoituskelvoton, muuten
+  # joku muu käyttäjä voisi vaihtaa sen alle symlinkin ennen rootin kirjoitusta.
+  local owner mode
+  owner="$(stat -c %U "$1")"; mode="$(stat -c %a "$1")"
+  if [ "$owner" != "root" ] || [ $(( 8#$mode & 8#022 )) -ne 0 ]; then
+    fail "$1 on $owner:$mode. Vaaditaan root-omistus ilman ryhmän ja muiden kirjoitusoikeutta."
+  fi
 }
 
 # Arvot päätyvät polkuihin ja unit-nimeen, joten sallitaan vain turvalliset merkit.

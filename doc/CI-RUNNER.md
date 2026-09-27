@@ -239,28 +239,30 @@ Vipu takaisin GitHub-hostatulle (vaikutus heti seuraavasta ajosta):
 gh variable delete CI_RUNNER -R mv50000/paperclip
 ```
 
-Runnerin poisto hostilta. Runner-hakemistosta ei ajeta mitään rootina, koska jobi voi
+Runnerin poisto hostilta. Aja lohko alikuoressa (`bash -eu`) tai skriptinä, jotta `set -eu`
+ei sulje omaa shelliäsi. Runner-hakemistosta ei ajeta mitään rootina, koska jobi voi
 muokata sen tiedostoja. `${NAME:?}` pysäyttää komennon, jos nimi jäi asettamatta, jottei
 `rm -rf` osu koko `/srv/ci/actions-runners/`-hakemistoon (org-runnerit asuvat samassa).
 
 ```sh
+set -eu                  # keskeytä koko lohko ensimmäiseen virheeseen
 NAME='<nimi>'            # esim. builder-02-paperclip
 RUSER=ghrunner-pc
+RUID="$(id -u "$RUSER")"
 UNIT="actions.runner.mv50000-paperclip.${NAME:?}.service"
 sudo systemctl disable --now "$UNIT"
 sudo rm -f "/etc/systemd/system/$UNIT"
 sudo rm -rf "/etc/systemd/system/$UNIT.d"
 sudo systemctl daemon-reload
 # Käyttäjän kaikki prosessit, user-unitit ja rootless-kontit pois.
-RUID="$(id -u "$RUSER")"
 sudo loginctl disable-linger "$RUSER"
 sudo systemctl stop "user@${RUID:?}.service"
 sudo pkill -KILL -u "$RUSER" || true
 sudo rm -rf "/srv/ci/actions-runners/${NAME:?}"
-sudo find /tmp -maxdepth 1 -uid "$RUID" -exec rm -rf {} +
+sudo find /tmp -maxdepth 1 -uid "${RUID:?}" -exec rm -rf {} +
 sudo userdel -r "$RUSER"   # poistaa kodin /srv/ci/ghrunner-pc
 sudo sed -i "/^${RUSER}:/d" /etc/subuid /etc/subgid
-sudo rm -rf "/etc/systemd/system/user-${RUID}.slice.d" /usr/local/lib/paperclip-runner
+sudo rm -rf "/etc/systemd/system/user-${RUID:?}.slice.d" /usr/local/lib/paperclip-runner
 sudo systemctl daemon-reload
 ```
 
