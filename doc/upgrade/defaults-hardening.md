@@ -131,6 +131,45 @@ paikallinen nginx luottaa edgeen, ja Express luottaa vain paikalliseen nginxiin.
   `server/src/routes/access.ts`, `smoke-lab.ts` ja `tool-access.ts`. Portin 80 rajaaminen edgeen
   sulkee tämänkin reitin.
 
+## Porras v2026.707.0 — vastuukäyttäjä, ajastuksen esto ja idle-portti
+
+### Vastuukäyttäjä (responsible user)
+
+| Kohta | Arvo |
+|---|---|
+| Muutos | Jokaisella ajolla on vastuukäyttäjä. `heartbeat.ts` kieltäytyy käynnistämästä ajoa (`422 responsible_user_unresolved`), jos ketju konteksti → routine → issue → yläissue → `companies.default_responsible_user_id` → omistaja → ensimmäinen aktiivinen käyttäjäjäsen ei tuota käyttäjää. Agentin JWT kantaa ajon vastuukäyttäjän (`responsible_user_id`), ja `authorization.ts` leikkaa agentin oikeudet vastuukäyttäjän oikeuksilla. |
+| Upstream-oletus | leikkaus pakotetaan. Varjotila: `PAPERCLIP_RESPONSIBLE_USER_AUTHZ_MODE=shadow` tai `PAPERCLIP_RESPONSIBLE_USER_AUTHZ_SHADOW=true` (`authorization.ts:438`). Välimuisti `PAPERCLIP_RESPONSIBLE_USER_AUTHZ_CACHE_TTL_MS`, oletus 5000. |
+| RK9-arvo | pakotettu (ei env-muuttujaa). |
+| Prod-kopio (2026-09-27) | 0134 täytti `default_responsible_user_id`:n kaikille 11 yhtiölle; jokainen osoittaa omistajaan. Avoimia issueita, joilla vastuukäyttäjä on `NULL`: 0. Routineja: 0. |
+| Löydös | 43 issuella (6 avointa: AUR-230, AUR-231, AUR-233, AUR-239, QUA-288, QUA-289) ja 75 ajolla vastuukäyttäjä on merkkijono, jota ei ole `user`-taulussa (4 eri arvoa, sähköpostiosoitteita). 26 issueta vastaa oikeaa käyttäjää sähköpostin perusteella. Koodin perusteella agentin kommentti tai muutos näihin issueihin hylätään (`RESPONSIBLE_USER_UNAVAILABLE`); harjoituksessa tätä ei ajettu (todentamatta). |
+| Korjaus | operaattorin päätös cutoverissa, migraatioiden jälkeen ja ennen agenttien käynnistystä: kohdista sähköposti oikeaan käyttäjä-id:hen ja muut yhtiön `default_responsible_user_id`:hen (SQL MERGE-READY-viestissä ja PR:ssä). |
+
+`0111` antaa `skills:create`-grantin aktiivisille owner- ja admin-käyttäjille. Laajennus koskee vain board-käyttäjiä,
+joilla on jo laaja oikeus. `0110` vaihtaa `documents`- ja `document_revisions`-taulujen yhtiö-FK:t muotoon
+`ON DELETE CASCADE`.
+
+### Ajastuksen esto (scheduling suppression)
+
+| Kohta | Arvo |
+|---|---|
+| Asetus | `PAPERCLIP_IN_WORKTREE`, `PAPERCLIP_DATABASE_RESTORE_IN_PROGRESS`, `PAPERCLIP_RESTORE_IN_PROGRESS` (`resolveHeartbeatSchedulingSuppression`) |
+| Upstream-oletus | asettamatta: ajastus käynnissä |
+| RK9-arvo | asettamatta. Prodin prosessin env ja env-tiedostot tarkistettu 2026-09-27: yhtäkään ei ole. |
+| Huomio | Tosi-arvo pysäyttää timer-tickit ja jonon uudelleenkäynnistyksen. Forkin system pause toimii ennallaan ja tarkistetaan ensin. |
+
+### Idle-timer-portti (RK9-231) ja `skipTimerWhenNoActionableWork`
+
+| Kohta | Arvo |
+|---|---|
+| Upstream | `heartbeat.skipTimerWhenNoActionableWork`, oletus `false`, ei UI-kytkintä. Työksi lasketaan agentille osoitettu `todo`- tai `in_progress`-issue. |
+| Fork | `heartbeat.skipWhenIdle`, oletus `true`, UI-kytkin. Työksi lasketaan myös routine-ajot ja blokatut issuet, joiden blokkerit ovat ratkenneet. Tarkistetaan ensin; ohitus kirjataan syyllä `heartbeat.idle`. |
+| RK9-arvo | forkin portti päällä. Uuden agentin oletuksiin ei kirjoiteta upstreamin avainta. |
+
+### Globaali concurrency cap
+
+Upstream siirsi `activeRunExecutions`in moduulitasolle. Forkin cap (`maxGlobalConcurrentRunsDefault`) laskee nyt kaikkien
+`heartbeatService`-instanssien ajot, myös reittien luomien. Aiemmin reitin oma instanssi näki vain omat ajonsa.
+
 ## Porras v2026.831.1
 
 ### `enableNativeRunner` tulee mukaan
