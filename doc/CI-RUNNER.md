@@ -69,13 +69,16 @@ Varsinainen suoja on nämä viisi:
    ensimmäistä askelta. Hook sallii vain repon `mv50000/paperclip` jobit ja niistä vain
    tapahtumat `push`, `workflow_dispatch`, `workflow_run`, `schedule` sekä `pull_request`,
    jonka head-repo on `mv50000/paperclip`. Kaikki muu (fork-PR, `pull_request_target`)
-   kaatuu ennen kuin yksikään PR:n koodirivi ajaa. Jobi ei voi muuttaa hookia, ja `.env`:iin
-   se pääsisi vasta ajettuaan koodia.
+   hylätään. Pelkkä epäonnistunut hook ei riitä, koska runneri ajaa silti askeleet, joiden
+   ehto on `always()` tai `failure()`. Siksi hook tappaa jobin `Runner.Worker`-prosessin
+   (runnerilla on yksi slotti). Jobi ei voi muuttaa hookia, ja `.env`:iin se pääsisi vasta
+   ajettuaan koodia.
 2. **Fork-PR:n ajo vaatii hyväksynnän jokaiselta ulkopuoliselta.** Asetus on 27.9.2026
    `first_time_contributors` (todennettu: `gh api repos/mv50000/paperclip/actions/permissions/fork-pr-contributor-approval`).
    Se päästää kerran hyväksytyt kontribuuttorit läpi ilman hyväksyntää. Vaihda asetus
-   arvoon `all_external_contributors` ennen runnerin rekisteröintiä (vaihe 1). Hyväksyjä
-   lukee `.github/`-diffin ennen kuin hyväksyy ajon.
+   arvoon `all_external_contributors` ennen runnerin rekisteröintiä (vaihe 1). Vaiheen 3
+   token-komento tarkistaa asetuksen ja kieltäytyy muuten. Hyväksyjä lukee `.github/`-diffin
+   ennen kuin hyväksyy ajon.
 3. **Runneri ajaa omana käyttäjänään** (`ghrunner-pc`). Käyttäjällä ei ole sudoa, docker-ryhmää
    eikä pääsyä org-runnerien (`ghrunner`) hakemistoihin ja cacheihin. Docker on rootless.
 4. **Root ei aja eikä kirjoita mitään runner-hakemistossa asennuksen jälkeen.** Hakemisto
@@ -92,7 +95,12 @@ Varsinainen suoja on nämä viisi:
   luottamusraja ei muutu.
 - **Verkko.** Jobit näkevät builder-02:n lähiverkon kuten org-runneritkin. Egress-rajausta ei ole.
 - **Orpoprosessit.** Runneri tappaa jobin prosessit jobin lopussa (`RUNNER_TRACKING_ID`), mutta
-  tarkoituksella irrotettu prosessi tai kontti voi jäädä. Tämä koskee vain luotettua koodia (kohta 1).
+  tarkoituksella irrotettu prosessi, user-unit tai kontti voi jäädä (linger on päällä). Tämä
+  koskee luotettua koodia, koska hook tappaa fork-jobin ennen sen ensimmäistä askelta.
+  Poisto-ohje siivoaa käyttäjän kokonaan.
+- **Uusi `workflow_run`-workflow.** Hook sallii `workflow_run`in, koska se ajaa masterin koodia.
+  Jos tällainen workflow checkoutaa PR:n headin, fork-koodi ajaisi runnerilla.
+  `scripts/upgrade-smoke.sh --offline` kieltää checkoutin `workflow_run`-workflowssa.
 
 Jos jäännösriskit eivät kelpaa, valitse Ubicloud (ks. alla). Sen runnerit ovat
 kertakäyttöisiä VM:iä, joten pysyvyysriskiä ei ole.
@@ -128,7 +136,7 @@ Repoa ei ole kloonattu build-hosteille. Kopioi skripti hostille, esim.
 Tarkista esivaatimukset ilman muutoksia:
 
 ```sh
-sudo scripts/ci/install-paperclip-runner.sh --check
+sudo ./install-paperclip-runner.sh --check
 ```
 
 Esitarkistus kertoo puuttuvat paketit. Tyypilliset korjaukset rootina:
@@ -141,22 +149,36 @@ npx -y playwright install-deps chromium                    # Chromiumin kirjasto
 
 ### Vaihe 3: rekisteröinti ja asennus
 
+Hae token koneella, jolla `gh` on kirjautunut. Komento hakee tokenin vain, jos vaiheen 1
+asetus on voimassa:
+
 ```sh
-export RUNNER_TOKEN="$(gh api -X POST repos/mv50000/paperclip/actions/runners/registration-token --jq .token)"
-sudo --preserve-env=RUNNER_TOKEN scripts/ci/install-paperclip-runner.sh
+policy="$(gh api repos/mv50000/paperclip/actions/permissions/fork-pr-contributor-approval --jq .approval_policy)"
+if [ "$policy" = "all_external_contributors" ]; then
+  gh api -X POST repos/mv50000/paperclip/actions/runners/registration-token --jq .token
+else
+  echo "Pysähdy: fork-PR-hyväksyntä on '$policy'. Tee vaihe 1 ensin." >&2
+fi
+```
+
+Aja asennus kohdehostilla. Liitä token kehotteeseen, jotta se ei jää shellin historiaan:
+
+```sh
+read -rs RUNNER_TOKEN && export RUNNER_TOKEN
+sudo --preserve-env=RUNNER_TOKEN ./install-paperclip-runner.sh
 unset RUNNER_TOKEN
 ```
 
 Skripti tekee nämä:
 
 - luo järjestelmäkäyttäjän `ghrunner-pc` (koti `/srv/ci/ghrunner-pc`, lukittu salasana, ei ryhmiä)
-- asentaa root-omisteisen job-started-hookin (ks. [Turvamalli](#turvamalli))
+- asentaa root-omisteisen job-started-hookin (ks. [Turvamalli](#turvamalli)); vaatii `jq`:n ja `pkill`in
 - lataa actions/runnerin kiinnitetyllä versiolla ja tarkistaa SHA256:n
 - rekisteröi runnerin labeleilla `self-hosted, Linux, X64, paperclip-ci`
 - kirjoittaa `.env`:iin hookin, `NODE_OPTIONS=--max-old-space-size=4096`,
   `PAPERCLIP_CI_NO_SUDO=1` ja rootless-`DOCKER_HOST`in
 - asentaa rootless Dockerin käyttäjän user-sessioon (linger päällä)
-- kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` drop-inillä
+- kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` (`KillMode=mixed`) drop-inillä
   `Slice=ci-runners.slice`, `MemoryHigh=6G`, `MemoryMax=7G`, `Restart=on-failure`,
   `OOMPolicy=continue`
 
@@ -213,17 +235,30 @@ gh variable delete CI_RUNNER -R mv50000/paperclip
 ```
 
 Runnerin poisto hostilta. Runner-hakemistosta ei ajeta mitään rootina, koska jobi voi
-muokata sen tiedostoja:
+muokata sen tiedostoja. `${NAME:?}` pysäyttää komennon, jos nimi jäi asettamatta, jottei
+`rm -rf` osu koko `/srv/ci/actions-runners/`-hakemistoon (org-runnerit asuvat samassa).
 
 ```sh
-NAME=<nimi>
-UNIT="actions.runner.mv50000-paperclip.$NAME.service"
+NAME='<nimi>'            # esim. builder-02-paperclip
+RUSER=ghrunner-pc
+UNIT="actions.runner.mv50000-paperclip.${NAME:?}.service"
 sudo systemctl disable --now "$UNIT"
-sudo rm -rf "/etc/systemd/system/$UNIT" "/etc/systemd/system/$UNIT.d"
+sudo rm -f "/etc/systemd/system/$UNIT"
+sudo rm -rf "/etc/systemd/system/$UNIT.d"
 sudo systemctl daemon-reload
-ID="$(gh api repos/mv50000/paperclip/actions/runners --jq ".runners[] | select(.name == \"$NAME\") | .id")"
-gh api -X DELETE "repos/mv50000/paperclip/actions/runners/$ID"
-sudo rm -rf "/srv/ci/actions-runners/$NAME"
+# Käyttäjän kaikki prosessit, user-unitit ja rootless-kontit pois.
+sudo loginctl disable-linger "$RUSER"
+sudo systemctl stop "user@$(id -u "$RUSER").service"
+sudo pkill -KILL -u "$RUSER" || true
+sudo rm -rf "/srv/ci/actions-runners/${NAME:?}"
+sudo userdel -r "$RUSER"   # poistaa kodin /srv/ci/ghrunner-pc; tarkista /etc/subuid ja /etc/subgid
+```
+
+Poista rekisteröinti GitHubista koneella, jolla `gh` on kirjautunut:
+
+```sh
+ID="$(gh api repos/mv50000/paperclip/actions/runners --jq ".runners[] | select(.name == \"${NAME:?}\") | .id")"
+gh api -X DELETE "repos/mv50000/paperclip/actions/runners/${ID:?}"
 ```
 
 ## Tunnetut rajat

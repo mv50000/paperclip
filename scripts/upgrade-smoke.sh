@@ -83,22 +83,30 @@ NODE
 
 # --- CI-runner-vipu (RK9-350): jokainen jobi valitsee runnerinsa vars.CI_RUNNERista ---
 # Upstream-porras tuo `runs-on: ubuntu-latest` -rivit takaisin. Ks. doc/CI-RUNNER.md.
-# pull_request-workflowissa vivun pitää sisältää fork-suoja, eikä pull_request_targetia sallita.
+# pull_request-workflowissa vivun pitää sisältää fork-suoja. pull_request_targetia ei sallita,
+# eikä workflow_run-workflow saa checkoutata koodia (se ajaisi fork-PR:n koodia runnerilla).
 check_ci_runners() {
   local errors=() f line uses labels
   for f in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
     [[ -f "$f" ]] || continue
     local name="${f#"$REPO_ROOT"/}"
-    if grep -qE '^[[:space:]]*pull_request_target[[:space:]]*:|on:.*pull_request_target' "$f"; then
+    if grep -q 'pull_request_target' "$f"; then
       errors+=("$name: pull_request_target ei ole sallittu")
     fi
+    if grep -qE '^[[:space:]]*(-[[:space:]]*)?workflow_run[[:space:]]*:?[[:space:]]*$|on:.*workflow_run' "$f" \
+      && grep -q 'actions/checkout' "$f"; then
+      errors+=("$name: workflow_run-workflow ei saa checkoutata koodia")
+    fi
     local is_pr=0
-    grep -qE '^[[:space:]]*pull_request[[:space:]]*:|on:.*pull_request' "$f" && is_pr=1
+    grep -qE '^[[:space:]]*(-[[:space:]]*)?pull_request[[:space:]]*:?[[:space:]]*$|on:.*pull_request' "$f" && is_pr=1
     while IFS= read -r line; do
+      local trimmed="${line#"${line%%[![:space:]]*}"}"
       if [[ "$line" != *vars.CI_RUNNER* ]]; then
-        errors+=("$name: ${line#"${line%%[![:space:]]*}"}")
+        errors+=("$name: $trimmed")
+      elif [[ "$trimmed" == runs-on:* && "$line" != *"fromJSON("* ]]; then
+        errors+=("$name: runs-on ilman fromJSONia: $trimmed")
       elif [[ $is_pr -eq 1 && "$line" != *"head.repo.full_name == github.repository"* ]]; then
-        errors+=("$name: fork-suoja puuttuu: ${line#"${line%%[![:space:]]*}"}")
+        errors+=("$name: fork-suoja puuttuu: $trimmed")
       fi
     done < <(grep -E '^[[:space:]]*(runs-on|runner_label):' "$f" || true)
     # Jobitason reusable workflow (`uses:` 4 välilyönnin sisennyksellä) tarvitsee runner_labelin.

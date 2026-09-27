@@ -14,7 +14,7 @@
 #
 # Käyttäjä on eri kuin org-runnerien ghrunner. Repo on julkinen, joten tämän
 # runnerin jobi ei saa päästä käsiksi org-runnerien hakemistoihin ja cacheihin.
-# Root-omisteinen job-started-hook hylkää jobin, jonka koodi ei tule
+# Root-omisteinen job-started-hook tappaa jobin, jonka koodi ei tule
 # repositoriosta mv50000/paperclip itsestään (fork-PR:t).
 #
 # Root ei aja eikä kirjoita mitään runner-hakemistossa sen jälkeen, kun runneri on
@@ -24,8 +24,8 @@
 #   sudo scripts/ci/install-paperclip-runner.sh --check
 #   sudo --preserve-env=RUNNER_TOKEN scripts/ci/install-paperclip-runner.sh
 #
-# Rekisteröintitoken (voimassa 1 h, kertakäyttöinen):
-#   export RUNNER_TOKEN="$(gh api -X POST repos/mv50000/paperclip/actions/runners/registration-token --jq .token)"
+# Rekisteröintitoken (voimassa 1 h, kertakäyttöinen) haetaan vasta, kun fork-PR:ien
+# hyväksyntä on all_external_contributors (doc/CI-RUNNER.md, vaiheet 1 ja 3).
 #
 # Valinnat:
 #   --check          aja vain esitarkistukset, älä muuta mitään
@@ -68,6 +68,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# Token talteen viemättömään muuttujaan: runner-käyttäjänä ajettavat komennot
+# eivät saa periä sitä ympäristöstä.
+TOKEN="${RUNNER_TOKEN:-}"
+unset RUNNER_TOKEN
+
 fail() { echo "VIRHE: $*" >&2; exit 1; }
 warn() { echo "VAROITUS: $*" >&2; }
 info() { echo "==> $*"; }
@@ -82,9 +87,9 @@ RUNNER_HOME="/srv/ci/$RUNNER_USER"
 UNIT="actions.runner.mv50000-paperclip.${RUNNER_NAME}.service"
 
 # Aja komento runner-käyttäjänä. runuser säilyttää kutsujan ympäristön
-# (paitsi HOME, SHELL, USER ja LOGNAME).
+# (paitsi HOME, SHELL, USER ja LOGNAME). Stdin ei ole rootin pääte.
 as_runner() {
-  runuser -u "$RUNNER_USER" -- "$@"
+  runuser -u "$RUNNER_USER" -- "$@" </dev/null
 }
 
 # --- Esitarkistukset -------------------------------------------------------
@@ -103,7 +108,7 @@ preflight() {
     root|rk9admin|paperclip|ghrunner) fail "käyttäjä '$RUNNER_USER' ei kelpaa: käytä omaa runner-käyttäjää." ;;
   esac
 
-  for cmd in curl tar sha256sum jq systemctl useradd usermod runuser loginctl install; do
+  for cmd in curl tar sha256sum jq pkill systemctl useradd usermod runuser loginctl install; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if [ "$WITH_DOCKER" -eq 1 ]; then
@@ -161,8 +166,8 @@ ensure_user() {
 # --- Job-started-hook ------------------------------------------------------
 
 # Hook on root-omisteinen ja runner-hakemiston ulkopuolella, joten jobi ei voi
-# muuttaa sitä. Runneri ajaa sen ennen jobin ensimmäistä askelta. Nollasta
-# poikkeava paluuarvo kaataa jobin ennen kuin yksikään PR:n koodirivi ajaa.
+# muuttaa sitä. Runneri ajaa sen ennen jobin ensimmäistä askelta. Hylätessään
+# hook tappaa jobin Runner.Worker-prosessin, joten jobin askeleet eivät aja.
 install_hook() {
   info "Asennetaan job-started-hook $HOOK."
   install -d -o root -g root -m 755 "$HOOK_DIR"
@@ -172,27 +177,34 @@ install_hook() {
 #!/usr/bin/env bash
 # Asentanut scripts/ci/install-paperclip-runner.sh (RK9-350). Älä muokkaa käsin.
 # Hylkää jobin, jonka koodi ei tule repositoriosta $REPO itsestään.
-set -euo pipefail
+set -uo pipefail
 expected="$REPO"
-if [ "\${GITHUB_REPOSITORY:-}" != "\$expected" ]; then
-  echo "::error::Runneri palvelee vain repoa \$expected (saatiin '\${GITHUB_REPOSITORY:-}')."
+
+reject() {
+  echo "::error::\$1 Ks. doc/CI-RUNNER.md."
+  # Nollasta poikkeava paluuarvo ei yksin riitä: runneri ajaa silti askeleet,
+  # joiden ehto on always() tai failure(). Runnerilla on yksi slotti, joten
+  # tämän käyttäjän ainoa Runner.Worker on tämä jobi. Tapetaan se.
+  pkill -KILL -x -u "\$(id -u)" Runner.Worker
   exit 1
+}
+
+if [ "\${GITHUB_REPOSITORY:-}" != "\$expected" ]; then
+  reject "Runneri palvelee vain repoa \$expected (saatiin '\${GITHUB_REPOSITORY:-}')."
 fi
 case "\${GITHUB_EVENT_NAME:-}" in
   push|workflow_dispatch|workflow_run|schedule)
     exit 0
     ;;
   pull_request)
-    head="\$(jq -r '.pull_request.head.repo.full_name // ""' "\$GITHUB_EVENT_PATH")"
+    head="\$(jq -r '.pull_request.head.repo.full_name // ""' "\${GITHUB_EVENT_PATH:-/nonexistent}" 2>/dev/null)"
     if [ "\$head" = "\$expected" ]; then
       exit 0
     fi
-    echo "::error::Fork-PR (\$head) ei saa ajaa self-hosted-runnerilla. Ks. doc/CI-RUNNER.md."
-    exit 1
+    reject "Fork-PR ('\$head') ei saa ajaa self-hosted-runnerilla."
     ;;
   *)
-    echo "::error::Tapahtumaa '\${GITHUB_EVENT_NAME:-}' ei sallita self-hosted-runnerilla."
-    exit 1
+    reject "Tapahtumaa '\${GITHUB_EVENT_NAME:-}' ei sallita self-hosted-runnerilla."
     ;;
 esac
 EOF
@@ -205,9 +217,10 @@ EOF
 install_runner() {
   if [ -f "$RUNNER_DIR/.runner" ]; then
     info "Runneri on jo asennettu ja rekisteröity: $RUNNER_DIR"
+    TOKEN=""
     return
   fi
-  [ -n "${RUNNER_TOKEN:-}" ] || fail "RUNNER_TOKEN puuttuu. Hae token: gh api -X POST repos/$REPO/actions/runners/registration-token --jq .token"
+  [ -n "$TOKEN" ] || fail "RUNNER_TOKEN puuttuu. Hae token: gh api -X POST repos/$REPO/actions/runners/registration-token --jq .token"
 
   local tarball tmp
   tarball="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -229,14 +242,17 @@ install_runner() {
   chmod 711 "$tmp"
   as_runner tar xzf "$tmp/$tarball" -C "$RUNNER_DIR"
   rm -rf "$tmp"
+  # svc.sh kopioisi tämän; skripti kirjoittaa unitin itse (ks. install_service).
+  as_runner cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"
 
   info "Rekisteröidään runneri $RUNNER_NAME repolle $REPO_URL."
   # Token välitetään ympäristömuuttujana, ei komentoriviargumenttina (ps-näkyvyys).
   # shellcheck disable=SC2016 # argumentit laajenevat tarkoituksella vasta alikuoressa
-  ACTIONS_RUNNER_INPUT_TOKEN="$RUNNER_TOKEN" as_runner \
+  ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" as_runner \
     bash -c 'cd "$1" && ./config.sh --unattended --url "$2" --name "$3" --labels "$4" --work _work --replace' \
     _ "$RUNNER_DIR" "$REPO_URL" "$RUNNER_NAME" "$RUNNER_LABELS"
-  unset RUNNER_TOKEN
+  TOKEN=""
+
 }
 
 # .env kirjoitetaan runner-käyttäjänä: root ei kirjoita käyttäjän hakemistoon
@@ -330,7 +346,8 @@ Wants=network-online.target
 ExecStart=$RUNNER_DIR/runsvc.sh
 User=$RUNNER_USER
 WorkingDirectory=$RUNNER_DIR
-KillMode=process
+# mixed: SIGTERM runnerille, pysäytyksen lopuksi SIGKILL kaikille unitin prosesseille.
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=5min
 
