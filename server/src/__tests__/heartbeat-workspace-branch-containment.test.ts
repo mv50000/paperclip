@@ -641,9 +641,19 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(environmentLeases);
-    await db.delete(activityLog);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(heartbeatRuns);
+    // --- RK9 Custom (RK9-314): a finished run can still write activity or run events after
+    // waitForHeartbeatIdle returns; retry so the late row does not fail the heartbeat_runs delete. ---
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await db.delete(activityLog);
+        await db.delete(heartbeatRunEvents);
+        await db.delete(heartbeatRuns);
+        break;
+      } catch (error) {
+        if (attempt >= 20) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(projectWorkspaces);
