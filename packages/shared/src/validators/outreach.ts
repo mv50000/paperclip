@@ -45,7 +45,7 @@ export const createOutreachProspectSchema = z.object({
   source: z.enum(OUTREACH_PROSPECT_SOURCES),
   sourceUrl: z.string().trim().url().max(2000).optional().nullable(),
   legalBasis: z.enum(OUTREACH_LEGAL_BASES).default("b2b_legitimate_interest"),
-  enrichment: z.record(z.unknown()).optional(),
+  enrichment: z.record(z.string(), z.unknown()).optional(),
 });
 export type CreateOutreachProspect = z.infer<typeof createOutreachProspectSchema>;
 
@@ -62,7 +62,7 @@ export const updateOutreachProspectSchema = z
     // Only the manual review transition is exposed here; every other status is
     // driven by events (bounce/reply/unsubscribe) or by the sender (RK9-196).
     status: z.enum(["new", "approved"]),
-    enrichment: z.record(z.unknown()),
+    enrichment: z.record(z.string(), z.unknown()),
   })
   .partial()
   .refine((value) => Object.keys(value).length > 0, { message: "no fields to update" });
@@ -106,7 +106,7 @@ const sequenceBase = z.object({
   senderIdentity: outreachEmailSchema,
   steps: z.array(outreachSequenceStepSchema).max(50).default([]),
   dailyCap: z.number().int().min(0).max(10_000).default(20),
-  sendWindow: outreachSendWindowSchema.default({}),
+  sendWindow: outreachSendWindowSchema.prefault({}),
   rampSchedule: z.array(outreachRampStepSchema).max(50).default([]),
   active: z.boolean().default(false),
 });
@@ -181,7 +181,7 @@ export const createOutreachEventSchema = z.object({
   prospectId: z.string().uuid(),
   messageId: z.string().uuid().optional().nullable(),
   type: z.enum(OUTREACH_EVENT_TYPES),
-  payload: z.record(z.unknown()).default({}),
+  payload: z.record(z.string(), z.unknown()).default({}),
   occurredAt: z
     .coerce.date()
     .refine(

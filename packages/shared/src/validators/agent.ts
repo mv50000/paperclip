@@ -202,7 +202,7 @@ export const recordExternalRunSchema = z.object({
   status: z.enum(["succeeded", "failed", "cancelled"]),
   summary: z.string().trim().max(500).optional(),
   durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
-  contextSnapshot: z.record(z.unknown()).optional(),
+  contextSnapshot: z.record(z.string(), z.unknown()).optional(),
   externalRunId: z.string().trim().min(1).max(200).optional(),
   exitCode: z.number().int().optional(),
   errorMessage: z.string().trim().max(2000).optional(),
