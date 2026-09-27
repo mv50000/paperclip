@@ -7,6 +7,7 @@ const execFileSyncMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({
   execFileSync: execFileSyncMock,
 }));
+const ORIGINAL_PATH = process.env.PATH;
 
 describe("network bind helpers", () => {
   beforeEach(() => {
@@ -63,12 +64,19 @@ describe("network bind helpers", () => {
   });
 
   it("falls back to loopback when no tailscale address is available for tailnet presets", () => {
-    const preset = buildPresetServerConfig("tailnet", {
-      port: 3100,
-      allowedHostnames: [],
-      serveUi: true,
-    });
+    delete process.env.PAPERCLIP_TAILNET_BIND_HOST;
+    process.env.PATH = "";
 
-    expect(preset.server.host).toBe("127.0.0.1");
+    try {
+      const preset = buildPresetServerConfig("tailnet", {
+        port: 3100,
+        allowedHostnames: [],
+        serveUi: true,
+      });
+
+      expect(preset.server.host).toBe("127.0.0.1");
+    } finally {
+      process.env.PATH = ORIGINAL_PATH;
+    }
   });
 });

@@ -1,4 +1,10 @@
-export { execute, runClaudeLogin, resolveClaudeBillingTypeForEnv } from "./execute.js";
+export {
+  claudeSessionCwdMatchesExecutionTarget,
+  execute,
+  runClaudeLogin,
+  resolveClaudeBillingTypeForEnv,
+} from "./execute.js";
+// --- RK9 Custom (RK9-228) ---
 export {
   inheritableHostEnv,
   hostEnvKeysNotInherited,
@@ -7,7 +13,7 @@ export {
   INHERIT_OPT_IN_ENV_KEY,
 } from "./host-env.js";
 export { listClaudeSkills, syncClaudeSkills } from "./skills.js";
-export { listClaudeModels } from "./models.js";
+export { listClaudeModels, refreshClaudeModels, resetClaudeModelsCacheForTests } from "./models.js";
 export { testEnvironment } from "./test.js";
 export {
   parseClaudeStreamJson,

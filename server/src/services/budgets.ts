@@ -14,6 +14,7 @@ import type {
   BudgetIncidentResolutionInput,
   BudgetMetric,
   BudgetOverview,
+  PauseReason,
   BudgetPolicy,
   BudgetPolicySummary,
   BudgetPolicyUpsertInput,
@@ -29,7 +30,7 @@ type ScopeRecord = {
   companyId: string;
   name: string;
   paused: boolean;
-  pauseReason: "manual" | "budget" | "system" | null;
+  pauseReason: PauseReason | null;
 };
 
 type PolicyRow = typeof budgetPolicies.$inferSelect;

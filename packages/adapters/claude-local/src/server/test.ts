@@ -241,6 +241,14 @@ export async function testEnvironment(
       if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
       if (extraArgs.length > 0) args.push(...extraArgs);
 
+      // Sandbox bridges still add lease warmup and transport overhead, but
+      // the standard-2 Cloudflare tier now probes fast enough that a 90s
+      // budget leaves headroom without masking real hangs.
+      const helloProbeTimeoutSec = Math.max(
+        1,
+        asNumber(config.helloProbeTimeoutSec, targetIsSandbox ? 90 : 45),
+      );
+
       const probe = await runAdapterExecutionTargetProcess(
         runId,
         target,
@@ -251,7 +259,7 @@ export async function testEnvironment(
           env,
           // --- RK9 Custom (RK9-228): keep a server-wide ANTHROPIC_API_KEY out of the CLI. See doc/upgrade/acpx-claude-local.md ---
           doNotInheritEnvKeys: hostEnvKeysNotInherited(),
-          timeoutSec: 45,
+          timeoutSec: helloProbeTimeoutSec,
           graceSec: 5,
           stdin: "Respond with hello.",
           onLog: async () => {},
