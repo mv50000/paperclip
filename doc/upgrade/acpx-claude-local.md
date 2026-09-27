@@ -109,6 +109,17 @@ Porraskohtaiset toimet:
   `claude_acp_host_key_blocked`, kun palvelimen envissä on `ANTHROPIC_API_KEY` ilman opt-iniä.
   Testi: `packages/adapters/claude-local/src/server/execute.acp-host-key-guard.test.ts`.
   Upstreamin `acp.test.ts`:n auto-ACP-odotukset muutettiin CLI-pinnaukseen.
+- **Porras, joka tuo v2026.817.0:n:** upstream poisti paikallisen kaistan agentti-wrapperin ja
+  antaa ajon envin `sessionOptions: { env }`illä. acpx 0.12:n `buildAgentEnvironment` on kuitenkin
+  `{ ...process.env, ...sessionEnv }`, joten lapsi perisi palvelimen omat `PAPERCLIP_*`-muuttujat
+  (esimerkiksi `PAPERCLIP_AGENT_JWT_SECRET`). **Tehty 2026-09-27 (RK9-315).** Fork kirjoittaa
+  POSIX-wrapperin (`writeAgentWrapper`, `acpx-engine/execute.ts`), joka poistaa kaikki `PAPERCLIP_*`-muuttujat
+  paitsi ajon envin omat avaimet ja `PAPERCLIP_RUNTIME_API_URL`, `PAPERCLIP_LISTEN_HOST` ja
+  `PAPERCLIP_LISTEN_PORT`, ja käynnistää agentin `exec`illä. Wrapper ei kirjoita envin arvoja levylle
+  (upstreamin "does not materialize credential wrapper scripts" -testi pätee), ja siivous poistaa 720:n
+  jättämät `.env`-tiedostot heti. Windowsilla ja etäkaistalla wrapperia ei käytetä. Testit:
+  `acpx-engine/execute.test.ts` (wrapper pudottaa palvelimen `PAPERCLIP_AGENT_JWT_SECRET`in) ja
+  `spawn-smoke.test.ts` (wrappers-hakemistossa vain `.sh`-tiedostoja).
 - **Porras, joka tuo v2026.831.0:n:** aseta `enableNativeRunner: false`
   instanssiasetuksiin ennen deployta.
 - **Porras, joka tuo v2026.916.0:n:** päätä `DEFAULT_CLAUDE_LOCAL_MODEL`.

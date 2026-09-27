@@ -8,11 +8,14 @@ import type { PaperclipConfig } from "../config/schema.js";
 const ORIGINAL_ENV = { ...process.env };
 const execFileSyncMock = vi.hoisted(() => vi.fn());
 
-vi.mock("node:child_process", () => ({
+// --- RK9 Custom (RK9-315): partial mock; since v2026.817.0 service-manager.ts also imports execFile ---
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   execFileSync: execFileSyncMock,
 }));
 const ORIGINAL_CWD = process.cwd();
 const ORIGINAL_PATH = process.env.PATH;
+const ORIGINAL_EXIT_CODE = process.exitCode;
 
 function createExistingConfigFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-onboard-"));
@@ -116,6 +119,7 @@ describe("onboard", () => {
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
     process.chdir(ORIGINAL_CWD);
+    process.exitCode = ORIGINAL_EXIT_CODE;
   });
 
   it("preserves an existing config when rerun without flags", async () => {
@@ -136,6 +140,20 @@ describe("onboard", () => {
     expect(fs.readFileSync(fixture.configPath, "utf8")).toBe(fixture.configText);
     expect(fs.existsSync(`${fixture.configPath}.backup`)).toBe(false);
     expect(fs.existsSync(path.join(path.dirname(fixture.configPath), ".env"))).toBe(true);
+  });
+
+  it("backs up invalid config bytes and refuses --yes replacement", async () => {
+    const configPath = createFreshConfigPath();
+    const invalidBytes = Buffer.from('{"database": invalid}\n', "utf8");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, invalidBytes);
+
+    await onboard({ config: configPath, yes: true, invokedByRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(fs.readFileSync(configPath)).toEqual(invalidBytes);
+    expect(fs.readFileSync(`${configPath}.invalid-1`)).toEqual(invalidBytes);
+    expect(fs.existsSync(`${configPath}.backup`)).toBe(false);
   });
 
   it("keeps --yes onboarding on local trusted loopback defaults", async () => {

@@ -612,6 +612,50 @@ Porras-720:n fork-päätökset:
   v2026.720.0:lla; niihin tuotiin v2026.817.0:n odotukset. `parse.test.ts`: max turns tunnistetaan vain
   rakenteisista kentistä.
 
+## Konfliktit portaassa 817 (`origin/master` `d27bd45d` + `v2026.817.0`, RK9-315)
+
+Porras 4/6. 39 konfliktitiedostoa ja 30 migraatiota (0182–0211), molemmat pilkkomisrajojen alla.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0211 tavu tavulta, sitten 9001–9010 idx:llä 212–221. Upstream muutti `0177`:n idx:n 178:ksi, joten `0177` ja `0178` jakavat idx:n; `client.ts` ratkaisee tasapelin tiedostonimellä. |
+| `packages/adapter-utils/src/acpx-engine/execute.ts`, `execute.test.ts` | upstreamin versio + forkin POSIX-wrapper ilman env-tiedostoa ja `sanitizeInheritedPaperclipEnv` sandbox-kaistalla (ks. `acpx-claude-local.md`). Upstreamin neljä odotusta sovitettiin wrapperiin. |
+| `packages/adapters/claude-local/src/server/execute.ts` | upstreamin `selectPaperclipTaskMarkdown`-pohjainen tehtäväkonteksti + forkin knowledge-konteksti (RK9-18) ja turn budget -huomautus RK9 Custom -lohkossa |
+| `packages/adapters/claude-local/src/server/test.ts` | järjestys: konfigin avain, perityn host-avaimen varoitus (RK9-228), upstreamin `CLAUDE_CODE_OAUTH_TOKEN`, ei-perityn host-avaimen info (RK9-228), tilaus |
+| `packages/adapters/claude-local/src/server/execute.remote.test.ts` | upstreamin versio; forkin backport on upstreamissa, joten sen markkeri poistui |
+| `packages/adapters/claude-local/src/index.ts` (ei konfliktia) | upstreamin `claude-sonnet-5`- ja `claude-opus-5`-rivit olisivat tulleet kahdesti; duplikaatit poistettu, Opus 5.5 pysyy ensimmäisenä |
+| `server/src/services/authorization.ts`, `authorization-service.test.ts` | forkin `tasks:assign`-sääntö (RK9-313) + upstreamin default-open-kommentit ja -muutokset (#10804). Low-trust-testin rajan sisäinen assign odottaa `deny_missing_grant`. |
+| `server/src/routes/issues.ts` | forkin paused/terminated-assignee-vartija, SEC-91-outcomes ja RK9-76:n valinnainen run id checkoutissa ja interaktion luonnissa. Upstreamin `unblockDescriptor`, blocked-syyn validointi ja checkoutin unique violation -409. `requireAgentRunId` palautettiin upstreamin interaktioiden resolve- ja withdraw-reiteille. |
+| `server/src/routes/approvals.ts` | reject kutsuu sekä forkin `wakeRequesterOnDecision`ia (RK9-82) että upstreamin `queueAdditionalApprovalReviewPathWakes`ia |
+| `server/src/index.ts`, `server/src/app.ts` | molemmat; heartbeat-palvelu luodaan upstreamin tapaan aikaisin (`heartbeatSchedulerEnabled`) forkin optioilla (`systemPause`, `maxGlobalConcurrentRunsDefault`) |
+| `server/src/services/heartbeat.ts` | upstreamin compact/redaction, sitten forkin knowledge-injektio |
+| `server/src/services/recovery/service.ts` | `LatestIssueRun` sisältää forkin kentät (RK9-87) |
+| `packages/shared/src/feature-catalog.ts` (ei konfliktia) | forkin liput `knowledgeRecallInjectionEnabled` ja `recoveryStrictInProgressOnly` lisätty katalogiin (muuten typecheck kaatuu) |
+| `.github/workflows/pr.yml`, `release.yml`, `docker.yml`, `release-smoke.yml` | runner-vipu uusille jobeille (`e2e`-aggregaatti, `build-and-push-cloud`, stable-jobit); `release-smoke.yml` sai `runner_label`-inputin. `commitperclip-review.yml` poistettiin taas. |
+| `package.json`, `server/package.json`, `pnpm-lock.yaml` | molemmat; lockfile upstreamista + `pnpm install`. `@types/node` pysyy masterin versiossa 24.13.3. |
+| `heartbeat-process-recovery.test.ts` | forkin versio (RK9-87 korvasi upstreamin kaksi testiä) |
+| `heartbeat-retry-scheduling.test.ts` | forkin retry-silmukka kutsuu upstreamin `cleanupHeartbeatRunDependents()`ia |
+| `scripts/provision-worktree.sh` | upstreamin versio (seed-argumentit poistuivat) |
+| `skills/paperclip/SKILL.md` | upstreamin "Bounded write retry" + forkin blocked-rivi; lisäksi RK9 Custom -lohko blocked-syyn säännöstä |
+| muut | molemmat puolet (importit, exportit, testit, dokumentaatio) |
+
+CI:n löytämät sovitukset (RK9-315):
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `server/src/services/issues.ts` (`addComment`, `assertKnownActorRunId`) | forkin RK9-76-tarkistus pidettiin: tuntematon run id on 422 ennen tallennusta. Ilman sitä board-kommentti tallentuisi ja reitti palauttaisi 500:n `activity_log`in FK:sta. Tarkistus hylkää nyt myös ei-UUID-arvon 422:lla (ennen Postgres-virhe). Upstreamin kaksi "nulls out" -testiä odottavat 422:ta. |
+| `server/src/routes/issues.ts` (`assertCrossIssueInfluenceWithinRunCap`) | runiton human proxy -agentti ohittaa 817:n run-vaatimuksen (operaattorin interaktiiviset sessiot, RK9-76). Testit: `issue-comment-reopen-routes.test.ts` (RK9 Custom -lohko). |
+| `issue-assignee-invokability-routes.test.ts` | upstream (#10837) sallii boardin asettaa paussatun agentin assigneeksi. Forkin vartija estää paussatut ja terminoidut kaikilta; testi odottaa 409:ää. |
+| `status-cards.test.ts` | status cardit käyttävät `tasks:assign`-oikeutta. Forkin RK9-313-sääntö vaatii agentilta grantin, joten testiagentti saa jäsenyyden ja grantin. |
+| `agent-permissions-routes.test.ts`, `heartbeat-stale-queue-invalidation.test.ts` | forkin oletukset: `AGENT_DEFAULT_MAX_CONCURRENT_RUNS` = 5, ja RK9-231-idle-portti pois testistä |
+| `server-startup-feedback-export.test.ts` | forkin `risk-event-listeners.js` mockattiin: sen riippuvuusketju lataa 817:ssä `services/issues.ts`:n, joka lukee db-tauluja moduulin latauksessa |
+| `cli/src/__tests__/onboard.test.ts` | `node:child_process`-mock osittaiseksi (817:n `service-manager.ts` tuo `execFile`n) |
+| `claude-local/src/server/test.probe.test.ts` | upstreamin usage-limit-syöte palautettiin; 720:n backport-markkeri poistui tarpeettomana |
+| `.github/workflows/release.yml`, `docker.yml` | upstreamin nightly-npm-kaista (`select_nightly`, ajastettu) ja `build-and-push-cloud` saivat ehdon `github.repository == 'paperclipai/paperclip'` |
+
+Poistetut tiedostot: upstream poisti cloud upstream -koodin (16 tiedostoa), `Activity.tsx`:n ja tool app galleryn.
+Fork ei ollut muuttanut niistä yhtään.
+
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
 Näille commiteille ei ole masterilla omaa testiä. Ne tarkistetaan manuaalisesti yllä olevan

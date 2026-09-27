@@ -68,11 +68,14 @@ const firstCustom = tags.findIndex((t) => /^9\d{3}_/.test(t));
 const lastUpstream = tags.map((t) => /^0\d{3}_/.test(t)).lastIndexOf(true);
 if (firstCustom !== -1 && lastUpstream > firstCustom) errors.push(`upstream-migraatio ${tags[lastUpstream]} on 9xxx-rivien jälkeen`);
 // client.ts sorts by idx. Upstream leaves gaps (0126 and 0130 are missing since v2026.707.0),
-// so idx must grow strictly, not match the position.
+// so idx must grow, not match the position. v2026.817.0 gives 0177 and 0178 the same idx (178);
+// client.ts breaks a tie by file name, so a tie is allowed when the tags grow (RK9-315).
 journal.entries.forEach((e, i) => {
   const prev = journal.entries[i - 1];
   if (!Number.isInteger(e.idx)) errors.push(`idx puuttuu: ${e.tag}`);
-  else if (prev && e.idx <= prev.idx) errors.push(`idx ei kasva: ${e.tag} idx=${e.idx}, edellinen ${prev.tag} idx=${prev.idx}`);
+  else if (prev && (e.idx < prev.idx || (e.idx === prev.idx && e.tag <= prev.tag))) {
+    errors.push(`idx ei kasva: ${e.tag} idx=${e.idx}, edellinen ${prev.tag} idx=${prev.idx}`);
+  }
 });
 for (const f of fs.readdirSync(dir).filter((f) => /^9\d{3}_.*\.sql$/.test(f))) {
   if (!tags.includes(f.replace(/\.sql$/, ""))) errors.push(`${f} ei ole journalissa`);

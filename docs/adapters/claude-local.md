@@ -8,7 +8,8 @@ The `claude_local` adapter runs Anthropic's Claude Code CLI locally. It supports
 ## Prerequisites
 
 - Claude Code CLI installed (`claude` command available)
-- Claude logged in with a subscription, **or** `ANTHROPIC_API_KEY` set in the agent's adapter config `env`
+- Claude logged in with a subscription, **or** `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`
+  set in the agent's adapter config `env` or in the selected environment's env
 
 A bare `ANTHROPIC_API_KEY` in the host environment is deliberately **not** passed to agents — see [API key inheritance](#api-key-inheritance).
 
@@ -73,6 +74,7 @@ The adapter creates a temporary directory with symlinks to Paperclip skills and 
 
 ## Remote credential ownership
 
+When no API key or `CLAUDE_CODE_OAUTH_TOKEN` is configured,
 `claude_local` uses a snapshot-owns-auth topology for managed sandbox execution
 targets. When the run uses a sandbox execution target and no explicit
 `CLAUDE_CONFIG_DIR` is configured, Paperclip creates a remote
@@ -112,8 +114,15 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
 
 - Claude CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
-- API key/auth mode hints (`ANTHROPIC_API_KEY` vs subscription login, and whether a host key is inherited)
+- API key/auth mode hints (`ANTHROPIC_API_KEY` vs `CLAUDE_CODE_OAUTH_TOKEN` vs subscription login, and whether a host key is inherited)
 - A live hello probe (`claude --print - --output-format stream-json --verbose` with prompt `Respond with hello.`) to verify CLI readiness
+
+The probe sees the same layered env as a real run: when an environment is
+selected, its environment variables (secret refs included) are resolved and
+merged under the adapter config's `env`, so environment-level auth is
+reflected in the test result. A secret binding that is missing surfaces as
+an `environment_env_binding_missing` failure instead of a silently passing
+probe.
 
 ## API key inheritance
 
