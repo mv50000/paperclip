@@ -67,7 +67,13 @@ if (custom.slice(0, expected.length).join() !== expected.join()) errors.push(`9x
 const firstCustom = tags.findIndex((t) => /^9\d{3}_/.test(t));
 const lastUpstream = tags.map((t) => /^0\d{3}_/.test(t)).lastIndexOf(true);
 if (firstCustom !== -1 && lastUpstream > firstCustom) errors.push(`upstream-migraatio ${tags[lastUpstream]} on 9xxx-rivien jälkeen`);
-journal.entries.forEach((e, i) => { if (e.idx !== i) errors.push(`idx ei juokse: ${e.tag} idx=${e.idx}, odotettu ${i}`); });
+// client.ts sorts by idx. Upstream leaves gaps (0126 and 0130 are missing since v2026.707.0),
+// so idx must grow strictly, not match the position.
+journal.entries.forEach((e, i) => {
+  const prev = journal.entries[i - 1];
+  if (!Number.isInteger(e.idx)) errors.push(`idx puuttuu: ${e.tag}`);
+  else if (prev && e.idx <= prev.idx) errors.push(`idx ei kasva: ${e.tag} idx=${e.idx}, edellinen ${prev.tag} idx=${prev.idx}`);
+});
 for (const f of fs.readdirSync(dir).filter((f) => /^9\d{3}_.*\.sql$/.test(f))) {
   if (!tags.includes(f.replace(/\.sql$/, ""))) errors.push(`${f} ei ole journalissa`);
 }
