@@ -51,6 +51,9 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
+
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
@@ -101,6 +104,9 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -153,6 +159,9 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
+
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
@@ -191,6 +200,9 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
