@@ -253,6 +253,24 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     cloudDefault: false,
     selfHostedDefault: false,
   },
+  // --- RK9 Custom: fork-only experimental flags (RK9-18, RK9-87) ---
+  knowledgeRecallInjectionEnabled: {
+    title: "Knowledge Recall Injection",
+    description:
+      "Prepend a short knowledge-vault recall preamble to opted-in agents' heartbeat prompts (RK9 fork).",
+    tier: "preference",
+    cloudDefault: false,
+    selfHostedDefault: false,
+  },
+  recoveryStrictInProgressOnly: {
+    title: "Strict In-Progress Recovery",
+    description:
+      "Limit stranded-issue recovery to issues still in progress (RK9 fork).",
+    tier: "preference",
+    cloudDefault: false,
+    selfHostedDefault: false,
+  },
+  // --- /RK9 Custom ---
 };
 
 export const INSTANCE_FEATURE_KEYS = Object.keys(INSTANCE_FEATURE_CATALOG).sort() as InstanceFeatureKey[];
