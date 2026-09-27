@@ -83,14 +83,37 @@ NODE
 
 # --- CI-runner-vipu (RK9-350): jokainen jobi valitsee runnerinsa vars.CI_RUNNERista ---
 # Upstream-porras tuo `runs-on: ubuntu-latest` -rivit takaisin. Ks. doc/CI-RUNNER.md.
+# pull_request-workflowissa vivun pitää sisältää fork-suoja, eikä pull_request_targetia sallita.
 check_ci_runners() {
-  local bad
-  bad="$(cd "$REPO_ROOT" || exit 1
-    grep -nE '^[[:space:]]*(runs-on|runner_label):' .github/workflows/*.yml | grep -v 'vars\.CI_RUNNER' || true)"
-  if [[ -z "$bad" ]]; then
-    ok "CI-runner-vipu: kaikki runs-on- ja runner_label-rivit käyttävät vars.CI_RUNNERia"
+  local errors=() f line uses labels
+  for f in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
+    [[ -f "$f" ]] || continue
+    local name="${f#"$REPO_ROOT"/}"
+    if grep -qE '^[[:space:]]*pull_request_target[[:space:]]*:|on:.*pull_request_target' "$f"; then
+      errors+=("$name: pull_request_target ei ole sallittu")
+    fi
+    local is_pr=0
+    grep -qE '^[[:space:]]*pull_request[[:space:]]*:|on:.*pull_request' "$f" && is_pr=1
+    while IFS= read -r line; do
+      if [[ "$line" != *vars.CI_RUNNER* ]]; then
+        errors+=("$name: ${line#"${line%%[![:space:]]*}"}")
+      elif [[ $is_pr -eq 1 && "$line" != *"head.repo.full_name == github.repository"* ]]; then
+        errors+=("$name: fork-suoja puuttuu: ${line#"${line%%[![:space:]]*}"}")
+      fi
+    done < <(grep -E '^[[:space:]]*(runs-on|runner_label):' "$f" || true)
+    # Jobitason reusable workflow (`uses:` 4 välilyönnin sisennyksellä) tarvitsee runner_labelin.
+    uses="$(grep -cE '^    uses:' "$f" || true)"
+    labels="$(grep -cE '^[[:space:]]*runner_label:' "$f" || true)"
+    if (( uses > labels )); then
+      errors+=("$name: reusable-workflow-kutsu ilman runner_labelia")
+    fi
+  done
+  if [[ ${#errors[@]} -eq 0 ]]; then
+    ok "CI-runner-vipu: kaikki jobit käyttävät vars.CI_RUNNERia, PR-jobit fork-suojalla"
   else
-    fail "CI-runner-vipu puuttuu (doc/CI-RUNNER.md): ${bad//$'\n'/; }"
+    local joined
+    joined="$(printf '%s; ' "${errors[@]}")"
+    fail "CI-runner-vipu (doc/CI-RUNNER.md): ${joined%; }"
   fi
 }
 

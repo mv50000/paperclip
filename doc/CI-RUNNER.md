@@ -51,27 +51,56 @@ on GitHubin mielestä fork, joten ehto olisi tosi myös omille PR:ille.
 
 ## Turvamalli
 
-Workflow-ehto on vain yksi kerros. Fork-PR voi muuttaa `pr.yml`:ää ja kirjoittaa
+GitHub ei suosittele pysyviä self-hosted-runnereita julkisille repoille. Syy on fork-PR:t:
+PR:n koodi ajaa runnerilla, ja pysyvällä runnerilla yksi jobi voi jättää jälkeensä
+prosessin, joka näkee myöhempien jobien tokenit (esim. `release.yml`:n `GITHUB_TOKEN` ja
+npm-julkaisun OIDC-token). Siksi suoja rakentuu siitä, ettei fork-koodi koskaan pääse
+ajamaan yhtään riviä omalla runnerilla.
+
+Workflow-ehto on vain ensimmäinen kerros. Fork-PR voi muuttaa `pr.yml`:ää ja kirjoittaa
 `runs-on: [self-hosted, paperclip-ci]` suoraan. GitHub ajaa PR:n oman workflow-version,
-joten ehto ei yksin estä vierasta koodia omalla runnerilla.
+joten ehto ei yksin riitä.
 
-Varsinainen suoja on nämä neljä:
+Varsinainen suoja on nämä viisi:
 
-1. **Fork-PR:n ajo vaatii hyväksynnän jokaiselta ulkopuoliselta.** Asetus on 27.9.2026
+1. **Job-started-hook hylkää fork-koodin runnerin tasolla.** Asennusskripti asentaa
+   root-omisteisen hookin `/usr/local/lib/paperclip-runner/job-started.sh` ja kytkee sen
+   runnerin `.env`:iin (`ACTIONS_RUNNER_HOOK_JOB_STARTED`). Runneri ajaa hookin ennen jobin
+   ensimmäistä askelta. Hook sallii vain repon `mv50000/paperclip` jobit ja niistä vain
+   tapahtumat `push`, `workflow_dispatch`, `workflow_run`, `schedule` sekä `pull_request`,
+   jonka head-repo on `mv50000/paperclip`. Kaikki muu (fork-PR, `pull_request_target`)
+   kaatuu ennen kuin yksikään PR:n koodirivi ajaa. Jobi ei voi muuttaa hookia, ja `.env`:iin
+   se pääsisi vasta ajettuaan koodia.
+2. **Fork-PR:n ajo vaatii hyväksynnän jokaiselta ulkopuoliselta.** Asetus on 27.9.2026
    `first_time_contributors` (todennettu: `gh api repos/mv50000/paperclip/actions/permissions/fork-pr-contributor-approval`).
-   Se päästää kaikki kerran hyväksytyt kontribuuttorit läpi ilman hyväksyntää. Vaihda
-   asetus arvoon `all_external_contributors` ennen runnerin rekisteröintiä (vaihe 1).
-2. **Hyväksyjä lukee `.github/`-diffin ennen kuin hyväksyy fork-PR:n ajon.** Jos PR muuttaa
-   `runs-on`-rivejä tai lisää workflowta, älä hyväksy ajoa.
+   Se päästää kerran hyväksytyt kontribuuttorit läpi ilman hyväksyntää. Vaihda asetus
+   arvoon `all_external_contributors` ennen runnerin rekisteröintiä (vaihe 1). Hyväksyjä
+   lukee `.github/`-diffin ennen kuin hyväksyy ajon.
 3. **Runneri ajaa omana käyttäjänään** (`ghrunner-pc`). Käyttäjällä ei ole sudoa, docker-ryhmää
    eikä pääsyä org-runnerien (`ghrunner`) hakemistoihin ja cacheihin. Docker on rootless.
-4. **Runneri ei aja paperclip-01:llä.** Prod ajaa siellä, ja `CONSTITUTION.md` kieltää
+4. **Root ei aja eikä kirjoita mitään runner-hakemistossa asennuksen jälkeen.** Hakemisto
+   on runner-käyttäjän kirjoitettavissa. Skripti kirjoittaa systemd-unitin suoraan
+   (`svc.sh`ää ei ajeta rootina), päivittää `.env`:n runner-käyttäjänä, ja poisto tehdään
+   GitHubin API:lla ja `systemctl`illä.
+5. **Runneri ei aja paperclip-01:llä.** Prod ajaa siellä, ja `CONSTITUTION.md` kieltää
    CI-buildit sille hostille. Asennusskripti kieltäytyy, jos host ajaa `paperclip.service`ä.
 
+### Jäännösriskit
+
+- **Saman repon PR:t ja master-push jakavat käyttäjän julkaisujobien kanssa.** Kirjoitusoikeus
+  repoon riittää kaappaamaan runnerin. Sama oikeus riittää jo nyt pushiin masteriin, joten
+  luottamusraja ei muutu.
+- **Verkko.** Jobit näkevät builder-02:n lähiverkon kuten org-runneritkin. Egress-rajausta ei ole.
+- **Orpoprosessit.** Runneri tappaa jobin prosessit jobin lopussa (`RUNNER_TRACKING_ID`), mutta
+  tarkoituksella irrotettu prosessi tai kontti voi jäädä. Tämä koskee vain luotettua koodia (kohta 1).
+
+Jos jäännösriskit eivät kelpaa, valitse Ubicloud (ks. alla). Sen runnerit ovat
+kertakäyttöisiä VM:iä, joten pysyvyysriskiä ei ole.
+
 Suositus, ei pakollinen: vaihda repon `default_workflow_permissions` arvosta `write` arvoon
-`read`. Jobit, jotka kirjoittavat (`release.yml`, `docker.yml`, `refresh-lockfile.yml`,
-`ai-auto-merge.yml`), julistavat oikeutensa itse. `pr.yml`, `e2e.yml` ja `release-smoke.yml`
-tarvitsevat vain lukuoikeuden.
+`read` (27.9.2026: `write`). Jobit, jotka kirjoittavat (`release.yml`, `docker.yml`,
+`refresh-lockfile.yml`, `ai-auto-merge.yml`), julistavat oikeutensa itse. `pr.yml`, `e2e.yml`
+ja `release-smoke.yml` tarvitsevat vain lukuoikeuden.
 
 ## Käyttöönotto (operaattori)
 
@@ -121,15 +150,19 @@ unset RUNNER_TOKEN
 Skripti tekee nämä:
 
 - luo järjestelmäkäyttäjän `ghrunner-pc` (koti `/srv/ci/ghrunner-pc`, lukittu salasana, ei ryhmiä)
+- asentaa root-omisteisen job-started-hookin (ks. [Turvamalli](#turvamalli))
 - lataa actions/runnerin kiinnitetyllä versiolla ja tarkistaa SHA256:n
 - rekisteröi runnerin labeleilla `self-hosted, Linux, X64, paperclip-ci`
-- kirjoittaa `.env`:iin `NODE_OPTIONS=--max-old-space-size=4096` ja rootless-`DOCKER_HOST`in
+- kirjoittaa `.env`:iin hookin, `NODE_OPTIONS=--max-old-space-size=4096`,
+  `PAPERCLIP_CI_NO_SUDO=1` ja rootless-`DOCKER_HOST`in
 - asentaa rootless Dockerin käyttäjän user-sessioon (linger päällä)
-- asentaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` drop-inillä
+- kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` drop-inillä
   `Slice=ci-runners.slice`, `MemoryHigh=6G`, `MemoryMax=7G`, `Restart=on-failure`,
   `OOMPolicy=continue`
 
-Skripti on idempotentti. Uusi ajo ohittaa jo tehdyt vaiheet.
+Skripti on idempotentti. Uusi ajo ohittaa rekisteröinnin, jos runneri on jo rekisteröity,
+ja päivittää hookin, `.env`:n ja unitin. Keskeneräinen asennus (hakemisto ilman `.runner`ia)
+pysäyttää skriptin: poista hakemisto ja aja uudelleen.
 
 ### Vaihe 4: runneri näkyy GitHubissa
 
@@ -155,7 +188,8 @@ gh api repos/mv50000/paperclip/actions/runs/<RUN_ID>/jobs \
   --jq '.jobs[] | {name, runner_name, conclusion}'
 ```
 
-`runner_name` on runnerin nimi eikä `GitHub Actions N`. Seuraava master-push todentaa
+`runner_name` on runnerin nimi eikä `GitHub Actions N`. Jobin lokissa näkyy erillinen
+job-started-hookin askel ennen checkoutia. Seuraava master-push todentaa
 `Release`-, `Docker`- ja `Refresh Lockfile` -workflowt.
 
 ## Vaihtoehto: Ubicloud
@@ -178,17 +212,19 @@ Vipu takaisin GitHub-hostatulle (vaikutus heti seuraavasta ajosta):
 gh variable delete CI_RUNNER -R mv50000/paperclip
 ```
 
-Runnerin poisto hostilta:
+Runnerin poisto hostilta. Runner-hakemistosta ei ajeta mitään rootina, koska jobi voi
+muokata sen tiedostoja:
 
 ```sh
-DIR=/srv/ci/actions-runners/<nimi>
-sudo bash -c "cd $DIR && ./svc.sh stop && ./svc.sh uninstall"
-TOKEN="$(gh api -X POST repos/mv50000/paperclip/actions/runners/remove-token --jq .token)"
-sudo runuser -u ghrunner-pc -- bash -c "cd $DIR && ./config.sh remove --token $TOKEN"
+NAME=<nimi>
+UNIT="actions.runner.mv50000-paperclip.$NAME.service"
+sudo systemctl disable --now "$UNIT"
+sudo rm -rf "/etc/systemd/system/$UNIT" "/etc/systemd/system/$UNIT.d"
+sudo systemctl daemon-reload
+ID="$(gh api repos/mv50000/paperclip/actions/runners --jq ".runners[] | select(.name == \"$NAME\") | .id")"
+gh api -X DELETE "repos/mv50000/paperclip/actions/runners/$ID"
+sudo rm -rf "/srv/ci/actions-runners/$NAME"
 ```
-
-Hakemisto on 750 ja käyttäjän `ghrunner-pc` oma, joten `cd` onnistuu vain rootina tai
-runner-käyttäjänä.
 
 ## Tunnetut rajat
 
@@ -197,7 +233,8 @@ runner-käyttäjänä.
 - **Runnerin katkos pysäyttää CI:n.** Jobit jäävät jonoon, eikä `ai-auto-merge` merge mitään.
   Ohitus on vivun palautus (`gh variable delete CI_RUNNER`).
 - **Playwright ilman sudoa.** Workflow ajaa `playwright install --with-deps` vain, jos
-  `sudo -n true` onnistuu. Muuten se asentaa pelkän selaimen, ja kirjastot tulevat hostilta.
+  `PAPERCLIP_CI_NO_SUDO` ei ole `1` ja `sudo -n true` onnistuu. Muuten se asentaa pelkän
+  selaimen, ja kirjastot tulevat hostilta.
 - **E2E-kotihakemistot.** `tests/e2e/playwright.config.ts` luo jokaiselle ajolle
   `paperclip-e2e-home-*`-hakemiston `os.tmpdir()`iin. Pysyvällä runnerilla ne kertyvät
   `/tmp`iin. Siivoa tarvittaessa: `find /tmp -maxdepth 1 -user ghrunner-pc -name 'paperclip-e2e-home-*' -mtime +2 -exec rm -rf {} +`.

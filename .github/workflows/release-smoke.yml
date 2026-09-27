@@ -61,9 +61,10 @@ jobs:
 
       - name: Install Playwright browser
         # --- RK9 Custom (RK9-350) --- --with-deps ajaa aptin sudolla. Self-hosted-runnerin
-        # käyttäjällä ei ole sudoa, joten järjestelmäriippuvuudet asennetaan hostille etukäteen.
+        # käyttäjällä ei ole sudoa (runnerin .env: PAPERCLIP_CI_NO_SUDO=1), joten
+        # järjestelmäriippuvuudet asennetaan hostille etukäteen.
         run: |
-          if sudo -n true 2>/dev/null; then
+          if [ "${PAPERCLIP_CI_NO_SUDO:-}" != "1" ] && sudo -n true 2>/dev/null; then
             npx playwright install --with-deps chromium
           else
             npx playwright install chromium

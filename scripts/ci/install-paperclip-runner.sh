@@ -14,13 +14,18 @@
 #
 # Käyttäjä on eri kuin org-runnerien ghrunner. Repo on julkinen, joten tämän
 # runnerin jobi ei saa päästä käsiksi org-runnerien hakemistoihin ja cacheihin.
+# Root-omisteinen job-started-hook hylkää jobin, jonka koodi ei tule
+# repositoriosta mv50000/paperclip itsestään (fork-PR:t).
+#
+# Root ei aja eikä kirjoita mitään runner-hakemistossa sen jälkeen, kun runneri on
+# asennettu: hakemisto on runner-käyttäjän kirjoitettavissa.
 #
 # Käyttö:
 #   sudo scripts/ci/install-paperclip-runner.sh --check
-#   sudo RUNNER_TOKEN=<rekisteröintitoken> scripts/ci/install-paperclip-runner.sh
+#   sudo --preserve-env=RUNNER_TOKEN scripts/ci/install-paperclip-runner.sh
 #
 # Rekisteröintitoken (voimassa 1 h, kertakäyttöinen):
-#   gh api -X POST repos/mv50000/paperclip/actions/runners/registration-token --jq .token
+#   export RUNNER_TOKEN="$(gh api -X POST repos/mv50000/paperclip/actions/runners/registration-token --jq .token)"
 #
 # Valinnat:
 #   --check          aja vain esitarkistukset, älä muuta mitään
@@ -32,10 +37,13 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/mv50000/paperclip"
+REPO="mv50000/paperclip"
+REPO_URL="https://github.com/$REPO"
 RUNNER_VERSION="2.337.0"
 RUNNER_SHA256="70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
 BASE_DIR="/srv/ci/actions-runners"
+HOOK_DIR="/usr/local/lib/paperclip-runner"
+HOOK="$HOOK_DIR/job-started.sh"
 
 RUNNER_USER="ghrunner-pc"
 RUNNER_NAME="$(hostname -s)-paperclip"
@@ -44,15 +52,15 @@ WITH_DOCKER=1
 CHECK_ONLY=0
 
 usage() {
-  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK_ONLY=1 ;;
-    --name) RUNNER_NAME="$2"; shift ;;
-    --user) RUNNER_USER="$2"; shift ;;
-    --labels) RUNNER_LABELS="$2"; shift ;;
+    --name) RUNNER_NAME="${2:?--name vaatii arvon}"; shift ;;
+    --user) RUNNER_USER="${2:?--user vaatii arvon}"; shift ;;
+    --labels) RUNNER_LABELS="${2:?--labels vaatii arvon}"; shift ;;
     --no-docker) WITH_DOCKER=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Tuntematon valinta: $1" >&2; usage >&2; exit 2 ;;
@@ -60,13 +68,24 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+fail() { echo "VIRHE: $*" >&2; exit 1; }
+warn() { echo "VAROITUS: $*" >&2; }
+info() { echo "==> $*"; }
+
+# Arvot päätyvät polkuihin ja unit-nimeen, joten sallitaan vain turvalliset merkit.
+[[ "$RUNNER_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$ ]] || fail "--name: sallittu [A-Za-z0-9._-], enintään 40 merkkiä."
+[[ "$RUNNER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "--user: virheellinen käyttäjänimi."
+[[ "$RUNNER_LABELS" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] || fail "--labels: sallittu [A-Za-z0-9._-] pilkulla eroteltuna."
+
 RUNNER_DIR="$BASE_DIR/$RUNNER_NAME"
 RUNNER_HOME="/srv/ci/$RUNNER_USER"
 UNIT="actions.runner.mv50000-paperclip.${RUNNER_NAME}.service"
 
-fail() { echo "VIRHE: $*" >&2; exit 1; }
-warn() { echo "VAROITUS: $*" >&2; }
-info() { echo "==> $*"; }
+# Aja komento runner-käyttäjänä. runuser säilyttää kutsujan ympäristön
+# (paitsi HOME, SHELL, USER ja LOGNAME).
+as_runner() {
+  runuser -u "$RUNNER_USER" -- "$@"
+}
 
 # --- Esitarkistukset -------------------------------------------------------
 
@@ -84,7 +103,7 @@ preflight() {
     root|rk9admin|paperclip|ghrunner) fail "käyttäjä '$RUNNER_USER' ei kelpaa: käytä omaa runner-käyttäjää." ;;
   esac
 
-  for cmd in curl tar sha256sum systemctl useradd runuser loginctl; do
+  for cmd in curl tar sha256sum jq systemctl useradd usermod runuser loginctl install; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if [ "$WITH_DOCKER" -eq 1 ]; then
@@ -94,6 +113,10 @@ preflight() {
   fi
   if [ ${#missing[@]} -gt 0 ]; then
     fail "puuttuvat komennot: ${missing[*]}. Rootless Docker: apt install uidmap slirp4netns docker-ce-rootless-extras."
+  fi
+
+  if [ -e "$RUNNER_DIR" ] && [ ! -f "$RUNNER_DIR/.runner" ]; then
+    fail "$RUNNER_DIR on olemassa, mutta runneria ei ole rekisteröity. Poista keskeneräinen hakemisto: rm -rf $RUNNER_DIR"
   fi
 
   if ! systemctl cat ci-runners.slice >/dev/null 2>&1; then
@@ -119,11 +142,11 @@ preflight() {
 ensure_user() {
   if ! id "$RUNNER_USER" >/dev/null 2>&1; then
     info "Luodaan järjestelmäkäyttäjä $RUNNER_USER (koti $RUNNER_HOME)."
-    mkdir -p "$(dirname "$RUNNER_HOME")"
+    install -d -o root -g root -m 755 "$(dirname "$RUNNER_HOME")"
     useradd --system --user-group --create-home --home-dir "$RUNNER_HOME" --shell /bin/bash "$RUNNER_USER"
     passwd -l "$RUNNER_USER" >/dev/null
+    chmod 750 "$RUNNER_HOME"
   fi
-  chmod 750 "$RUNNER_HOME"
 
   # Käyttäjä ei saa kuulua mihinkään etuoikeutettuun ryhmään.
   local groups
@@ -135,14 +158,56 @@ ensure_user() {
   done
 }
 
+# --- Job-started-hook ------------------------------------------------------
+
+# Hook on root-omisteinen ja runner-hakemiston ulkopuolella, joten jobi ei voi
+# muuttaa sitä. Runneri ajaa sen ennen jobin ensimmäistä askelta. Nollasta
+# poikkeava paluuarvo kaataa jobin ennen kuin yksikään PR:n koodirivi ajaa.
+install_hook() {
+  info "Asennetaan job-started-hook $HOOK."
+  install -d -o root -g root -m 755 "$HOOK_DIR"
+  local tmp
+  tmp="$(mktemp)"
+  cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+# Asentanut scripts/ci/install-paperclip-runner.sh (RK9-350). Älä muokkaa käsin.
+# Hylkää jobin, jonka koodi ei tule repositoriosta $REPO itsestään.
+set -euo pipefail
+expected="$REPO"
+if [ "\${GITHUB_REPOSITORY:-}" != "\$expected" ]; then
+  echo "::error::Runneri palvelee vain repoa \$expected (saatiin '\${GITHUB_REPOSITORY:-}')."
+  exit 1
+fi
+case "\${GITHUB_EVENT_NAME:-}" in
+  push|workflow_dispatch|workflow_run|schedule)
+    exit 0
+    ;;
+  pull_request)
+    head="\$(jq -r '.pull_request.head.repo.full_name // ""' "\$GITHUB_EVENT_PATH")"
+    if [ "\$head" = "\$expected" ]; then
+      exit 0
+    fi
+    echo "::error::Fork-PR (\$head) ei saa ajaa self-hosted-runnerilla. Ks. doc/CI-RUNNER.md."
+    exit 1
+    ;;
+  *)
+    echo "::error::Tapahtumaa '\${GITHUB_EVENT_NAME:-}' ei sallita self-hosted-runnerilla."
+    exit 1
+    ;;
+esac
+EOF
+  install -o root -g root -m 755 "$tmp" "$HOOK"
+  rm -f "$tmp"
+}
+
 # --- Runnerin asennus -----------------------------------------------------
 
 install_runner() {
-  mkdir -p "$BASE_DIR"
-  if [ -x "$RUNNER_DIR/config.sh" ]; then
-    info "Runner-binäärit löytyvät jo: $RUNNER_DIR"
+  if [ -f "$RUNNER_DIR/.runner" ]; then
+    info "Runneri on jo asennettu ja rekisteröity: $RUNNER_DIR"
     return
   fi
+  [ -n "${RUNNER_TOKEN:-}" ] || fail "RUNNER_TOKEN puuttuu. Hae token: gh api -X POST repos/$REPO/actions/runners/registration-token --jq .token"
 
   local tarball tmp
   tarball="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -156,91 +221,124 @@ install_runner() {
     fail "tarkistussumma ei täsmää: $tarball."
   fi
 
-  mkdir -p "$RUNNER_DIR"
-  tar xzf "$tmp/$tarball" -C "$RUNNER_DIR"
+  # Hakemisto luodaan tyhjänä (esitarkistus hylkää keskeneräisen), joten root
+  # purkaa paketin hakemistoon, jota jobi ei ole vielä koskaan nähnyt.
+  install -d -o root -g root -m 755 "$BASE_DIR"
+  install -d -o "$RUNNER_USER" -g "$RUNNER_USER" -m 750 "$RUNNER_DIR"
+  chmod 644 "$tmp/$tarball"
+  chmod 711 "$tmp"
+  as_runner tar xzf "$tmp/$tarball" -C "$RUNNER_DIR"
   rm -rf "$tmp"
-  chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
-  chmod 750 "$RUNNER_DIR"
-}
-
-configure_runner() {
-  if [ -f "$RUNNER_DIR/.runner" ]; then
-    info "Runneri on jo rekisteröity ($RUNNER_DIR/.runner). Ohitetaan config.sh."
-    return
-  fi
-  [ -n "${RUNNER_TOKEN:-}" ] || fail "RUNNER_TOKEN puuttuu. Hae token: gh api -X POST repos/mv50000/paperclip/actions/runners/registration-token --jq .token"
 
   info "Rekisteröidään runneri $RUNNER_NAME repolle $REPO_URL."
   # Token välitetään ympäristömuuttujana, ei komentoriviargumenttina (ps-näkyvyys).
   # shellcheck disable=SC2016 # argumentit laajenevat tarkoituksella vasta alikuoressa
-  ACTIONS_RUNNER_INPUT_TOKEN="$RUNNER_TOKEN" runuser -u "$RUNNER_USER" -- \
+  ACTIONS_RUNNER_INPUT_TOKEN="$RUNNER_TOKEN" as_runner \
     bash -c 'cd "$1" && ./config.sh --unattended --url "$2" --name "$3" --labels "$4" --work _work --replace' \
     _ "$RUNNER_DIR" "$REPO_URL" "$RUNNER_NAME" "$RUNNER_LABELS"
   unset RUNNER_TOKEN
 }
 
+# .env kirjoitetaan runner-käyttäjänä: root ei kirjoita käyttäjän hakemistoon
+# (symlinkki voisi ohjata kirjoituksen minne tahansa).
 write_runner_env() {
-  local uid env_file
+  local uid docker_host=""
   uid="$(id -u "$RUNNER_USER")"
-  env_file="$RUNNER_DIR/.env"
-  info "Kirjoitetaan $env_file."
-  {
-    echo "LANG=C.UTF-8"
-    # Node mitoittaa heapin VM:n muistista, ei slotin cgroup-rajasta (policy-note, 4.8.2026).
-    echo "NODE_OPTIONS=--max-old-space-size=4096"
-    if [ "$WITH_DOCKER" -eq 1 ]; then
-      echo "DOCKER_HOST=unix:///run/user/${uid}/docker.sock"
+  if [ "$WITH_DOCKER" -eq 1 ]; then
+    docker_host="unix:///run/user/${uid}/docker.sock"
+  fi
+  info "Päivitetään $RUNNER_DIR/.env (runner-käyttäjänä)."
+  # shellcheck disable=SC2016 # argumentit laajenevat tarkoituksella vasta alikuoressa
+  as_runner bash -c '
+    set -euo pipefail
+    env_file="$1/.env"; hook="$2"; docker_host="$3"
+    keys="ACTIONS_RUNNER_HOOK_JOB_STARTED|NODE_OPTIONS|DOCKER_HOST|PAPERCLIP_CI_NO_SUDO"
+    tmp="$(mktemp "$1/.env.XXXXXX")"
+    if [ -f "$env_file" ]; then
+      grep -Ev "^($keys)=" "$env_file" >"$tmp" || true
     fi
-  } >"$env_file"
-  chown "$RUNNER_USER:$RUNNER_USER" "$env_file"
-  chmod 640 "$env_file"
+    {
+      echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook"
+      # Node mitoittaa heapin VM:n muistista, ei slotin cgroup-rajasta (policy-note, 4.8.2026).
+      echo "NODE_OPTIONS=--max-old-space-size=4096"
+      # Workflow ohittaa playwright --with-deps -asennuksen (vaatisi sudon).
+      echo "PAPERCLIP_CI_NO_SUDO=1"
+      if [ -n "$docker_host" ]; then echo "DOCKER_HOST=$docker_host"; fi
+    } >>"$tmp"
+    chmod 640 "$tmp"
+    mv -f "$tmp" "$env_file"
+  ' _ "$RUNNER_DIR" "$HOOK" "$docker_host"
 }
 
 # --- Rootless Docker ------------------------------------------------------
 
 next_subid_start() {
   # Ensimmäinen vapaa alue kaikkien olemassa olevien subuid/subgid-alueiden jälkeen.
-  awk -F: 'BEGIN { max = 100000 } { end = $2 + $3; if (end > max) max = end } END { print max }' \
-    /etc/subuid /etc/subgid 2>/dev/null
+  local files=()
+  [ -f /etc/subuid ] && files+=(/etc/subuid)
+  [ -f /etc/subgid ] && files+=(/etc/subgid)
+  if [ ${#files[@]} -eq 0 ]; then
+    echo 100000
+    return
+  fi
+  awk -F: 'BEGIN { max = 100000 } { end = $2 + $3; if (end > max) max = end } END { print max }' "${files[@]}"
 }
 
 setup_rootless_docker() {
   [ "$WITH_DOCKER" -eq 1 ] || return 0
-  local uid start
+  local uid start range
   uid="$(id -u "$RUNNER_USER")"
 
-  if ! grep -q "^${RUNNER_USER}:" /etc/subuid 2>/dev/null || ! grep -q "^${RUNNER_USER}:" /etc/subgid 2>/dev/null; then
-    start="$(next_subid_start)"
-    info "Varataan subuid/subgid-alue ${start}-$((start + 65535)) käyttäjälle $RUNNER_USER."
-    usermod --add-subuids "${start}-$((start + 65535))" --add-subgids "${start}-$((start + 65535))" "$RUNNER_USER"
+  if ! grep -qs "^${RUNNER_USER}:" /etc/subuid; then
+    start="$(next_subid_start)"; range="${start}-$((start + 65535))"
+    info "Varataan subuid-alue $range käyttäjälle $RUNNER_USER."
+    usermod --add-subuids "$range" "$RUNNER_USER"
+  fi
+  if ! grep -qs "^${RUNNER_USER}:" /etc/subgid; then
+    start="$(next_subid_start)"; range="${start}-$((start + 65535))"
+    info "Varataan subgid-alue $range käyttäjälle $RUNNER_USER."
+    usermod --add-subgids "$range" "$RUNNER_USER"
   fi
 
   loginctl enable-linger "$RUNNER_USER"
   systemctl start "user@${uid}.service"
 
+  local user_env=(env XDG_RUNTIME_DIR="/run/user/${uid}"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" HOME="$RUNNER_HOME")
   if [ ! -S "/run/user/${uid}/docker.sock" ]; then
     info "Asennetaan rootless Docker käyttäjälle $RUNNER_USER."
-    runuser -u "$RUNNER_USER" -- env \
-      XDG_RUNTIME_DIR="/run/user/${uid}" \
-      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
-      HOME="$RUNNER_HOME" \
-      dockerd-rootless-setuptool.sh install
+    as_runner "${user_env[@]}" dockerd-rootless-setuptool.sh install
   fi
-  runuser -u "$RUNNER_USER" -- env XDG_RUNTIME_DIR="/run/user/${uid}" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
-    systemctl --user enable --now docker.service
+  as_runner "${user_env[@]}" systemctl --user enable --now docker.service
 }
 
 # --- systemd-palvelu ------------------------------------------------------
 
+# Unit kirjoitetaan suoraan eikä svc.sh:lla: svc.sh on runner-hakemistossa, jota
+# jobi voi muokata, joten rootin ei pidä ajaa sitä.
 install_service() {
-  if ! systemctl cat "$UNIT" >/dev/null 2>&1; then
-    info "Asennetaan palvelu $UNIT."
-    (cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER")
-  fi
+  local unit_file="/etc/systemd/system/$UNIT" dropin="/etc/systemd/system/${UNIT}.d" tmp
+  info "Kirjoitetaan $unit_file."
+  tmp="$(mktemp)"
+  cat >"$tmp" <<EOF
+[Unit]
+Description=GitHub Actions Runner ($REPO.$RUNNER_NAME)
+After=network-online.target
+Wants=network-online.target
 
-  local dropin="/etc/systemd/system/${UNIT}.d"
-  mkdir -p "$dropin"
+[Service]
+ExecStart=$RUNNER_DIR/runsvc.sh
+User=$RUNNER_USER
+WorkingDirectory=$RUNNER_DIR
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  install -o root -g root -m 644 "$tmp" "$unit_file"
+
   {
     echo "[Service]"
     if systemctl cat ci-runners.slice >/dev/null 2>&1; then
@@ -253,7 +351,10 @@ install_service() {
     echo "RestartSec=60"
     # Yhden prosessin OOM-kill ei saa pysäyttää koko runner-palvelua (RK9-216).
     echo "OOMPolicy=continue"
-  } >"$dropin/override.conf"
+  } >"$tmp"
+  install -d -o root -g root -m 755 "$dropin"
+  install -o root -g root -m 644 "$tmp" "$dropin/override.conf"
+  rm -f "$tmp"
 
   systemctl daemon-reload
   systemctl enable "$UNIT" >/dev/null
@@ -267,15 +368,15 @@ verify() {
   if [ "$WITH_DOCKER" -eq 1 ]; then
     local uid
     uid="$(id -u "$RUNNER_USER")"
-    runuser -u "$RUNNER_USER" -- env DOCKER_HOST="unix:///run/user/${uid}/docker.sock" docker info --format '{{.SecurityOptions}}' \
+    as_runner env DOCKER_HOST="unix:///run/user/${uid}/docker.sock" docker info --format '{{.SecurityOptions}}' \
       | grep -q rootless || fail "rootless Docker ei vastaa käyttäjälle $RUNNER_USER."
     info "Rootless Docker vastaa."
   fi
   cat <<EOF
 
-Seuraavaksi (doc/CI-RUNNER.md, vaiheet 3-5):
-  gh api repos/mv50000/paperclip/actions/runners --jq '.runners[] | {name, status, labels: [.labels[].name]}'
-  gh variable set CI_RUNNER -R mv50000/paperclip --body '["self-hosted","${RUNNER_LABELS%%,*}"]'
+Seuraavaksi (doc/CI-RUNNER.md, vaiheet 4-6):
+  gh api repos/$REPO/actions/runners --jq '.runners[] | {name, status, labels: [.labels[].name]}'
+  gh variable set CI_RUNNER -R $REPO --body '["self-hosted","${RUNNER_LABELS%%,*}"]'
 EOF
 }
 
@@ -284,8 +385,8 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   exit 0
 fi
 ensure_user
+install_hook
 install_runner
-configure_runner
 write_runner_env
 setup_rootless_docker
 install_service
