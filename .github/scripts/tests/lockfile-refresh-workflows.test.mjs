@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,7 +8,11 @@ const workflows = [
   '.github/workflows/pr-trusted.yml',
   '.github/workflows/docker.yml',
   '.github/workflows/docker-cloud.yml',
-];
+].filter(
+  // --- RK9 Custom (RK9-317): pr-trusted.yml and docker-cloud.yml are upstream-only and removed
+  // from the fork; check the workflows the fork keeps. ---
+  (workflow) => existsSync(workflow),
+);
 
 test('lockfile repair workflows resolve dependencies instead of updating metadata only', async () => {
   for (const workflow of workflows) {

@@ -116,7 +116,8 @@ test("invalid source and timing configuration are rejected before registry acces
   for (const options of [{ timeoutMs: 0 }, { intervalMs: -1 }, { timeoutMs: Infinity }]) await assert.rejects(waitForCloudArtifacts(sha, { ...options, fetchImpl }), /positive finite/);
 });
 
-test("versioned readiness retains every source gate and removes duplicate automatic npm publication", () => {
+// --- RK9 Custom (RK9-317): cloud-readiness.yml is upstream-only and removed from the fork ---
+test("versioned readiness retains every source gate and removes duplicate automatic npm publication", { skip: !existsSync(new URL("../../workflows/cloud-readiness.yml", import.meta.url)) }, () => {
   const workflow = readFileSync(new URL("../../workflows/cloud-readiness.yml", import.meta.url), "utf8");
   assert.match(workflow, /push:\s*\n\s*branches: \[master\]/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/release-verify.yml\s+with:\s+ref: \$\{\{ github.sha \}\}/);

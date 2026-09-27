@@ -666,6 +666,7 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 917ae45d v20
 |---|---|
 | `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0230 tavu tavulta, sitten 9001–9010 muuttamattomina idx:llä 231–240 |
 | `.github/workflows/release.yml`, `release-smoke.yml` (ei konfliktia) | upstreamin versio; jokainen `runs-on: ubuntu-latest` sai RK9-350-runner-vivun, `verify_beta_candidate` sai `runner_label`-inputin ja uusi `smoke_service` vivun. `commitperclip-review.yml` pysyy poistettuna. |
+| `.github/scripts/tests/`, `scripts/__tests__/e2e-shard.test.mjs`, `release-verify-workflow.test.mjs` (policy-job) | Upstream toi 10 uutta CI-testitiedostoa. Viisi testaa vain upstreamin poistettuja workflowta tai AWS-fleet-reititystä, joten ne poistettiin: `cloud-runner-routing`, `docker-disk-workflow`, `post-merge-runner-routing`, `pr-dependency-cache` ja `pr-runner-rust-cache`. `lockfile-refresh-workflows` tarkistaa forkissa olevat workflowt. `cloud-readiness`-workflowtesti ohitetaan, kun tiedosto puuttuu. `e2e-shard`: upstreamin kuusi `pr-trusted.yml`-testiä ohitetaan, kun tiedosto puuttuu, ja masterin kaksi `pr.yml`-testiä palautettiin. `release-verify-workflow`: Runner eval- ja cloud-readiness-testit ohitetaan, kun workflowt puuttuvat, ja `publish_canary` odottaa forkin `if: false` -ehtoa. |
 | `.github/scripts/check-pr-migration-order.mjs` (ei konfliktia) | upstreamin uusi CI-tarkistus (#12433) vertaa kaikkia migraationumeroita yhteen maksimiin, jolloin jokainen 02xx näyttäisi olevan 9010:n "takana". RK9 Custom: vertailu tehdään sarjoittain (upstream < 9000, fork ≥ 9000). Neljä testiä lisätty. |
 | `scripts/check-node-version-policy.mjs` (ei konfliktia) | RK9 Custom: `infra/ses-forwarder/package.json` ohitetaan, koska se on AWS Lambda (`nodejs20.x`) eikä ajeta palvelimen Nodella |
 | `.env.example`, `.gitignore`, `package.json`, `packages/db/package.json`, `server/package.json`, `pnpm-lock.yaml` | molemmat; lockfile upstreamista + `pnpm install`. Forkin riippuvuudet (`tsx`, AWS SDK, `jsdom`, `mailparser` ja tyypit) säilyivät. |
@@ -762,7 +763,7 @@ Mergen jälkeen koko vitest-ajo löysi 38 kaatuvaa testiä ja kaksi ajoituksesta
 | `adapter-utils`: `execution-target-stdin-race.test.ts` (T22), `sandbox-callback-bridge.test.ts` (HTTP/2) | ajoituksesta riippuvia; builder-02:lla vuoroin läpi ja vuoroin kaatuu. Fork ei koske niihin. | ei muutosta |
 | `heartbeat-process-recovery.test.ts` (14 testiä) | RK9-87 ohittaa onnistuneen ajon ennen productive-continuation-requeueta | masterin RK9-87-testit palautettu, upstreamin requeue-testit skipattu (ks. alla) |
 
-Markkerit: 326 → 419 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Markkerimuutokset, jotka eivät ole pelkkiä lisäyksiä:
+Markkerit: 326 → 432 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Markkerimuutokset, jotka eivät ole pelkkiä lisäyksiä:
 
 - `agent-permissions-routes.test.ts`: testi "creates agents when optional adapter model profile discovery fails".
   Upstream poisti halvat model profilet (#12683), joten testi ja sen RK9-rivi poistuivat.

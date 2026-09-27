@@ -14,7 +14,8 @@ function readWorkflow(name) {
   return readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8");
 }
 
-test("chaos verification isolates callers that verify the same source commit", () => {
+// --- RK9 Custom (RK9-317): runner-chaos-evals.yml is upstream-only and removed from the fork ---
+test("chaos verification isolates callers that verify the same source commit", { skip: !existsSync(path.join(repoRoot, ".github/workflows/runner-chaos-evals.yml")) }, () => {
   const chaosWorkflow = readWorkflow("runner-chaos-evals.yml");
   const group = chaosWorkflow.match(/^  group: (.+)$/m)?.[1];
   assert.ok(group, "chaos verification must define its concurrency group");
@@ -44,7 +45,9 @@ test("canary reuses exact-source proof while stable keeps full verification", ()
   assert.match(canary, /SOURCE_SHA: \$\{\{ github\.sha \}\}/);
   assert.match(canary, /run: node scripts\/cloud-source-verification\.mjs "\$SOURCE_SHA"/);
   assert.doesNotMatch(canary, /release-verify\.yml|continue-on-error|always\(\)/);
-  assert.match(releaseWorkflow, /publish_canary:\n\s+if: github\.event_name == 'push'\n\s+needs: verify_canary/);
+  // --- RK9 Custom: the fork never publishes npm canaries (publish_canary is `if: false`, see release.yml) ---
+  assert.match(releaseWorkflow, /publish_canary:\n(?:\s+#[^\n]*\n)*\s+if: false\n\s+needs: verify_canary/);
+  // --- /RK9 Custom ---
   // The stable lane is gated on the stable channel since the nightly lane
   // was added; a `needs:` line (for example a preflight job) may sit between
   // the gate and the delegation.
@@ -60,7 +63,8 @@ test("canary reuses exact-source proof while stable keeps full verification", ()
   );
 });
 
-test("source proof requires every source check and does not wait on image publication", () => {
+// --- RK9 Custom (RK9-317): cloud-readiness.yml is upstream-only and removed from the fork ---
+test("source proof requires every source check and does not wait on image publication", { skip: !existsSync(path.join(repoRoot, ".github/workflows/cloud-readiness.yml")) }, () => {
   const readiness = readWorkflow("cloud-readiness.yml");
   const proof = readiness.split("  source_verified:\n")[1].split("\n  ready:")[0];
   assert.match(proof, /name: Cloud source verified v1/);
@@ -227,17 +231,22 @@ test("release verify workflow covers the same split test surface as stable PR ve
   assert.deepEqual(runnerChecks, runnerScripts["check:all"].split(" && ")
     .map((command) => command.replace(/^pnpm run /, "")));
   assert.match(verifyWorkflow, /pnpm --filter @paperclipai\/paperclip-runner "\$check"/);
-  assert.match(verifyWorkflow, /runner_workflow_evals:/);
-  assert.match(verifyWorkflow, /runner_chaos_evals:/);
-  assert.match(
-    verifyWorkflow,
-    /uses: \.\/\.github\/workflows\/runner-chaos-evals\.yml/,
-  );
-  assert.match(
-    verifyWorkflow,
-    /runner_workflow_evals:[\s\S]*?Install dependencies\n\s+run: pnpm install --no-frozen-lockfile[\s\S]*?Run deterministic Runner workflow scorer tests/,
-  );
-  assert.match(verifyWorkflow, /pnpm test:runner-workflow-evals/);
+  // --- RK9 Custom (RK9-317): the fork removes the upstream Runner eval jobs and workflows
+  // (doc/CI-RUNNER.md), so these checks apply only where runner-chaos-evals.yml exists. ---
+  if (existsSync(path.join(repoRoot, ".github/workflows/runner-chaos-evals.yml"))) {
+    assert.match(verifyWorkflow, /runner_workflow_evals:/);
+    assert.match(verifyWorkflow, /runner_chaos_evals:/);
+    assert.match(
+      verifyWorkflow,
+      /uses: \.\/\.github\/workflows\/runner-chaos-evals\.yml/,
+    );
+    assert.match(
+      verifyWorkflow,
+      /runner_workflow_evals:[\s\S]*?Install dependencies\n\s+run: pnpm install --no-frozen-lockfile[\s\S]*?Run deterministic Runner workflow scorer tests/,
+    );
+    assert.match(verifyWorkflow, /pnpm test:runner-workflow-evals/);
+  }
+  // --- /RK9 Custom ---
 
   const buildJob = verifyWorkflow.match(/  build:\n[\s\S]*?(?=\n  [A-Za-z0-9_-]+:|$)/)?.[0] ?? "";
   assert.match(buildJob, /persist-credentials: false/);
@@ -270,7 +279,8 @@ test("release verify workflow covers the same split test surface as stable PR ve
   assert.match(verifyWorkflow, /pnpm test:run:serialized -- --shard-index/);
 });
 
-test("Runner eval workflows pin actions and gate paid live execution", () => {
+// --- RK9 Custom (RK9-317): the Runner eval workflows are upstream-only and removed from the fork ---
+test("Runner eval workflows pin actions and gate paid live execution", { skip: !existsSync(path.join(repoRoot, ".github/workflows/runner-live-evals.yml")) }, () => {
   const actionPinWorkflows = [
     readWorkflow("release-verify.yml"),
     readWorkflow("runner-live-evals.yml"),

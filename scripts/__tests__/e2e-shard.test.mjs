@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,11 +157,17 @@ test("shard arguments are validated", () => {
   }
 });
 
-test("pr.yml calls the trusted PR workflow from master", () => {
+// --- RK9 Custom (RK9-317): upstream moved PR CI into pr-trusted.yml, which the fork does not
+// have; the fork keeps its own pr.yml (doc/CI-RUNNER.md). These run only where pr-trusted.yml
+// exists, and the pr.yml tests at the end of this file cover the fork workflow. ---
+const hasTrustedPrWorkflow = existsSync(trustedPrWorkflow);
+// --- /RK9 Custom ---
+
+test("pr.yml calls the trusted PR workflow from master", { skip: !hasTrustedPrWorkflow }, () => {
   assert.ok(readTrustedPrWorkflow().length > 0);
 });
 
-test("the trusted PR workflow keeps a stable aggregate check named e2e over the shard matrix", () => {
+test("the trusted PR workflow keeps a stable aggregate check named e2e over the shard matrix", { skip: !hasTrustedPrWorkflow }, () => {
   // Branch protection requires a check literally named `e2e`. The shards run
   // as `e2e shard (n/3)`, so the aggregate job below is what keeps the
   // required-check contract intact — same pattern as the `verify` aggregate.
@@ -207,7 +213,7 @@ test("the trusted PR workflow keeps a stable aggregate check named e2e over the 
   }
 });
 
-test("the trusted PR workflow limits full CI to merge-relevant stack layers", () => {
+test("the trusted PR workflow limits full CI to merge-relevant stack layers", { skip: !hasTrustedPrWorkflow }, () => {
   const workflow = readFileSync(trustedPrWorkflow, "utf8");
   const jobs = readWorkflowJobs(workflow);
   const gate = jobs.get("gate");
@@ -266,7 +272,7 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
   assert.match(e2e, /false\) test "\$E2E_SHARDS_RESULT" = "skipped"/);
 });
 
-test("the stacked PR scope selector runs full CI only where intended", () => {
+test("the stacked PR scope selector runs full CI only where intended", { skip: !hasTrustedPrWorkflow }, () => {
   assert.equal(runStackScope(null, "master").full_ci, "true");
   assert.equal(
     runStackScope({ position: 11, size: 11, base: { ref: "master" } }, "stack-10").full_ci,
@@ -286,7 +292,7 @@ test("the stacked PR scope selector runs full CI only where intended", () => {
   );
 });
 
-test("the trusted PR workflow passes the shard's spec filter to Playwright without a literal --", () => {
+test("the trusted PR workflow passes the shard's spec filter to Playwright without a literal --", { skip: !hasTrustedPrWorkflow }, () => {
   // `pnpm run test:e2e -- $specs` forwards the literal separator to Playwright,
   // so the specs after it are not applied as file filters.
   const workflow = readTrustedPrWorkflow();
@@ -301,7 +307,7 @@ test("the trusted PR workflow passes the shard's spec filter to Playwright witho
   );
 });
 
-test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
+test("the trusted PR workflow regenerates stale stacked lockfiles", { skip: !hasTrustedPrWorkflow }, () => {
   // Validate the proposed workflow here. The caller executes the merged master
   // workflow; edits to this workflow take effect after code-owner review and merge.
   const workflow = readFileSync(trustedPrWorkflow, "utf8");
@@ -337,3 +343,76 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
     "a missing artifact must fail after the policy job says it uploaded one",
   );
 });
+
+// --- RK9 Custom (RK9-317): fork pr.yml checks, kept from fork master (see above) ---
+const prWorkflow = prCallerWorkflow;
+
+test("pr.yml keeps a stable aggregate check named e2e over the shard matrix", () => {
+  // Branch protection requires a check literally named `e2e`. The shards run
+  // as `e2e shard (n/3)`, so the aggregate job below is what keeps the
+  // required-check contract intact — same pattern as the `verify` aggregate.
+  const workflow = readFileSync(prWorkflow, "utf8");
+  const jobs = new Map();
+  let current = null;
+  for (const line of workflow.split("\n")) {
+    const header = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (header) {
+      current = header[1];
+      jobs.set(current, []);
+      continue;
+    }
+    if (current && /^\S/.test(line)) current = null;
+    if (current) jobs.get(current).push(line);
+  }
+  for (const [id, lines] of jobs) jobs.set(id, lines.join("\n"));
+
+  const aggregate = jobs.get("e2e");
+  assert.ok(aggregate, "pr.yml must define an `e2e` job to satisfy branch protection");
+  assert.match(aggregate, /^ {4}name: e2e$/m, "the aggregate job must be named exactly `e2e`");
+  assert.match(aggregate, /^ {4}if: \$\{\{ always\(\) \}\}$/m, "the aggregate must run even when a shard fails");
+  assert.match(aggregate, /^ {4}needs: \[e2e_shards\]$/m, "the aggregate must depend on the shard matrix");
+  assert.match(
+    aggregate,
+    /test "\$E2E_SHARDS_RESULT" = "success"/,
+    "the aggregate must fail unless every shard succeeded",
+  );
+
+  const shards = jobs.get("e2e_shards");
+  assert.ok(shards, "pr.yml must define the `e2e_shards` matrix job");
+  const matrixEntries = [
+    ...shards.matchAll(
+      /^ {10}- shard_index: (?<shardIndex>\d+)\n {12}shard_count: (?<shardCount>\d+)\n {12}shard_label: (?<shardLabel>\d+\/\d+)$/gm,
+    ),
+  ].map((match) => ({
+    shardIndex: Number(match.groups.shardIndex),
+    shardCount: Number(match.groups.shardCount),
+    shardLabel: match.groups.shardLabel,
+  }));
+
+  assert.equal(matrixEntries.length, SHARD_COUNT, "the shard matrix must define exactly SHARD_COUNT entries");
+  assert.deepEqual(
+    matrixEntries.map((entry) => entry.shardIndex).sort((a, b) => a - b),
+    Array.from({ length: SHARD_COUNT }, (_, index) => index),
+    "the shard matrix must define each shard index exactly once",
+  );
+  for (const entry of matrixEntries) {
+    assert.equal(entry.shardCount, SHARD_COUNT, "each shard matrix entry must use the same SHARD_COUNT");
+    assert.equal(entry.shardLabel, `${entry.shardIndex + 1}/${SHARD_COUNT}`, "each shard label must match its index");
+  }
+});
+
+test("pr.yml passes the shard's spec filter to Playwright without a literal --", () => {
+  // `pnpm run test:e2e -- $specs` forwards the literal separator to Playwright,
+  // so the specs after it are not applied as file filters.
+  const workflow = readFileSync(prWorkflow, "utf8");
+  assert.ok(
+    !/pnpm run test:e2e --\s/.test(workflow),
+    "pr.yml must not insert a literal `--` between `pnpm run test:e2e` and the spec filter",
+  );
+  assert.match(
+    workflow,
+    /pnpm run test:e2e \$specs/,
+    "pr.yml e2e_shards must invoke `pnpm run test:e2e $specs`",
+  );
+});
+// --- /RK9 Custom ---
