@@ -19,3 +19,10 @@ aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-
 4693d770aab4ec8342833cfed78dd4ac43c49f7a:server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:232
 # Upstream v2026.618.0 redaction test fixture: plaintext sign-in password that the test proves gets redacted.
 bb7978327ed568bf012f6efe16fd200e8baa3a5c:server/src/__tests__/redact-sensitive.test.ts:generic-api-key:6
+# Upstream v2026.707.0 test fixtures: sandbox lease id, Hermes gateway test keys and a deliberately wrong smoke-test bearer.
+8d9f9fd24086a3ae8ee7edc83f8368084be81277:server/src/__tests__/environment-custom-images-service.test.ts:generic-api-key:456
+d77fab6aae3146ab5957c4d4d54d634f22545707:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:203
+d77fab6aae3146ab5957c4d4d54d634f22545707:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:233
+fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:scripts/smoke/hermes-gateway-e2e.sh:curl-auth-header:610
+fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:155
+fd2f82ac5bba6ce2db0c5d17c573733af5f2bbb8:server/src/__tests__/invite-accept-gateway-defaults.test.ts:generic-api-key:178
