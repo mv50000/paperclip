@@ -1,13 +1,10 @@
 ---
 name: deploy
 description: >
-  Promote a merged PR to a company's deployment target via the unified
-  mv50000/cicd pipeline: watch the deploy workflow, validate the running
-  service, and document rollback. Use when leadership says "deploy to prod",
-  "ship this to <company>", "promote PR <N>", or after `prcheckloop` and merge
-  for a Dockerized company. Do NOT use for the Paperclip product itself
-  (use `release` instead) or for non-Dockerized companies still pending
-  migration to mv50000/cicd.
+  Promote a merged PR to a company's deployment target via the mv50000/cicd
+  pipeline: watch the deploy workflow, validate the service, document
+  rollback. Use for "deploy to prod" or "promote PR <N>" on Dockerized
+  companies. Not for Paperclip itself (use `release`).
 ---
 
 # Deploy Skill
