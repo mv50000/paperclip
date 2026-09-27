@@ -2020,6 +2020,8 @@ describe("IssueProperties", () => {
         mode: "normal",
         commentRequired: true,
         stages: [],
+        // --- RK9 Custom: SEC-91 keeps outcomeRequirements on monitor edits ---
+        outcomeRequirements: [],
       },
     });
 
