@@ -61,6 +61,10 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
 - `skills/paperclip/SKILL.md` (3) ja `skills/paperclip-dev/SKILL.md` (modify/delete)
 - `ui/src/components/IssueProperties.tsx` — upstream pilkkoi komponentin hakemistoon `issue-properties/` portaassa 707
   (RK9-314). Juuritiedosto on pelkkä re-export; forkin SEC-91-rivi on `issue-properties/IssueProperties.tsx`:ssä.
+- `packages/adapters/claude-local/src/server/acp.ts` (`normalizeEngine`), `execute.ts` ja `test.ts` (ACP-haara) —
+  forkin CLI-pinnaus ja ACP-avainvartija (RK9-305, RK9-228; v2026.720.0, RK9-314). Ks. `doc/upgrade/acpx-claude-local.md`.
+- `server/src/services/built-in-agents.ts` (`autoProvisionBundledAgents`) — forkin `enableBuiltInAgents`-portti (RK9-314).
+- `ui/src/components/StatusBadge.tsx` — forkin `adapterType`-propi ja human proxy -haara; upstream muuttaa tiedostoa usein.
 - `packages/db/src/migrations/meta/_journal.json` — 707:stä alkaen upstreamin idx on sama kuin migraation numero, ja
   numeroissa on aukkoja (0126, 0130). Anna 9001–9010:lle idx:t upstreamin suurimmasta idx:stä + 1 alkaen, älä paikan
   mukaan. `client.ts` järjestää idx:n mukaan; `upgrade-smoke.sh` vaatii tiukasti kasvavan idx:n.
@@ -76,7 +80,13 @@ jokainen porras tuo rivit takaisin, jos upstream muuttaa niitä. Muutokset on me
 
 - `.github/workflows/pr.yml` — `runs-on` neljässä jobissa fork-suojalla ja secret-scanin
   `runner_label`. Playwright-askel ajaa `--with-deps` vain, jos sudo toimii.
-- `.github/workflows/release.yml` — `runs-on` viidessä jobissa.
+- `.github/workflows/release.yml` — `runs-on` viidessä jobissa. v2026.720.0:sta alkaen verify-jobit ovat
+  uudelleenkäytettävässä `release-verify.yml`:ssä; kutsu antaa `runner_label: ${{ vars.CI_RUNNER || '["ubuntu-latest"]' }}`
+  (2 kohtaa, RK9-314).
+- `.github/workflows/release-verify.yml` (upstream, v2026.720.0) — input `runner_label`, neljä jobia
+  `fromJSON(inputs.runner_label || vars.CI_RUNNER || '["ubuntu-latest"]')`.
+- `.github/workflows/storybook-visual.yml` (upstream, v2026.720.0) — `pull_request`-jobi: vipu fork-suojalla,
+  `workflow_dispatch`illa vipu ilman suojaa.
 - `.github/workflows/docker.yml`, `refresh-lockfile.yml` — `runs-on`.
 - `.github/workflows/e2e.yml`, `release-smoke.yml` — `runs-on` ja Playwright-askel.
 - `.github/workflows/ai-auto-merge.yml` (vain forkissa) — `runs-on`, deploy-dev-dispatch pois,
@@ -479,6 +489,9 @@ harjoitusinstanssissa egress estettynä.
 Varattu upstreamin ACPX-muutosten arvioinnille ja päätöksille. `claude_local`-moottorin
 kiinnitys ja RK9-228-avainvartijan portaat kirjataan tiedostoon `doc/upgrade/acpx-claude-local.md`
 (RK9-305; tiedosto tulee masteriin sen PR:n mukana).
+
+Porras v2026.720.0 (RK9-314) teki pinnauksen: asettamaton `engine` ajaa CLI:llä. `acpx_local` poistui upstreamista,
+joten RK9-312:n avainvartija siirtyi `claude_local`in ACP-haaraan.
 
 ## Upgrade-prosessi
 
