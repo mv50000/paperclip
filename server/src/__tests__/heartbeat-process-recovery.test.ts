@@ -1413,8 +1413,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
     expect(recoveryAction?.nextAction).toContain("Repair the source issue workspace link");
 
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments.some((comment) => comment.body.includes("workspace failed validation"))).toBe(true);
+    // --- RK9 Custom (RK9-313): the recovery comment lands after the status flip; wait for it
+    // instead of reading once (flaked under load on builder-02 and paperclip-01). ---
+    const validationComment = await waitForValue(async () =>
+      db.select().from(issueComments).where(eq(issueComments.issueId, issueId)).then((rows) =>
+        rows.find((comment) => comment.body.includes("workspace failed validation")) ?? null),
+    );
+    expect(validationComment).not.toBeNull();
   });
 
   it("queues one finish-handoff wake when a successful run leaves in-progress work without a next action", async () => {
