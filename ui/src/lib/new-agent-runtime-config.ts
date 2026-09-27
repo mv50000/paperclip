@@ -13,6 +13,7 @@ export function buildNewAgentRuntimeConfig(input?: {
       intervalSec: input?.intervalSec ?? defaultCreateValues.intervalSec,
       wakeOnDemand: true,
       skipWhenIdle: true,
+      skipTimerWhenNoActionableWork: true,
       cooldownSec: 10,
       maxConcurrentRuns: AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
     },

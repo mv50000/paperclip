@@ -10,6 +10,7 @@ import {
   type InstanceExperimentalSettings,
   type PatchInstanceGeneralSettings,
   type InstanceSettings,
+  type PatchInstanceSettings,
   type PatchInstanceExperimentalSettings,
 } from "@paperclipai/shared";
 import { eq } from "drizzle-orm";
@@ -49,14 +50,19 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     return {
       enableEnvironments: parsed.data.enableEnvironments ?? false,
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
-      enableStreamlinedLeftNavigation: parsed.data.enableStreamlinedLeftNavigation ?? false,
+      enableStreamlinedLeftNavigation: parsed.data.enableStreamlinedLeftNavigation ?? true,
+      enablePipelines: parsed.data.enablePipelines ?? false,
       enableConferenceRoomChat: parsed.data.enableConferenceRoomChat ?? false,
       enableIssuePlanDecompositions: parsed.data.enableIssuePlanDecompositions ?? false,
       enableExperimentalFileViewer: parsed.data.enableExperimentalFileViewer ?? false,
+      enableTaskWatchdogs: parsed.data.enableTaskWatchdogs ?? false,
       enableCloudSync: parsed.data.enableCloudSync ?? false,
+      enableExternalObjects: parsed.data.enableExternalObjects ?? false,
+      enableServerInfoDebugView: parsed.data.enableServerInfoDebugView ?? false,
       autoRestartDevServerWhenIdle: parsed.data.autoRestartDevServerWhenIdle ?? false,
       enableIssueGraphLivenessAutoRecovery: parsed.data.enableIssueGraphLivenessAutoRecovery ?? false,
       knowledgeRecallInjectionEnabled: parsed.data.knowledgeRecallInjectionEnabled ?? false,
+      enableWorkspaceBranchReconcileForward: parsed.data.enableWorkspaceBranchReconcileForward ?? false,
       issueGraphLivenessAutoRecoveryLookbackHours:
         parsed.data.issueGraphLivenessAutoRecoveryLookbackHours ??
         DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
@@ -66,14 +72,19 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
   return {
     enableEnvironments: false,
     enableIsolatedWorkspaces: false,
-    enableStreamlinedLeftNavigation: false,
+    enableStreamlinedLeftNavigation: true,
+    enablePipelines: false,
     enableConferenceRoomChat: false,
+    enableTaskWatchdogs: false,
     enableIssuePlanDecompositions: false,
     enableExperimentalFileViewer: false,
     enableCloudSync: false,
+    enableExternalObjects: false,
+    enableServerInfoDebugView: false,
     autoRestartDevServerWhenIdle: false,
     enableIssueGraphLivenessAutoRecovery: false,
     knowledgeRecallInjectionEnabled: false,
+    enableWorkspaceBranchReconcileForward: false,
     issueGraphLivenessAutoRecoveryLookbackHours:
       DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
     recoveryStrictInProgressOnly: false,
@@ -83,11 +94,12 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
 function toInstanceSettings(row: typeof instanceSettings.$inferSelect): InstanceSettings {
   return {
     id: row.id,
+    defaultEnvironmentId: row.defaultEnvironmentId ?? null,
     general: normalizeGeneralSettings(row.general),
     experimental: normalizeExperimentalSettings(row.experimental),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-  };
+  } as InstanceSettings;
 }
 
 export function instanceSettingsService(db: Db) {
@@ -131,6 +143,22 @@ export function instanceSettingsService(db: Db) {
 
   return {
     get: async (): Promise<InstanceSettings> => toInstanceSettings(await getOrCreateRow()),
+
+    update: async (patch: PatchInstanceSettings): Promise<InstanceSettings> => {
+      const current = await getOrCreateRow();
+      const now = new Date();
+      const [updated] = await db
+        .update(instanceSettings)
+        .set({
+          ...(Object.prototype.hasOwnProperty.call(patch, "defaultEnvironmentId")
+            ? { defaultEnvironmentId: patch.defaultEnvironmentId ?? null }
+            : {}),
+          updatedAt: now,
+        })
+        .where(eq(instanceSettings.id, current.id))
+        .returning();
+      return toInstanceSettings(updated ?? current);
+    },
 
     getGeneral: async (): Promise<InstanceGeneralSettings> => {
       const row = await getOrCreateRow();

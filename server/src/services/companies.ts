@@ -134,6 +134,7 @@ export function companyService(db: Db) {
     budgetMonthlyCents: companies.budgetMonthlyCents,
     spentMonthlyCents: companies.spentMonthlyCents,
     attachmentMaxBytes: companies.attachmentMaxBytes,
+    defaultResponsibleUserId: companies.defaultResponsibleUserId,
     requireBoardApprovalForNewAgents: companies.requireBoardApprovalForNewAgents,
     feedbackDataSharingEnabled: companies.feedbackDataSharingEnabled,
     feedbackDataSharingConsentAt: companies.feedbackDataSharingConsentAt,
