@@ -17,3 +17,5 @@ aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-
 70b1a9109d756818fb448beafa67af27babb52de:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:35
 # Artifact test fixture: storage object key "primary-cut.mp4".
 4693d770aab4ec8342833cfed78dd4ac43c49f7a:server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:232
+# Upstream v2026.618.0 redaction test fixture: plaintext sign-in password that the test proves gets redacted.
+bb7978327ed568bf012f6efe16fd200e8baa3a5c:server/src/__tests__/redact-sensitive.test.ts:generic-api-key:6
