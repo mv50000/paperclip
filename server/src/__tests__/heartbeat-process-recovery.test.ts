@@ -948,6 +948,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           enabled: true,
           intervalSec: 60,
           wakeOnDemand: true,
+          // --- RK9 Custom (RK9-314): turn the fork RK9-231 idle gate off so the test
+          // exercises upstream's skipTimerWhenNoActionableWork path. ---
+          skipWhenIdle: false,
           skipTimerWhenNoActionableWork: true,
         },
       },
