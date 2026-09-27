@@ -83,5 +83,9 @@ packages/db/src/migration-dry-run-lib.test.ts
 packages/db/src/migration-fallback.test.ts
 server/src/__tests__/claude-local-adapter-environment.test.ts
 server/src/__tests__/claude-local-execute.test.ts
-server/src/__tests__/acpx-host-key-guard.test.ts
 server/src/__tests__/trust-proxy-rk9.test.ts
+# Lisätty portaassa 720 (RK9-314). acpx_local poistui upstreamista, joten RK9-312-vartija siirtyi claude_localin ACP-haaraan.
+# acp.test.ts todentaa CLI-pinnauksen (RK9-305), companies-service.test.ts built-in-agenttien portin.
+packages/adapters/claude-local/src/server/execute.acp-host-key-guard.test.ts
+packages/adapters/claude-local/src/server/acp.test.ts
+server/src/__tests__/companies-service.test.ts
