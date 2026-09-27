@@ -7,6 +7,11 @@ const expectedEngine = ">=24.11.0";
 const expectedTypes = "^24.0.0";
 const failures = [];
 const skippedDirectories = new Set([".git", ".paperclip", "coverage", "data", "dist", "node_modules"]);
+// --- RK9 Custom (RK9-316) --- the SES forwarder is an AWS Lambda on the nodejs20.x
+// runtime (infra/ses-forwarder/README.md), not a workspace package, so the server's
+// Node engine floor does not describe where it runs.
+const skippedPackageManifests = new Set(["infra/ses-forwarder/package.json"]);
+// --- end RK9 Custom ---
 
 function relative(filePath) {
   return path.relative(repoRoot, filePath) || ".";
@@ -23,6 +28,7 @@ function walk(directory, visit) {
 
 walk(repoRoot, (filePath) => {
   if (path.basename(filePath) !== "package.json") return;
+  if (skippedPackageManifests.has(relative(filePath))) return; // RK9 Custom (RK9-316)
   const manifest = JSON.parse(fs.readFileSync(filePath, "utf8"));
   for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
     const specifier = manifest[section]?.["@types/node"];

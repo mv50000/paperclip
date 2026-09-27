@@ -38,3 +38,5 @@ f712cedbc2e0c86ffa606018609831167641766a:ui/src/pages/apps/gateways/panels/Token
 9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:406
 9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:453
 9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/decisions-service.test.ts:generic-api-key:44
+# v2026.831.1 upstream test fixture (RK9-316): RFC 6455 sample Sec-WebSocket-Key ("the sample nonce")
+9964b034bbff24e700c8eccf5a8b1fc3daa44bf2:packages/paperclip-runner/src/control-plane/durable-prp-control-plane.test.ts:generic-api-key:170
