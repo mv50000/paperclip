@@ -663,6 +663,35 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(env).not.toContain("old-key");
   });
 
+  // --- RK9 Custom (RK9-314): the local ACP lane runs the agent through this wrapper, which acpx
+  // starts with the server's whole env ---
+  it.skipIf(process.platform === "win32")("drops server PAPERCLIP_* settings in the local wrapper but keeps the run's values", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+
+    await runExecutor({
+      agentCommand: "env",
+      agent: "custom-env",
+      stateDir,
+      env: { PAPERCLIP_API_KEY: "run-key" },
+    });
+
+    const wrappers = await fs.readdir(path.join(stateDir, "wrappers"));
+    const wrapperPath = path.join(stateDir, "wrappers", wrappers.find((name) => name.endsWith(".sh"))!);
+    const { stdout } = await promisify(execFile)(wrapperPath, [], {
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        PAPERCLIP_AGENT_JWT_SECRET: "host-jwt-secret",
+        PAPERCLIP_API_KEY: "host-key",
+        PAPERCLIP_LISTEN_PORT: "3100",
+      },
+    });
+    expect(stdout).not.toContain("host-jwt-secret");
+    expect(stdout).not.toContain("host-key");
+    expect(stdout).toContain("PAPERCLIP_API_KEY=run-key");
+    expect(stdout).toContain("PAPERCLIP_LISTEN_PORT=3100");
+  });
+
   it("forwards resolved adapter env (plain + secret) to the wrapper without overriding runtime vars", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

@@ -927,6 +927,16 @@ async function writeAgentWrapper(input: {
   const script = [
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    // --- RK9 Custom (RK9-314): acpx starts this wrapper with the server's whole env. Drop the
+    // server's own PAPERCLIP_* settings (for example the agent JWT secret) with the same
+    // exceptions as sanitizeInheritedPaperclipEnv; the run's values come from the env file. ---
+    "for paperclip_name in $(compgen -e); do",
+    "  case \"$paperclip_name\" in",
+    "    PAPERCLIP_RUNTIME_API_URL|PAPERCLIP_LISTEN_HOST|PAPERCLIP_LISTEN_PORT) ;;",
+    "    PAPERCLIP_*) unset \"$paperclip_name\" ;;",
+    "  esac",
+    "done",
+    // --- /RK9 Custom ---
     `env_file=${shellQuote(envFilePath)}`,
     "if [[ -f \"$env_file\" ]]; then",
     "  set -a",
