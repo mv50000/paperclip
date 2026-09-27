@@ -6,6 +6,7 @@ export { and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, not, or, sql } from 
 
 export {
   createDb,
+  closeRegisteredClients,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
   resetPostgresDatabase,
@@ -41,6 +42,7 @@ export {
   ensureLinuxSharedLibraryAliases,
   prepareEmbeddedPostgresNativeRuntime,
 } from "./embedded-postgres-native.js";
+export { loadWithoutEmbeddedPostgresExitHooks } from "./embedded-postgres-lifecycle.js";
 export { issueRelations } from "./schema/issue_relations.js";
 export { issueReferenceMentions } from "./schema/issue_reference_mentions.js";
 export * from "./schema/index.js";

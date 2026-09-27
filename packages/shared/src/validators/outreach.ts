@@ -45,7 +45,7 @@ export const createOutreachProspectSchema = z.object({
   source: z.enum(OUTREACH_PROSPECT_SOURCES),
   sourceUrl: z.string().trim().url().max(2000).optional().nullable(),
   legalBasis: z.enum(OUTREACH_LEGAL_BASES).default("b2b_legitimate_interest"),
-  enrichment: z.record(z.unknown()).optional(),
+  enrichment: z.record(z.string(), z.unknown()).optional(),
 });
 export type CreateOutreachProspect = z.infer<typeof createOutreachProspectSchema>;
 
@@ -62,7 +62,7 @@ export const updateOutreachProspectSchema = z
     // Only the manual review transition is exposed here; every other status is
     // driven by events (bounce/reply/unsubscribe) or by the sender (RK9-196).
     status: z.enum(["new", "approved"]),
-    enrichment: z.record(z.unknown()),
+    enrichment: z.record(z.string(), z.unknown()),
   })
   .partial()
   .refine((value) => Object.keys(value).length > 0, { message: "no fields to update" });
@@ -106,7 +106,7 @@ const sequenceBase = z.object({
   senderIdentity: outreachEmailSchema,
   steps: z.array(outreachSequenceStepSchema).max(50).default([]),
   dailyCap: z.number().int().min(0).max(10_000).default(20),
-  sendWindow: outreachSendWindowSchema.default({}),
+  sendWindow: outreachSendWindowSchema.prefault({}),
   rampSchedule: z.array(outreachRampStepSchema).max(50).default([]),
   active: z.boolean().default(false),
 });
@@ -129,8 +129,8 @@ export const updateOutreachSequenceSchema = z
 export type UpdateOutreachSequence = z.infer<typeof updateOutreachSequenceSchema>;
 
 export const createOutreachMessageSchema = z.object({
-  prospectId: z.string().uuid(),
-  sequenceId: z.string().uuid().optional().nullable(),
+  prospectId: z.string().guid(),
+  sequenceId: z.string().guid().optional().nullable(),
   step: z.number().int().min(0).max(1000).default(0),
   subject: z.string().trim().min(1).max(998),
   bodyText: z.string().min(1).max(100_000),
@@ -162,26 +162,26 @@ export type UpdateOutreachMessage = z.infer<typeof updateOutreachMessageSchema>;
 // RK9-196: batch enrichment / drafting requests from the CLI. Bounded well
 // below the 1000-row import cap — these calls do real network/LLM work.
 export const enrichOutreachProspectsSchema = z.object({
-  prospectIds: z.array(z.string().uuid()).min(1).max(200),
+  prospectIds: z.array(z.string().guid()).min(1).max(200),
 });
 export type EnrichOutreachProspects = z.infer<typeof enrichOutreachProspectsSchema>;
 
 export const draftOutreachMessagesSchema = z.object({
-  prospectIds: z.array(z.string().uuid()).min(1).max(200),
+  prospectIds: z.array(z.string().guid()).min(1).max(200),
   company: z.enum(OUTREACH_TEMPLATE_COMPANIES),
   // RK9-224: if omitted, the service resolves it to the company's one active
   // sequence whose first step targets this template — 422 `sequence_required`
   // if that isn't unique. A draft is never created without a sequence.
-  sequenceId: z.string().uuid().optional(),
+  sequenceId: z.string().guid().optional(),
   maxCostUsd: z.number().positive().max(100).default(1),
 });
 export type DraftOutreachMessages = z.infer<typeof draftOutreachMessagesSchema>;
 
 export const createOutreachEventSchema = z.object({
-  prospectId: z.string().uuid(),
-  messageId: z.string().uuid().optional().nullable(),
+  prospectId: z.string().guid(),
+  messageId: z.string().guid().optional().nullable(),
   type: z.enum(OUTREACH_EVENT_TYPES),
-  payload: z.record(z.unknown()).default({}),
+  payload: z.record(z.string(), z.unknown()).default({}),
   occurredAt: z
     .coerce.date()
     .refine(

@@ -63,6 +63,7 @@ tests/release-smoke/playwright-report/
 tests/e2e-companies/test-results/
 tests/e2e-companies/playwright-report/
 tests/e2e-companies/.last-run.json
+test-results/issue-detail-perf/
 tests/storybook-visual/.cache/
 tests/storybook-visual/.snapshots/
 tests/storybook-visual/baseline-review/

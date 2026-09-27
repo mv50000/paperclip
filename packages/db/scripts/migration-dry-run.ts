@@ -168,6 +168,28 @@ async function namedImpacts(sql: postgres.Sql): Promise<Impact[]> {
     else skip("0196", `rows in ${table}`);
   }
 
+  // RK9-316 (v2026.831.1): the unique indexes in 0212 and 0226 fail the whole
+  // migration on duplicates, and 0227 rewrites heartbeat_run_events (seq -> bigint).
+  if (await columnExists(sql, "issues", "origin_kind")) {
+    add("0212", "companies with 2+ onboarding_first_task issues (unique index fails)", await scalar(sql,
+      `select count(*)::text n from (select company_id from issues where origin_kind = 'onboarding_first_task'
+       group by company_id having count(*) > 1) d`));
+  } else skip("0212", "issues.origin_kind");
+  for (const table of ["adapter_auth_sessions", "claude_setup_token_sessions"]) {
+    if (await tableExists(sql, table)) add("0224/0225", `rows in ${table} (deleted or dropped)`, await scalar(sql, `select count(*)::text n from ${q(table)}`));
+    else skip("0224/0225", `rows in ${table}`);
+  }
+  if (await columnExists(sql, "agent_wakeup_requests", "idempotency_key")) {
+    add("0226", "duplicate disposition-repair idempotency keys (unique index fails)", await scalar(sql,
+      `select count(*)::text n from (select company_id, idempotency_key from agent_wakeup_requests
+       where idempotency_key like 'issue_disposition_repair:%' and status <> 'skipped'
+       group by 1, 2 having count(*) > 1) d`));
+  } else skip("0226", "agent_wakeup_requests.idempotency_key");
+  if (await tableExists(sql, "heartbeat_run_events")) {
+    add("0227", "heartbeat_run_events rows (seq rewritten to bigint)", await scalar(sql, "select count(*)::text n from heartbeat_run_events"));
+    add("0227", "heartbeat_runs rows (next_event_seq backfilled)", await scalar(sql, "select count(*)::text n from heartbeat_runs"));
+  } else skip("0227", "heartbeat_run_events");
+
   if (await columnExists(sql, "issue_thread_interactions", "requested_resolver_policy")) {
     add("0218", "issue_thread_interactions total (all rows get provenance backfill)", await scalar(sql, "select count(*)::text n from issue_thread_interactions"));
     for (const policy of ["board_or_agents", "board_only"]) {
@@ -191,6 +213,8 @@ async function namedImpacts(sql: postgres.Sql): Promise<Impact[]> {
     for (const { provider_id, n } of providers) {
       add("0230", `account.provider_id='${provider_id}' -> issuer '${provider_id === "credential" ? "local:credential" : `local:oauth:${provider_id}`}'`, Number(n));
     }
+    add("0230", "duplicate (provider_id, account_id) pairs (unique issuer index fails)", await scalar(sql,
+      `select count(*)::text n from (select provider_id, account_id from "account" group by 1, 2 having count(*) > 1) d`));
   } else skip("0230", "account");
 
   if (await columnExists(sql, "agents", "runtime_config")) {
