@@ -2776,10 +2776,11 @@ export function issueRoutes(
     kind: CrossIssueInfluenceKind,
   ) {
     if (req.actor.type !== "agent") return true;
-    // --- RK9 Custom (RK9-76, RK9-315): interactive operator sessions act as the company's
-    // human-proxy agent without a heartbeat run. Upstream v2026.817.0 requires a run for every
-    // agent issue write; the fork exempts runless human-proxy writes (human-driven, no autonomous
-    // fan-out). Every other runless agent write still fails closed below. ---
+    // --- RK9 Custom (RK9-76, RK9-315): interactive operator sessions, CI issue closing and smoke
+    // timers write as the company's human-proxy agent ("AI") with an API key and no heartbeat run.
+    // Upstream v2026.817.0 requires a run for every agent issue write; the fork exempts runless
+    // human-proxy writes in the agent's own company, as on fork master. Every other runless agent
+    // write still fails closed below. ---
     if (req.actor.agentId && !req.actor.runId) {
       const actorAgent = await agentsSvc.getById(req.actor.agentId);
       if (actorAgent && actorAgent.companyId === issue.companyId && isHumanProxyAgent(actorAgent)) return true;

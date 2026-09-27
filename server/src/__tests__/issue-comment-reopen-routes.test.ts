@@ -2033,6 +2033,25 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockObserveCrossIssueInfluence).not.toHaveBeenCalled();
   });
 
+  it("rejects a runless human-proxy agent from another company", async () => {
+    const humanProxyId = "55555555-5555-4555-8555-555555555555";
+    mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+    mockAgentService.getById.mockResolvedValue({
+      id: humanProxyId,
+      companyId: "company-2",
+      adapterType: "human_proxy",
+      status: "idle",
+    });
+    const actor = { ...agentActor(humanProxyId), runId: undefined };
+
+    const res = await request(await installActor(createApp(), actor))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "cross-company write" });
+
+    expect(res.status).toBe(403);
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+
   it("rejects a runless non-human-proxy agent even when the agent exists", async () => {
     const agentA = "44444444-4444-4444-8444-444444444444";
     mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
