@@ -1030,7 +1030,8 @@ describeEmbeddedPostgres("authorization service", () => {
         assigneeAgentId: collaborator.id,
       },
       scope: { projectId: project.id, assigneeAgentId: collaborator.id },
-    })).resolves.toMatchObject({ allowed: true, reason: "allow_simple_company_member" });
+    // --- RK9 Custom (RK9-313): the fork needs a tasks:assign grant; upstream allows an in-boundary assignment ---
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_missing_grant" });
     await expect(authorization.decide({
       actor,
       action: "tasks:assign",

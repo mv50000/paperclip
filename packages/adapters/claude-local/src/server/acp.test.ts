@@ -757,11 +757,8 @@ describe("claude_local ACP lane", () => {
           remoteCwd: "/work",
         },
       }),
-    ).resolves.toMatchObject({
-      engine: "cli",
-      explicit: false,
-      fallbackReason: expect.stringContaining("bidirectional remote process"),
-    });
+    // --- RK9 Custom (RK9-305): fork pin, no fallback reason for an unset engine ---
+    ).resolves.toEqual({ engine: "cli", explicit: false });
   });
 
   it("delivers the issue description exactly once per prompt and compacts non-assignment resume deltas", async () => {
