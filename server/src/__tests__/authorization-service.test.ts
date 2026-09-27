@@ -222,7 +222,9 @@ describeEmbeddedPostgres("authorization service", () => {
     expect(decision.explanation).toContain("Agent key cannot access another company");
   });
 
-  it("allows simple-mode task assignment between same-company agents without explicit grants", async () => {
+  // RK9 Custom (RK9-313): upstream allows any active agent here ("allow_simple_company_member").
+  // The fork keeps the v2026.512.0 rule: explicit tasks:assign grant or CEO/canCreateAgents.
+  it("denies simple-mode task assignment between same-company agents without explicit grants (RK9-313)", async () => {
     const company = await createCompany(db, "AssignmentDefault");
     const actorAgent = await createAgent(db, company.id, { role: "engineer" });
     const targetAgent = await createAgent(db, company.id, { role: "engineer" });
@@ -242,10 +244,31 @@ describeEmbeddedPostgres("authorization service", () => {
     });
 
     expect(decision).toMatchObject({
-      allowed: true,
-      reason: "allow_simple_company_member",
+      allowed: false,
+      reason: "deny_missing_grant",
     });
-    expect(decision.explanation).toContain("simple mode");
+    expect(decision.explanation).toContain("tasks:assign");
+  });
+
+  it("allows agent task assignment with a grant or legacy creator authority (RK9-313)", async () => {
+    const company = await createCompany(db, "AssignmentFork");
+    const targetAgent = await createAgent(db, company.id, { role: "engineer" });
+    const ceo = await createAgent(db, company.id, { role: "ceo" });
+    const creator = await createAgent(db, company.id, { role: "cto", permissions: { canCreateAgents: true } });
+    const granted = await createAgent(db, company.id, { role: "engineer" });
+    await grantAgentPermission(db, company.id, granted.id, "tasks:assign");
+
+    const decideAs = (agentId: string) =>
+      authorizationService(db).decide({
+        actor: { type: "agent", agentId, companyId: company.id, source: "agent_key" },
+        action: "tasks:assign",
+        resource: { type: "issue", companyId: company.id, assigneeAgentId: targetAgent.id },
+        scope: { assigneeAgentId: targetAgent.id },
+      });
+
+    await expect(decideAs(ceo.id)).resolves.toMatchObject({ allowed: true, reason: "allow_legacy_agent_creator" });
+    await expect(decideAs(creator.id)).resolves.toMatchObject({ allowed: true, reason: "allow_legacy_agent_creator" });
+    await expect(decideAs(granted.id)).resolves.toMatchObject({ allowed: true, reason: "allow_explicit_grant" });
   });
 
   it("limits low-trust issue reads to the configured project and root issue boundary", async () => {

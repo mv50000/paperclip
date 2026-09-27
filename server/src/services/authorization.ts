@@ -1078,11 +1078,25 @@ export function authorizationService(db: Db) {
         if (grantDecision.allowed) return grantDecision;
         return denyRestrictedAssignmentPolicy(policyEffect);
       }
-      return allow({
+      // --- RK9 Custom (RK9-313): agents keep the fork task-assignment rule ---
+      // Upstream v2026.609.0 lets every active agent assign in simple mode. The fork
+      // (v2026.512.0 assertCanAssignTasks) required an explicit tasks:assign grant or
+      // legacy creator authority (CEO or canCreateAgents). doc/upgrade/defaults-hardening.md.
+      const rk9GrantDecision = await decideWithTaskAssignmentGrants("agent", actorAgentId);
+      if (rk9GrantDecision.allowed) return rk9GrantDecision;
+      if (canCreateAgentsLegacy(actorAgent)) {
+        return allow({
+          action: input.action,
+          reason: "allow_legacy_agent_creator",
+          explanation: "Allowed by legacy agent creator authority.",
+        });
+      }
+      return deny({
         action: input.action,
-        reason: "allow_simple_company_member",
-        explanation: "Allowed by simple mode company-wide task assignment default.",
+        reason: "deny_missing_grant",
+        explanation: "Missing permission: tasks:assign",
       });
+      // --- end RK9 Custom ---
     }
 
     if (input.action === "issue:mutate") {

@@ -288,7 +288,7 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
     expect(res.body.error).toContain("Agent key cannot access another company");
   });
 
-  it("allows same-company route assignment after upgrade but keeps private target assignment grant constrained", async () => {
+  it("keeps the fork assignment rule after upgrade and private target assignment grant constrained (RK9-313)", async () => {
     const company = await seedCompany(db, "Assignment");
     const actorAgent = await seedAgent(db, company.id);
     const openTargetAgent = await seedAgent(db, company.id);
@@ -304,10 +304,19 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
     });
     const app = await createApp(db, agentActor(company.id, actorAgent.id));
 
+    // RK9 Custom (RK9-313): a standard agent without a tasks:assign grant stays denied
+    // (fork rule from v2026.512.0); the CEO keeps legacy assignment authority.
     const openAssignment = await request(app)
       .post(`/api/companies/${company.id}/issues`)
       .send({ title: "Assignable after upgrade", assigneeAgentId: openTargetAgent.id });
-    expect(openAssignment.status, JSON.stringify(openAssignment.body)).toBe(201);
+    expect(openAssignment.status, JSON.stringify(openAssignment.body)).toBe(403);
+    expect(openAssignment.body.error).toContain("tasks:assign");
+
+    const ceoAgent = await seedAgent(db, company.id, { role: "ceo" });
+    const ceoAssignment = await request(await createApp(db, agentActor(company.id, ceoAgent.id)))
+      .post(`/api/companies/${company.id}/issues`)
+      .send({ title: "CEO assigns after upgrade", assigneeAgentId: openTargetAgent.id });
+    expect(ceoAssignment.status, JSON.stringify(ceoAssignment.body)).toBe(201);
 
     const deniedPrivateAssignment = await request(app)
       .post(`/api/companies/${company.id}/issues`)
