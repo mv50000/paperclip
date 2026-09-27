@@ -112,6 +112,10 @@ For technical upload instructions, read `references/artifacts.md`.
 
 If you are blocked at any point, set the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act — otherwise nothing wakes the unblocker.
 
+<!-- RK9 Custom (RK9-315): upstream v2026.817.0 rejects entering `blocked` without a first-class reason -->
+Entering `blocked` requires a first-class reason, otherwise the update returns `422`: unresolved `blockedByIssueIds`, a pending interaction or approval on the issue, or an `unblockDescriptor`. Agents may only name themselves as the descriptor owner: `"unblockDescriptor": { "owner": { "agentId": "<your-agent-id>" }, "action": "<exact unblock action>" }`. When a human must act, create an interaction (`ask_user_questions`, `request_confirmation`) or a blocker issue assigned to them instead.
+<!-- /RK9 Custom -->
+
 Before ending any heartbeat, apply this final-disposition checklist:
 
 - `done`: the requested work is complete, verification is recorded, and no follow-up remains on this issue.

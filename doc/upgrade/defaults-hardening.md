@@ -46,6 +46,11 @@ egress on estetty (ks. osio "Harjoitusinstanssi"), joten lokissa ei saa näkyä 
 Portaalla 817.0: migraatio 0196 ajetaan, ja taulut ovat poissa (`\dt cloud_upstream_*` palauttaa
 tyhjän).
 
+Todennettu portaalla 817.0 (RK9-315, harjoitus prod-kopiolla): `0196` pudotti taulut, joissa oli 0 riviä.
+Upstream poisti cloud syncin koodin, joten asetusta ei ole enää. Jäljelle jäävät cloud-polut (`routes/cloud.ts`,
+`cloud-instance.ts`) aktivoituvat vain, kun `PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN` tai `PAPERCLIP_MANAGED_CONFIG`
+on asetettu. Kumpaakaan ei ole prodin env-tiedostoissa (`/etc/paperclip/*.env`, tarkistettu avainten nimistä).
+
 ## Porras v2026.609.0 — oikeusmalli (`access.decide`)
 
 Todennettu 2026-09-27 ([RK9-313](/RK9/issues/RK9-313)). Upstream siirsi agenttien ja board-käyttäjien
@@ -216,6 +221,52 @@ Upstream siirsi `activeRunExecutions`in moduulitasolle. Forkin cap (`maxGlobalCo
 46 migraatiota (0136–0181) prod-kopiolla 1,41 s. Pisin AccessExclusiveLock 0,24 s (`activity_log`,
 `0177`:n indeksit). `0141` ja `0142` rakentavat indeksit `heartbeat_runs`- ja `issues`-tauluihin ilman
 CONCURRENTLY-optiota; prodin koolla (heartbeat_runs 19 280, activity_log 71 633 riviä) tämä on alle sekunnin.
+
+## Porras v2026.817.0 — default-open-kirjoitukset, blocked-syy, resolver-politiikka ja managed config
+
+### Issue-kirjoitukset vertaisten issueihin
+
+| Kohta | Arvo |
+|---|---|
+| Muutos | upstream `dfcda676` (#10804): standard-trust-agentti saa kommentoida ja muuttaa näkyvää, toisen agentin omistamaa issueta (`allow_visible_issue_write`). Low-trust-agentti ja yritysrajan ylitys estetään yhä. |
+| RK9-arvo | upstreamin oletus kommentille ja muutokselle. Forkin `tasks:assign`-kovennus (RK9-313, `authorization.ts`) pidettiin: agentti saa asettaa assigneen vain eksplisiittisellä grantilla tai legacy-luojana. Upstreamin low-trust-testi odottaa rajan sisäisen assignin sallituksi; fork odottaa `deny_missing_grant` (RK9 Custom -kommentti testissä). |
+
+### Blocked-tilaan siirto vaatii syyn
+
+| Kohta | Arvo |
+|---|---|
+| Muutos | `PATCH /api/issues/:id` palauttaa `422` ("Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor"), kun issue siirretään `blocked`-tilaan ilman ratkaisematonta blockeria, odottavaa interaktiota tai hyväksyntää tai `unblockDescriptor`ia. Sääntö koskee kaikkia toimijoita, myös boardia. Agentti saa nimetä `unblockDescriptor`in omistajaksi vain itsensä. |
+| Vaikutus | agentit ja operaattorin skriptit, jotka asettavat `blocked`in pelkällä kommentilla, saavat 422:n. Prodin määrä on todentamatta (tarkista `activity_log`ista status-muutokset `blocked`-tilaan ilman blockeria). |
+| RK9-toimi | `skills/paperclip/SKILL.md` kertoo säännön (RK9 Custom -lohko). Operaattorin `~/.claude`-skillit ja -skriptit päivitetään erikseen. |
+
+### Resolver-politiikka (`0203_interaction_resolver_governance`)
+
+| Kohta | Arvo |
+|---|---|
+| Muutos | `issue_thread_interactions` saa sarakkeet `requested_resolver_policy` ja `effective_resolver_policy` (oletus `board_only`), `companies` saa `interaction_resolver_governance`n (oletus `{}`). |
+| Prod-kopio | 62 interaktiota, kaikki `board_only`/`board_only`. 11 yritystä, kaikilla `{}`. |
+| Reititys | outreach- ja support-desk-reititys ei muuttunut: `email_routes` (11), issuet statuksineen, assigneineen ja execution policyineen (30 844), interaktiot (62), outreach-taulut ja agentit (120) olivat identtiset ennen ja jälkeen migraatioiden. |
+
+### Managed config ja feature-katalogi
+
+| Kohta | Arvo |
+|---|---|
+| Muutos | valinnainen `PAPERCLIP_MANAGED_CONFIG` (JSON) lukitsee instanssiasetuksia ja pluginien asennusta. Virheellinen arvo estää käynnistyksen (fail closed). Jokaisella `experimental`-lipulla on oltava rivi `INSTANCE_FEATURE_CATALOG`issa. |
+| RK9-arvo | asettamatta. Forkin liput `knowledgeRecallInjectionEnabled` ja `recoveryStrictInProgressOnly` ovat katalogissa tierillä `preference`, oletus `false`. |
+| Uudet liput | `enableTaskChatRedesign`, `enableBetaSkills`, `enableStatusCards`, `enableSimplifiedEnglishInteractions`, `enableOwnerInstanceAdmin`: kaikki oletuksena `false`. |
+| Uusi oikeus | `audit:view_agent_actions`. Mikään rooli ei saa sitä oletuksena; instanssiadmin ja `local_implicit` ohittavat tarkistuksen. |
+
+### Työtilan haarakorjaukset
+
+817:n skeemaoletus on yhä `true` lipuille `enableWorkspaceBranchReconcileForward` ja
+`enableWorkspaceDirtyQuarantineRepair`. Prodin tallennetut arvot (`false`, kirjoitettu 720:n cutoverissa) säilyivät
+migraatioiden yli prod-kopiolla. Cutoverissa ei tarvita uutta kirjoitusta.
+
+### Migraatiot
+
+30 migraatiota (0182–0211) prod-kopiolla 11,2 s. Hitain `0205_narrow_shiva` 7,4 s, ja sen AccessExclusiveLock
+`issue_comments`-tauluun kesti 7,35 s. Palvelin ajaa migraatiot käynnistyksessä ennen kuuntelun alkua
+(`applyPendingMigrations`, ks. `cutover-runbook.md` vaihe 5), joten sovellus ei kilpaile lukosta.
 
 ## Porras v2026.831.1
 
