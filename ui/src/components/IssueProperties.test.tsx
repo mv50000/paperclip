@@ -2492,7 +2492,9 @@ describe("IssueProperties", () => {
   });
 
   // --- RK9 Custom: enforced outcomes (SEC-91) survive a monitor change ---
+  // v2026.720.0 opens the monitor editor from the row trigger, as in the upstream clear test above.
   it("keeps outcome requirements when clearing a monitor", async () => {
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-11T10:00:00.000Z").getTime());
     const onUpdate = vi.fn();
     const outcomeRequirements = [
       { kind: "work_product_present" as const, id: "req-1", workProductType: "pull_request" },
@@ -2509,6 +2511,25 @@ describe("IssueProperties", () => {
             scheduledBy: "board",
           },
         }),
+        executionState: createExecutionState({
+          status: "idle",
+          currentStageId: null,
+          currentStageIndex: null,
+          currentStageType: null,
+          currentParticipant: null,
+          returnAssignee: null,
+          lastDecisionOutcome: null,
+          monitor: {
+            status: "scheduled",
+            nextCheckAt: "2026-04-11T12:30:00.000Z",
+            lastTriggeredAt: null,
+            attemptCount: 0,
+            notes: "Check deployment",
+            scheduledBy: "board",
+            clearedAt: null,
+            clearReason: null,
+          },
+        }),
       }),
       childIssues: [],
       onUpdate,
@@ -2516,14 +2537,15 @@ describe("IssueProperties", () => {
     });
     await flush();
 
-    const monitorTrigger = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent?.includes("Next check"));
+    const monitorTrigger = container.querySelector('[data-testid="monitor-row-trigger"]')?.closest("button");
+    expect(monitorTrigger).toBeTruthy();
     await act(async () => {
       monitorTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
     const clearButton = Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent?.includes("Clear"));
+    expect(clearButton).toBeTruthy();
     act(() => {
       clearButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -2533,6 +2555,7 @@ describe("IssueProperties", () => {
     });
 
     act(() => root.unmount());
+    dateNowSpy.mockRestore();
   });
 
   it("shows agent-archive attribution and unarchive only in the properties pane", async () => {

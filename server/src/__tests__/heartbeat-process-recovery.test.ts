@@ -2282,6 +2282,20 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       executionRunId: retryRun?.id ?? null,
     });
 
+    // --- RK9 Custom (RK9-314): the resume-failure comment and interaction result land after the
+    // retry run row; wait for both (2 of 3 full-file runs raced on builder-02) ---
+    await waitForValue(async () => {
+      const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      const current = await db
+        .select({ result: issueThreadInteractions.result })
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId))
+        .then((result) => result[0] ?? null);
+      const resumeFailure = (current?.result as Record<string, unknown> | null | undefined)?.resumeFailure;
+      return rows.length >= 1 && resumeFailure ? true : null;
+    });
+    // --- /RK9 Custom ---
+
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(1);
     expect(comments[0]).toMatchObject({
@@ -5833,7 +5847,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
 
-  it("does not accept unmanaged local-background wait evidence as a live continuation path", async () => {
+  // --- RK9 Custom (RK9-314): upstream v2026.720.0 local-background wait tests follow RK9-87 ---
+  // Upstream requeues one continuation for unmanaged local-background wait evidence and escalates
+  // the repeat. RK9-87 skips every in_progress issue whose latest run succeeded before either
+  // branch runs, so both cases stay in_progress with no new run and no escalation.
+  it("skips unmanaged local-background wait evidence on a succeeded run (RK9-87)", async () => {
     const localWaitEvidence = {
       summary: "Started a local polling watcher and will check the log later.",
       externalWait: {
@@ -5852,22 +5870,17 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
-    expect(result.continuationRequeued).toBe(1);
+    expect(result.continuationRequeued).toBe(0);
     expect(result.escalated).toBe(0);
-    expect(result.issueIds).toEqual([issueId]);
+    expect(result.skipped).toBe(1);
+    expect(result.issueIds).not.toContain(issueId);
 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(retryRun?.contextSnapshot as Record<string, unknown> | undefined).toMatchObject({
-      issueId,
-      retryReason: "issue_continuation_needed",
-      retryOfRunId: runId,
-      source: "issue.productive_terminal_continuation_recovery",
-    });
-    expect(retryRun?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("modelProfile");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
   });
 
-  it("escalates repeated unmanaged local-background waits instead of retrying forever", async () => {
+  it("skips a repeated unmanaged local-background wait on a succeeded run instead of escalating (RK9-87)", async () => {
     const localWaitEvidence = {
       summary: "Still waiting on the local background watcher.",
       externalWait: {
@@ -5877,7 +5890,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         durable: false,
       },
     };
-    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+    const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "succeeded",
       retryReason: "issue_continuation_needed",
@@ -5889,24 +5902,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
     expect(result.continuationRequeued).toBe(0);
-    expect(result.escalated).toBe(1);
-    expect(result.issueIds).toEqual([issueId]);
+    expect(result.escalated).toBe(0);
+    expect(result.issueIds).not.toContain(issueId);
 
     const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
-    expect(issue?.status).toBe("blocked");
-
-    await expectSourceScopedStrandedRecoveryAction({
-      companyId,
-      agentId,
-      issueId,
-      runId,
-      previousStatus: "in_progress",
-      retryReason: "issue_continuation_needed",
-    });
-
-    const followupRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
-    expect(followupRuns).toHaveLength(2);
+    expect(issue?.status).toBe("in_progress");
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.id).toBe(runId);
   });
+  // --- /RK9 Custom ---
 
   it("preserves a persisted issue monitor as the durable external-wait path", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
@@ -5980,42 +5985,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
     expect(runs).toHaveLength(1);
   });
-
-  it("blocks stranded in-progress work after a productive continuation retry was already used", async () => {
-    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
-      status: "in_progress",
-      runStatus: "succeeded",
-      retryReason: "issue_continuation_needed",
-      runSource: "issue.productive_terminal_continuation_recovery",
-      livenessState: "advanced",
-    });
-    const heartbeat = heartbeatService(db);
-
-    const result = await heartbeat.reconcileStrandedAssignedIssues();
-    expect(result.continuationRequeued).toBe(0);
-    expect(result.escalated).toBe(1);
-    expect(result.issueIds).toEqual([issueId]);
-
-    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
-    expect(issue?.status).toBe("blocked");
-
-    const recoveryAction = await expectSourceScopedStrandedRecoveryAction({
-      companyId,
-      agentId,
-      issueId,
-      runId,
-      previousStatus: "in_progress",
-      retryReason: "issue_continuation_needed",
-    });
-
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    expect(comments).toHaveLength(1);
-    expect(comments[0]?.body).toContain("automatically retried continuation");
-    expect(comments[0]?.body).toContain("still has no live execution path");
-    expect(comments[0]?.body).toContain(`Recovery action: \`${recoveryAction.id}\``);
-    expect(comments[0]?.body).toContain("Recovery owner: [CodexCoder]");
-  });
-
 
   it("does not re-enqueue continuation for a succeeded+satisfied run with no scheduled retry reason (RK9-87)", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
