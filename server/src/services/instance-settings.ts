@@ -29,6 +29,8 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
       backupRetention: parsed.data.backupRetention ?? DEFAULT_BACKUP_RETENTION,
       systemPause: parsed.data.systemPause ?? null,
       maxGlobalConcurrentRuns: parsed.data.maxGlobalConcurrentRuns ?? null,
+      // Absent => unrestricted; only carry through an explicit policy.
+      ...(parsed.data.executionMode ? { executionMode: parsed.data.executionMode } : {}),
     };
   }
   return {
@@ -48,7 +50,9 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       enableEnvironments: parsed.data.enableEnvironments ?? false,
       enableIsolatedWorkspaces: parsed.data.enableIsolatedWorkspaces ?? false,
       enableStreamlinedLeftNavigation: parsed.data.enableStreamlinedLeftNavigation ?? false,
+      enableConferenceRoomChat: parsed.data.enableConferenceRoomChat ?? false,
       enableIssuePlanDecompositions: parsed.data.enableIssuePlanDecompositions ?? false,
+      enableExperimentalFileViewer: parsed.data.enableExperimentalFileViewer ?? false,
       enableCloudSync: parsed.data.enableCloudSync ?? false,
       autoRestartDevServerWhenIdle: parsed.data.autoRestartDevServerWhenIdle ?? false,
       enableIssueGraphLivenessAutoRecovery: parsed.data.enableIssueGraphLivenessAutoRecovery ?? false,
@@ -63,7 +67,9 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableEnvironments: false,
     enableIsolatedWorkspaces: false,
     enableStreamlinedLeftNavigation: false,
+    enableConferenceRoomChat: false,
     enableIssuePlanDecompositions: false,
+    enableExperimentalFileViewer: false,
     enableCloudSync: false,
     autoRestartDevServerWhenIdle: false,
     enableIssueGraphLivenessAutoRecovery: false,
