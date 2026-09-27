@@ -68,6 +68,7 @@ const mockAgentService = vi.hoisted(() => ({
 
 const mockAccessService = vi.hoisted(() => ({
   canUser: vi.fn(),
+  decide: vi.fn(),
   hasPermission: vi.fn(),
   getMembership: vi.fn(),
   ensureMembership: vi.fn(),
@@ -209,6 +210,38 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
       makeAgent({ ...patch, id }),
     );
     mockAccessService.canUser.mockResolvedValue(true);
+    // v2026.609.0 routes hire checks through access.decide("agents:create"). This mirrors
+    // authorizationService for agent actors (explicit grant, CEO role or canCreateAgents);
+    // hire-authorization-rk9.test.ts locks the real service against the same rules.
+    mockAccessService.decide.mockImplementation(
+      async (input: { actor: { type: string; agentId?: string }; action: string; resource: { companyId: string } }) => {
+        if (input.action !== "agents:create") {
+          return { allowed: true, action: input.action, reason: "allow_company_agent", explanation: "test" };
+        }
+        if (input.actor.type !== "agent") {
+          return { allowed: true, action: input.action, reason: "allow_board", explanation: "test" };
+        }
+        const actorAgent = await mockAgentService.getById(input.actor.agentId);
+        const explicitGrant = await mockAccessService.hasPermission(
+          input.resource.companyId,
+          "agent",
+          input.actor.agentId,
+          "agents:create",
+        );
+        const allowed =
+          Boolean(explicitGrant) ||
+          actorAgent?.role === "ceo" ||
+          Boolean(actorAgent?.permissions?.canCreateAgents);
+        return allowed
+          ? { allowed: true, action: input.action, reason: "allow_legacy_agent_creator", explanation: "test" }
+          : {
+              allowed: false,
+              action: input.action,
+              reason: "deny_missing_grant",
+              explanation: "Missing permission: agents:create.",
+            };
+      },
+    );
     mockAccessService.hasPermission.mockResolvedValue(false);
     mockAccessService.getMembership.mockResolvedValue(null);
     mockAccessService.listPrincipalGrants.mockResolvedValue([]);
@@ -238,7 +271,7 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
     const res = await request(app).post(`/api/companies/${companyId}/agent-hires`).send(hireBody);
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain("can create agents");
+    expect(res.body.error).toContain("agents:create");
     expect(mockAgentService.create).not.toHaveBeenCalled();
     expect(mockApprovalService.create).not.toHaveBeenCalled();
   });

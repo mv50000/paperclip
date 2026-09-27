@@ -21,6 +21,9 @@ describe("instance settings service", () => {
       autoRestartDevServerWhenIdle: true,
       enableIssueGraphLivenessAutoRecovery: true,
       issueGraphLivenessAutoRecoveryLookbackHours: 48,
+      // --- RK9 Custom: fork experimental flags keep their defaults ---
+      knowledgeRecallInjectionEnabled: false,
+      recoveryStrictInProgressOnly: false,
     });
   });
 });

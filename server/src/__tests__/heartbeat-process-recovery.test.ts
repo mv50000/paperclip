@@ -2949,6 +2949,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  // --- RK9 Custom (RK9-87): the fork skips continuation for an in_progress issue whose latest
+  // run succeeded, so the new classifier must not requeue it either (upstream expects a requeue). ---
   it("leaves the productive-but-stranded continuation path unchanged under the new classifier", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
@@ -2958,20 +2960,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
-    expect(result.continuationRequeued).toBe(1);
+    expect(result.continuationRequeued).toBe(0);
     expect(result.escalated).toBe(0);
-    expect(result.issueIds).toEqual([issueId]);
+    expect(result.issueIds).not.toContain(issueId);
 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
-    const retryRun = runs.find((row) => row.id !== runId);
-    expect(retryRun?.contextSnapshot as Record<string, unknown> | undefined).toMatchObject({
-      issueId,
-      retryReason: "issue_continuation_needed",
-      source: "issue.productive_terminal_continuation_recovery",
-    });
-    if (retryRun) {
-      await waitForRunToSettle(heartbeat, retryRun.id);
-    }
+    expect(runs.map((row) => row.id)).toEqual([runId]);
   });
 
   it("reuses the raced stranded recovery issue when duplicate active recovery creation conflicts", async () => {

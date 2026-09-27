@@ -42,6 +42,15 @@ const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockWakeup = vi.hoisted(() => vi.fn(async () => ({ id: "run-9" })));
 
 vi.mock("../services/index.js", () => ({
+  // v2026.609.0: approval routes check company_scope:read through access.decide.
+  accessService: vi.fn(() => ({
+    decide: vi.fn(async (input: { action: string }) => ({
+      allowed: true,
+      action: input.action,
+      reason: "allow_board",
+      explanation: "test",
+    })),
+  })),
   approvalService: vi.fn(() => mockApprovalSvc),
   issueApprovalService: vi.fn(() => ({
     linkManyForApproval: mockLinkMany,

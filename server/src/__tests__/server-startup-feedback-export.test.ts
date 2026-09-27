@@ -188,6 +188,12 @@ vi.mock("../services/index.js", () => ({
   createChannelResolver: vi.fn(),
 }));
 
+// --- RK9 Custom: index.ts imports companyService directly (system pause); from v2026.609.0
+// companies.ts pulls in heartbeat.ts, which needs real @paperclipai/db tables. ---
+vi.mock("../services/companies.js", () => ({
+  companyService: vi.fn(() => ({})),
+}));
+
 vi.mock("../services/slack/index.js", () => ({
   startSlackEventForwarder: vi.fn(() => ({ stop: vi.fn() })),
   createSystemPauseSlackNotifier: vi.fn(() => ({

@@ -33,6 +33,7 @@ server/src/__tests__/emit-approval-created.test.ts
 server/src/__tests__/github-webhook-routes.test.ts
 server/src/__tests__/heartbeat-idle-timer-skip.test.ts
 server/src/__tests__/hire-approval-policy.test.ts
+server/src/__tests__/hire-authorization-rk9.test.ts
 server/src/__tests__/human-proxy.test.ts
 server/src/__tests__/issue-outcome-requirements.test.ts
 server/src/__tests__/issues-checkout-race.test.ts
