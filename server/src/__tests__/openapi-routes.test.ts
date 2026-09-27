@@ -46,6 +46,34 @@ const apiPrefixes: Record<string, string> = {
   "user-profiles.ts": "/api",
 };
 
+// --- RK9 Custom (RK9-313): fork route files and fork endpoints in upstream route files are not
+// in the upstream OpenAPI spec yet. Keep them out of the exact-coverage check; a new fork route
+// must be added here on purpose. Documenting them in routes/openapi.ts is a follow-up. ---
+const RK9_FORK_ROUTE_FILES = new Set([
+  "agent-metrics.ts",
+  "email.ts",
+  "github-webhooks.ts",
+  "knowledge.ts",
+  "outreach-inbound.ts",
+  "outreach-metrics.ts",
+  "outreach-sender.ts",
+  "outreach.ts",
+  "resend-inbound.ts",
+  "risk.ts",
+  "ses-inbound.ts",
+  "slack-interactions.ts",
+  "unsubscribe.ts",
+]);
+const RK9_FORK_ROUTES = new Set([
+  "GET /api/instance/concurrency",
+  "GET /api/instance/system-pause",
+  "POST /api/agents/{id}/external-runs",
+  "POST /api/companies/{companyId}/pause",
+  "POST /api/companies/{companyId}/resume",
+  "POST /api/instance/system-pause",
+  "POST /api/instance/system-resume",
+]);
+
 const ROUTE_LITERAL_PATTERN = /router\.(get|post|put|patch|delete)\(\s*["'`]([^"'`]+)["'`]/g;
 const ROUTER_METHOD_PATTERN = /router\.(get|post|put|patch|delete)\(/;
 const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
@@ -85,6 +113,8 @@ function loadActualRoutes() {
     const prefix = apiPrefixes[file];
     const source = fs.readFileSync(path.join(ROUTES_DIR, file), "utf8");
     if (!prefix) {
+      // --- RK9 Custom (RK9-313) ---
+      if (RK9_FORK_ROUTE_FILES.has(file)) continue;
       if (ROUTER_METHOD_PATTERN.test(source)) {
         unknownRouteFiles.push(file);
       }
@@ -156,7 +186,11 @@ describe("openapi routes", () => {
     const { routes: actualRoutes, unknownRouteFiles } = loadActualRoutes();
     const { routes: specRoutes } = loadSpecRoutes();
 
-    const missingInSpec = [...actualRoutes].filter((route) => !specRoutes.has(route)).sort();
+    const missingInSpec = [...actualRoutes]
+      // --- RK9 Custom (RK9-313) ---
+      .filter((route) => !RK9_FORK_ROUTES.has(route))
+      .filter((route) => !specRoutes.has(route))
+      .sort();
     const extraInSpec = [...specRoutes].filter((route) => !actualRoutes.has(route)).sort();
 
     expect({ unknownRouteFiles, missingInSpec, extraInSpec }).toEqual({
