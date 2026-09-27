@@ -7,6 +7,7 @@ import {
   activityLog,
   agents,
   companies,
+  companyMemberships,
   costEvents,
   createDb,
   documentRevisions,
@@ -15,6 +16,7 @@ import {
   instanceSettings,
   issueComments,
   issues,
+  principalPermissionGrants,
   statusCards,
   statusCardUpdates,
 } from "@paperclipai/db";
@@ -92,9 +94,32 @@ describeEmbeddedPostgres("status card routes", () => {
     await db.delete(activityLog);
     await db.delete(heartbeatRuns);
     await db.delete(instanceSettings);
+    await db.delete(principalPermissionGrants);
+    await db.delete(companyMemberships);
     await db.delete(agents);
     await db.delete(companies);
   });
+
+  // --- RK9 Custom (RK9-315): status cards reuse tasks:assign, and the fork keeps the RK9-313
+  // rule: an agent needs an explicit grant (or legacy creator authority), not upstream's default. ---
+  async function grantTaskAssign(companyId: string, agentId: string) {
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "agent",
+      principalId: agentId,
+      status: "active",
+      membershipRole: "member",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId,
+      principalType: "agent",
+      principalId: agentId,
+      permissionKey: "tasks:assign",
+      scope: null,
+      grantedByUserId: null,
+    });
+  }
+  // --- end RK9 Custom ---
 
   afterAll(async () => {
     await tempDb?.cleanup();
@@ -391,6 +416,7 @@ describeEmbeddedPostgres("status card routes", () => {
       })
       .returning()
       .then((rows) => rows[0]!);
+    await grantTaskAssign(company.id, agent.id); // RK9-315
     const app = createApp(db, {
       type: "agent",
       agentId: agent.id,
@@ -426,6 +452,7 @@ describeEmbeddedPostgres("status card routes", () => {
       adapterType: "process",
       adapterConfig: {},
     }).returning().then((rows) => rows[0]!);
+    await grantTaskAssign(company.id, agent.id); // RK9-315
     const app = createApp(db, agentActor(company.id, agent.id, null));
 
     const tooLong = await request(app)

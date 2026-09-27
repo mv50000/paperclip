@@ -139,7 +139,9 @@ jobs:
   # canary publish, so the nightly publish skips re-verification.
 
   select_nightly:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly')
+    # --- RK9 Custom (RK9-315) --- upstream-only nightly npm lane; the fork does not publish to npm
+    # (same reason as publish_canary: if false). smoke_nightly and publish_nightly chain from this job.
+    if: github.repository == 'paperclipai/paperclip' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly'))
     # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 10

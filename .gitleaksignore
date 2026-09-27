@@ -32,3 +32,9 @@ f712cedbc2e0c86ffa606018609831167641766a:ui/src/pages/apps/gateways/panels/Token
 931eec3fbf83dc425b5381ba5823125162cd13e7:server/src/__tests__/tool-gateway.test.ts:generic-api-key:2072
 7b35de65aaabbd53c2393cdf10c2223e36af1c23:packages/google-sheets-mcp-server/src/http.test.ts:private-key:26
 7b35de65aaabbd53c2393cdf10c2223e36af1c23:packages/google-sheets-mcp-server/src/server.test.ts:private-key:25
+# v2026.817.0 upstream test fixtures (RK9-315): fake hex decision-signing and agent JWT secrets
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:289
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:290
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:406
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/server-startup-feedback-export.test.ts:generic-api-key:453
+9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/decisions-service.test.ts:generic-api-key:44

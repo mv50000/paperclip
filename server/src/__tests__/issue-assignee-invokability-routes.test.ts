@@ -259,18 +259,19 @@ describe("issue assignee invokability guard", () => {
     expect(mockIssueService.update).toHaveBeenCalled();
   });
 
-  it("allows a board user to assign to a paused agent deliberately", async () => {
+  // --- RK9 Custom (RK9-315): the fork guard refuses paused and terminated assignees for every
+  // actor, board included (routes/issues.ts, "paused/terminated assignee guard"). Upstream
+  // v2026.817.0 lets a board user assign to a paused agent deliberately. ---
+  it("refuses a board user assigning to a paused agent (fork guard)", async () => {
     const existing = makeIssue({ assigneeAgentId: null });
-    const updated = makeIssue({ assigneeAgentId: PAUSED_AGENT_ID });
     mockIssueService.getById.mockResolvedValue(existing);
-    mockIssueService.update.mockResolvedValue(updated);
 
     const res = await request(createApp(boardActor()))
       .patch(`/api/issues/${existing.id}`)
       .send({ assigneeAgentId: PAUSED_AGENT_ID });
 
-    expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalled();
+    expect(res.status).toBe(409);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 });
 

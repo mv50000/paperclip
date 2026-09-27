@@ -329,15 +329,14 @@ describeEmbeddedPostgres("issueService.checkout interactive agent run handling (
     expect(comment.authorAgentId).toBe(agentId);
   });
 
-  it("rejects a comment's unknown actorRunId with a clean 4xx, not a 500", async () => {
+  // --- RK9 Custom (RK9-315): since v2026.817.0 an unknown comment run id is nulled out, not rejected ---
+  it("keeps a comment with an unknown actorRunId and drops the run id, not a 500", async () => {
     const { agentId, issueId } = await seedCompanyAgentAndIssue();
     const unknownRunId = randomUUID();
 
-    await expect(
-      svc.addComment(issueId, "comment with bad run", { agentId, runId: unknownRunId }),
-    ).rejects.toMatchObject({
-      status: 422,
-      message: expect.stringContaining("Unknown actorRunId"),
-    });
+    const comment = await svc.addComment(issueId, "comment with bad run", { agentId, runId: unknownRunId });
+
+    expect(comment.body).toBe("comment with bad run");
+    expect(comment.createdByRunId).toBeNull();
   });
 });

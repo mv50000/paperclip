@@ -8637,7 +8637,9 @@ export function issueService(db: Db) {
         .then((rows: Array<{ companyId: string }>) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
-      await assertKnownActorRunId(actor.runId ?? null, issue.companyId);
+      // --- RK9 Custom (RK9-76, RK9-315): no assertKnownActorRunId here. v2026.817.0 nulls out an
+      // unknown or non-UUID run id below (resolveCommentCreatedByRunId), so the comment is kept and
+      // nothing 500s. Checkout and status updates still reject unknown run ids (FK columns). ---
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,

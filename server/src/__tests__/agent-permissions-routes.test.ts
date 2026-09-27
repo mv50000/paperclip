@@ -1050,7 +1050,8 @@ describe.sequential("agent permission routes", () => {
           runtimeConfig: {
             heartbeat: {
               enabled: false,
-              maxConcurrentRuns: 20,
+              // --- RK9 Custom: fork default is 5, upstream 20 (packages/shared/src/constants.ts) ---
+              maxConcurrentRuns: AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
             },
             modelProfiles: {
               cheap: {

@@ -639,6 +639,19 @@ Porras 4/6. 39 konfliktitiedostoa ja 30 migraatiota (0182–0211), molemmat pilk
 | `skills/paperclip/SKILL.md` | upstreamin "Bounded write retry" + forkin blocked-rivi; lisäksi RK9 Custom -lohko blocked-syyn säännöstä |
 | muut | molemmat puolet (importit, exportit, testit, dokumentaatio) |
 
+CI:n löytämät sovitukset (RK9-315):
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `server/src/services/issues.ts` (`addComment`) | forkin `assertKnownActorRunId` (RK9-76) poistettiin kommenteista. 817 nollaa tuntemattoman tai ei-UUID-muotoisen run id:n (`resolveCommentCreatedByRunId`), joten kommentti säilyy eikä mikään palauta 500:aa. Forkin tarkistus palautti ei-UUID-arvolla Postgres-virheen (500). Checkout ja statuspäivitys hylkäävät tuntemattoman run id:n yhä (FK-sarakkeet). `issues-checkout-race.test.ts` odottaa nyt kommenttia ilman run id:tä. |
+| `issue-assignee-invokability-routes.test.ts` | upstream (#10837) sallii boardin asettaa paussatun agentin assigneeksi. Forkin vartija estää paussatut ja terminoidut kaikilta; testi odottaa 409:ää. |
+| `status-cards.test.ts` | status cardit käyttävät `tasks:assign`-oikeutta. Forkin RK9-313-sääntö vaatii agentilta grantin, joten testiagentti saa jäsenyyden ja grantin. |
+| `agent-permissions-routes.test.ts`, `heartbeat-stale-queue-invalidation.test.ts` | forkin oletukset: `AGENT_DEFAULT_MAX_CONCURRENT_RUNS` = 5, ja RK9-231-idle-portti pois testistä |
+| `server-startup-feedback-export.test.ts` | forkin `risk-event-listeners.js` mockattiin: sen riippuvuusketju lataa 817:ssä `services/issues.ts`:n, joka lukee db-tauluja moduulin latauksessa |
+| `cli/src/__tests__/onboard.test.ts` | `node:child_process`-mock osittaiseksi (817:n `service-manager.ts` tuo `execFile`n) |
+| `claude-local/src/server/test.probe.test.ts` | upstreamin usage-limit-syöte palautettiin; 720:n backport-markkeri poistui tarpeettomana |
+| `.github/workflows/release.yml`, `docker.yml` | upstreamin nightly-npm-kaista (`select_nightly`, ajastettu) ja `build-and-push-cloud` saivat ehdon `github.repository == 'paperclipai/paperclip'` |
+
 Poistetut tiedostot: upstream poisti cloud upstream -koodin (16 tiedostoa), `Activity.tsx`:n ja tool app galleryn.
 Fork ei ollut muuttanut niistä yhtään.
 

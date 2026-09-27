@@ -341,6 +341,12 @@ vi.mock("../services/slack/index.js", () => ({
   })),
 }));
 
+// --- RK9 Custom (RK9-315): the fork risk listeners import services/issues.ts through the risk
+// monitors. Since v2026.817.0 that chain reads @paperclipai/db tables at module load. ---
+vi.mock("../services/risk-event-listeners.js", () => ({
+  startRiskEventListeners: vi.fn(),
+}));
+
 vi.mock("../services/secret-proposals.js", () => ({
   createSecretProposalsService: vi.fn(() => ({
     sweepExpired: vi.fn(async () => 0),

@@ -377,6 +377,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
+        // --- RK9 Custom (RK9-315): turn off the fork RK9-231 idle gate, as above ---
+        skipWhenIdle: false,
         intervalSec: 60,
       },
     });

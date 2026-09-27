@@ -203,6 +203,8 @@ jobs:
   # separate runner, so this one carries its own copy of the prep steps
   # (checkout through schema labels) — the accepted cost of that isolation.
   build-and-push-cloud:
+    # --- RK9 Custom (RK9-315) --- Paperclip Cloud image is upstream-only; the fork does not run cloud stacks.
+    if: github.repository == 'paperclipai/paperclip'
     # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
     runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 60

@@ -239,6 +239,13 @@ CONCURRENTLY-optiota; prodin koolla (heartbeat_runs 19 280, activity_log 71 633 
 | Vaikutus | agentit ja operaattorin skriptit, jotka asettavat `blocked`in pelkällä kommentilla, saavat 422:n. Prodin määrä on todentamatta (tarkista `activity_log`ista status-muutokset `blocked`-tilaan ilman blockeria). |
 | RK9-toimi | `skills/paperclip/SKILL.md` kertoo säännön (RK9 Custom -lohko). Operaattorin `~/.claude`-skillit ja -skriptit päivitetään erikseen. |
 
+### Kommentin tuntematon run id ja paussattu assignee
+
+| Kohta | Arvo |
+|---|---|
+| Kommentti | 817 nollaa kommentin tuntemattoman tai virheellisen `X-Paperclip-Run-Id`:n ja tallentaa kommentin. Fork palautti tähän asti 422:n (RK9-76). Fork seuraa nyt upstreamia; checkout ja statuspäivitys palauttavat yhä 422:n. |
+| Paussattu assignee | upstream (#10837) estää vain agenttia asettamasta paussattua agenttia assigneeksi. Forkin vartija estää paussatut ja terminoidut kaikilta, myös boardilta (ennallaan). Human proxy -agentit ovat aina sallittuja. |
+
 ### Resolver-politiikka (`0203_interaction_resolver_governance`)
 
 | Kohta | Arvo |

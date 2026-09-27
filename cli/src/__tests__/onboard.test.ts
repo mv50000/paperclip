@@ -8,7 +8,9 @@ import type { PaperclipConfig } from "../config/schema.js";
 const ORIGINAL_ENV = { ...process.env };
 const execFileSyncMock = vi.hoisted(() => vi.fn());
 
-vi.mock("node:child_process", () => ({
+// --- RK9 Custom (RK9-315): partial mock; since v2026.817.0 service-manager.ts also imports execFile ---
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   execFileSync: execFileSyncMock,
 }));
 const ORIGINAL_CWD = process.cwd();
