@@ -610,10 +610,10 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockStorageService.deleteObject).not.toHaveBeenCalled();
   });
 
-  it("rejects the checked-out owner without a run id on attachment upload (401)", async () => {
-    // Regression: an agent-authenticated client (e.g. the CLI's attachment:upload)
-    // that fails to send X-Paperclip-Run-Id must be rejected — mutating your own
-    // in-progress checkout requires proving run ownership.
+  // --- RK9 Custom (RK9-76): the run id is optional for agents (interactive sessions have none).
+  // Upstream rejects a missing run id with 401 at the route; the fork passes null to
+  // assertCheckoutOwner, which rejects a run-locked checkout it cannot match. ---
+  it("hands a missing run id to the checkout owner check on attachment upload (RK9-76)", async () => {
     const app = await createApp({
       type: "agent",
       agentId: ownerAgentId,
@@ -621,13 +621,16 @@ describe("agent issue mutation checkout ownership", () => {
       source: "agent_key",
       // intentionally no runId
     });
+    // Same module instance as the app's errorHandler, so the HttpError maps to 409.
+    const { conflict } = await import("../errors.js");
+    mockIssueService.assertCheckoutOwner.mockRejectedValue(conflict("Issue run ownership conflict"));
 
     const res = await request(app)
       .post(`/api/companies/${companyId}/issues/${issueId}/attachments`)
       .attach("file", Buffer.from("report"), { filename: "report.html", contentType: "text/html" });
 
-    expect(res.status, JSON.stringify(res.body)).toBe(401);
-    expect(res.body.error).toBe("Agent run id required");
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(mockIssueService.assertCheckoutOwner).toHaveBeenCalledWith(issueId, ownerAgentId, null);
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
   });
 
