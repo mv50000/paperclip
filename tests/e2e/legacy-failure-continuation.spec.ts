@@ -102,7 +102,15 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
       const completed = await json(await request.get(`/api/issues/${issue.id}`));
       expect(completed).toMatchObject({ status: "done", executionBlocker: null });
       const runs = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, company.id), eq(heartbeatRuns.agentId, agent.id)));
-      expect(runs.filter(run => run.id !== sourceRunId)).toHaveLength(1);
+      // --- RK9 Custom (RK9-317): the fork starts an assigned backlog issue as todo, so creating the
+      // fixture issue queues an assignment wake. The reconciliation gate cancels it before it starts,
+      // so exactly one new run still executes. ---
+      const newRuns = runs.filter(run => run.id !== sourceRunId);
+      const rk9InitialAssignmentRuns = newRuns.filter(run => run.invocationSource === "assignment"
+        && run.status === "cancelled" && run.errorCode === "execution_reconciliation_required" && run.startedAt === null);
+      expect(rk9InitialAssignmentRuns.length).toBeLessThanOrEqual(1);
+      expect(newRuns.filter(run => !rk9InitialAssignmentRuns.includes(run))).toHaveLength(1);
+      // --- /RK9 Custom ---
       expect(runs.find(run => run.id === sourceRunId)).toMatchObject({ status: "failed", resultJson: null });
       const prompts = await readFile(path.join(root, "prompts"), "utf8");
       if (action === "queued_interrupt" || action === "automatic_message") {
