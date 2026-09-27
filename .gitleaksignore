@@ -40,3 +40,32 @@ f712cedbc2e0c86ffa606018609831167641766a:ui/src/pages/apps/gateways/panels/Token
 9c1f8e788732c2cff971d8f2b0c69499bde0fac7:server/src/__tests__/decisions-service.test.ts:generic-api-key:44
 # v2026.831.1 upstream test fixture (RK9-316): RFC 6455 sample Sec-WebSocket-Key ("the sample nonce")
 9964b034bbff24e700c8eccf5a8b1fc3daa44bf2:packages/paperclip-runner/src/control-plane/durable-prp-control-plane.test.ts:generic-api-key:170
+#
+# v2026.916.1 (RK9-317): all verified placeholders in upstream commits.
+# jwt.io sample token (sub "1234567890") in redaction and run-failure-report tests.
+c276d3fdc3f46c547e4ca9225b5aa822764a5e0b:server/src/services/__tests__/run-failure-report.test.ts:jwt:187
+0f9452101740835ce0b1488a204bf48acd5bafc3:server/src/__tests__/redaction.test.ts:jwt:101
+0f9452101740835ce0b1488a204bf48acd5bafc3:server/src/__tests__/redaction.test.ts:jwt:340
+25cf079ec54ec619882f30c3d862a9370827be05:server/src/__tests__/redaction.test.ts:jwt:48
+# PEM headers around base64 "private-key-material" (runner durable-state redaction tests) and an e2e paste fixture.
+0f9452101740835ce0b1488a204bf48acd5bafc3:packages/paperclip-runner/runner/crates/runner-core/src/durable/state.rs:private-key:2322
+0f9452101740835ce0b1488a204bf48acd5bafc3:packages/paperclip-runner/runner/crates/runner-core/src/durable/state.rs:private-key:2333
+0f9452101740835ce0b1488a204bf48acd5bafc3:packages/paperclip-runner/runner/crates/runner-core/src/durable/state.rs:private-key:2343
+0f9452101740835ce0b1488a204bf48acd5bafc3:packages/paperclip-runner/runner/crates/runner-core/src/durable/state.rs:private-key:2353
+889947c238c088a09c39d2783bc5e3521a8d1d8d:tests/e2e/chat-adapters-ui.spec.ts:private-key:23
+# Redaction canaries and test passwords that the tests prove get redacted.
+889947c238c088a09c39d2783bc5e3521a8d1d8d:server/src/__tests__/http-log-redaction.test.ts:generic-api-key:537
+889947c238c088a09c39d2783bc5e3521a8d1d8d:server/src/__tests__/http-log-redaction.test.ts:generic-api-key:539
+889947c238c088a09c39d2783bc5e3521a8d1d8d:server/src/__tests__/redact-sensitive.test.ts:generic-api-key:13
+ea86e780af658b13d804f7908a15c0a60d293e91:packages/paperclip-runner/src/tools/capability-semantic-tools.test.ts:generic-api-key:1841
+ab15aff390c9bbb0495cd93603adeaf118242a3d:packages/paperclip-runner/runner/crates/runner-core/tests/acpx_sidecar_transport.rs:generic-api-key:191
+# Lookup keys ("company/assigned") and a display token prefix ("pcgw_abcd1234"), not credentials.
+0f9452101740835ce0b1488a204bf48acd5bafc3:packages/paperclip-runner/src/drivers/opencode/opencode-server-driver.test.ts:generic-api-key:57
+0f9452101740835ce0b1488a204bf48acd5bafc3:packages/paperclip-runner/src/live/runnerd-codex-transport.test.ts:generic-api-key:809
+560e7e48b5f8db2a64237ff6908dff57f23bbabd:packages/paperclip-runner/src/live/runnerd-codex-transport.test.ts:generic-api-key:491
+2e5a24e17769f206fb350a719bf7c85eadb348c7:packages/paperclip-runner/src/drivers/opencode/opencode-server-driver.test.ts:generic-api-key:39
+b51112798f1794776adf837982be58d231d5ac3d:ui/src/pages/apps/gateways/ConnectClientDialog.test.tsx:generic-api-key:75
+# Plan docs: sha256 digests of patches and prose ("credential-free bytes"), not tokens.
+889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-github-private-attachment-authority.md:generic-api-key:107
+889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-chat-queue-and-webhook-repair.md:discord-api-token:3585
+889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-chat-queue-and-webhook-repair.md:generic-api-key:6669
