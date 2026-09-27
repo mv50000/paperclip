@@ -1475,68 +1475,201 @@
     {
       "idx": 212,
       "version": "7",
+      "when": 1786388759523,
+      "tag": "0212_onboarding_first_task_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 213,
+      "version": "7",
+      "when": 1786467951626,
+      "tag": "0213_complete_mystique",
+      "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1786467951627,
+      "tag": "0214_lively_lord_tyger",
+      "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1786467951628,
+      "tag": "0215_flat_daimon_hellstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 216,
+      "version": "7",
+      "when": 1786467952628,
+      "tag": "0216_company_onboarding_seeds",
+      "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1786643974972,
+      "tag": "0217_yielding_starbolt",
+      "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1786711898729,
+      "tag": "0218_mushy_jack_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1786711898730,
+      "tag": "0219_runtime_service_exposure",
+      "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1786711898731,
+      "tag": "0220_execution_workspace_runtime_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1786983881320,
+      "tag": "0221_swift_justin_hammer",
+      "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1786983999395,
+      "tag": "0222_orphan_cleanup_env_reference_survives_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 223,
+      "version": "7",
+      "when": 1787000753489,
+      "tag": "0223_robust_zaladane",
+      "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1787000754489,
+      "tag": "0224_unified_adapter_auth_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1787101144413,
+      "tag": "0225_drop_claude_setup_token_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 226,
+      "version": "7",
+      "when": 1787261199301,
+      "tag": "0226_tan_colossus",
+      "breakpoints": true
+    },
+    {
+      "idx": 227,
+      "version": "7",
+      "when": 1787668790923,
+      "tag": "0227_modern_pandemic",
+      "breakpoints": true
+    },
+    {
+      "idx": 228,
+      "version": "7",
+      "when": 1787837657366,
+      "tag": "0228_nasty_grim_reaper",
+      "breakpoints": true
+    },
+    {
+      "idx": 229,
+      "version": "7",
+      "when": 1787854369379,
+      "tag": "0229_drop_company_brand_color_and_attachment_max_bytes",
+      "breakpoints": true
+    },
+    {
+      "idx": 230,
+      "version": "7",
+      "when": 1787880484952,
+      "tag": "0230_better_auth_account_issuer",
+      "breakpoints": true
+    },
+    {
+      "idx": 231,
+      "version": "7",
       "when": 1777196451045,
       "tag": "9001_rk9_risk_management",
       "breakpoints": true
     },
     {
-      "idx": 213,
+      "idx": 232,
       "version": "7",
       "when": 1777325153203,
       "tag": "9002_rk9_resend_email",
       "breakpoints": true
     },
     {
-      "idx": 214,
+      "idx": 233,
       "version": "7",
       "when": 1777351911226,
       "tag": "9003_rk9_email_escalation",
       "breakpoints": true
     },
     {
-      "idx": 215,
+      "idx": 234,
       "version": "7",
       "when": 1777629600000,
       "tag": "9004_rk9_resolve_stale_incidents",
       "breakpoints": true
     },
     {
-      "idx": 216,
+      "idx": 235,
       "version": "7",
       "when": 1785322800000,
       "tag": "9005_rk9_email_support_desk",
       "breakpoints": true
     },
     {
-      "idx": 217,
+      "idx": 236,
       "version": "7",
       "when": 1789290000000,
       "tag": "9006_rk9_outreach",
       "breakpoints": true
     },
     {
-      "idx": 218,
+      "idx": 237,
       "version": "7",
       "when": 1789307684000,
       "tag": "9007_rk9_outreach_enrichment",
       "breakpoints": true
     },
     {
-      "idx": 219,
+      "idx": 238,
       "version": "7",
       "when": 1789399200000,
       "tag": "9008_rk9_outreach_sender",
       "breakpoints": true
     },
     {
-      "idx": 220,
+      "idx": 239,
       "version": "7",
       "when": 1789485600000,
       "tag": "9009_rk9_outreach_metrics",
       "breakpoints": true
     },
     {
-      "idx": 221,
+      "idx": 240,
       "version": "7",
       "when": 1789572000000,
       "tag": "9010_rk9_outreach_inbound_routes",
