@@ -145,7 +145,9 @@ jobs:
   general_tests:
     name: General tests (${{ matrix.group_label }})
     needs: [policy]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -191,7 +193,9 @@ jobs:
     name: verify
     if: ${{ always() }}
     needs: [typecheck_release_registry, general_tests, build]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 5
 
     steps:
@@ -208,7 +212,9 @@ jobs:
   build:
     name: Build
     needs: [policy]
-    runs-on: ubuntu-latest
+    # --- RK9 Custom (RK9-350) --- runner-vipu vain saman repon PR:ille;
+    # fork-PR:t ajavat aina GitHub-hostatulla. Ks. doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 20
 
     steps:
