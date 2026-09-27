@@ -129,8 +129,8 @@ export const updateOutreachSequenceSchema = z
 export type UpdateOutreachSequence = z.infer<typeof updateOutreachSequenceSchema>;
 
 export const createOutreachMessageSchema = z.object({
-  prospectId: z.string().uuid(),
-  sequenceId: z.string().uuid().optional().nullable(),
+  prospectId: z.string().guid(),
+  sequenceId: z.string().guid().optional().nullable(),
   step: z.number().int().min(0).max(1000).default(0),
   subject: z.string().trim().min(1).max(998),
   bodyText: z.string().min(1).max(100_000),
@@ -162,24 +162,24 @@ export type UpdateOutreachMessage = z.infer<typeof updateOutreachMessageSchema>;
 // RK9-196: batch enrichment / drafting requests from the CLI. Bounded well
 // below the 1000-row import cap — these calls do real network/LLM work.
 export const enrichOutreachProspectsSchema = z.object({
-  prospectIds: z.array(z.string().uuid()).min(1).max(200),
+  prospectIds: z.array(z.string().guid()).min(1).max(200),
 });
 export type EnrichOutreachProspects = z.infer<typeof enrichOutreachProspectsSchema>;
 
 export const draftOutreachMessagesSchema = z.object({
-  prospectIds: z.array(z.string().uuid()).min(1).max(200),
+  prospectIds: z.array(z.string().guid()).min(1).max(200),
   company: z.enum(OUTREACH_TEMPLATE_COMPANIES),
   // RK9-224: if omitted, the service resolves it to the company's one active
   // sequence whose first step targets this template — 422 `sequence_required`
   // if that isn't unique. A draft is never created without a sequence.
-  sequenceId: z.string().uuid().optional(),
+  sequenceId: z.string().guid().optional(),
   maxCostUsd: z.number().positive().max(100).default(1),
 });
 export type DraftOutreachMessages = z.infer<typeof draftOutreachMessagesSchema>;
 
 export const createOutreachEventSchema = z.object({
-  prospectId: z.string().uuid(),
-  messageId: z.string().uuid().optional().nullable(),
+  prospectId: z.string().guid(),
+  messageId: z.string().guid().optional().nullable(),
   type: z.enum(OUTREACH_EVENT_TYPES),
   payload: z.record(z.string(), z.unknown()).default({}),
   occurredAt: z

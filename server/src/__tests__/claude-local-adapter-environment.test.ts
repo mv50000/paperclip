@@ -522,15 +522,22 @@ console.log(JSON.stringify({ type: "result", result: "hello", usage: { input_tok
  */
 describe("claude_local hello probe environment", () => {
   async function probeWithHostKey(optIn: boolean): Promise<string | null> {
+    // Since v2026.831.1 the local probe ignores the caller `command` path and
+    // resolves `claude` from the trusted server PATH, and its `env` option is
+    // deny-by-default. runChildProcess still merges the host env, so the fake
+    // `claude` goes first on the host PATH and the capture path is a host env
+    // value (not PAPERCLIP_*, which the merge strips). RK9-316.
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-probe-env-"));
-    const commandPath = path.join(root, "claude");
+    const binDir = path.join(root, "bin");
+    const commandPath = path.join(binDir, "claude");
     const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(binDir, { recursive: true });
     await fs.writeFile(
       commandPath,
       `#!/usr/bin/env node
 const fs = require("node:fs");
 const key = Object.prototype.hasOwnProperty.call(process.env, "ANTHROPIC_API_KEY") ? process.env.ANTHROPIC_API_KEY : null;
-fs.writeFileSync(process.env.PAPERCLIP_TEST_CAPTURE_PATH, JSON.stringify({ anthropicApiKey: key }), "utf8");
+fs.writeFileSync(process.env.RK9_TEST_PROBE_CAPTURE_PATH, JSON.stringify({ anthropicApiKey: key }), "utf8");
 fs.readFileSync(0, "utf8");
 console.log(JSON.stringify({ type: "result", session_id: "s", result: "hello" }));
 `,
@@ -538,9 +545,12 @@ console.log(JSON.stringify({ type: "result", session_id: "s", result: "hello" })
     );
     await fs.chmod(commandPath, 0o755);
 
+    const originalPath = process.env.PATH;
     delete process.env.CLAUDE_CODE_USE_BEDROCK;
     delete process.env.ANTHROPIC_BEDROCK_BASE_URL;
     process.env.ANTHROPIC_API_KEY = "sk-test-host";
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
+    process.env.RK9_TEST_PROBE_CAPTURE_PATH = capturePath;
     if (optIn) process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY = "1";
     else delete process.env.PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY;
 
@@ -549,15 +559,16 @@ console.log(JSON.stringify({ type: "result", session_id: "s", result: "hello" })
         companyId: "company-1",
         adapterType: "claude_local",
         config: {
-          command: commandPath,
           cwd: root,
-          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
         },
       });
       expect(result.checks.some((check) => check.code === "claude_hello_probe_passed")).toBe(true);
       const captured = JSON.parse(await fs.readFile(capturePath, "utf8")) as { anthropicApiKey: string | null };
       return captured.anthropicApiKey;
     } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      delete process.env.RK9_TEST_PROBE_CAPTURE_PATH;
       await fs.rm(root, { recursive: true, force: true });
     }
   }

@@ -294,6 +294,8 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
     expect(mockAgentService.create).toHaveBeenCalledWith(
       companyId,
       expect.objectContaining({ status: "pending_approval" }),
+      // v2026.831.1 passes create options (claudeLogin) as a third argument.
+      expect.anything(),
     );
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       companyId,
@@ -316,6 +318,8 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
     expect(mockAgentService.create).toHaveBeenCalledWith(
       companyId,
       expect.objectContaining({ status: "pending_approval" }),
+      // v2026.831.1 passes create options (claudeLogin) as a third argument.
+      expect.anything(),
     );
     expect(mockApprovalService.create).toHaveBeenCalledWith(
       companyId,
@@ -355,6 +359,8 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
     expect(mockAgentService.create).toHaveBeenCalledWith(
       companyId,
       expect.objectContaining({ status: "idle" }),
+      // v2026.831.1 passes create options (claudeLogin) as a third argument.
+      expect.anything(),
     );
     expect(mockApprovalService.create).not.toHaveBeenCalled();
   });
