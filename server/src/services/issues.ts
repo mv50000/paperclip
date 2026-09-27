@@ -5054,6 +5054,10 @@ export function issueService(db: Db) {
   // unhandled Postgres FK-violation (500) instead of a clean client error.
   async function assertKnownActorRunId(runId: string | null, companyId?: string): Promise<void> {
     if (!runId) return;
+    // --- RK9 Custom (RK9-315): a non-UUID run id is a clean 422, not a Postgres uuid cast error ---
+    if (!isUuidLike(runId)) {
+      throw unprocessable("Unknown actorRunId: no matching heartbeat run", { actorRunId: runId });
+    }
     const run = await db
       .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId })
       .from(heartbeatRuns)
@@ -8637,9 +8641,10 @@ export function issueService(db: Db) {
         .then((rows: Array<{ companyId: string }>) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
-      // --- RK9 Custom (RK9-76, RK9-315): no assertKnownActorRunId here. v2026.817.0 nulls out an
-      // unknown or non-UUID run id below (resolveCommentCreatedByRunId), so the comment is kept and
-      // nothing 500s. Checkout and status updates still reject unknown run ids (FK columns). ---
+      // --- RK9 Custom (RK9-76, RK9-315): reject an unknown run id before the insert. v2026.817.0
+      // only nulls createdByRunId, but the route then writes the raw run id to activity_log and
+      // execution decisions (FK to heartbeat_runs) and would 500 after the comment is saved. ---
+      await assertKnownActorRunId(actor.runId ?? null, issue.companyId);
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,

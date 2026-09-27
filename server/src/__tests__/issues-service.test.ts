@@ -6722,22 +6722,18 @@ describeEmbeddedPostgres("issueService.addComment createdByRunId", () => {
       .then((rows) => rows[0]?.createdByRunId ?? null);
   }
 
-  it("nulls out a non-UUID x-paperclip-run-id instead of 500-ing", async () => {
-    const comment = await svc.addComment(issueId, "hello from a synthetic run id", {
+  // --- RK9 Custom (RK9-76, RK9-315): the fork rejects an unknown or non-UUID comment run id with
+  // a clean 422 before the insert (the route writes the raw run id to FK columns afterwards). ---
+  it("rejects a non-UUID x-paperclip-run-id with a 422 instead of 500-ing", async () => {
+    await expect(svc.addComment(issueId, "hello from a synthetic run id", {
       runId: "client-request-abc123",
-    });
-
-    expect(comment.id).toBeTruthy();
-    expect(await createdByRunIdFor(comment.id)).toBeNull();
+    })).rejects.toMatchObject({ status: 422 });
   });
 
-  it("nulls out a UUID runId absent from heartbeat_runs instead of 500-ing", async () => {
-    const comment = await svc.addComment(issueId, "hello from a stale run", {
+  it("rejects a UUID runId absent from heartbeat_runs with a 422 instead of 500-ing", async () => {
+    await expect(svc.addComment(issueId, "hello from a stale run", {
       runId: randomUUID(),
-    });
-
-    expect(comment.id).toBeTruthy();
-    expect(await createdByRunIdFor(comment.id)).toBeNull();
+    })).rejects.toMatchObject({ status: 422 });
   });
 
   it("preserves a valid runId that exists in heartbeat_runs for the company", async () => {

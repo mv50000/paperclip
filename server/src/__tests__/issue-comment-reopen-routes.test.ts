@@ -2007,6 +2007,53 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
   });
 
+  // --- RK9 Custom (RK9-76, RK9-315): runless human-proxy writes (interactive operator sessions)
+  // skip the run requirement; other runless agents still get 403 (tests below). ---
+  it("lets a runless human-proxy agent comment through PATCH without a run header", async () => {
+    const humanProxyId = "55555555-5555-4555-8555-555555555555";
+    const existing = makeIssue("todo");
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...existing,
+      ...patch,
+    }));
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === humanProxyId
+        ? { id: humanProxyId, companyId: "company-1", adapterType: "human_proxy", status: "idle" }
+        : null,
+    );
+    const actor = { ...agentActor(humanProxyId), runId: undefined };
+
+    const res = await request(await installActor(createApp(), actor))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ comment: "Operator note from an interactive session" });
+
+    expect(res.body?.details?.code).not.toBe("cross_issue_influence_run_context_required");
+    expect(res.status).toBe(200);
+    expect(mockObserveCrossIssueInfluence).not.toHaveBeenCalled();
+  });
+
+  it("rejects a runless non-human-proxy agent even when the agent exists", async () => {
+    const agentA = "44444444-4444-4444-8444-444444444444";
+    mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+    mockAgentService.getById.mockResolvedValue({
+      id: agentA,
+      companyId: "company-1",
+      adapterType: "claude_local",
+      status: "idle",
+    });
+    const actor = { ...agentActor(agentA), runId: undefined };
+
+    const res = await request(await installActor(createApp(), actor))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "cross-issue write" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.details).toEqual({ code: "cross_issue_influence_run_context_required" });
+    expect(mockIssueService.addComment).not.toHaveBeenCalled();
+  });
+  // --- end RK9 Custom ---
+
   it("counts a comment-only cross-issue PATCH once", async () => {
     const agentA = "44444444-4444-4444-8444-444444444444";
     const existing = {

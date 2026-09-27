@@ -643,7 +643,8 @@ CI:n löytämät sovitukset (RK9-315):
 
 | Tiedosto | Ratkaisu |
 |---|---|
-| `server/src/services/issues.ts` (`addComment`) | forkin `assertKnownActorRunId` (RK9-76) poistettiin kommenteista. 817 nollaa tuntemattoman tai ei-UUID-muotoisen run id:n (`resolveCommentCreatedByRunId`), joten kommentti säilyy eikä mikään palauta 500:aa. Forkin tarkistus palautti ei-UUID-arvolla Postgres-virheen (500). Checkout ja statuspäivitys hylkäävät tuntemattoman run id:n yhä (FK-sarakkeet). `issues-checkout-race.test.ts` odottaa nyt kommenttia ilman run id:tä. |
+| `server/src/services/issues.ts` (`addComment`, `assertKnownActorRunId`) | forkin RK9-76-tarkistus pidettiin: tuntematon run id on 422 ennen tallennusta. Ilman sitä board-kommentti tallentuisi ja reitti palauttaisi 500:n `activity_log`in FK:sta. Tarkistus hylkää nyt myös ei-UUID-arvon 422:lla (ennen Postgres-virhe). Upstreamin kaksi "nulls out" -testiä odottavat 422:ta. |
+| `server/src/routes/issues.ts` (`assertCrossIssueInfluenceWithinRunCap`) | runiton human proxy -agentti ohittaa 817:n run-vaatimuksen (operaattorin interaktiiviset sessiot, RK9-76). Testit: `issue-comment-reopen-routes.test.ts` (RK9 Custom -lohko). |
 | `issue-assignee-invokability-routes.test.ts` | upstream (#10837) sallii boardin asettaa paussatun agentin assigneeksi. Forkin vartija estää paussatut ja terminoidut kaikilta; testi odottaa 409:ää. |
 | `status-cards.test.ts` | status cardit käyttävät `tasks:assign`-oikeutta. Forkin RK9-313-sääntö vaatii agentilta grantin, joten testiagentti saa jäsenyyden ja grantin. |
 | `agent-permissions-routes.test.ts`, `heartbeat-stale-queue-invalidation.test.ts` | forkin oletukset: `AGENT_DEFAULT_MAX_CONCURRENT_RUNS` = 5, ja RK9-231-idle-portti pois testistä |

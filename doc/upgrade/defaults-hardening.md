@@ -243,7 +243,8 @@ CONCURRENTLY-optiota; prodin koolla (heartbeat_runs 19 280, activity_log 71 633 
 
 | Kohta | Arvo |
 |---|---|
-| Kommentti | 817 nollaa kommentin tuntemattoman tai virheellisen `X-Paperclip-Run-Id`:n ja tallentaa kommentin. Fork palautti tähän asti 422:n (RK9-76). Fork seuraa nyt upstreamia; checkout ja statuspäivitys palauttavat yhä 422:n. |
+| Kommentti | 817 nollaa kommentin tuntemattoman tai virheellisen `X-Paperclip-Run-Id`:n ja tallentaa kommentin. Reitti kirjoittaa kuitenkin raa'an run id:n `activity_log`iin ja execution decisioneihin (FK), jolloin board-kommentti tallentuisi ja pyyntö palauttaisi 500:n. Fork pitää RK9-76:n 422:n ennen tallennusta, myös ei-UUID-arvolle. |
+| Runiton agenttikirjoitus | 817 (#10837, #10843) vaatii run id:n jokaiselta agentin issue-kommentilta ja -muutokselta, muuten 403 `cross_issue_influence_run_context_required`. Operaattorin interaktiiviset sessiot kirjoittavat yrityksen human proxy -agenttina ("AI") ilman runia. Fork päästää runittoman human proxy -agentin kirjoitukset läpi saman yrityksen issueihin (RK9 Custom, `assertCrossIssueInfluenceWithinRunCap`). Muut runittomat agentit saavat 403:n. |
 | Paussattu assignee | upstream (#10837) estää vain agenttia asettamasta paussattua agenttia assigneeksi. Forkin vartija estää paussatut ja terminoidut kaikilta, myös boardilta (ennallaan). Human proxy -agentit ovat aina sallittuja. |
 
 ### Resolver-politiikka (`0203_interaction_resolver_governance`)
