@@ -18,6 +18,7 @@
 #   PAPERCLIP_SMOKE_TOKEN       board-token; ilman sitä risk-reitiltä hyväksytään 401/403
 #   PAPERCLIP_SMOKE_COMPANY_ID  yritys-id risk-reitille (oletus: nollauuid)
 #   OUTREACH_METRICS_API_KEY    jos asetettu, digest ja /metrics vaaditaan 200:ksi
+#   OUTREACH_SENDER_API_KEY     jos asetettu, sender-jonon (GET /api/outreach/send-queue) pitää antaa 200
 #
 # Poistumiskoodi: 0 = kaikki ok, 1 = vähintään yksi tarkistus epäonnistui, 2 = käyttövirhe.
 
@@ -63,7 +64,9 @@ for (let n = 9001; n <= 9010; n++) {
   expected.push(tag);
 }
 const custom = tags.filter((t) => /^9\d{3}_/.test(t));
-if (custom.slice(0, expected.length).join() !== expected.join()) errors.push(`9xxx-järjestys väärä: ${custom.join(", ")}`);
+// RK9-317: 9000 (email_messages split) runs before 9001 and 9011 after 9010, so 9001–9010 must keep
+// their relative order inside the 9xxx rows but no longer start them.
+if (custom.filter((t) => expected.includes(t)).join() !== expected.join()) errors.push(`9xxx-järjestys väärä: ${custom.join(", ")}`);
 const firstCustom = tags.findIndex((t) => /^9\d{3}_/.test(t));
 const lastUpstream = tags.map((t) => /^0\d{3}_/.test(t)).lastIndexOf(true);
 if (firstCustom !== -1 && lastUpstream > firstCustom) errors.push(`upstream-migraatio ${tags[lastUpstream]} on 9xxx-rivien jälkeen`);
@@ -191,6 +194,18 @@ check_http() {
     # /metrics on /api:n ulkopuolella; 401 erottaa sen UI:n SPA-fallbackista (joka antaisi 200).
     expect "outreach-metrics" "401" GET /metrics -
   fi
+
+  # --- RK9 Custom (RK9-317): sender-avaimen positiivinen polku. 817/831 opetti, että pelkkä 401 ilman
+  # avainta ei todista mitään: auth-middleware voi hylätä staattisen avaimen ennen fork-reittiä (#133).
+  # limit=1: jonon luku voi tallentaa yhdelle jonossa olevalle viestille unsubscribe-tokenin ja
+  # Message-ID:n, jotka sender tallentaisi joka tapauksessa seuraavalla haullaan. Ei lähetä postia. ---
+  if [[ -n "${OUTREACH_SENDER_API_KEY:-}" ]]; then
+    expect "outreach-send-queue" "200" GET "/api/outreach/send-queue?limit=1" '"items"' \
+      -H "Authorization: Bearer $OUTREACH_SENDER_API_KEY"
+  else
+    expect "outreach-send-queue" "401" GET "/api/outreach/send-queue?limit=1" -
+  fi
+  # --- /RK9 Custom ---
 
   # Unsubscribe: tuntematon token palauttaa aina saman vahvistussivun eikä muuta dataa.
   expect "unsubscribe" "200" GET /u/upgrade-smoke-nonexistent-token 'peruuttanut'

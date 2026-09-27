@@ -68,6 +68,21 @@ export function databaseNameFromUrl(url: string): string | null {
   }
 }
 
+// --- RK9 Custom (RK9-317): fork tables that a fork migration renames on the upgrade path. Upstream
+// v2026.916.1 creates its own "email_messages" (AgentMail, 0272), so the slot migration 0126 renames
+// the fork's Resend table first. Keys: the name the 9xxx migrations created; values: the new name and
+// the migration that renames it. The dry-run compares row counts across the rename and does not
+// report the upstream CREATE TABLE as a fork collision while that migration is pending. ---
+export const FORK_TABLE_RENAMES: Readonly<Record<string, { to: string; migration: string }>> = {
+  email_messages: { to: "rk9_email_messages", migration: "0126_rk9_email_messages_rename.sql" },
+};
+
+/** Parse --expect-pending-fork: a comma-separated list of fork migration files, empty entries dropped. */
+export function parseFileList(value: string): string[] {
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+// --- end RK9 Custom ---
+
 export type PinnedHashCheck = {
   missingBaseline: string[];
   changed: Array<{ file: string; expected: string; actual: string }>;

@@ -11,7 +11,10 @@
  *   PGHOST=/var/run/postgresql PGUSER=paperclip \
  *     pnpm --filter @paperclipai/db db:migration-dry-run --dump /var/backups/paperclip/<x>.dump \
  *       [--database paperclip_migdryrun] [--report report.md] [--schema-diff] [--keep-db] \
- *       [--deploy-window-seconds 300]
+ *       [--deploy-window-seconds 300] [--expect-pending-fork a.sql,b.sql]
+ *
+ * --expect-pending-fork (RK9 Custom, RK9-317): fork migration files that this stage adds and that
+ * are therefore pending on the prod copy. The pending fork set must equal this list exactly.
  *
  * Fails closed: the target must match paperclip_migdryrun[_x], is never `paperclip`, and is
  * reached over a unix socket only. The scratch database is dropped at the end unless --keep-db.
@@ -30,8 +33,10 @@ import {
   createdObjectsIn,
   destructiveStatementsIn,
   forkTableReferencesIn,
+  FORK_TABLE_RENAMES,
   isForkMigrationFile,
   migrationSha256,
+  parseFileList,
   redactDbError,
   scratchTargetViolations,
   tablesCreatedIn,
@@ -50,6 +55,7 @@ type Args = {
   keepDb: boolean;
   schemaDiff: boolean;
   deployWindowSeconds: number;
+  expectPendingFork: string[];
 };
 
 function parseArgs(argv: string[]): Args {
@@ -60,6 +66,7 @@ function parseArgs(argv: string[]): Args {
     keepDb: false,
     schemaDiff: false,
     deployWindowSeconds: 300,
+    expectPendingFork: [],
   };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
@@ -78,6 +85,7 @@ function parseArgs(argv: string[]): Args {
     else if (flag === "--keep-db") args.keepDb = true;
     else if (flag === "--schema-diff") args.schemaDiff = true;
     else if (flag === "--deploy-window-seconds") args.deployWindowSeconds = Number(value());
+    else if (flag === "--expect-pending-fork") args.expectPendingFork = parseFileList(value());
     else usage(`unknown argument ${flag}`);
   }
   if (!Number.isFinite(args.deployWindowSeconds) || args.deployWindowSeconds <= 0) usage("bad --deploy-window-seconds");
@@ -398,7 +406,10 @@ async function main(): Promise<void> {
     out(`- Driver view before the run: status \`${preInspect.status}\`, applied ${preInspect.appliedMigrations.length}, pending ${preInspect.status === "needsMigrations" ? preInspect.pendingMigrations.length : 0}.`);
     const pendingFiles = preInspect.status === "needsMigrations" ? preInspect.pendingMigrations : [];
     const pendingForkFiles = pendingFiles.filter(isFork);
-    assertOk(pendingForkFiles.length === 0, `no fork 9xxx migration is pending before the run (pending fork: ${pendingForkFiles.join(", ") || "none"})`);
+    // RK9 Custom (RK9-317): a stage may add fork migrations; they must be named with --expect-pending-fork.
+    const expectedPendingFork = [...args.expectPendingFork].sort();
+    assertOk([...pendingForkFiles].sort().join() === expectedPendingFork.join(),
+      `pending fork migrations equal --expect-pending-fork (pending fork: ${pendingForkFiles.join(", ") || "none"}; expected: ${expectedPendingFork.join(", ") || "none"})`);
     const upstreamPending = pendingFiles.filter((f) => !isFork(f));
     out(`- Pending upstream migrations: ${upstreamPending.length} (${upstreamPending[0] ?? "-"} .. ${upstreamPending[upstreamPending.length - 1] ?? "-"}).`);
     const pendingContents = contents.filter((c) => pendingFiles.includes(c.file));
@@ -412,8 +423,15 @@ async function main(): Promise<void> {
     }
     out();
     out("### Upstream DDL touching fork tables");
+    // RK9 Custom (RK9-317): a fork table that a pending fork migration renames first is not touched by
+    // upstream DDL that uses its old name; the new name is the fork table from then on.
+    const renamedBeforeUpstream = new Set(Object.entries(FORK_TABLE_RENAMES)
+      .filter(([table, rename]) => forkTables.has(table) && pendingFiles.includes(rename.migration))
+      .map(([table]) => table));
+    const upstreamViewOfForkTables = new Set([...forkTables].filter((t) => !renamedBeforeUpstream.has(t)));
+    for (const table of renamedBeforeUpstream) upstreamViewOfForkTables.add(FORK_TABLE_RENAMES[table].to);
     const refs = pendingContents.filter((c) => !isFork(c.file)).flatMap((c) =>
-      forkTableReferencesIn(c.content, forkTables).map((r) => ({ file: c.file, ...r })));
+      forkTableReferencesIn(c.content, upstreamViewOfForkTables).map((r) => ({ file: c.file, ...r })));
     if (refs.length === 0) out("- None: no pending upstream statement alters, drops or references a fork table.");
     for (const ref of refs) out(`- \`${ref.file}\` (${ref.via}) ${ref.table}: \`${ref.statement}\``);
 
@@ -423,7 +441,12 @@ async function main(): Promise<void> {
     for (const { file, content } of pendingContents.filter((c) => !isFork(c.file))) {
       const created = createdObjectsIn(content);
       for (const table of created.tables) {
-        if (await tableExists(sql, table)) collisions.push(`\`${file}\` creates table \`${table}\`, which exists (${before.get(table) ?? 0} rows)${forkTables.has(table) ? " [FORK TABLE]" : ""}`);
+        if (!(await tableExists(sql, table))) continue;
+        if (renamedBeforeUpstream.has(table)) {
+          out(`- \`${file}\` creates table \`${table}\`: the fork table of that name is renamed to \`${FORK_TABLE_RENAMES[table].to}\` first by pending \`${FORK_TABLE_RENAMES[table].migration}\` (RK9-317).`);
+          continue;
+        }
+        collisions.push(`\`${file}\` creates table \`${table}\`, which exists (${before.get(table) ?? 0} rows)${forkTables.has(table) ? " [FORK TABLE]" : ""}`);
       }
       // A drop followed by a re-add of the same name in one migration is a rebuild, not a collision.
       const dropped = (kind: string, name: string) =>
@@ -476,7 +499,12 @@ async function main(): Promise<void> {
     const afterCounts = await tableCounts(after);
     out();
     out("## 4. Row counts");
-    const forkDeltas = [...forkTables].map((t) => ({ table: t, before: before.get(t) ?? 0, after: afterCounts.get(t) ?? 0 }));
+    // RK9 Custom (RK9-317): a renamed fork table is counted under its new name after the run.
+    const forkDeltas = [...forkTables].map((t) => {
+      const renamed = FORK_TABLE_RENAMES[t] && afterCounts.has(FORK_TABLE_RENAMES[t].to) ? FORK_TABLE_RENAMES[t].to : null;
+      return { table: renamed ? `${t} -> ${renamed}` : t, before: before.get(t) ?? 0, after: afterCounts.get(renamed ?? t) ?? 0 };
+    });
+    const renamedForkTargets = new Set(Object.values(FORK_TABLE_RENAMES).map((rename) => rename.to));
     assertOk(forkDeltas.every((d) => d.before === d.after) && forkDeltas.length > 0, `fork 9001-9010 tables: row counts identical before and after (${forkDeltas.length} tables, non-zero deltas: ${forkDeltas.filter((d) => d.before !== d.after).map((d) => `${d.table} ${d.before}->${d.after}`).join(", ") || "none"})`);
     out();
     out("| fork table | before | after |");
@@ -484,7 +512,7 @@ async function main(): Promise<void> {
     for (const d of forkDeltas.sort((a, b) => a.table.localeCompare(b.table))) out(`| ${d.table} | ${d.before} | ${d.after} |`);
     out();
     const otherChanges = [...new Set([...before.keys(), ...afterCounts.keys()])]
-      .filter((t) => !forkTables.has(t) && before.get(t) !== afterCounts.get(t))
+      .filter((t) => !forkTables.has(t) && !renamedForkTargets.has(t) && before.get(t) !== afterCounts.get(t))
       .sort();
     const newTables = otherChanges.filter((t) => !before.has(t));
     const goneTables = otherChanges.filter((t) => !afterCounts.has(t));

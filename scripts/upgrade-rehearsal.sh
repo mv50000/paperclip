@@ -66,6 +66,9 @@ STATE_FILE="$REH_HOME/rehearsal-state.env"
 HOLDER_PID_FILE="$REH_HOME/netns-holder.pid"
 SERVER_PID_FILE="$REH_HOME/server.pid"
 SERVER_LOG="$REH_HOME/server.log"
+# RK9-317: harjoituksen omat satunnaiset outreach-avaimet (ei prodin avaimia). Palvelin saa ne, ja smoke
+# testaa niillä sender-, digest- ja /metrics-reittien 200-polun (831:n opetus: pelkkä 401 ei todista mitään).
+SMOKE_KEYS_FILE="$REH_HOME/smoke-keys.env"
 
 # Taulut, joiden rivimäärät vertaillaan rollbackissa ja joista etsitään ulos lähteneet rivit.
 OUTBOUND_TABLES=(email_messages email_outbound_audit outreach_messages outreach_events outreach_sender_pauses)
@@ -103,6 +106,18 @@ guard_names() {
 }
 
 psql_q() { psql -X -qAt -v ON_ERROR_STOP=1 "$@"; }
+
+# RK9-317: luo harjoituksen outreach-avaimet kerran (0600) ja lataa ne muuttujiin.
+load_smoke_keys() {
+  if [[ ! -s "$SMOKE_KEYS_FILE" ]]; then
+    printf 'SMOKE_SENDER_KEY=rehearsal-%s\nSMOKE_METRICS_KEY=rehearsal-%s\n' \
+      "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')" >"$SMOKE_KEYS_FILE"
+    chmod 600 "$SMOKE_KEYS_FILE"
+  fi
+  SMOKE_SENDER_KEY="$(sed -n 's/^SMOKE_SENDER_KEY=//p' "$SMOKE_KEYS_FILE")"
+  SMOKE_METRICS_KEY="$(sed -n 's/^SMOKE_METRICS_KEY=//p' "$SMOKE_KEYS_FILE")"
+  [[ "$SMOKE_SENDER_KEY" == rehearsal-* && "$SMOKE_METRICS_KEY" == rehearsal-* ]] || die "smoke-avaimet puuttuvat: $SMOKE_KEYS_FILE"
+}
 
 # --- Nimiavaruus ----------------------------------------------------------------------------
 
@@ -186,8 +201,16 @@ verify_server_env() {
     n=$((n + 1))
     leaked="$(printf '%s\n' "$envtxt" | cut -d= -f1 \
       | grep -E -i '(SES|RESEND|SLACK|GITHUB|TELEGRAM|ANTHROPIC|OPENAI|TOKEN|SECRET|API_KEY|PASSWORD|PRIVATE|AWS_)' \
-      | grep -v -E '^PAPERCLIP_SECRETS_(MASTER_KEY_FILE|PROVIDER|STRICT_MODE)$' || true)"
+      | grep -v -E '^PAPERCLIP_SECRETS_(MASTER_KEY_FILE|PROVIDER|STRICT_MODE)$' \
+      | grep -v -E '^OUTREACH_(SENDER|METRICS)_API_KEY$' || true)"
     [[ -z "$leaked" ]] || bad+="pid $p: $(echo "$leaked" | tr '\n' ' ')"
+    # RK9-317: outreach-avaimet sallitaan vain harjoituksen omilla satunnaisarvoilla.
+    local kv
+    for kv in "OUTREACH_SENDER_API_KEY=$SMOKE_SENDER_KEY" "OUTREACH_METRICS_API_KEY=$SMOKE_METRICS_KEY"; do
+      if [[ -n "$(printf '%s\n' "$envtxt" | grep -E "^${kv%%=*}=" | grep -v -x -F "$kv" || true)" ]]; then
+        bad+="pid $p: ${kv%%=*} ei ole harjoituksen oma avain; "
+      fi
+    done
     # Ei -q: pipefail + SIGPIPE.
     if [[ -n "$(printf '%s\n' "$envtxt" | grep -E '^DATABASE_URL=[a-z]+://[^@/]*:[^@/]*@' || true)" ]]; then bad+="pid $p: DATABASE_URL sisältää salasanan; "; fi
   done
@@ -302,6 +325,7 @@ start_server() {
   : >"$SERVER_LOG"
   start_pg_bridge
   rm -f "$SERVER_PID_FILE"
+  load_smoke_keys
   # env -i: vain allowlist. Ei perittyjä tokeneita eikä ses.env:iä; salaisuuksista vain master.key:n polku.
   # TMPDIR: unshare -r näyttää uid 0:n, joten tsx yrittäisi IPC-socketia root-omisteiseen /tmp/tsx-0:aan (EACCES).
   NS_WD="$WORKTREE" ns_daemon "$SERVER_LOG" env -i \
@@ -317,6 +341,7 @@ start_server() {
       OUTREACH_SENDER_ENABLED=false OUTREACH_AUTO_PAUSE_ENABLED=false OUTREACH_DNSBL_ENABLED=false \
       PAPERCLIP_ANNOUNCEMENTS_ENABLED=false PAPERCLIP_QMD_WATCHDOG_ENABLED=false \
       PAPERCLIP_DB_BACKUP_ENABLED=false \
+      OUTREACH_SENDER_API_KEY="$SMOKE_SENDER_KEY" OUTREACH_METRICS_API_KEY="$SMOKE_METRICS_KEY" \
       bash -c "echo \$\$ >'$SERVER_PID_FILE'; exec $SERVER_CMD"
   for i in $(seq 1 120); do
     if (( i > 5 )) && ! server_alive; then
@@ -453,7 +478,9 @@ cmd_smoke() {
       PAPERCLIP_CONFIG="$REH_HOME/instances/default/config.json" CI="${CI:-}" bash "$smoke" "${outside[@]}" ) || rc=1
   if (( offline_only == 0 )); then
     log "smoke: HTTP-tarkistukset nimiavaruudessa http://127.0.0.1:$PORT"
+    load_smoke_keys
     ns_exec env -i PATH="$PATH" HOME="$REH_HOME" PAPERCLIP_SMOKE_URL="http://127.0.0.1:$PORT" \
+      OUTREACH_SENDER_API_KEY="$SMOKE_SENDER_KEY" OUTREACH_METRICS_API_KEY="$SMOKE_METRICS_KEY" \
       bash "$smoke" "${http_args[@]}" || rc=1
   fi
   return "$rc"
