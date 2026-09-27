@@ -120,6 +120,8 @@ describeEmbeddedPostgres("heartbeat timer idle precheck", () => {
       name: "Paperclip",
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
+      // Upstream v2026.707.0 refuses to dispatch a run without a responsible user.
+      defaultResponsibleUserId: "responsible-user",
     });
     await db.insert(agents).values({
       id: agentId,

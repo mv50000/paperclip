@@ -439,6 +439,9 @@ describeEmbeddedPostgres("authorization service", () => {
     const company = await createCompany(db, "ResponsibleUserUnavailable");
     const actorAgent = await createAgent(db, company.id, { role: "engineer" });
     const targetAgent = await createAgent(db, company.id, { role: "engineer" });
+    // RK9 Custom (RK9-314): the fork RK9-313 rule denies an ungranted agent before the
+    // responsible-user check runs; grant tasks:assign so the test reaches that check.
+    await grantAgentPermission(db, company.id, actorAgent.id, "tasks:assign");
 
     const decision = await authorizationService(db).decide({
       actor: {

@@ -48,7 +48,18 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
-    await db.delete(heartbeatRuns);
+    // --- RK9 Custom (RK9-314): a finished run can still append a run event after the
+    // test body returns; retry so the late event does not fail the heartbeat_runs delete. ---
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await db.delete(heartbeatRunEvents);
+        await db.delete(heartbeatRuns);
+        break;
+      } catch (error) {
+        if (attempt >= 20) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(agentRuntimeState);

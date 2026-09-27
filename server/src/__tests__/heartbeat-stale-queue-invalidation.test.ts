@@ -297,6 +297,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
+        // --- RK9 Custom (RK9-314): the fork RK9-231 gate runs first and skips idle timer
+        // wakes by default; turn it off so these tests exercise the upstream policy. ---
+        skipWhenIdle: false,
         skipTimerWhenNoActionableWork: true,
       },
     });
@@ -335,6 +338,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
+        // --- RK9 Custom (RK9-314): the fork RK9-231 gate runs first and skips idle timer
+        // wakes by default; turn it off so these tests exercise the upstream policy. ---
+        skipWhenIdle: false,
         intervalSec: 60,
         skipTimerWhenNoActionableWork: true,
       },
@@ -398,6 +404,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
+        // --- RK9 Custom (RK9-314): the fork RK9-231 gate runs first and skips idle timer
+        // wakes by default; turn it off so these tests exercise the upstream policy. ---
+        skipWhenIdle: false,
       },
     });
 
@@ -415,6 +424,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const { agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
         enabled: true,
+        // --- RK9 Custom (RK9-314): the fork RK9-231 gate runs first and skips idle timer
+        // wakes by default; turn it off so these tests exercise the upstream policy. ---
+        skipWhenIdle: false,
         skipTimerWhenNoActionableWork: false,
       },
     });
