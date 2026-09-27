@@ -378,6 +378,8 @@ function createExecutionPolicy(overrides: Partial<IssueExecutionPolicy> = {}): I
     mode: "normal",
     commentRequired: true,
     stages: [],
+    // --- RK9 Custom: outcomeRequirements is required in the fork (SEC-91) ---
+    outcomeRequirements: [],
     ...overrides,
   };
 }

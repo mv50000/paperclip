@@ -5,13 +5,11 @@ import {
   isClaudeTransientUpstreamError,
   parseClaudeStreamJson,
   extractClaudeLoginUrl,
-  detectClaudeLoginRequired,
   describeClaudeFailure,
   isClaudeMaxTurnsResult,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeRefusalResult,
   isClaudeUnknownSessionError,
-  isClaudePoisonedPreviousMessageIdError,
   isClaudeImageProcessingError,
 } from "./parse.js";
 

@@ -604,6 +604,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
         contextSnapshot: heartbeatRuns.contextSnapshot,
+        // --- RK9 Custom: run fields for succeeded-run skip ---
+        issueCommentStatus: heartbeatRuns.issueCommentStatus,
+        scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
         livenessState: heartbeatRuns.livenessState,
         resultJson: heartbeatRuns.resultJson,
       })

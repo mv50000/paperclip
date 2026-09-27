@@ -64,6 +64,9 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enableIssueGraphLivenessAutoRecovery: false,
     issueGraphLivenessAutoRecoveryLookbackHours: 24,
     enableWorkspaceBranchReconcileForward: false,
+    // --- RK9 Custom: fork experimental settings ---
+    knowledgeRecallInjectionEnabled: false,
+    recoveryStrictInProgressOnly: false,
   };
 }
 
