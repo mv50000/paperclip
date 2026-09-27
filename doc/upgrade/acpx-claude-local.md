@@ -166,6 +166,9 @@ Mitä testit lukitsevat:
   portaassa, joka koskee tiedostoa.
 - `claude-local-adapter-environment.test.ts`, describe
   `claude_local hello probe environment`: sama sääntö hello-proben spawnille.
+  831.1:stä alkaen probe ajaa `claude`n luotetusta PATHista eikä konfigin `command`ista,
+  joten testi laittaa väärennetyn `claude`n `PATH`in alkuun ja palauttaa `PATH`in lopuksi.
+  Kaappauspolku kulkee muuttujassa, joka ei ala `PAPERCLIP_`-etuliitteellä (RK9-316).
 - `claude-local-adapter-billing-inheritance.test.ts`: env-apufunktioiden
   yksikkötestit (olemassa jo RK9-228:sta).
 - `risk-monitors.test.ts`, describe `default model allow-list`: jokainen

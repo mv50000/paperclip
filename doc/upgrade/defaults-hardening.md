@@ -308,6 +308,22 @@ outreach-inbound, unsubscribe) eivät tuota CLI-ohjeita, joten #11400 ei muuta n
 `private-hostname-guard.ts` kuitenkin muuttuu. Aja siksi portaan jälkeen reittitestit (lista
 alla) ja savutesti `scripts/upgrade-smoke.sh` `paperclip.rk9.fi`-hostnimellä.
 
+
+### Mergessä todetut oletusmuutokset (RK9-316)
+
+| Kohta | 817 | 831.1 | RK9-päätös |
+|---|---|---|---|
+| Agentin JWT:n oletus-TTL (`PAPERCLIP_AGENT_JWT_TTL_SECONDS`, `server/src/agent-auth-jwt.ts:51`) | 1 h | 48 h (upstream #10176) | Operaattorin päätös. 817:n käytös säilyy asettamalla `PAPERCLIP_AGENT_JWT_TTL_SECONDS=3600` `paperclip-start.sh`:hon. Token ei sidu ajon tilaan, joten pidempi TTL pidentää vuotaneen tokenin ikää. |
+| Uudet `experimental`-liput `enableNativeRunner`, `enableManagedSandboxOnly`, `enableClassicTaskInterface`, `enableSandboxDuplexBridge` | – | kaikki `false` | ei muutosta; `enableNativeRunner` kirjoitetaan riville ennen 916:ta (yllä) |
+| `PAPERCLIP_SETTING_DEFAULTS` | – | valinnainen overlay, ei tallennu kantaan. Virheellinen arvo tunnetulle kentälle estää käynnistyksen (fail closed). | ei asetettu prodissa |
+| `PAPERCLIP_WORKSPACE_REAPER_COOLDOWN_DAYS` | – | oletus 7 vrk: reaper odottaa ennen työtilan siivousta | oletus käy |
+| Migraatio `0218`: interaktioiden `board_only` | – | nimetään `human_only`:ksi (prod-kopiolla 62 riviä) | ei toimenpiteitä, nimenmuutos |
+| Migraatio `0229`: `companies.brand_color`, `attachment_max_bytes` | sarakkeet | poistettu | prod-kopion auditointi: `brand_color` vain RK9:llä (kosmeettinen), `attachment_max_bytes` 10 MiB kaikilla 11 yhtiöllä = deploymentin oletus. Ei siirrettävää dataa. |
+| Migraatio `0230`: `account.issuer` (better-auth 1.7) | – | täytetään (`local:credential`) ja uniikki-indeksi | prod-kopiolla 0 NULLia, 0 duplikaattia |
+
+Uusia pakollisia env-avaimia tai instanssihakemiston tiedostoja ei tullut. `config.json` on yhä valinnainen,
+eikä konfigskeemassa ole `.strict()`-validointia.
+
 ## Porras v2026.916.1
 
 ### Announcement feed

@@ -14,6 +14,7 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 | Freeze päivitetty (porras 618, RK9-314) | `06b877ab7f687028e205021df6a5216e8cfa9a1b` (2026-09-27), commitit 166–174 alla |
 | Freeze päivitetty (porras 707, RK9-314) | `a0ae4d43b` (2026-09-27, PR #128 merge), commitit 175–180 alla |
 | Freeze päivitetty (porras 720, RK9-314) | `7a2ceba55` (2026-09-27, PR #129 merge), commitit 181–190 alla |
+| Freeze päivitetty (porras 817→831, RK9-316) | `917ae45d8` (2026-09-27, portaan 831 pre-SHA). Välissä vain 817:n seitsemän sovituscommittia (`c38f350c`…`13a76a70`, RK9-315); niitä ei lisätty taulukkoon, koska ne kuuluvat 817:n konfliktilokiin. |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
 | Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
@@ -655,6 +656,46 @@ CI:n löytämät sovitukset (RK9-315):
 
 Poistetut tiedostot: upstream poisti cloud upstream -koodin (16 tiedostoa), `Activity.tsx`:n ja tool app galleryn.
 Fork ei ollut muuttanut niistä yhtään.
+
+## Konfliktit portaassa 831 (`origin/master` `917ae45d` + `v2026.831.1`, RK9-316)
+
+Porras 5/6. 32 konfliktitiedostoa ja 19 migraatiota (0212–0230), molemmat pilkkomisrajojen alla.
+Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 917ae45d v2026.831.1`.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0230 tavu tavulta, sitten 9001–9010 muuttamattomina idx:llä 231–240 |
+| `.github/workflows/release.yml`, `release-smoke.yml` (ei konfliktia) | upstreamin versio; jokainen `runs-on: ubuntu-latest` sai RK9-350-runner-vivun, `verify_beta_candidate` sai `runner_label`-inputin ja uusi `smoke_service` vivun. `commitperclip-review.yml` pysyy poistettuna. |
+| `.github/scripts/check-pr-migration-order.mjs` (ei konfliktia) | upstreamin uusi CI-tarkistus (#12433) vertaa kaikkia migraationumeroita yhteen maksimiin, jolloin jokainen 02xx näyttäisi olevan 9010:n "takana". RK9 Custom: vertailu tehdään sarjoittain (upstream < 9000, fork ≥ 9000). Neljä testiä lisätty. |
+| `scripts/check-node-version-policy.mjs` (ei konfliktia) | RK9 Custom: `infra/ses-forwarder/package.json` ohitetaan, koska se on AWS Lambda (`nodejs20.x`) eikä ajeta palvelimen Nodella |
+| `.env.example`, `.gitignore`, `package.json`, `packages/db/package.json`, `server/package.json`, `pnpm-lock.yaml` | molemmat; lockfile upstreamista + `pnpm install`. Forkin riippuvuudet (`tsx`, AWS SDK, `jsdom`, `mailparser` ja tyypit) säilyivät. |
+| `packages/adapters/claude-local/src/server/test.ts` | upstreamin `buildLocalAdapterTestProbeEnv` ja `prepareSandboxClaudeProbeRuntime` + forkin RK9-228-host-env: `runtimeEnv` rakennetaan `inheritableHostEnv()`:stä ja probe saa `doNotInheritEnvKeys: hostEnvKeysNotInherited()`. `ANTHROPIC_API_KEY` ei siis periydy probelle. |
+| `packages/adapters/claude-local/src/server/acp.test.ts` | forkin pin-testin nimi, Node-versio `v24.11.0` (831:n engines-alaraja) |
+| `server/src/__tests__/claude-local-adapter-environment.test.ts` (ei konfliktia) | upstreamin probe käyttää luotettua PATHia eikä konfigin `command`ia. Testin väärennetty `claude` laitetaan PATHin alkuun, ja kaappauspolku kulkee ei-`PAPERCLIP_*`-muuttujassa. |
+| `packages/mcp-server/src/tools.ts` | molemmat työkalut (`paperclipRecallKnowledge`, `paperclipListSkills`); forkin heartbeat-context-kuvaus, id-validointi `z.string().guid()` kuten upstreamissa |
+| `packages/shared/src/validators/*.ts` (ei konfliktia) | zod 4: `z.record` sai avainskeeman, `sendWindow` käyttää `.prefault({})`:tä ja outreachin id:t `.guid()`:ta (zod 4:n `.uuid()` hylkää ei-RFC-arvot) |
+| `packages/shared/src/validators/instance.ts` | upstreamin tyyppi + forkin `ManualPauseRequest` |
+| `server/src/index.ts`, `server/src/app.ts` | molemmat; heartbeat-palvelu forkin optioilla (`systemPause`, `maxGlobalConcurrentRunsDefault`), forkin Slack/risk/email/outreach-käynnistys ennen upstreamin `reconcileStaleRuntimeControlOperations`ia, `closeQmdMcpSession()` ennen `finalizeServerShutdown`ia |
+| `server/src/routes/issues.ts` | forkin RK9-76: `assertKnownActorRunId` ennen transaktionaalista päätöspäivitystä ja valinnainen run id checkoutissa (`getAgentRunId`). Upstreamin workspace-reopen säilyi. Interaktioiden resolve/withdraw vaativat yhä run id:n (upstream). |
+| `server/src/services/recovery/service.ts` | upstream toi not-invokable-eskalaation. RK9 Custom -lohko ohittaa sitä ennen human proxy- ja heartbeat-disabled-agentit (`isRk9RecoveryExcludedAgent`); paussatut ja terminoidut agentit saavat upstreamin eskalaation. Forkin `unwrapDatabaseConflictError` poistui käyttämättömänä. |
+| `server/src/services/built-in-agents.ts`, `companies.ts`, `heartbeat.ts`, `routes/companies.ts` | forkin RK9-314-portti (`enableBuiltInAgents`) ensin; upstreamin `wakeOnDemand` + forkin `skipWhenIdle`; importit molemmista |
+| `heartbeat-process-recovery.test.ts` | forkin versio. Testinimien vertailu: yksikään upstreamin tai forkin testi ei kadonnut. |
+| `built-in-agents.test.ts`, `companies-service.test.ts`, `openapi-routes.test.ts`, `server-startup-feedback-export.test.ts` | molemmat; openapi-suodatin yhdistää `RK9_FORK_ROUTES`in ja upstreamin `specOnlyContractFirstRoutes`in |
+| `hire-approval-policy.test.ts` (ei konfliktia) | 831 antaa agentin luonnille kolmannen argumentin (create options), joten odotukset saivat `expect.anything()`:n |
+| `skills/paperclip/SKILL.md` | upstreamin teksti + RK9-315:n blocked-syyn lohko |
+| `ui/src/pages/InstanceSettings.tsx` | upstream poisti sivun (#12282). Forkin globaali ajolaskuri ("X / Y running") siirtyi `InstanceGeneralSettings.tsx`:n concurrency-osioon RK9 Custom -markkerien sisään. |
+| `ui/src/pages/InstanceGeneralSettings.tsx`, `CompanySettings.tsx`, `Companies.tsx`, `components/ApprovalPayload.tsx` | molemmat; forkin concurrency-kortti muuttui upstreamin tyyliseksi `<section>`iksi |
+| `.gitleaksignore` (ei konfliktia) | upstreamin RFC 6455 -esimerkkiavain `durable-prp-control-plane.test.ts`:ssä on väärä positiivinen |
+
+RK9 Custom -markkerit: 294 → 309 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Yksi markkeri katosi:
+`companies-service.test.ts`:n Reflection Coach -testin RK9-314-rivi. Upstream korvasi koko testin testillä,
+joka odottaa, ettei bundled-agentteja luoda lainkaan, joten forkin lippurivillä ei ole enää kohdetta.
+`InstanceSettings.tsx`:n laskurilla ei ollut markkeria; siirretty koodi on nyt markkerien sisällä.
+
+Tunnettu CI-rajoite: `paperclip-runner` (Rust) tarvitsee `cargo`n typecheckiin ja serverin
+`prepare:runner-vendor`iin. builder-02:lla ei ole cargoa, joten serverin typecheck ajettiin sieltä
+TypeScript-buildin kautta (`build:typescript` + `tsc --noEmit`). Tuotanto ajaa TS-lähdettä `tsx`:llä,
+eikä natiivia runneria käytetä (`enableNativeRunner` = false).
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
