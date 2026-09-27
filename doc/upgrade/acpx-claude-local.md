@@ -102,6 +102,13 @@ Porraskohtaiset toimet:
 - **Porras, joka tuo v2026.720.0:n:** muuta forkin `acp.ts`:n
   `normalizeEngine`-oletus arvoon `{ engine: "cli", explicit: false }` ja merkitse
   se RK9 Custom -kommentilla. Ilman tätä portin testit kaatuvat (ks. alla).
+  **Tehty 2026-09-27 (RK9-314).** Samassa portaassa `acpx_local` poistui upstreamista ja
+  `0136` muuntaa sen agentit muotoon `claude_local` + `engine: "acp"`. Siksi RK9-312:n
+  vartija siirtyi `registry.ts`:stä `claude_local`in `execute`- ja `testEnvironment`-funktioihin
+  (`acpHostKeyBlockReason`, `host-env.ts`). Eksplisiittinen ACP-ajo epäonnistuu koodilla
+  `claude_acp_host_key_blocked`, kun palvelimen envissä on `ANTHROPIC_API_KEY` ilman opt-iniä.
+  Testi: `packages/adapters/claude-local/src/server/execute.acp-host-key-guard.test.ts`.
+  Upstreamin `acp.test.ts`:n auto-ACP-odotukset muutettiin CLI-pinnaukseen.
 - **Porras, joka tuo v2026.831.0:n:** aseta `enableNativeRunner: false`
   instanssiasetuksiin ennen deployta.
 - **Porras, joka tuo v2026.916.0:n:** päätä `DEFAULT_CLAUDE_LOCAL_MODEL`.

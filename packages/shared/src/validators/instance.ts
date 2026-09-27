@@ -63,20 +63,31 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableEnvironments: z.boolean().default(false),
   enableIsolatedWorkspaces: z.boolean().default(false),
   enableStreamlinedLeftNavigation: z.boolean().default(true),
+  enableApps: z.boolean().default(false),
   enablePipelines: z.boolean().default(false),
+  enableCases: z.boolean().default(false),
   enableConferenceRoomChat: z.boolean().default(false),
   enableTaskWatchdogs: z.boolean().default(false),
   enableIssuePlanDecompositions: z.boolean().default(false),
   enableExperimentalFileViewer: z.boolean().default(false),
   enableCloudSync: z.boolean().default(false),
   enableExternalObjects: z.boolean().default(false),
+  enableSmokeLab: z.boolean().default(false),
+  enableBuiltInAgents: z.boolean().default(false),
+  enableSummaries: z.boolean().default(false),
+  enableDecisions: z.boolean().default(false),
+  enableGoalsSidebarLink: z.boolean().default(false),
   enableServerInfoDebugView: z.boolean().default(false),
   autoRestartDevServerWhenIdle: z.boolean().default(false),
   enableIssueGraphLivenessAutoRecovery: z.boolean().default(false),
   // RK9-18 (C6): global kill-switch for heartbeat knowledge-recall injection. Default off;
   // even when on, injection still requires per-agent opt-in (agents.runtimeConfig.knowledgeRecall.enabled).
   knowledgeRecallInjectionEnabled: z.boolean().default(false),
-  enableWorkspaceBranchReconcileForward: z.boolean().default(false),
+  enableWorkspaceBranchReconcileForward: z.boolean().default(true),
+  enableWorkspaceDirtyQuarantineRepair: z.boolean().default(true),
+  enableWorktreeRunExecution: z.boolean().default(false),
+  worktreeRunExecutionActivatedAt: z.string().datetime().nullable().default(null),
+  worktreeRunExecutionActivationInstanceId: z.string().min(1).nullable().default(null),
   issueGraphLivenessAutoRecoveryLookbackHours: z
     .number()
     .int()
@@ -86,7 +97,13 @@ export const instanceExperimentalSettingsSchema = z.object({
   recoveryStrictInProgressOnly: z.boolean().default(false),
 }).strict();
 
-export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();
+export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema
+  .omit({
+    worktreeRunExecutionActivatedAt: true,
+    worktreeRunExecutionActivationInstanceId: true,
+  })
+  .partial()
+  .strip();
 
 export const patchInstanceSettingsSchema = z.object({
   defaultEnvironmentId: z.string().uuid().nullable().optional(),

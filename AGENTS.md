@@ -230,3 +230,6 @@ PR #2218 (`feat/external-adapter-phase1`) adds external adapter support. See roo
 - Reference external adapters: Droid (npm); Hermes can also be tested as an override package.
 
 <!-- e2e webhook test SEC-61 — 2026-04-26T20:18:17Z -->
+## Design system
+
+`DESIGN.md` at the repo root is the source of truth for UI design decisions. The token-only rule applies to all `ui/` changes: every color, spacing, radius, type, shadow, and motion value in `ui/src/components/**` and `ui/src/pages/**` comes from the token layer in `ui/src/index.css` — no hex, raw px, arbitrary Tailwind bracket values, or raw `font-size`/`fontSize` declarations in components, outside the documented allowlist in `ui/src/index.css`. Run `pnpm check:token-gates` (`scripts/check-token-gates.mjs`) before committing UI changes — it fails on any violation not covered by that allowlist.

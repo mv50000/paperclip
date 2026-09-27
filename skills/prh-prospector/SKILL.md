@@ -1,11 +1,10 @@
 ---
 name: prh-prospector
 description: >
-  Hae ja rikastu B2B-yritystietoa Suomesta PRH:n avoimesta YTJ-rajapinnasta
-  (Patentti- ja rekisterihallitus). Tukee yksittäishakua Y-tunnuksella, nimellä
-  tai toimialakoodilla. Täydentyy AI-pohjaisella verkkosivuanalyysilla
-  (tech-stack, sosiaalinen media, rekrytointi, EAA-relevanssi). GDPR-tiukka:
-  ainoastaan B2B-tason tietoa, ei henkilötietoja, ei LinkedIn-skrapeä.
+  Hae B2B-yritystietoa PRH:n avoimesta YTJ-rajapinnasta Y-tunnuksella, nimellä
+  tai toimialakoodilla ja rikasta se verkkosivuanalyysilla (tech-stack, some,
+  rekrytointi, EAA). GDPR: vain B2B-tietoa, ei henkilötietoja eikä
+  LinkedIn-skrapeä.
 ---
 
 # PRH-Prospector — B2B-leadihakuskill

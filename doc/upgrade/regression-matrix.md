@@ -13,6 +13,7 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 | Freeze päivitetty (porras 609, RK9-313) | `e3aa869c6334993bc13e72c0dcf17c5f61ec356b` (2026-09-27), commitit 160–165 alla |
 | Freeze päivitetty (porras 618, RK9-314) | `06b877ab7f687028e205021df6a5216e8cfa9a1b` (2026-09-27), commitit 166–174 alla |
 | Freeze päivitetty (porras 707, RK9-314) | `a0ae4d43b` (2026-09-27, PR #128 merge), commitit 175–180 alla |
+| Freeze päivitetty (porras 720, RK9-314) | `7a2ceba55` (2026-09-27, PR #129 merge), commitit 181–190 alla |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
 | Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
@@ -282,6 +283,16 @@ tarkistus.
 | 178 | `7a70d90b5` | chore(upgrade): gitleaks false positive from v2026.618.0 upstream redaction test (RK9-314) | ci/tooling | `.gitleaksignore` | PR-checkin gitleaks-ajo |
 | 179 | `ea8ffec40` | test(upgrade): warm the email route import before the first email-routes test (RK9-314) | email | `server/src/__tests__/email-routes.test.ts` | `npx vitest run server/src/__tests__/email-routes.test.ts` |
 | 180 | `7d5f268ad` | docs(upgrade): secrets:read gets its first callers in v2026.618.0 (RK9-314) | docs | `doc/upgrade/defaults-hardening.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 181 | `ce84785d3` | fix(upgrade): typecheck after the v2026.707.0 merge (RK9-314) | heartbeat/recovery (+ UI-testit) | `server/src/services/recovery/service.ts`, `packages/adapters/claude-local/src/server/parse.test.ts` (+2) | `npx vitest run server/src/__tests__/heartbeat-process-recovery.test.ts` |
+| 182 | `1194e0254` | fix(upgrade): unique journal idx for fork migrations after upstream gaps (RK9-314) | db/migraatiot | `packages/db/src/migrations/meta/_journal.json`, `scripts/upgrade-smoke.sh` | `scripts/upgrade-smoke.sh --offline` (journal-tarkistus) |
+| 183 | `bd0411dd0` | fix(upgrade): general suite after v2026.707.0 (RK9-314) | heartbeat (+ UI) | `ui/src/lib/new-agent-runtime-config.ts` (+5 testiä) | `npx vitest run ui/src/lib/new-agent-runtime-config.test.ts server/src/__tests__/heartbeat-idle-timer-skip.test.ts` |
+| 184 | `9534b279b` | chore(upgrade): gitleaks false positives from v2026.707.0 upstream tests (RK9-314) | ci/tooling | `.gitleaksignore` | PR-checkin gitleaks-ajo |
+| 185 | `10aea5fae` | test(upgrade): upstream idle-timer recovery test runs with the fork gate off (RK9-314) | heartbeat/recovery | `server/src/__tests__/heartbeat-process-recovery.test.ts` | `npx vitest run server/src/__tests__/heartbeat-process-recovery.test.ts` |
+| 186 | `a2a82796f` | docs(upgrade): stage 707 conflict log and freeze rows (RK9-314) | docs | `doc/upgrade/regression-matrix.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 187 | `8fc7db049` | docs(upgrade): stage 707 log, rehearsal results and defaults review (RK9-314) | docs | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/defaults-hardening.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 188 | `c3337709e` | test(upgrade): restore the fork SEC-91 expectation in the monitor-clear UI test (RK9-314) | SEC-91 (UI) | `ui/src/components/IssueProperties.test.tsx` | `npx vitest run ui/src/components/IssueProperties.test.tsx` |
+| 189 | `9ff918377` | docs(upgrade): agent keys and runs without a valid responsible user on the prod copy (RK9-314) | docs | `doc/upgrade/defaults-hardening.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 190 | `ddaf75727` | test(upgrade): retry run cleanup in the branch-containment test on late activity rows (RK9-314) | heartbeat (testi) | `server/src/__tests__/heartbeat-workspace-branch-containment.test.ts` | `npx vitest run server/src/__tests__/heartbeat-workspace-branch-containment.test.ts` |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 
@@ -552,6 +563,54 @@ Porras-707:n fork-päätökset ja testisovitukset:
   (flake 1/3 builder-02:lla, korjauksen jälkeen 5/5).
 - RK9-313:n `waitForValue`-korjauksen markkeri poistui `heartbeat-process-recovery.test.ts`:stä, koska upstream korjasi
   saman kohdan. GGU-809-sovitus (RK9-314) säilyi.
+
+## Konfliktit portaassa 720 (`origin/master` `7a2ceba55` + `v2026.720.0`, RK9-314)
+
+Porras 720:n osa 3, viimeinen. 42 konfliktitiedostoa ja 46 migraatiota (0136–0181). Konfliktimäärä on
+pilkkomisrajan (~40) kohdalla. Porrasta ei pilkottu, koska 707 ja 720 ovat vierekkäiset tagit: välissä ei ole
+tagia, jolla pilkkoa.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0181 tavu tavulta, sitten 9001–9010 idx:llä 182–191 |
+| `packages/adapters/claude-local/src/server/acp.ts` | upstreamin moottorivalitsin; asettamaton `engine` palauttaa `{ engine: "cli", explicit: false }` (RK9-228, RK9-305). Upstreamin oletus on ACP. |
+| `packages/adapters/claude-local/src/server/execute.ts` | upstreamin versio. Forkin SIGTERM-onnistumissääntö on upstreamissa (`parsedSucceeded`), joten sen markkeri poistui. `doNotInheritEnvKeys` säilyi. |
+| `packages/adapters/claude-local/src/server/index.ts`, `server/src/adapters/registry.ts` | forkin RK9-228-exportit + upstreamin `acp.js` ja `getConfigSchema`. Upstream poisti `acpx_local`-adapterin (hautakivi, ajo epäonnistuu `acpx_local_retired`). Forkin acpx-avainvartija (RK9-312) siirtyi claude_localin ACP-haaraan, ks. alla. |
+| `packages/adapter-utils/src/server-utils.ts` | molemmat (`doNotInheritEnvKeys` + upstreamin `localProcessSandbox`) |
+| `server/src/index.ts` | forkin palvelut + `toolAccessService`; heartbeat- ja routine-palvelu saavat forkin optiot. Upstreamin ajastuksen esto on nyt `heartbeat.resolveSchedulingSuppression()` ja `resolveWorktreeRunExecutionActivationState`. |
+| `server/src/services/heartbeat.ts` | käynnistyspolulla ensin upstreamin suppression, sitten forkin globaali cap, sitten upstreamin worktree-cutoff. Timer-tickissä ensin forkin system pause, sitten suppression. |
+| `server/src/services/routines.ts` | forkin `systemPause` + upstreamin `runtimeEnv` ja worktree-aktivointi; forkin try/catch-dispatch sai upstreamin `nextRunAtOverride`n |
+| `server/src/services/recovery/service.ts` | upstreamin provider quota -funktiot + forkin `strictInProgressOnly`. `getLatestIssueRunSince` valitsee forkin kentät (RK9-87), provider quota -politiikan fallback saa `outcomeRequirements: []` (SEC-91). |
+| `server/src/services/companies.ts` | forkin `seedDefaultTemplates` + upstreamin `autoProvisionBundledAgents` (fork-portti, ks. alla) |
+| `server/src/routes/issues.ts`, `server/src/app.ts`, `server/src/services/instance-settings.ts`, `packages/shared/src/validators/*.ts` | molemmat |
+| `server/package.json`, `pnpm-lock.yaml` | forkin sesv2 + upstream; `@paperclipai/adapter-acpx-local` poistui upstreamin mukana. Lockfile: upstreamin + `pnpm install --lockfile-only`. |
+| `.github/workflows/release.yml`, uusi `release-verify.yml`, uusi `storybook-visual.yml` | runner-vipu, ks. `doc/UPSTREAM-UPGRADE.md` "CI-runner-vipu" |
+| `ui/src/components/StatusBadge.tsx` | upstreamin `{ status, label }` + forkin `adapterType` ja human proxy -haara |
+| `ui/src/components/Sidebar.tsx`, `ui/src/lib/status-colors.ts` | molemmat (forkin Risks + upstreamin Apps; riskitilat + tool access -tilat) |
+| `ui/src/pages/Routines.tsx`, `Routines.test.tsx` | forkin system pause -kysely ja `systemPaused`-propi + upstreamin jaettu pollaus ja kansiot |
+| `ui/src/pages/InstanceGeneralSettings.tsx`, `ClaudeSubscriptionPanel.tsx` | forkin globaali concurrency-osio ja Pause/Resume-napit upstreamin `Card`- ja token-luokilla |
+| `ui/src/components/IssueProperties.test.tsx` | upstreamin arkistotestit + forkin SEC-91-testi |
+| `ui/src/components/IssueMonitorActivityCard.test.tsx` | upstream poisti komponentin, testi poistettiin |
+| `heartbeat-workspace-branch-containment.test.ts`, `heartbeat-worktree-suppression.test.ts` | upstreamin versio; upstreamilla on omat siivousapurit, forkin retry-markkerit poistuivat |
+| `heartbeat-process-recovery.test.ts` | molemmat; upstreamin uudet testit + RK9-87-testit |
+| muut | molemmat puolet (importit, validaattorit, testit, dokumentaatio) |
+
+Porras-720:n fork-päätökset:
+
+- **ACP ja host-avain.** Migraatio `0136` muuntaa `acpx_local`-agentit muotoon `claude_local` + `engine: "acp"`
+  (eksplisiittinen). ACP-polku antaa agentille koko palvelimen envin, joten eksplisiittinen ACP ohittaisi RK9-228:n.
+  Vartija siirtyi `claude_local`in `execute`- ja `testEnvironment`-funktioihin: eksplisiittinen ACP-ajo epäonnistuu
+  koodilla `claude_acp_host_key_blocked`, kun palvelimen envissä on `ANTHROPIC_API_KEY` ilman opt-iniä. Testi:
+  `packages/adapters/claude-local/src/server/execute.acp-host-key-guard.test.ts`. Prod-kopiossa ei ole
+  `acpx_local`-agentteja eikä yhtään agenttia, jolla on `engine`-asetus.
+- **Built-in-agentit.** Upstream luo Reflection Coachin ja Summarizerin jokaiseen yritykseen joka käynnistyksessä.
+  Prod-kopiossa ensimmäinen käynnistys loi 16 agenttia 8 yritykseen, joista 8 odotti palkkaushyväksyntää.
+  Hylätty tai terminoitu agentti syntyy uudelleen seuraavassa käynnistyksessä. Fork luo ne vain, kun
+  `enableBuiltInAgents` on päällä (oletus pois). Oletusgrantit ajetaan silti. Testi:
+  `companies-service.test.ts` ("does not auto-provision bundled agents while built-in agents are disabled").
+- **Upstreamin punaiset testit.** `test.probe.test.ts` ja `execute.remote.test.ts` kaatuvat myös puhtaalla
+  v2026.720.0:lla; niihin tuotiin v2026.817.0:n odotukset. `parse.test.ts`: max turns tunnistetaan vain
+  rakenteisista kentistä.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

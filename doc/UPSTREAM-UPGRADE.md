@@ -61,6 +61,10 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
 - `skills/paperclip/SKILL.md` (3) ja `skills/paperclip-dev/SKILL.md` (modify/delete)
 - `ui/src/components/IssueProperties.tsx` — upstream pilkkoi komponentin hakemistoon `issue-properties/` portaassa 707
   (RK9-314). Juuritiedosto on pelkkä re-export; forkin SEC-91-rivi on `issue-properties/IssueProperties.tsx`:ssä.
+- `packages/adapters/claude-local/src/server/acp.ts` (`normalizeEngine`), `execute.ts` ja `test.ts` (ACP-haara) —
+  forkin CLI-pinnaus ja ACP-avainvartija (RK9-305, RK9-228; v2026.720.0, RK9-314). Ks. `doc/upgrade/acpx-claude-local.md`.
+- `server/src/services/built-in-agents.ts` (`autoProvisionBundledAgents`) — forkin `enableBuiltInAgents`-portti (RK9-314).
+- `ui/src/components/StatusBadge.tsx` — forkin `adapterType`-propi ja human proxy -haara; upstream muuttaa tiedostoa usein.
 - `packages/db/src/migrations/meta/_journal.json` — 707:stä alkaen upstreamin idx on sama kuin migraation numero, ja
   numeroissa on aukkoja (0126, 0130). Anna 9001–9010:lle idx:t upstreamin suurimmasta idx:stä + 1 alkaen, älä paikan
   mukaan. `client.ts` järjestää idx:n mukaan; `upgrade-smoke.sh` vaatii tiukasti kasvavan idx:n.
@@ -76,7 +80,13 @@ jokainen porras tuo rivit takaisin, jos upstream muuttaa niitä. Muutokset on me
 
 - `.github/workflows/pr.yml` — `runs-on` neljässä jobissa fork-suojalla ja secret-scanin
   `runner_label`. Playwright-askel ajaa `--with-deps` vain, jos sudo toimii.
-- `.github/workflows/release.yml` — `runs-on` viidessä jobissa.
+- `.github/workflows/release.yml` — `runs-on` viidessä jobissa. v2026.720.0:sta alkaen verify-jobit ovat
+  uudelleenkäytettävässä `release-verify.yml`:ssä; kutsu antaa `runner_label: ${{ vars.CI_RUNNER || '["ubuntu-latest"]' }}`
+  (2 kohtaa, RK9-314).
+- `.github/workflows/release-verify.yml` (upstream, v2026.720.0) — input `runner_label`, neljä jobia
+  `fromJSON(inputs.runner_label || vars.CI_RUNNER || '["ubuntu-latest"]')`.
+- `.github/workflows/storybook-visual.yml` (upstream, v2026.720.0) — `pull_request`-jobi: vipu fork-suojalla,
+  `workflow_dispatch`illa vipu ilman suojaa.
 - `.github/workflows/docker.yml`, `refresh-lockfile.yml` — `runs-on`.
 - `.github/workflows/e2e.yml`, `release-smoke.yml` — `runs-on` ja Playwright-askel.
 - `.github/workflows/ai-auto-merge.yml` (vain forkissa) — `runs-on`, deploy-dev-dispatch pois,
@@ -480,6 +490,9 @@ Varattu upstreamin ACPX-muutosten arvioinnille ja päätöksille. `claude_local`
 kiinnitys ja RK9-228-avainvartijan portaat kirjataan tiedostoon `doc/upgrade/acpx-claude-local.md`
 (RK9-305; tiedosto tulee masteriin sen PR:n mukana).
 
+Porras v2026.720.0 (RK9-314) teki pinnauksen: asettamaton `engine` ajaa CLI:llä. `acpx_local` poistui upstreamista,
+joten RK9-312:n avainvartija siirtyi `claude_local`in ACP-haaraan.
+
 ## Upgrade-prosessi
 
 ### 1. Pre-flight
@@ -584,6 +597,7 @@ tarkistukset on kirjattu Porraslokiin.
 | 2026-09-27 | v2026.609.0 | `e3aa869c6334993bc13e72c0dcf17c5f61ec356b` (tagi `rk9/pre-upgrade-v2026.609.0`) | 34 | HTTP 11/11, offline 3/3, fork-testit 77/77 harjoituksessa ja 78/78 builder-02:lla | RK9-313. Harjoitus prod-kopiolla (`rehearsal-20260927-080758.dump`, ref `d8713779`): putki 152 s, käynnistyksen migraatiot 0084–0098 (historia 94 → 109). Dry-run: 15 pendingiä 0,49 s, pisin AccessExclusiveLock 0,02 s (hitain `0085` 0,28 s), journal-, hash- ja fork-rivimääräassertit OK; schema-diffin 3 FAILia ovat taas jaetun kannan vieraita tauluja (`ai_conversations`, `bookings`, `_sqlx_migrations`…). Rollback 49 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. Koko vitest-sarja builder-02:lla (`pcp-remote-verify.sh`): general 245/246 → korjattu, serialized vihreä. Korjatut testit: ks. regressiomatriisi, osio "Konfliktit portaassa 609". Upstreamin `tasks:assign`-laajennus kovennettiin (ks. `defaults-hardening.md`). |
 | 2026-09-27 | v2026.618.0 (porras 720, osa 1) | `06b877ab7f687028e205021df6a5216e8cfa9a1b` (tagi `rk9/pre-upgrade-v2026.618.0`) | 18 | HTTP 11/11, offline 3/3, fork-testit 79/79 harjoituksessa (ennen `trust-proxy-rk9.test.ts`:tä) ja 81/81 builder-02:lla | RK9-314. Koko vitest-sarja builder-02:lla: general-server 266/266, workspaces-a 272/272, workspaces-b vihreä (`ssh-fixture.test.ts` flakkasi kerran, yksin 3/3), serialized 106/106 tiedostoa GGU-809-sovituksen jälkeen. Harjoitus prod-kopiolla (`rehearsal-20260927-093718.dump`, ref `5035179e9`): putki 144 s, käynnistyksen migraatiot 0099–0102 (historia 109 → 113). Routine-API prod-kopiolla: list (12 routinea), create, edit ja run-now; paussatun agentin run-now epäonnistui oikein ("Agent is not invokable"), `process`-no-op-agentin run-now loi yhden routine runin, yhden issuen ja yhden assignment-ajon (lisäksi upstreamin `missing_issue_comment`-jatkoajo, joka on jo masterissa), ei kaksoisajoja 30 s seurannassa. Dry-run: 4 pendingiä 0,35 s, pisin AccessExclusiveLock 0,02 s (hitain `0100` 0,30 s), journal-, hash- ja fork-rivimääräassertit OK; schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 50 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. Korjatut testit: ks. regressiomatriisi, osio "Konfliktit portaassa 618". |
 | 2026-09-27 | v2026.707.0 (porras 720, osa 2) | `a0ae4d43beff8a403ce97e1cd76bbd14793e138e` (tagi `rk9/pre-upgrade-v2026.707.0`) | 39 | HTTP 11/11, offline 3/3, fork-testit 80/80 harjoituksessa ja 81/81 builder-02:lla | RK9-314. Koko vitest-sarja builder-02:lla: general 288/292 tiedostoa ensimmäisellä ajolla, 4 failaavaa tiedostoa korjattu ja ajettu erikseen vihreiksi; serialized 116/116. Harjoitus prod-kopiolla (`rehearsal-20260927-111616.dump`, ref `a2a82796f`): putki 194 s, käynnistyksen migraatiot 0103–0135 (historia 113 → 144). Routine-API: `process`-no-op-agentin run-now loi yhden routine runin, yhden issuen ja yhden assignment-ajon (lisäksi upstreamin `missing_issue_comment`-jatkoajo), ei kaksoisajoja 30 s seurannassa. Dry-run: 31 pendingiä 24,1 s, hitain `0134` 19,6 s ja samalla pisin AccessExclusiveLock (`companies`), toiseksi hitain `0131` 2,6 s; journal-, hash- ja fork-assertit OK; schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 53 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. Vastuukäyttäjädata: ks. `defaults-hardening.md`, "Porras v2026.707.0". |
+| 2026-09-27 | v2026.720.0 (porras 720, osa 3) | `7a2ceba556621ed2dbb6270ad788f5e203f2b082` (tagi `rk9/pre-upgrade-v2026.720.0`) | 42 | HTTP 11/11, offline 3/3, fork-testit 79/79 harjoituksessa ja 82/82 builder-02:lla | RK9-314. Koko vitest-sarja builder-02:lla: general-server 327/327, workspaces-a 370/370 + 44/44, workspaces-b 42/42 + 4/5 (skill-kuvausten pituusraja, korjattu), serialized 128/128. CI löysi lisäksi forkin SEC-91-UI-testin, upstreamin local-background-recovery-testit (RK9-87) ja kaksi teardown-flakea; korjattu. Harjoitus prod-kopiolla (`rehearsal-20260927-123935.dump`, ref `4db8db584`): putki 135 s, käynnistyksen migraatiot 0136–0181 (historia 144 → 190), 0 uutta built-in-agenttia. Routine-API: yksi routine run, yksi issue, yksi assignment-ajo ja upstreamin jatkoajo, ei kaksoisajoja 30 s seurannassa. Dry-run: 46 pendingiä 1,41 s, pisin lukko 0,24 s (`activity_log`); schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 52 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. |
 
 ## Upgrade-loki
 
@@ -594,3 +608,4 @@ tarkistukset on kirjattu Porraslokiin.
 | 2026-09-27 | v2026.609.0 | Porras 2/6 (RK9-313). 34 konfliktia, migraatiot 0084–0098, kesto prod-kopiolla 0,49 s (pisin lukko 0,02 s). Upstream toi `commitperclip-review.yml`:n (`pull_request_target`), joka poistettiin, ja jakoi `verify`-jobin neljään; kaikki saivat runner-vivun. Oikeusmalli siirtyi `access.decide`en: hire-sääntö ennallaan, agenttien `tasks:assign`-laajennus kovennettiin RK9 Custom -lohkolla. Pre-push-hookin koko typecheck ajettiin builder-02:lla (`pcp-remote-verify.sh`) ja push `--no-verify`. PR mergetään merge-commitilla. |
 | 2026-09-27 | v2026.618.0 | Porras 3/6, osa 1 (RK9-314). Suora 720-merge olisi antanut 60 konfliktia ja 83 migraatiota, joten porras pilkottiin (618 → 626/707 → 720). 18 konfliktia, migraatiot 0099–0102, kesto prod-kopiolla 0,35 s. Upstream toi `agent-runtime-images.yml`:n (runner-vipu + upstream-only-ehto) ja `TRUST_PROXY`n (asetus `loopback`, testi `trust-proxy-rk9.test.ts`). GGU-809-recovery-testit mukautettiin RK9-87:ään. PR mergetään merge-commitilla. |
 | 2026-09-27 | v2026.707.0 | Porras 3/6, osa 2 (RK9-314). 39 konfliktia, migraatiot 0103–0135 (upstreamista puuttuvat 0126 ja 0130; forkin journal-idx 136–145), kesto prod-kopiolla 24 s. Upstream toi vastuukäyttäjämallin (ajo vaatii vastuukäyttäjän, agentin oikeudet leikataan vastuukäyttäjän oikeuksilla) ja ajastuksen eston env-lipuilla. Forkin RK9-231-idle-portti pidettiin upstreamin `skipTimerWhenNoActionableWork`in edellä. `IssueProperties` pilkottiin hakemistoksi; SEC-91-rivi siirrettiin. PR mergetään merge-commitilla. |
+| 2026-09-27 | v2026.720.0 | Porras 3/6, osa 3 (RK9-314). 42 konfliktia, migraatiot 0136–0181 (forkin journal-idx 182–191), kesto prod-kopiolla 1,4 s. Porrasta ei pilkottu, koska 707 ja 720 ovat vierekkäiset tagit. Upstream teki ACP:stä `claude_local`in oletusmoottorin ja poisti `acpx_local`in: fork pinnaa asettamattoman moottorin CLI:hin ja siirsi RK9-312:n avainvartijan ACP-haaraan. Built-in-agenttien automaattiluonti on forkissa `enableBuiltInAgents`-lipun takana, oletusgrantit vain lisäävät puuttuvia rivejä, ja ACP-lapsi ei peri palvelimen `PAPERCLIP_*`-asetuksia. Cutoverissa kirjoitetaan työtilan korjauslippujen arvoksi `false` (ks. `defaults-hardening.md`). PR mergetään merge-commitilla. |
