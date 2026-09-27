@@ -184,9 +184,29 @@ describe("agent auth middleware", () => {
     expect(res.body).toMatchObject({ type: "board", userId: "local-board", runId });
   });
 
+  // --- RK9 Custom: a static route key (no JWT shape) reaches the route as an anonymous actor ---
+  it.each(["local_trusted", "authenticated"] as const)(
+    "passes a non-JWT bearer key to the route as an anonymous actor (%s)",
+    async (mode) => {
+      const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+      const companyId = randomUUID();
+      const app = createApp(db, mode);
+
+      const actor = await request(app).get("/actor").set("Authorization", `Bearer ${"a".repeat(64)}`);
+      expect(actor.status).toBe(200);
+      expect(actor.body).toMatchObject({ type: "none", source: "none" });
+
+      const denied = await request(app)
+        .get(`/companies/${companyId}/protected`)
+        .set("Authorization", `Bearer ${"a".repeat(64)}`);
+      expect(denied.status).toBe(401);
+    },
+  );
+  // --- end RK9 Custom ---
+
   it.each([
     ["empty bearer token", "Bearer   ", "Empty bearer token"],
-    ["unverified token", "Bearer not-a-token", "Agent token did not verify"],
+    ["unverified token", "Bearer not.a.token", "Agent token did not verify"],
   ])("rejects %s instead of retaining the implicit local-board actor", async (_label, authorization, error) => {
     const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
     let commentWrites = 0;
