@@ -3167,6 +3167,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
     const ownerAgentId = current.assigneeAgentId;
     const ownerAgent = ownerAgentId ? await getAgent(ownerAgentId) : null;
+    // --- RK9 Custom (RK9-316): a human-proxy or heartbeat-disabled owner is a
+    // durable wait in the fork (a person works the issue). Upstream would escalate
+    // it as owner_not_invokable and move the issue to blocked. ---
+    if (ownerAgent && ownerAgent.companyId === current.companyId && isRk9RecoveryExcludedAgent(ownerAgent)) {
+      return "skipped";
+    }
+    // --- /RK9 Custom ---
     const ownerInvokable = ownerAgent && ownerAgent.companyId === current.companyId
       ? (await isAgentInvokable(ownerAgent)) && isHeartbeatWakeOnDemandEnabled(ownerAgent)
       : false;

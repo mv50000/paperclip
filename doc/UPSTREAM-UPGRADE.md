@@ -84,6 +84,9 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
   `assertKnownActorRunId` pysyy `addComment`issa (422 ennen tallennusta, RK9-76, RK9-315).
 - `server/src/services/recovery/service.ts` — 831 toi not-invokable-eskalaation. Forkin RK9 Custom -lohko ohittaa
   human proxy- ja heartbeat-disabled-agentit ennen sitä (`isRk9RecoveryExcludedAgent`, RK9-316).
+  Sama ohitus on `reconcileDispositionRepair`issa. Tarkista jokainen uusi upstream-polku, joka kutsuu
+  `isAgentInvokable`a ja eskaloi tai siirtää issuen `blocked`-tilaan.
+  `packages/db/src/migration-snapshot-drift.test.ts` (upstream, 831) ohittaa 9xxx-taulut (RK9 Custom).
 - `packages/adapters/claude-local/src/server/test.ts` — 831:n probe rakentaa oman envinsä
   (`buildLocalAdapterTestProbeEnv`) ja ajaa luotetusta PATHista. Forkin `inheritableHostEnv()` ja
   `doNotInheritEnvKeys: hostEnvKeysNotInherited()` pitävät `ANTHROPIC_API_KEY`n poissa (RK9-228, RK9-316).

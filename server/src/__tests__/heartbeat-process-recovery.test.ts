@@ -4772,6 +4772,62 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
+  // --- RK9 Custom (RK9-316): a human-proxy or heartbeat-disabled owner is a durable
+  // wait in the fork. Upstream v2026.831.1 disposition repair would escalate it as
+  // owner_not_invokable and move the issue to blocked while a person works it. ---
+  it.each([
+    { label: "heartbeat-disabled", patch: { runtimeConfig: { heartbeat: { enabled: false } } } },
+    { label: "human-proxy", patch: { adapterType: "human_proxy" } },
+  ])("leaves a persisted disposition repair owned by a $label agent alone (RK9-316)", async ({ patch }) => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+    });
+    await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
+    await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
+    const sourceIssue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+    const sourceState = await collectDispositionRepairSourceState(db, { issue: sourceIssue });
+    const action = await db
+      .insert(issueRecoveryActions)
+      .values({
+        companyId,
+        sourceIssueId: issueId,
+        kind: "deliberate_wait_without_target",
+        status: "active",
+        ownerType: "agent",
+        ownerAgentId: agentId,
+        previousOwnerAgentId: agentId,
+        returnOwnerAgentId: agentId,
+        cause: "deliberate_wait_without_target",
+        fingerprint: sourceState.fingerprint,
+        evidence: { sourceStateFingerprint: sourceState.fingerprint },
+        nextAction: "Record a durable disposition.",
+        wakePolicy: { type: "bounded_owner_disposition_repair", attempt: 1, maxAttempts: 5 },
+        attemptCount: 1,
+        maxAttempts: 5,
+        timeoutAt: new Date(Date.now() - 60_000),
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    await db.update(agents).set(patch).where(eq(agents.id, agentId));
+
+    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+
+    const [sourceAfter, actionAfter] = await Promise.all([
+      db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null),
+      db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)).then((rows) => rows[0] ?? null),
+    ]);
+    expect(sourceAfter).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
+    expect(actionAfter?.resolutionNote).not.toBe("owner_not_invokable");
+    expect(actionAfter?.ownerType).toBe("agent");
+  });
+  // --- /RK9 Custom ---
+
   it("keeps a legacy agent-owned recovery action readable without scheduling another takeover wake", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",

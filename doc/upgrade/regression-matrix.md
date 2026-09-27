@@ -677,7 +677,7 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 917ae45d v20
 | `packages/shared/src/validators/instance.ts` | upstreamin tyyppi + forkin `ManualPauseRequest` |
 | `server/src/index.ts`, `server/src/app.ts` | molemmat; heartbeat-palvelu forkin optioilla (`systemPause`, `maxGlobalConcurrentRunsDefault`), forkin Slack/risk/email/outreach-käynnistys ennen upstreamin `reconcileStaleRuntimeControlOperations`ia, `closeQmdMcpSession()` ennen `finalizeServerShutdown`ia |
 | `server/src/routes/issues.ts` | forkin RK9-76: `assertKnownActorRunId` ennen transaktionaalista päätöspäivitystä ja valinnainen run id checkoutissa (`getAgentRunId`). Upstreamin workspace-reopen säilyi. Interaktioiden resolve/withdraw vaativat yhä run id:n (upstream). |
-| `server/src/services/recovery/service.ts` | upstream toi not-invokable-eskalaation. RK9 Custom -lohko ohittaa sitä ennen human proxy- ja heartbeat-disabled-agentit (`isRk9RecoveryExcludedAgent`); paussatut ja terminoidut agentit saavat upstreamin eskalaation. Forkin `unwrapDatabaseConflictError` poistui käyttämättömänä. |
+| `server/src/services/recovery/service.ts` | upstream toi not-invokable-eskalaation. RK9 Custom -lohko ohittaa sitä ennen human proxy- ja heartbeat-disabled-agentit (`isRk9RecoveryExcludedAgent`); paussatut ja terminoidut agentit saavat upstreamin eskalaation. Uusi `reconcileDispositionRepair` ohittaa samat agentit (verifierin löydös): muuten `in_review`-issue tai tallennettu disposition repair -action siirtyisi `blocked`-tilaan syyllä `owner_not_invokable`. Testi: `heartbeat-process-recovery.test.ts`, "leaves a persisted disposition repair … (RK9-316)". Forkin `unwrapDatabaseConflictError` poistui käyttämättömänä. |
 | `server/src/services/built-in-agents.ts`, `companies.ts`, `heartbeat.ts`, `routes/companies.ts` | forkin RK9-314-portti (`enableBuiltInAgents`) ensin; upstreamin `wakeOnDemand` + forkin `skipWhenIdle`; importit molemmista |
 | `heartbeat-process-recovery.test.ts` | forkin versio. Testinimien vertailu: yksikään upstreamin tai forkin testi ei kadonnut. |
 | `built-in-agents.test.ts`, `companies-service.test.ts`, `openapi-routes.test.ts`, `server-startup-feedback-export.test.ts` | molemmat; openapi-suodatin yhdistää `RK9_FORK_ROUTES`in ja upstreamin `specOnlyContractFirstRoutes`in |
@@ -685,6 +685,15 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 917ae45d v20
 | `skills/paperclip/SKILL.md` | upstreamin teksti + RK9-315:n blocked-syyn lohko |
 | `ui/src/pages/InstanceSettings.tsx` | upstream poisti sivun (#12282). Forkin globaali ajolaskuri ("X / Y running") siirtyi `InstanceGeneralSettings.tsx`:n concurrency-osioon RK9 Custom -markkerien sisään. |
 | `ui/src/pages/InstanceGeneralSettings.tsx`, `CompanySettings.tsx`, `Companies.tsx`, `components/ApprovalPayload.tsx` | molemmat; forkin concurrency-kortti muuttui upstreamin tyyliseksi `<section>`iksi |
+
+CI:n löytämät sovitukset (RK9-316):
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `InstanceGeneralSettings.tsx` | forkin `concurrencyQuery` oli ehdollisten paluiden jälkeen ("Rendered more hooks"). Hook siirrettiin muiden kyselyjen viereen. |
+| `heartbeat-process-recovery.test.ts` | mergen jättämä tuplaimport (`heartbeatService`) poistettiin |
+| `issue-closed-workspace-routes.test.ts` | upstreamin "fails the run-id gate" -testi odottaa 401:tä. Forkissa checkoutilla ei ole run-id-porttia (RK9-76), joten testi korvattiin forkin odotuksella: workspace avataan ja checkout kirjataan null-run id:llä. |
+| `packages/db/src/migration-snapshot-drift.test.ts` (upstream, 831) | forkin 9xxx-migraatioilla ei ole snapshotteja. Testi vertaa uusimpaan upstream-snapshotiin ja ohittaa lauseet, jotka koskevat 9xxx-migraatioiden luomia tauluja. |
 | `.gitleaksignore` (ei konfliktia) | upstreamin RFC 6455 -esimerkkiavain `durable-prp-control-plane.test.ts`:ssä on väärä positiivinen |
 
 RK9 Custom -markkerit: 294 → 309 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Yksi markkeri katosi:
