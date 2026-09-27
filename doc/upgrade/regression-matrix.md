@@ -10,6 +10,7 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 |---|---|
 | Pre-upgrade-SHA (`origin/master`) | `9ed8e7704bd49da4064499de8477ae0a42e593e7` |
 | Freeze päivitetty (porras 512, RK9-312) | `3e7ff932008e8feb99e45553ab0ba74945417c9e` (2026-09-27), commitit 143–159 alla |
+| Freeze päivitetty (porras 609, RK9-313) | `e3aa869c6334993bc13e72c0dcf17c5f61ec356b` (2026-09-27), commitit 160–165 alla |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
 | Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
@@ -91,7 +92,7 @@ eivät muuta ajonaikaista käytöstä.
 
 Tarkistus: `scripts/upgrade-smoke.sh --offline` (järjestys, `idx`, tiedostot, ei upstream-rivejä 9xxx:n jälkeen).
 
-## Commitit (159, vanhin ensin)
+## Commitit (165, vanhin ensin)
 
 Kyky on commitin pääkyky; sulkeissa oleva "+" nimeää toissijaisen kyvyn. Tiedostoista näytetään
 neljä ensimmäistä. Verifiointi on joko commitin oma yhä olemassa oleva testi tai manuaalinen
@@ -258,6 +259,12 @@ tarkistus.
 | 157 | `b50a83d24` | outreach: AI-luonnokset Opus 5.5:llä (effort medium) (#121) | outreach | `server/src/__tests__/outreach-draft-logic.test.ts`, `server/src/services/outreach/draft.ts` | `npx vitest run server/src/__tests__/outreach-draft-logic.test.ts` |
 | 158 | `b73e6611b` | fix(outreach): rk9 template B — sell maintenance, never claim the site is broken (RK9-349) (#122) | outreach (docs) | `docs/outreach/templates/rk9.md` | _manuaalinen:_ ei ajonaikaista käytöstä — pohjateksti |
 | 159 | `3e7ff9320` | ci: move fork CI behind vars.CI_RUNNER lever (RK9-350) (#123) | ci/tooling | `.github/workflows/ai-auto-merge.yml`, `.github/workflows/deploy-dev.yml`, `.github/workflows/docker.yml`, `.github/workflows/e2e.yml` (+8) | `scripts/upgrade-smoke.sh --offline` (runner-vipu-tarkistus) |
+| 160 | `0d20d9704` | docs(upgrade): regressiomatriisin freeze 3e7ff9320, porras-512:n konfliktit ja lockfile-ohje (RK9-312) | docs | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/fork-tests.txt`, `doc/upgrade/regression-matrix.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
+| 161 | `e2b601228` | fix(upgrade): fork concurrency default in route test, idle-timer cleanup race, gitleaks false positives (RK9-312) | ci/tooling (+ heartbeat) | `.gitleaksignore`, `server/src/__tests__/agent-permissions-routes.test.ts`, `server/src/__tests__/heartbeat-idle-timer-skip.test.ts` | `npx vitest run server/src/__tests__/agent-permissions-routes.test.ts server/src/__tests__/heartbeat-idle-timer-skip.test.ts` |
+| 162 | `2f85242ed` | fix(upgrade): runner lever for upstream's new PR jobs, gemini turn-limit test, step-512 logs (RK9-312) | ci/tooling | `.github/workflows/pr.yml`, `doc/UPSTREAM-UPGRADE.md`, `packages/adapters/gemini-local/src/server/parse.test.ts` | `scripts/upgrade-smoke.sh --offline` |
+| 163 | `6610d0e76` | fix(upgrade): guard acpx_local against the host API key, keep SEC-91 outcomes on monitor edits (RK9-312) | claude-local (+ SEC-91) | `.github/workflows/pr.yml`, `doc/upgrade/acpx-claude-local.md`, `doc/upgrade/fork-tests.txt`, `server/src/__tests__/acpx-host-key-guard.test.ts` (+2) | `npx vitest run server/src/__tests__/acpx-host-key-guard.test.ts` |
+| 164 | `4a2f21f71` | fix: cicd-failure-watch repos after org transfer, firecrawl hint in prh-prospector (#126) | ci/tooling | `server/scripts/process-adapters/cicd-failure-watch.sh`, `skills/prh-prospector/SKILL.md` | _manuaalinen:_ `cicd-failure-watch.sh` löytää repot |
+| 165 | `e3aa869c6` | docs(upgrade): Node 24 prod cutover notes and native-module rebuild step (RK9-347) (#124) | docs | `doc/UPSTREAM-UPGRADE.md`, `doc/upgrade/cutover-runbook.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 
@@ -391,6 +398,48 @@ Porras-512:n muut fork-sovitukset (ei konfliktia, verifierin löydökset):
   Testi: `acpx-host-key-guard.test.ts`.
 - `ui/src/components/IssueProperties.tsx` `updateMonitor` säilyttää SEC-91-vaatimukset. Testi:
   `IssueProperties.test.tsx` ("keeps outcome requirements when clearing a monitor").
+
+## Konfliktit portaassa 609 (`origin/master` `69ae3ff5` + `v2026.609.0`, RK9-313)
+
+Todellinen merge 2026-09-27: 34 konfliktitiedostoa, 203 upstream-committia, migraatiot 0084–0098.
+`server/src/app.ts`, `server/src/index.ts`, `packages/db/src/schema/index.ts` ja
+`packages/shared/src/constants.ts` automergautuivat. Upstream toi kaksi uutta keskitettyä tarkistusta,
+joihin forkin säännöt nyt nojaavat: `agent-invokability.ts` (kuka voi ajaa) ja `agent-assignability.ts`
+(kenelle voi antaa työtä), sekä `authorization.ts` (`access.decide`), joka hoitaa nyt myös hire-oikeuden.
+
+| Tiedosto | Lohkoja | Ratkaisu |
+|---|---|---|
+| `pnpm-lock.yaml` | 14 | upstream + `pnpm install`; forkin riippuvuudet (`tsx`, `@aws-sdk/client-sesv2`, `@slack/web-api`, `mailparser`, `@types/mailparser`) masterin versioissa. Importerit = upstream + nämä viisi. |
+| `packages/db/src/migrations/meta/_journal.json` | 10 | upstream 0000–0098, sitten 9001–9010 (idx 99–108), rivit muuten tavu tavulta ennallaan |
+| `server/src/services/heartbeat.ts` | 5 | upstreamin invokability + forkin company pause, system pause, concurrency cap (`effectiveSlots`) ja human proxy -ohitus. Forkin toinen `writeSkippedRequest` poistettiin (upstream siirsi sen ylemmäs). |
+| `ui/src/pages/Agents.tsx` | 4 | upstreamin `AgentStatusBadge`; forkin human proxy -merkki siirrettiin sen `adapterType`-propiksi (`StatusBadge.tsx`, `AgentProperties.tsx`, `AgentActionButtons.tsx`) |
+| `server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts` | 3 | molemmat mockit ja testit; upstreamin uusi "run id required" -testi mukautettiin RK9-76:een (ajo-id valinnainen) |
+| `server/src/__tests__/heartbeat-process-recovery.test.ts` | 3 | forkin RK9-87-testit; upstreamin kaksi productive-continuation-testiä pois ja uusi classifier-testi RK9-87:n mukaiseksi |
+| `.github/workflows/pr.yml` | 3 | lockfile-poikkeus + upstreamin dependabot-ehto; Playwright-askel: Chrome jos löytyy, muuten Playwrightin chromium (RK9-350/313); `upload-artifact@v7` |
+| `server/src/services/recovery/service.ts` | 2 | forkin human proxy- ja heartbeat-disabled-poikkeus upstreamin async `isAgentInvokable`in eteen; upstreamin continuation-classifier + forkin `logCandidate`-kirjaus |
+| `server/src/services/routines.ts` | 2 | upstreamin jaettu `assertAssignableAgent`; forkin human proxy -esto siirrettiin sinne (`kind: "routine"`), dispatch-vartija säilyi |
+| `ui/src/pages/CompanySettings.tsx` | 2 | upstream + forkin company pause/resume |
+| `cli/src/__tests__/network-bind.test.ts` | 2 | molemmat (forkin `execFileSync`-mock + upstreamin tyhjä `PATH`) |
+| `server/src/routes/issues.ts` | 1 | human proxy ensin, sitten `pending_approval`, forkin paused/terminated-viesti ja upstreamin org chain -tarkistus |
+| `server/src/routes/approvals.ts` | 1 | molemmat (RK9-82 `wakeRequesterOnDecision` + upstreamin `assertApprovalAccessAllowed`) |
+| `ui/src/App.tsx` | 1 | upstream (instanssiasetukset yritysasetusten alle); forkin `/companies/:uuid`-uudelleenohjaus säilyi |
+| `packages/adapters/claude-local/src/*` | 3 × 1 | molemmat mallilistat (Claude 5 ensin), RK9-228-exportit ja `doNotInheritEnvKeys` |
+| muut 17 tiedostoa | 1 | molemmat puolet (importit, exportit, riippuvuudet) |
+
+Porras-609:n muut fork-sovitukset (ei konfliktia):
+
+- Upstream lisäsi workflow'n `commitperclip-review.yml` (`pull_request_target`, upstreamin botin salaisuudet). Se poistettiin
+  forkista: `pull_request_target` on kielletty (`doc/CI-RUNNER.md`), eikä botti toimi forkissa. Älä palauta mergessä.
+- Upstream jakoi `pr.yml`:n `verify`-jobin neljään (`typecheck_release_registry`, `general_tests`, `build`, `verify`).
+  Kaikki saivat runner-vivun.
+- Upstreamin OpenAPI-kattavuustesti (`openapi-routes.test.ts`) ei tunne forkin reittejä. Testiin lisättiin
+  RK9-poikkeuslista (13 reittitiedostoa, 7 reittiä). Forkin reittien dokumentointi `routes/openapi.ts`:ään on seurantatyö.
+- `hire-approval-policy.test.ts` mockaa nyt `access.decide`n. Uusi `hire-authorization-rk9.test.ts` ajaa oikean
+  `authorizationService`n embedded Postgresia vasten ja lukitsee hire-säännön.
+- Upstreamin `access.decide("tasks:assign")` antaa jokaisen aktiivisen agentin antaa tehtäviä simple modessa.
+  Forkin sääntö palautettiin RK9 Custom -lohkolla (`authorization.ts`): grantti tai CEO/`canCreateAgents`.
+  Upstreamin kaksi testiä mukautettiin (`authorization-service.test.ts`, `permissions-upgrade-boundary-routes.test.ts`),
+  ja molemmat lisättiin `fork-tests.txt`:hen. Perustelu: `defaults-hardening.md`, osio "Porras v2026.609.0 — oikeusmalli".
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

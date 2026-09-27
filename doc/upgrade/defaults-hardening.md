@@ -46,6 +46,30 @@ egress on estetty (ks. osio "Harjoitusinstanssi"), joten lokissa ei saa näkyä 
 Portaalla 817.0: migraatio 0196 ajetaan, ja taulut ovat poissa (`\dt cloud_upstream_*` palauttaa
 tyhjän).
 
+## Porras v2026.609.0 — oikeusmalli (`access.decide`)
+
+Todennettu 2026-09-27 ([RK9-313](/RK9/issues/RK9-313)). Upstream siirsi agenttien ja board-käyttäjien
+oikeustarkistukset palveluun `server/src/services/authorization.ts` (`access.decide`). Vertailukohta on
+v2026.512.0 ja forkin master `69ae3ff5`, joissa tarkistukset olivat reiteissä.
+
+| Oikeus | 512 / fork-master | 609 upstream | Päätös |
+|---|---|---|---|
+| `agents:create` (hire) | grantti, CEO tai `canCreateAgents` | sama; rooli nyt trimmataan ja pienennetään | Pidetään. Lukitsee `hire-authorization-rk9.test.ts` (oikea `authorizationService`). |
+| `require_board_approval_for_new_agents` | forkin 0071: yrityskohtainen, oletus `false` | ei muutosta oletukseen | Pidetään. Forkin hyväksyntäportti ja `hire-approval-policy.test.ts` ennallaan. |
+| `tasks:assign`, agentti | eksplisiittinen `tasks:assign`-grantti tai CEO/`canCreateAgents` | **jokainen aktiivinen saman yrityksen agentti** (`allow_simple_company_member`) | **Kovennettu.** RK9 Custom -lohko `authorization.ts`:ssä palauttaa 512:n säännön. Restricted- ja private-kohteet toimivat upstreamin tapaan (vain grantti). Lukitsevat `authorization-service.test.ts` ja `permissions-upgrade-boundary-routes.test.ts`. |
+| `tasks:assign`, board-käyttäjä | `canUser(tasks:assign)` | aktiivinen jäsen (ei viewer); 0088 antaa member-käyttäjille operator-roolin ja `tasks:assign`-grantin | Pidetään. Käytännössä sama kuin ennen: jäsen sai grantin jo aiemmin. |
+| `runtime:manage`, agentti | reittikohtainen `workspace-runtime-service-authz` | saman yrityksen agentti sallitaan | Pidetään. Uusi tarkistus on lisäportti vanhan reittitarkistuksen edessä, ei korvaa sitä. |
+| `secrets:read`, agentti | ei vastinetta | saman yrityksen agentti sallitaan | Pidetään toistaiseksi. 609:ssä yksikään reitti ei kysy tätä oikeutta. Tarkista myöhemmissä portaissa (`git grep '"secrets:read"' server/src/routes`). |
+| `agent_config:update`, oma agentti | sallittu (`assertCanUpdateAgent`, `actorAgent.id === targetAgent.id`) | sallittu (`allow_self`) | Pidetään. Ei muutosta. |
+| Jäsenyydet (0087, 0088) | ei | 0088 antaa jokaiselle agentille aktiivisen jäsenyyden ilman grantteja; 0087 antaa owner/admin-käyttäjille `environments:manage`n | Pidetään. Agentit eivät saa grantteja, joten yllä oleva kovennus pätee. |
+
+Uudet `experimental`-liput (`enableCloudSync` ym.) ovat oletuksena `false`. Uusia egress-oletuksia ei tullut.
+
+Todennus: `pnpm --filter @paperclipai/server exec vitest run src/__tests__/authorization-service.test.ts
+src/__tests__/permissions-upgrade-boundary-routes.test.ts src/__tests__/hire-authorization-rk9.test.ts`.
+Prodissa: standard-agentti ilman granttia saa 403 `Missing permission: tasks:assign`, kun se luo issuen
+toiselle agentille. CEO-agentti saa 201.
+
 ## Porras v2026.720.0 — `TRUST_PROXY` tulee mukaan
 
 `server/src/middleware/trust-proxy.ts` ja `applyTrustProxy(app, parseTrustProxyEnv(process.env.TRUST_PROXY))`
