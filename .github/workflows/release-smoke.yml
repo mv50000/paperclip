@@ -10,6 +10,8 @@ on:
         type: choice
         options:
           - canary
+          - nightly
+          - beta
           - latest
       host_port:
         description: Host port for the Docker smoke container
@@ -34,11 +36,17 @@ on:
         required: false
         default: release-smoke
         type: string
+      # --- RK9 Custom (RK9-350, RK9-315) --- runner-vipu kutsujalta (JSON-taulukko), ks. doc/CI-RUNNER.md
+      runner_label: # tyhjänä runs-on putoaa vars.CI_RUNNERiin
+        description: JSON array of runner labels
+        required: false
+        type: string
+        default: ''
 
 jobs:
   smoke:
     # --- RK9 Custom (RK9-350) --- runner-vipu, ks. doc/CI-RUNNER.md
-    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(inputs.runner_label || vars.CI_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 45
 
     steps:
@@ -51,7 +59,7 @@ jobs:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -81,6 +89,7 @@ jobs:
           HOST_PORT="${{ inputs.host_port }}" \
           DATA_DIR="$RUNNER_TEMP/release-smoke-data" \
           PAPERCLIPAI_VERSION="${{ inputs.paperclip_version }}" \
+          SMOKE_READY_TIMEOUT_SECONDS=420 \
           SMOKE_DETACH=true \
           SMOKE_METADATA_FILE="$metadata_file" \
           ./scripts/docker-onboard-smoke.sh

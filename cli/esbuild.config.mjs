@@ -7,8 +7,10 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundledCliNpmDependencies } from "../scripts/cli-bundled-npm-dependencies.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -39,7 +41,10 @@ const externalWorkspacePackages = new Set([
 const externals = new Set();
 const cliPackage = JSON.parse(readFileSync(resolve(repoRoot, "cli", "package.json"), "utf8"));
 for (const name of Object.keys(cliPackage.dependencies || {})) {
-  if (externalWorkspacePackages.has(name) || !name.startsWith("@paperclipai/")) {
+  if (
+    externalWorkspacePackages.has(name) ||
+    (!name.startsWith("@paperclipai/") && !bundledCliNpmDependencies.has(name))
+  ) {
     externals.add(name);
   }
 }
@@ -50,6 +55,17 @@ for (const name of Object.keys(cliPackage.optionalDependencies || {})) {
 // Also add all published workspace packages as external
 for (const name of externalWorkspacePackages) {
   externals.add(name);
+}
+
+if (bundledCliNpmDependencies.has("embedded-postgres")) {
+  const requireFromDb = createRequire(resolve(repoRoot, "packages/db/package.json"));
+  const embeddedPostgresRoot = dirname(requireFromDb.resolve("embedded-postgres"));
+  const embeddedPostgresPackage = JSON.parse(
+    readFileSync(resolve(embeddedPostgresRoot, "..", "package.json"), "utf8"),
+  );
+  for (const name of Object.keys(embeddedPostgresPackage.optionalDependencies ?? {})) {
+    externals.add(name);
+  }
 }
 
 /** @type {import('esbuild').BuildOptions} */
