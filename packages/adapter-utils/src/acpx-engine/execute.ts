@@ -32,6 +32,7 @@ import {
   buildPaperclipEnv,
   ensureAbsoluteDirectory,
   ensurePathInEnv,
+  sanitizeInheritedPaperclipEnv,
   ensurePaperclipSkillSymlink,
   isPaperclipRuntimeEnvKey,
   joinPromptSections,
@@ -1238,8 +1239,10 @@ async function buildRuntime(input: {
       await input.ctx.onLog("stdout", "[paperclip] Sandbox ACP API callback bridge enabled for this run.\n");
     }
   }
+  // --- RK9 Custom (RK9-314): drop the server's own PAPERCLIP_* settings (for example the agent JWT
+  // secret) from the inherited env, as runChildProcess does for the CLI lane ---
   const runtimeEnv = Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
+    Object.entries(ensurePathInEnv({ ...sanitizeInheritedPaperclipEnv(process.env), ...env })).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );

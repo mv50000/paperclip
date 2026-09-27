@@ -1035,6 +1035,54 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(payloadEnv.PAPERCLIP_API_KEY).not.toBe("real-run-jwt");
   });
 
+  // --- RK9 Custom (RK9-314): the ACP child does not inherit the server's own PAPERCLIP_* settings ---
+  it("keeps server PAPERCLIP_* settings such as the agent JWT secret out of the ACP process env", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const localCwd = path.join(root, "worktree");
+    const remoteCwd = path.join(root, "remote-workspace");
+    await fs.mkdir(localCwd, { recursive: true });
+    await fs.mkdir(remoteCwd, { recursive: true });
+
+    const previousSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET = "host-jwt-secret";
+    let sessionPayload: Record<string, unknown> | null = null;
+    try {
+      const runner = createLocalSandboxRunner(
+        (input: { args?: string[]; env?: Record<string, string> }) => {
+          if (input.env?.PAPERCLIP_SANDBOX_EXEC_CHANNEL === "bridge") {
+            const script = input.args?.[1] ?? "";
+            const match = script.match(/PAPERCLIP_PROCESS_SESSION_COMMAND_B64='([^']+)'/);
+            if (match) {
+              sessionPayload = JSON.parse(Buffer.from(match[1]!, "base64").toString("utf8")) as Record<string, unknown>;
+            }
+          }
+        },
+      );
+
+      await runExecutor(
+        { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
+        {
+          authToken: "real-run-jwt",
+          executionTarget: {
+            kind: "remote",
+            transport: "sandbox",
+            providerKey: "fake-plugin",
+            remoteCwd,
+            runner,
+          },
+        },
+      );
+    } finally {
+      if (previousSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+      else process.env.PAPERCLIP_AGENT_JWT_SECRET = previousSecret;
+    }
+
+    const payloadEnv = ((sessionPayload as Record<string, unknown> | null)?.env ?? {}) as Record<string, unknown>;
+    expect(payloadEnv.PAPERCLIP_API_KEY).toBeTruthy();
+    expect(payloadEnv).not.toHaveProperty("PAPERCLIP_AGENT_JWT_SECRET");
+  });
+
   it.skipIf(process.platform === "win32")("drops benign ACP nes/close cleanup stderr but keeps it in the run log", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

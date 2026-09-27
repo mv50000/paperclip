@@ -38,7 +38,7 @@ export const agentConfigurationDoc = `# claude_local agent configuration
 Adapter: claude_local
 
 Core fields:
-- engine (string, optional): execution engine. Leave unset/auto to use ACP when prerequisites pass and fall back to the Claude Code CLI with diagnostics. Use "cli" to pin the CLI lane or "acp" to require ACP.
+- engine (string, optional): execution engine. On this server an unset value runs the Claude Code CLI (RK9-305). "acp" requires ACP and is refused while the server environment has ANTHROPIC_API_KEY (RK9-228). Use "cli" to pin the CLI lane explicitly.
 - cwd (string, optional): default absolute working directory fallback for the agent process (created if missing when possible)
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file injected at runtime
 - model (string, optional): Claude model id

@@ -106,8 +106,20 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projects);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(heartbeatRuns);
+    // --- RK9 Custom (RK9-314): a finished run can still write activity or run events after the
+    // test returns; retry so the late row does not fail the heartbeat_runs delete (CI flake). ---
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await db.delete(activityLog);
+        await db.delete(heartbeatRunEvents);
+        await db.delete(heartbeatRuns);
+        break;
+      } catch (error) {
+        if (attempt >= 20) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    // --- /RK9 Custom ---
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(budgetPolicies);

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { readPaperclipSkillSyncPreference, writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { and, desc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, builtInManagedResources, companies, issueThreadInteractions, issues, routines, routineTriggers } from "@paperclipai/db";
+import { agents, builtInManagedResources, companies, issueThreadInteractions, issues, principalPermissionGrants, routines, routineTriggers } from "@paperclipai/db";
 import { syncRoutineVariablesWithTemplate } from "@paperclipai/shared";
 import type { Agent, Approval, CompanySkill, PermissionKey, Routine, RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
@@ -820,13 +820,31 @@ export function builtInAgentService(db: Db) {
 
   async function ensureAgentDefaultGrants(companyId: string, agentId: string, grantKeys: PermissionKey[]) {
     if (grantKeys.length === 0) return 0;
-    await accessSvc.ensureMembership(companyId, "agent", agentId, "member", "active");
+    // --- RK9 Custom (RK9-314): insert-only. This runs on every boot and agent hire; upstream's
+    // ensureMembership/setPrincipalPermission would reactivate a suspended membership and reset
+    // an operator-scoped grant to unscoped each time. Only missing rows are created. ---
+    const membership = await accessSvc.getMembership(companyId, "agent", agentId);
+    if (!membership) {
+      await accessSvc.ensureMembership(companyId, "agent", agentId, "member", "active");
+    }
     let ensured = 0;
     for (const permissionKey of grantKeys) {
-      await accessSvc.setPrincipalPermission(companyId, "agent", agentId, permissionKey, true, null);
+      // Direct insert: setPrincipalPermission would also reactivate the membership.
+      await db
+        .insert(principalPermissionGrants)
+        .values({
+          companyId,
+          principalType: "agent",
+          principalId: agentId,
+          permissionKey,
+          scope: null,
+          grantedByUserId: null,
+        })
+        .onConflictDoNothing();
       ensured += 1;
     }
     return ensured;
+    // --- /RK9 Custom ---
   }
 
   async function ensureBuiltInAgentDefaultGrants(agent: Agent, definition: BuiltInAgentDefinition) {

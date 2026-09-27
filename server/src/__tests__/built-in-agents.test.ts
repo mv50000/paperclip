@@ -523,6 +523,51 @@ describeEmbeddedPostgres("built-in agents", () => {
     });
   });
 
+  // --- RK9 Custom (RK9-314): default grant sync is insert-only ---
+  it("keeps a suspended membership and an operator-scoped root CEO grant on reconcile", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const root = await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "agent",
+      principalId: root.id,
+      membershipRole: "member",
+      status: "suspended",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId,
+      principalType: "agent",
+      principalId: root.id,
+      permissionKey: "agents:configure",
+      scope: { agentIds: ["agent-x"] },
+    });
+
+    await reconcileBuiltInAgentsOnStartup(db);
+    await reconcileBuiltInAgentsOnStartup(db);
+
+    const membership = await db
+      .select()
+      .from(companyMemberships)
+      .where(and(eq(companyMemberships.principalType, "agent"), eq(companyMemberships.principalId, root.id)));
+    expect(membership).toHaveLength(1);
+    expect(membership[0]?.status).toBe("suspended");
+    const grants = await db
+      .select()
+      .from(principalPermissionGrants)
+      .where(and(eq(principalPermissionGrants.principalType, "agent"), eq(principalPermissionGrants.principalId, root.id)));
+    expect(grants.find((row) => row.permissionKey === "agents:configure")?.scope).toEqual({ agentIds: ["agent-x"] });
+    expect(grants.map((row) => row.permissionKey)).toEqual(expect.arrayContaining(["agents:configure", "skills:create"]));
+  });
+  // --- /RK9 Custom ---
+
   it("auto-provisions a paused Reflection Coach bundle with skill sync and a disabled routine", async () => {
     // --- RK9 Custom (RK9-314): bundled agents are provisioned only with built-in agents enabled ---
     await instanceSettingsService(db).updateExperimental({ enableBuiltInAgents: true });

@@ -12,7 +12,7 @@ on:
         description: JSON array of runner labels
         required: false
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
 
 jobs:
   typecheck:
