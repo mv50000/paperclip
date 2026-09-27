@@ -440,6 +440,11 @@ Porras-609:n muut fork-sovitukset (ei konfliktia):
   Forkin sääntö palautettiin RK9 Custom -lohkolla (`authorization.ts`): grantti tai CEO/`canCreateAgents`.
   Upstreamin kaksi testiä mukautettiin (`authorization-service.test.ts`, `permissions-upgrade-boundary-routes.test.ts`),
   ja molemmat lisättiin `fork-tests.txt`:hen. Perustelu: `defaults-hardening.md`, osio "Porras v2026.609.0 — oikeusmalli".
+- Upstreamin `assertAssignableAgent(kind: "work")` hylkää agentin, jonka raportointiketju on rikki (#7663).
+  Tämä koskee myös human proxy -agentteja, vaikka reitin kommentti sanoo niiden olevan aina assignattavissa.
+  Merkitystä on vain, jos human proxy raportoi lopetetulle tai puuttuvalle esihenkilölle. Ei muutettu.
+- Upstream lisäsi `.github/dependabot.yml`:n. Se on forkissa inertti (automaattiset tietoturvakorjaukset pois
+  päältä), ja `pr.yml`:n dependabot-poikkeus on vaaraton.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

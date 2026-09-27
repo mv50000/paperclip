@@ -63,7 +63,13 @@ v2026.512.0 ja forkin master `69ae3ff5`, joissa tarkistukset olivat reiteissä.
 | `agent_config:update`, oma agentti | sallittu (`assertCanUpdateAgent`, `actorAgent.id === targetAgent.id`) | sallittu (`allow_self`) | Pidetään. Ei muutosta. |
 | Jäsenyydet (0087, 0088) | ei | 0088 antaa jokaiselle agentille aktiivisen jäsenyyden ilman grantteja; 0087 antaa owner/admin-käyttäjille `environments:manage`n | Pidetään. Agentit eivät saa grantteja, joten yllä oleva kovennus pätee. |
 
-Uudet `experimental`-liput (`enableCloudSync` ym.) ovat oletuksena `false`. Uusia egress-oletuksia ei tullut.
+Uudet `experimental`-liput (`enableCloudSync` ym.) ovat oletuksena `false`.
+
+Uusi egress: `claude_local` hakee mallilistan osoitteesta `https://api.anthropic.com/v1/models`, jos
+palvelimen ympäristössä on `ANTHROPIC_API_KEY` (`packages/adapters/claude-local/src/server/models.ts`).
+Kutsu ei laskuta, eikä avain päädy CLI:lle (RK9-228 pätee). Prodissa avainta ei ole: 2026-09-27
+`/etc/paperclip/paperclip-server.env` ja palveluprosessin ympäristö eivät sisällä sitä. Pidetään näin.
+Jos avain joskus lisätään, API:n mallit tulevat listan alkuun forkin Claude 5 -järjestyksen edelle.
 
 Todennus: `pnpm --filter @paperclipai/server exec vitest run src/__tests__/authorization-service.test.ts
 src/__tests__/permissions-upgrade-boundary-routes.test.ts src/__tests__/hire-authorization-rk9.test.ts`.
