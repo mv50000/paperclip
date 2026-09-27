@@ -1,0 +1,7 @@
+# --- RK9 Custom (RK9-312) --- verified false positives in upstream commits merged by upgrade steps.
+# Gitleaks scans every commit of an upgrade PR (base..head), upstream commits included.
+# Add only fingerprints whose value is a documented placeholder, with the reason.
+#
+# v2026.512.0, #5429: AWS documentation example account 123456789012 in a fake Secrets Manager ARN (test fixture).
+778e775c35834aabe09266fb6d415d3dafbd1deb:server/src/__tests__/secrets-service.test.ts:generic-api-key:997
+778e775c35834aabe09266fb6d415d3dafbd1deb:server/src/__tests__/secrets-service.test.ts:generic-api-key:1113

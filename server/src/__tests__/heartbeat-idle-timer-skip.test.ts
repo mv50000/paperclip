@@ -89,9 +89,19 @@ describeEmbeddedPostgres("heartbeat timer idle precheck", () => {
     await db.delete(issueRelations);
     await db.delete(issueTreeHolds);
     await db.delete(issues);
-    await db.delete(heartbeatRunEvents);
-    await db.delete(activityLog);
-    await db.delete(heartbeatRuns);
+    // A finished run can still append a run event right after its status settles
+    // (upstream v2026.512.0 finalization), so retry until the delete wins the race.
+    for (let attempt = 0; ; attempt += 1) {
+      await db.delete(heartbeatRunEvents);
+      await db.delete(activityLog);
+      try {
+        await db.delete(heartbeatRuns);
+        break;
+      } catch (error) {
+        if (attempt >= 20) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
     await db.delete(agents);

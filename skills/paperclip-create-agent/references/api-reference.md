@@ -42,8 +42,13 @@ Request body matches agent create shape:
   "adapterType": "claude_local",
   "adapterConfig": {
     "cwd": "/absolute/path",
-    "model": "claude-sonnet-5",
-    "promptTemplate": "You are CTO..."
+    "model": "claude-sonnet-5"
+  },
+  "instructionsBundle": {
+    "entryFile": "AGENTS.md",
+    "files": {
+      "AGENTS.md": "You are CTO..."
+    }
   },
   "runtimeConfig": {
     "heartbeat": {

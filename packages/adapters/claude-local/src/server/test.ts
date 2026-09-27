@@ -9,11 +9,16 @@ import {
   asNumber,
   asStringArray,
   parseObject,
-  ensureAbsoluteDirectory,
-  ensureCommandResolvable,
   ensurePathInEnv,
-  runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
+import {
+  ensureAdapterExecutionTargetCommandResolvable,
+  ensureAdapterExecutionTargetDirectory,
+  maybeRunSandboxInstallCommand,
+  runAdapterExecutionTargetProcess,
+  describeAdapterExecutionTarget,
+  resolveAdapterExecutionTargetCwd,
+} from "@paperclipai/adapter-utils/execution-target";
 import path from "node:path";
 import { detectClaudeLoginRequired, parseClaudeStreamJson } from "./parse.js";
 import {
@@ -23,6 +28,8 @@ import {
   inheritsHostAnthropicApiKey,
 } from "./host-env.js";
 import { isBedrockModelId } from "./models.js";
+import { buildClaudeProbePermissionArgs } from "./permissions.js";
+import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -62,10 +69,29 @@ export async function testEnvironment(
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
   const command = asString(config.command, "claude");
-  const cwd = asString(config.cwd, process.cwd());
+  const target = ctx.executionTarget ?? null;
+  const targetIsRemote = target?.kind === "remote";
+  const targetIsSandbox = target?.kind === "remote" && target.transport === "sandbox";
+  const cwd = resolveAdapterExecutionTargetCwd(target, asString(config.cwd, ""), process.cwd());
+  const targetLabel = targetIsRemote
+    ? ctx.environmentName ?? describeAdapterExecutionTarget(target)
+    : null;
+  const runId = `claude-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  if (targetLabel) {
+    checks.push({
+      code: "claude_environment_target",
+      level: "info",
+      message: `Probing inside environment: ${targetLabel}`,
+    });
+  }
 
   try {
-    await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+    await ensureAdapterExecutionTargetDirectory(runId, target, cwd, {
+      cwd,
+      env: {},
+      createIfMissing: true,
+    });
     checks.push({
       code: "claude_cwd_valid",
       level: "info",
@@ -88,8 +114,17 @@ export async function testEnvironment(
   // Same environment the agent will actually run with, so the hello probe
   // cannot succeed on credentials the real run would not have (RK9-228).
   const runtimeEnv = ensurePathInEnv({ ...inheritableHostEnv(), ...env });
+  const installCheck = await maybeRunSandboxInstallCommand({
+    runId,
+    target,
+    adapterKey: "claude",
+    installCommand: SANDBOX_INSTALL_COMMAND,
+    detectCommand: command,
+    env,
+  });
+  if (installCheck) checks.push(installCheck);
   try {
-    await ensureCommandResolvable(command, cwd, runtimeEnv);
+    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
     checks.push({
       code: "claude_command_resolvable",
       level: "info",
@@ -104,16 +139,21 @@ export async function testEnvironment(
     });
   }
 
+  // When probing a remote target, the Paperclip host's process.env does not
+  // reflect what the agent will actually see at runtime. Only consider env
+  // vars from the adapter config in that case; the probe itself will surface
+  // any auth issues on the remote box.
+  const considerHostEnv = !targetIsRemote;
   const hasBedrock =
     env.CLAUDE_CODE_USE_BEDROCK === "1" ||
     env.CLAUDE_CODE_USE_BEDROCK === "true" ||
-    process.env.CLAUDE_CODE_USE_BEDROCK === "1" ||
-    process.env.CLAUDE_CODE_USE_BEDROCK === "true" ||
+    (considerHostEnv && process.env.CLAUDE_CODE_USE_BEDROCK === "1") ||
+    (considerHostEnv && process.env.CLAUDE_CODE_USE_BEDROCK === "true") ||
     isNonEmpty(env.ANTHROPIC_BEDROCK_BASE_URL) ||
-    isNonEmpty(process.env.ANTHROPIC_BEDROCK_BASE_URL);
+    (considerHostEnv && isNonEmpty(process.env.ANTHROPIC_BEDROCK_BASE_URL));
 
   const configApiKey = env.ANTHROPIC_API_KEY;
-  const hostApiKey = process.env.ANTHROPIC_API_KEY;
+  const hostApiKey = considerHostEnv ? process.env.ANTHROPIC_API_KEY : undefined;
   // Mirrors inheritableHostEnv() in execute.ts: a server-wide key reaches the
   // CLI only when the deployment opts in (RK9-228).
   const hostKeyIsInherited = inheritsHostAnthropicApiKey();
@@ -159,7 +199,7 @@ export async function testEnvironment(
         "A server-wide key would move every agent from subscription billing to metered API credit, so it is not inherited.",
       hint: `Set the key in this agent's adapter config env to use API-key auth, or set ${INHERIT_OPT_IN_ENV_KEY}=1 to inherit it for every agent.`,
     });
-  } else {
+  } else if (!targetIsRemote) {
     checks.push({
       code: "claude_subscription_mode_possible",
       level: "info",
@@ -191,7 +231,7 @@ export async function testEnvironment(
       })();
 
       const args = ["--print", "-", "--output-format", "stream-json", "--verbose"];
-      if (dangerouslySkipPermissions) args.push("--dangerously-skip-permissions");
+      args.push(...buildClaudeProbePermissionArgs({ dangerouslySkipPermissions, targetIsSandbox }));
       if (chrome) args.push("--chrome");
       // For Bedrock: only pass --model when the ID is a Bedrock-native identifier.
       if (model && (!hasBedrock || isBedrockModelId(model))) {
@@ -201,8 +241,9 @@ export async function testEnvironment(
       if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
       if (extraArgs.length > 0) args.push(...extraArgs);
 
-      const probe = await runChildProcess(
-        `claude-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      const probe = await runAdapterExecutionTargetProcess(
+        runId,
+        target,
         command,
         args,
         {

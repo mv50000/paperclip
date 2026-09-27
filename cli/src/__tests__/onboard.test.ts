@@ -11,6 +11,7 @@ const execFileSyncMock = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({
   execFileSync: execFileSyncMock,
 }));
+const ORIGINAL_CWD = process.cwd();
 
 function createExistingConfigFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-onboard-"));
@@ -94,10 +95,18 @@ describe("onboard", () => {
     execFileSyncMock.mockImplementation(() => {
       throw new Error("tailscale unavailable");
     });
+    delete process.env.PAPERCLIP_HOME;
+    delete process.env.PAPERCLIP_CONFIG;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_BIND;
+    delete process.env.PAPERCLIP_BIND_HOST;
+    delete process.env.PAPERCLIP_TAILNET_BIND_HOST;
+    delete process.env.HOST;
   });
 
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV };
+    process.chdir(ORIGINAL_CWD);
   });
 
   it("preserves an existing config when rerun without flags", async () => {
@@ -132,6 +141,27 @@ describe("onboard", () => {
     expect(raw.server.exposure).toBe("private");
     expect(raw.server.bind).toBe("loopback");
     expect(raw.server.host).toBe("127.0.0.1");
+  });
+
+  it("creates instance-root config and data paths for a fresh PAPERCLIP_HOME", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-onboard-home-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-onboard-cwd-"));
+    process.chdir(cwd);
+    process.env.PAPERCLIP_HOME = home;
+
+    await onboard({ yes: true, invokedByRun: true });
+
+    const instanceRoot = path.join(home, "instances", "default");
+    const configPath = path.join(instanceRoot, "config.json");
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as PaperclipConfig;
+
+    expect(raw.database.embeddedPostgresDataDir).toBe(path.join(instanceRoot, "db"));
+    expect(raw.database.backup.dir).toBe(path.join(instanceRoot, "data", "backups"));
+    expect(raw.logging.logDir).toBe(path.join(instanceRoot, "logs"));
+    expect(raw.storage.localDisk.baseDir).toBe(path.join(instanceRoot, "data", "storage"));
+    expect(raw.secrets.localEncrypted.keyFilePath).toBe(path.join(instanceRoot, "secrets", "master.key"));
+    expect(fs.existsSync(path.join(instanceRoot, ".env"))).toBe(true);
+    expect(fs.existsSync(path.join(instanceRoot, "secrets", "master.key"))).toBe(true);
   });
 
   it("supports authenticated/private quickstart bind presets", async () => {

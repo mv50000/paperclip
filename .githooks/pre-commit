@@ -11,6 +11,12 @@ if [[ "$branch" == chore/refresh-lockfile* ]]; then
   exit 0
 fi
 
+# --- RK9 Custom (RK9-312) --- upstream-porrasbranchit tuovat upstreamin lockfilen
+# (ks. doc/UPSTREAM-UPGRADE.md, "Ratkaise konfliktit")
+if [[ "$branch" == upgrade/v* ]]; then
+  exit 0
+fi
+
 # Check if pnpm-lock.yaml is staged
 if git diff --cached --name-only | grep -qx 'pnpm-lock.yaml'; then
   echo "ERROR: pnpm-lock.yaml is staged for commit."
