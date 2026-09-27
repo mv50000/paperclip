@@ -52,6 +52,7 @@ import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
+import { assertAssignableAgent } from "./agent-assignability.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { parseCron, validateCron } from "./cron.js";
@@ -167,6 +168,7 @@ function nextCronTickInTimeZone(expression: string, timeZone: string, after: Dat
 function nextResultText(status: string, issueId?: string | null) {
   if (status === "issue_created" && issueId) return `Created execution issue ${issueId}`;
   if (status === "coalesced") return "Coalesced into an existing live execution issue";
+  if (status === "skipped_paused") return "Skipped because the project is paused";
   if (status === "skipped") return "Skipped because a live execution issue already exists";
   if (status === "completed") return "Execution issue completed";
   if (status === "failed") return "Execution failed";
@@ -370,6 +372,8 @@ function createRoutineDispatchFingerprint(input: {
   payload: Record<string, unknown> | null;
   projectId: string | null;
   assigneeAgentId: string | null;
+  routineRevisionId: string | null;
+  routineEnvFingerprint: string | null;
   executionWorkspaceId?: string | null;
   executionWorkspacePreference?: string | null;
   executionWorkspaceSettings?: Record<string, unknown> | null;
@@ -377,6 +381,11 @@ function createRoutineDispatchFingerprint(input: {
   description: string | null;
 }) {
   const canonical = JSON.stringify(normalizeRoutineDispatchFingerprintValue(input));
+  return crypto.createHash("sha256").update(canonical).digest("hex");
+}
+
+function createRoutineEnvFingerprint(env: unknown) {
+  const canonical = JSON.stringify(normalizeRoutineDispatchFingerprintValue(env ?? null));
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
 
@@ -410,6 +419,7 @@ function routineRevisionSnapshotRoutine(routine: RoutineRow): RoutineRevisionSna
     concurrencyPolicy: routine.concurrencyPolicy as RoutineRevisionSnapshotV1["routine"]["concurrencyPolicy"],
     catchUpPolicy: routine.catchUpPolicy as RoutineRevisionSnapshotV1["routine"]["catchUpPolicy"],
     variables: routine.variables ?? [],
+    env: routine.env ?? null,
   };
 }
 
@@ -610,35 +620,12 @@ export function routineService(
     return routine;
   }
 
-  async function assertAssignableAgent(companyId: string, agentId: string | null | undefined) {
-    if (!agentId) return;
-    const agent = await db
-      // --- RK9 Custom: human-proxy agents ---
-      .select({
-        id: agents.id,
-        companyId: agents.companyId,
-        status: agents.status,
-        adapterType: agents.adapterType,
-      })
-      .from(agents)
-      .where(eq(agents.id, agentId))
-      .then((rows) => rows[0] ?? null);
-    if (!agent) throw notFound("Assignee agent not found");
-    if (agent.companyId !== companyId) throw unprocessable("Assignee must belong to same company");
-    // --- RK9 Custom: human-proxy agents ---
-    if (isHumanProxyAgent(agent)) {
-      throw conflict("Cannot assign routines to human-proxy agents — they are picked up manually via /implement");
-    }
-    if (agent.status === "pending_approval") throw conflict("Cannot assign routines to pending approval agents");
-    if (agent.status === "terminated") throw conflict("Cannot assign routines to terminated agents");
-  }
-
   async function assertRestorableAssignee(
     companyId: string,
     assigneeAgentId: string | null | undefined,
     actor: Actor,
   ) {
-    await assertAssignableAgent(companyId, assigneeAgentId);
+    await assertAssignableAgent(db, companyId, assigneeAgentId, { kind: "routine" });
     if (actor.agentId && assigneeAgentId !== actor.agentId) {
       throw forbidden("Agents can only restore routine revisions assigned to themselves");
     }
@@ -705,6 +692,7 @@ export function routineService(
         idempotencyKey: routineRuns.idempotencyKey,
         triggerPayload: routineRuns.triggerPayload,
         dispatchFingerprint: routineRuns.dispatchFingerprint,
+        routineRevisionId: routineRuns.routineRevisionId,
         linkedIssueId: routineRuns.linkedIssueId,
         coalescedIntoRunId: routineRuns.coalescedIntoRunId,
         failureReason: routineRuns.failureReason,
@@ -738,6 +726,7 @@ export function routineService(
         idempotencyKey: row.idempotencyKey,
         triggerPayload: row.triggerPayload as Record<string, unknown> | null,
         dispatchFingerprint: row.dispatchFingerprint,
+        routineRevisionId: row.routineRevisionId,
         linkedIssueId: row.linkedIssueId,
         coalescedIntoRunId: row.coalescedIntoRunId,
         failureReason: row.failureReason,
@@ -884,6 +873,66 @@ export function routineService(
         })
         .where(eq(routineTriggers.id, input.triggerId));
     }
+  }
+
+  // Records a skipped scheduled firing without creating an execution issue. Used when the
+  // routine's project is paused: the tick is still claimed/advanced upstream (no backfill),
+  // and run history + trigger audit reflect the pause-specific skip.
+  async function recordSuppressedScheduleRun(input: {
+    routine: typeof routines.$inferSelect;
+    trigger: typeof routineTriggers.$inferSelect;
+    reason: string;
+    nextRunAt: Date | null;
+  }) {
+    const triggeredAt = new Date();
+    const run = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const [createdRun] = await txDb
+        .insert(routineRuns)
+        .values({
+          companyId: input.routine.companyId,
+          routineId: input.routine.id,
+          triggerId: input.trigger.id,
+          source: "schedule",
+          status: "skipped",
+          triggeredAt,
+          failureReason: input.reason,
+          completedAt: triggeredAt,
+          linkedIssueId: null,
+          routineRevisionId: input.routine.latestRevisionId,
+        })
+        .returning();
+      await updateRoutineTouchedState({
+        routineId: input.routine.id,
+        triggerId: input.trigger.id,
+        triggeredAt,
+        status: "skipped_paused",
+        nextRunAt: input.nextRunAt,
+      }, txDb);
+      return createdRun;
+    });
+
+    try {
+      await logActivity(db, {
+        companyId: input.routine.companyId,
+        actorType: "system",
+        actorId: "routine-scheduler",
+        action: "routine.run_skipped",
+        entityType: "routine_run",
+        entityId: run.id,
+        details: {
+          routineId: input.routine.id,
+          triggerId: input.trigger.id,
+          source: "schedule",
+          status: "skipped",
+          reason: input.reason,
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, routineId: input.routine.id, runId: run.id }, "failed to log skipped routine run");
+    }
+
+    return run;
   }
 
   function routineExecutionFingerprintCondition(dispatchFingerprint?: string | null) {
@@ -1134,6 +1183,7 @@ export function routineService(
       );
       throw conflict("Cannot dispatch routine to human-proxy agent");
     }
+    await assertAssignableAgent(db, input.routine.companyId, assigneeAgentId, { kind: "routine" });
     const automaticVariables: Record<string, string | number | boolean> = {};
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
       const workspace = await db
@@ -1173,6 +1223,8 @@ export function routineService(
       payload: triggerPayload,
       projectId,
       assigneeAgentId,
+      routineRevisionId: input.routine.latestRevisionId,
+      routineEnvFingerprint: createRoutineEnvFingerprint(input.routine.env),
       executionWorkspaceId: input.executionWorkspaceId ?? null,
       executionWorkspacePreference: input.executionWorkspacePreference ?? null,
       executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
@@ -1218,6 +1270,7 @@ export function routineService(
           idempotencyKey: input.idempotencyKey ?? null,
           triggerPayload,
           dispatchFingerprint,
+          routineRevisionId: input.routine.latestRevisionId,
         })
         .returning();
 
@@ -1465,6 +1518,7 @@ export function routineService(
             idempotencyKey: routineRuns.idempotencyKey,
             triggerPayload: routineRuns.triggerPayload,
             dispatchFingerprint: routineRuns.dispatchFingerprint,
+            routineRevisionId: routineRuns.routineRevisionId,
             linkedIssueId: routineRuns.linkedIssueId,
             coalescedIntoRunId: routineRuns.coalescedIntoRunId,
             failureReason: routineRuns.failureReason,
@@ -1497,6 +1551,7 @@ export function routineService(
               idempotencyKey: run.idempotencyKey,
               triggerPayload: run.triggerPayload as Record<string, unknown> | null,
               dispatchFingerprint: run.dispatchFingerprint,
+              routineRevisionId: run.routineRevisionId,
               linkedIssueId: run.linkedIssueId,
               coalescedIntoRunId: run.coalescedIntoRunId,
               failureReason: run.failureReason,
@@ -1540,16 +1595,22 @@ export function routineService(
 
     create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<Routine> => {
       await assertProject(companyId, input.projectId ?? null);
-      await assertAssignableAgent(companyId, input.assigneeAgentId ?? null);
+      await assertAssignableAgent(db, companyId, input.assigneeAgentId ?? null, { kind: "routine" });
       if (input.goalId) await assertGoal(companyId, input.goalId);
       if (input.parentIssueId) await assertParentIssue(companyId, input.parentIssueId);
+      const env = input.env === undefined || input.env === null
+        ? null
+        : await secretsSvc.normalizeEnvBindingsForPersistence(companyId, input.env, {
+            strictMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
+            fieldPath: "env",
+          });
       const variables = syncRoutineVariablesWithTemplate(
         [input.title, input.description],
         sanitizeRoutineVariableInputs(input.variables),
       );
       assertRoutineVariableDefinitions(variables);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
-      return db.transaction(async (tx) => {
+      const createdRoutine = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const [created] = await txDb
           .insert(routines)
@@ -1566,6 +1627,7 @@ export function routineService(
             concurrencyPolicy: input.concurrencyPolicy,
             catchUpPolicy: input.catchUpPolicy,
             variables,
+            env,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
             updatedByAgentId: actor.agentId ?? null,
@@ -1575,8 +1637,17 @@ export function routineService(
         const { routine } = await appendRoutineRevision(txDb, created, actor, {
           changeSummary: "Created routine",
         });
+        if (env) {
+          await secretsSvc.syncEnvBindingsForTarget(
+            companyId,
+            { targetType: "routine", targetId: routine.id },
+            env,
+            { db: tx },
+          );
+        }
         return routine;
       });
+      return createdRoutine;
     },
 
     update: async (id: string, patch: UpdateRoutine, actor: Actor): Promise<Routine | null> => {
@@ -1586,6 +1657,14 @@ export function routineService(
       const nextAssigneeAgentId = patch.assigneeAgentId === undefined ? existing.assigneeAgentId : patch.assigneeAgentId;
       const nextTitle = patch.title ?? existing.title;
       const nextDescription = patch.description === undefined ? existing.description : patch.description;
+      const nextEnv = patch.env === undefined
+        ? existing.env
+        : patch.env === null
+          ? null
+          : await secretsSvc.normalizeEnvBindingsForPersistence(existing.companyId, patch.env, {
+              strictMode: process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true",
+              fieldPath: "env",
+            });
       const requestedStatus = patch.status ?? existing.status;
       if (patch.status === "active") {
         assertRoutineCanEnable(patch.status, nextAssigneeAgentId);
@@ -1598,7 +1677,9 @@ export function routineService(
         patch.variables === undefined ? existing.variables : sanitizeRoutineVariableInputs(patch.variables),
       );
       if (patch.projectId !== undefined) await assertProject(existing.companyId, nextProjectId);
-      if (patch.assigneeAgentId !== undefined) await assertAssignableAgent(existing.companyId, nextAssigneeAgentId);
+      if (patch.assigneeAgentId !== undefined || patch.status === "active") {
+        await assertAssignableAgent(db, existing.companyId, nextAssigneeAgentId, { kind: "routine" });
+      }
       if (patch.goalId) await assertGoal(existing.companyId, patch.goalId);
       if (patch.parentIssueId) await assertParentIssue(existing.companyId, patch.parentIssueId);
       assertRoutineVariableDefinitions(nextVariables);
@@ -1617,7 +1698,7 @@ export function routineService(
       if (enabledScheduleTriggers) {
         assertScheduleCompatibleVariables(nextVariables);
       }
-      return db.transaction(async (tx) => {
+      const updatedRoutine = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${id} for update`);
         const locked = await txDb
@@ -1646,6 +1727,7 @@ export function routineService(
           concurrencyPolicy: patch.concurrencyPolicy ?? locked.concurrencyPolicy,
           catchUpPolicy: patch.catchUpPolicy ?? locked.catchUpPolicy,
           variables: nextVariables,
+          env: nextEnv,
           updatedByAgentId: actor.agentId ?? null,
           updatedByUserId: actor.userId ?? null,
         };
@@ -1668,6 +1750,14 @@ export function routineService(
             )
             .then((rows) => rows[0] ?? null);
           if (latestRevision && snapshotsMatch(nextSnapshot, latestRevision.snapshot as RoutineRevisionSnapshotV1)) {
+            if (patch.env !== undefined) {
+              await secretsSvc.syncEnvBindingsForTarget(
+                locked.companyId,
+                { targetType: "routine", targetId: locked.id },
+                candidate.env,
+                { db: tx },
+              );
+            }
             return locked;
           }
         }
@@ -1686,6 +1776,7 @@ export function routineService(
             concurrencyPolicy: candidate.concurrencyPolicy,
             catchUpPolicy: candidate.catchUpPolicy,
             variables: candidate.variables,
+            env: candidate.env,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: new Date(),
@@ -1696,8 +1787,17 @@ export function routineService(
         const { routine } = await appendRoutineRevision(txDb, updated, actor, {
           changeSummary: "Updated routine",
         });
+        if (patch.env !== undefined) {
+          await secretsSvc.syncEnvBindingsForTarget(
+            routine.companyId,
+            { targetType: "routine", targetId: routine.id },
+            routine.env,
+            { db: tx },
+          );
+        }
         return routine;
       });
+      return updatedRoutine;
     },
 
     createTrigger: async (
@@ -1805,7 +1905,7 @@ export function routineService(
         }
       }
 
-      return db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         const [updated] = await txDb
@@ -1836,12 +1936,13 @@ export function routineService(
         });
         return { trigger: updated as RoutineTrigger, revision: appended.revision };
       });
+      return result;
     },
 
     deleteTrigger: async (id: string, actor: Actor = {}): Promise<{ deleted: boolean; revision: RoutineRevision | null }> => {
       const existing = await getTriggerById(id);
       if (!existing) return { deleted: false, revision: null };
-      return db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existing.routineId} for update`);
         await txDb.delete(routineTriggers).where(eq(routineTriggers.id, id));
@@ -1856,6 +1957,17 @@ export function routineService(
         });
         return { deleted: true, revision: appended.revision };
       });
+      if (result.deleted && existing.secretId) {
+        try {
+          await secretsSvc.remove(existing.secretId);
+        } catch (err) {
+          logger.warn(
+            { err, routineId: existing.routineId, triggerId: existing.id, secretId: existing.secretId },
+            "failed to remove routine trigger webhook secret after trigger deletion",
+          );
+        }
+      }
+      return result;
     },
 
     rotateTriggerSecret: async (
@@ -1947,7 +2059,7 @@ export function routineService(
       const routineSnapshot = snapshot.routine;
       await assertRestorableAssignee(existingRoutine.companyId, routineSnapshot.assigneeAgentId, actor);
 
-      return db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         await tx.execute(sql`select id from ${routines} where ${routines.id} = ${existingRoutine.id} for update`);
         const locked = await txDb
@@ -1999,6 +2111,7 @@ export function routineService(
             concurrencyPolicy: routineSnapshot.concurrencyPolicy,
             catchUpPolicy: routineSnapshot.catchUpPolicy,
             variables: routineSnapshot.variables,
+            env: routineSnapshot.env,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
             updatedAt: now,
@@ -2068,6 +2181,12 @@ export function routineService(
           changeSummary: `Restored from revision ${targetRevision.revisionNumber}`,
           restoredFromRevisionId: targetRevision.id,
         });
+        await secretsSvc.syncEnvBindingsForTarget(
+          locked.companyId,
+          { targetType: "routine", targetId: locked.id },
+          routineSnapshot.env,
+          { db: tx },
+        );
         return {
           routine: appended.routine,
           revision: appended.revision,
@@ -2076,6 +2195,7 @@ export function routineService(
           secretMaterials: [...recreatedWebhookSecrets.values()].map((entry) => entry.secretMaterial),
         };
       });
+      return result;
     },
 
     runRoutine: async (id: string, input: RunRoutine, actor?: Actor) => {
@@ -2085,7 +2205,8 @@ export function routineService(
       if (!routine) throw notFound("Routine not found");
       if (routine.status === "archived") throw conflict("Routine is archived");
       await assertProject(routine.companyId, input.projectId ?? null);
-      await assertAssignableAgent(routine.companyId, input.assigneeAgentId ?? null);
+      const assigneeAgentId = input.assigneeAgentId ?? routine.assigneeAgentId ?? null;
+      await assertAssignableAgent(db, routine.companyId, assigneeAgentId, { kind: "routine" });
       const trigger = input.triggerId ? await getTriggerById(input.triggerId) : null;
       if (trigger && trigger.routineId !== routine.id) throw forbidden("Trigger does not belong to routine");
       if (trigger && !trigger.enabled) throw conflict("Routine trigger is not active");
@@ -2211,6 +2332,7 @@ export function routineService(
           idempotencyKey: routineRuns.idempotencyKey,
           triggerPayload: routineRuns.triggerPayload,
           dispatchFingerprint: routineRuns.dispatchFingerprint,
+          routineRevisionId: routineRuns.routineRevisionId,
           linkedIssueId: routineRuns.linkedIssueId,
           coalescedIntoRunId: routineRuns.coalescedIntoRunId,
           failureReason: routineRuns.failureReason,
@@ -2243,6 +2365,7 @@ export function routineService(
         idempotencyKey: row.idempotencyKey,
         triggerPayload: row.triggerPayload as Record<string, unknown> | null,
         dispatchFingerprint: row.dispatchFingerprint,
+        routineRevisionId: row.routineRevisionId,
         linkedIssueId: row.linkedIssueId,
         coalescedIntoRunId: row.coalescedIntoRunId,
         failureReason: row.failureReason,
@@ -2278,9 +2401,11 @@ export function routineService(
         .select({
           trigger: routineTriggers,
           routine: routines,
+          projectPausedAt: projects.pausedAt,
         })
         .from(routineTriggers)
         .innerJoin(routines, eq(routineTriggers.routineId, routines.id))
+        .leftJoin(projects, eq(routines.projectId, projects.id))
         .where(
           and(
             eq(routineTriggers.kind, "schedule"),
@@ -2296,10 +2421,16 @@ export function routineService(
       for (const row of due) {
         if (!row.trigger.nextRunAt || !row.trigger.cronExpression || !row.trigger.timezone) continue;
 
+        // Suppress scheduled firings while the routine's project is paused. The tick is still
+        // claimed and advanced to the next single cron tick (no backfill), so resume continues
+        // at the next cron boundary instead of replaying missed firings. Routines with no
+        // project are never suppressed here.
+        const projectPaused = !!(row.routine.projectId && row.projectPausedAt);
+
         let runCount = 1;
         let claimedNextRunAt = nextCronTickInTimeZone(row.trigger.cronExpression, row.trigger.timezone, now);
 
-        if (row.routine.catchUpPolicy === "enqueue_missed_with_cap") {
+        if (!projectPaused && row.routine.catchUpPolicy === "enqueue_missed_with_cap") {
           let cursor: Date | null = row.trigger.nextRunAt;
           runCount = 0;
           while (cursor && cursor <= now && runCount < MAX_CATCH_UP_RUNS) {
@@ -2325,6 +2456,16 @@ export function routineService(
           .returning({ id: routineTriggers.id })
           .then((rows) => rows[0] ?? null);
         if (!claimed) continue;
+
+        if (projectPaused) {
+          await recordSuppressedScheduleRun({
+            routine: row.routine,
+            trigger: row.trigger,
+            reason: "paused",
+            nextRunAt: claimedNextRunAt,
+          });
+          continue;
+        }
 
         for (let i = 0; i < runCount; i += 1) {
           // --- RK9 Custom: isolate per-routine dispatch failures ---

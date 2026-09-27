@@ -17,13 +17,13 @@ jobs:
       PAPERCLIP_E2E_SKIP_LLM: ${{ inputs.skip_llm && 'true' || 'false' }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
@@ -31,20 +31,28 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Install Playwright
-        # --- RK9 Custom (RK9-350) --- --with-deps ajaa aptin sudolla. Self-hosted-runnerin
-        # käyttäjällä ei ole sudoa (runnerin .env: PAPERCLIP_CI_NO_SUDO=1), joten
-        # järjestelmäriippuvuudet asennetaan hostille etukäteen.
+        # --- RK9 Custom (RK9-350, RK9-313) --- Upstream (v2026.609.0) käyttää GitHubin
+        # Ubuntu-imagen valmista Chromea (PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome). Self-hosted-
+        # runnerilla Chromea ei välttämättä ole: käytä sitä, jos se löytyy, muuten asenna
+        # Playwrightin chromium. --with-deps ajaa aptin sudolla, eikä runnerin käyttäjällä
+        # ole sudoa (runnerin .env: PAPERCLIP_CI_NO_SUDO=1).
         run: |
-          if [ "${PAPERCLIP_CI_NO_SUDO:-}" != "1" ] && sudo -n true 2>/dev/null; then
+          if command -v google-chrome >/dev/null 2>&1; then
+            google-chrome --version
+            echo "PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome" >> "$GITHUB_ENV"
+          elif [ "${PAPERCLIP_CI_NO_SUDO:-}" != "1" ] && sudo -n true 2>/dev/null; then
             npx playwright install --with-deps chromium
           else
             npx playwright install chromium
           fi
 
       - name: Run e2e tests
+        env:
+          # --- RK9 Custom (RK9-313) --- kanava tulee asennusaskeleesta ($GITHUB_ENV).
+          PAPERCLIP_PLAYWRIGHT_CHANNEL: ${{ env.PAPERCLIP_PLAYWRIGHT_CHANNEL }}
         run: pnpm run test:e2e
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: playwright-report

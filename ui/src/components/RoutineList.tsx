@@ -140,7 +140,7 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
       <div className="flex items-center gap-3" onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}>
         {runNowButton ? (
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             disabled={runDisabled}
             onClick={() => onRunNow(routine)}

@@ -400,7 +400,17 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     }
     : null;
 
-  if (stages.length === 0 && outcomeRequirements.length === 0 && !monitor) return null;
+  const reviewPreset = parsed.data.reviewPreset;
+  const authorizationPolicy = parsed.data.authorizationPolicy;
+
+  if (
+    stages.length === 0 &&
+    // --- RK9 Custom: enforced outcomes (SEC-91) ---
+    outcomeRequirements.length === 0 &&
+    !monitor &&
+    !reviewPreset &&
+    !authorizationPolicy
+  ) return null;
 
   return {
     mode: parsed.data.mode ?? "normal",
@@ -409,6 +419,8 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     // --- RK9 Custom: enforced outcomes (SEC-91) ---
     outcomeRequirements,
     ...(monitor ? { monitor } : {}),
+    ...(reviewPreset ? { reviewPreset } : {}),
+    ...(authorizationPolicy ? { authorizationPolicy } : {}),
   };
 }
 

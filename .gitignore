@@ -18,6 +18,8 @@ cli/tmp/
 
 # Scratch/seed scripts (but not scripts/ dir)
 check-*.mjs
+!.github/scripts/check-*.mjs
+!.github/scripts/tests/check-*.mjs
 !scripts/check-*.mjs
 new-agent*.json
 newcompany.json
@@ -58,5 +60,7 @@ tests/e2e-companies/test-results/
 tests/e2e-companies/playwright-report/
 tests/e2e-companies/.last-run.json
 .superset/
+.superpowers/
 .claude/worktrees/
 /.playwright-mcp/
+.herenow

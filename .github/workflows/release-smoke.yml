@@ -43,15 +43,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
@@ -60,11 +60,16 @@ jobs:
         run: pnpm install --no-frozen-lockfile
 
       - name: Install Playwright browser
-        # --- RK9 Custom (RK9-350) --- --with-deps ajaa aptin sudolla. Self-hosted-runnerin
-        # käyttäjällä ei ole sudoa (runnerin .env: PAPERCLIP_CI_NO_SUDO=1), joten
-        # järjestelmäriippuvuudet asennetaan hostille etukäteen.
+        # --- RK9 Custom (RK9-350, RK9-313) --- Upstream (v2026.609.0) käyttää GitHubin
+        # Ubuntu-imagen valmista Chromea (PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome). Self-hosted-
+        # runnerilla Chromea ei välttämättä ole: käytä sitä, jos se löytyy, muuten asenna
+        # Playwrightin chromium. --with-deps ajaa aptin sudolla, eikä runnerin käyttäjällä
+        # ole sudoa (runnerin .env: PAPERCLIP_CI_NO_SUDO=1).
         run: |
-          if [ "${PAPERCLIP_CI_NO_SUDO:-}" != "1" ] && sudo -n true 2>/dev/null; then
+          if command -v google-chrome >/dev/null 2>&1; then
+            google-chrome --version
+            echo "PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome" >> "$GITHUB_ENV"
+          elif [ "${PAPERCLIP_CI_NO_SUDO:-}" != "1" ] && sudo -n true 2>/dev/null; then
             npx playwright install --with-deps chromium
           else
             npx playwright install chromium
@@ -98,6 +103,8 @@ jobs:
           PAPERCLIP_RELEASE_SMOKE_BASE_URL: ${{ env.SMOKE_BASE_URL }}
           PAPERCLIP_RELEASE_SMOKE_EMAIL: ${{ env.SMOKE_ADMIN_EMAIL }}
           PAPERCLIP_RELEASE_SMOKE_PASSWORD: ${{ env.SMOKE_ADMIN_PASSWORD }}
+          # --- RK9 Custom (RK9-313) --- kanava tulee asennusaskeleesta ($GITHUB_ENV).
+          PAPERCLIP_PLAYWRIGHT_CHANNEL: ${{ env.PAPERCLIP_PLAYWRIGHT_CHANNEL }}
         run: pnpm run test:release-smoke
 
       - name: Capture Docker logs
@@ -109,7 +116,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.artifact_name }}
           path: |

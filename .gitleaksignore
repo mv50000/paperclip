@@ -5,3 +5,15 @@
 # v2026.512.0, #5429: AWS documentation example account 123456789012 in a fake Secrets Manager ARN (test fixture).
 778e775c35834aabe09266fb6d415d3dafbd1deb:server/src/__tests__/secrets-service.test.ts:generic-api-key:997
 778e775c35834aabe09266fb6d415d3dafbd1deb:server/src/__tests__/secrets-service.test.ts:generic-api-key:1113
+#
+# v2026.609.0 (RK9-313):
+# exe-dev sandbox provider: PEM header strings in sshPrivateKey validation messages (plugin.ts) and inline test-fixture keys (plugin.test.ts).
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.ts:private-key:170
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:170
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:179
+aea35fe695672061918af10e5493c9d890e44d13:packages/plugins/sandbox-providers/exe-dev/src/plugin.test.ts:private-key:246
+# E2E log: token record UUIDs (IDs, not token values), both revoked.
+70b1a9109d756818fb448beafa67af27babb52de:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:34
+70b1a9109d756818fb448beafa67af27babb52de:doc/logs/2026-05-24-cli-api-parity-e2e-log.md:generic-api-key:35
+# Artifact test fixture: storage object key "primary-cut.mp4".
+4693d770aab4ec8342833cfed78dd4ac43c49f7a:server/src/__tests__/company-artifacts-service.test.ts:generic-api-key:232

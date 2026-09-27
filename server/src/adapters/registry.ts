@@ -25,6 +25,7 @@ import {
   listClaudeSkills,
   syncClaudeSkills,
   listClaudeModels,
+  refreshClaudeModels,
   testEnvironment as claudeTestEnvironment,
   sessionCodec as claudeSessionCodec,
   getQuotaWindows as claudeGetQuotaWindows,
@@ -79,6 +80,17 @@ import {
   models as geminiModels,
   modelProfiles as geminiModelProfiles,
 } from "@paperclipai/adapter-gemini-local";
+import {
+  execute as grokExecute,
+  listGrokSkills,
+  syncGrokSkills,
+  testEnvironment as grokTestEnvironment,
+  sessionCodec as grokSessionCodec,
+} from "@paperclipai/adapter-grok-local/server";
+import {
+  agentConfigurationDoc as grokAgentConfigurationDoc,
+  models as grokModels,
+} from "@paperclipai/adapter-grok-local";
 import {
   execute as openCodeExecute,
   listOpenCodeSkills,
@@ -246,6 +258,7 @@ const claudeLocalAdapter: ServerAdapterModule = {
   models: claudeModels,
   modelProfiles: claudeModelProfiles,
   listModels: listClaudeModels,
+  refreshModels: refreshClaudeModels,
   supportsLocalAgentJwt: true,
   supportsInstructionsBundle: true,
   instructionsPathKey: "instructionsFilePath",
@@ -392,6 +405,27 @@ const geminiLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: geminiAgentConfigurationDoc,
 };
 
+const grokLocalAdapter: ServerAdapterModule = {
+  type: "grok_local",
+  execute: grokExecute,
+  testEnvironment: grokTestEnvironment,
+  listSkills: listGrokSkills,
+  syncSkills: syncGrokSkills,
+  sessionCodec: grokSessionCodec,
+  sessionManagement: getAdapterSessionManagement("grok_local") ?? undefined,
+  models: grokModels,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: true,
+  getRuntimeCommandSpec: (config) => ({
+    command: readConfiguredCommand(config, "grok"),
+    detectCommand: readConfiguredCommand(config, "grok"),
+    installCommand: null,
+  }),
+  agentConfigurationDoc: grokAgentConfigurationDoc,
+};
+
 const openclawGatewayAdapter: ServerAdapterModule = {
   type: "openclaw_gateway",
   execute: openclawGatewayExecute,
@@ -529,6 +563,7 @@ function registerBuiltInAdapters() {
     cursorCloudAdapter,
     cursorLocalAdapter,
     geminiLocalAdapter,
+    grokLocalAdapter,
     openclawGatewayAdapter,
     hermesLocalAdapter,
     processAdapter,
