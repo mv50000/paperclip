@@ -79,7 +79,8 @@ toiselle agentille. CEO-agentti saa 201.
 ## Porras v2026.720.0 — `TRUST_PROXY` tulee mukaan
 
 `server/src/middleware/trust-proxy.ts` ja `applyTrustProxy(app, parseTrustProxyEnv(process.env.TRUST_PROXY))`
-tulevat tässä tagissa. Oletus on asettamaton: Express ei luota yhteenkään proxyyn.
+tulevat jo välitagissa `v2026.618.0`, joka on portaan 720 ensimmäinen osa (RK9-314). Supertest-todennus alla on
+tiedostossa `server/src/__tests__/trust-proxy-rk9.test.ts`. Oletus on asettamaton: Express ei luota yhteenkään proxyyn.
 
 Proxyketju paperclip-01:llä (todennettu 2026-09-26, `/etc/nginx/sites-enabled/paperclip`):
 
