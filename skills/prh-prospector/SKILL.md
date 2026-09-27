@@ -145,6 +145,8 @@ Tarkemmat vastaavuudet: `references/vainu-coverage-mapping.md`.
 - **Verkkosivun fetch epäonnistuu** → JS-renderöity SPA. AI-rikastus
   voi langeta takaisin vain HTML-meta-tageihin. Älä käynnistä Playwrightia
   rikastusvirheissä — kustannussyy.
+  **29.8.2026 alkaen:** käytä SPA-sivuihin `firecrawl scrape <url> -o x.md`
+  (skill `/webscrape`, avaimeton, ~3–15 s/sivu) ennen luovuttamista.
 
 ## Linkit
 
