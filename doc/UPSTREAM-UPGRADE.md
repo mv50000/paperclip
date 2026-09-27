@@ -23,13 +23,39 @@ Custom-migraatiot käyttävät **9000-sarjaa** (`9NNN_rk9_<feature>.sql`):
 | 9008   | Outreach: sekvenssimoottori (lähetyskirjanpito, unsubscribe) |
 | 9009   | Outreach: metriikat ja auto-pause (`outreach_sender_pauses`) |
 | 9010   | Outreach: CS-desk-sähköpostireitti jokaiselle lähettäjälle (RK9-234) |
+| 9000   | `email_messages`-jako, tuore kanta: upstreamin AgentMail-taulu parkkiin ennen 9002:ta (RK9-317) |
+| 9011   | `email_messages`-jako, tuore kanta: forkin taulu → `rk9_email_messages`, upstreamin taulu takaisin (RK9-317) |
+| 0126 (slot) | `email_messages`-jako, päivityspolku: forkin taulu → `rk9_email_messages` ennen upstreamin 0272:ta (RK9-317) |
 
-Seuraava vapaa numero: **9011** (tarkistettu 2026-09-26: `packages/db/src/migrations/`
-ei sisällä 9011+-tiedostoja).
+Seuraava vapaa numero: **9012** (tarkistettu 2026-09-27: `packages/db/src/migrations/`
+ei sisällä 9012+-tiedostoja).
+
+### `email_messages`-törmäys (RK9-317, porras 916.1)
+
+Upstream v2026.916.1 luo oman `email_messages`-taulunsa (AgentMail, `0272`). Forkin Resend-taulu
+(9002) on samanniminen. Forkin taulu on nyt `rk9_email_messages` (Drizzle `rk9EmailMessages`,
+`packages/db/src/schema/rk9_email.ts`), ja upstreamin taulu pitää nimensä. Kaikki taulun
+indeksit ja rajoitteet saavat `rk9_`-etuliitteen. Muut forkin sähköpostitaulut pitävät nimensä.
+
+- **Päivityspolku (prod):** slot-migraatio `0126_rk9_email_messages_rename.sql` käyttää upstreamin
+  vapaata numeroa 0126 (idx 126). Migraattori tunnistaa ajetut migraatiot hashista ja ajaa
+  odottavat idx-järjestyksessä, joten 0126 ajetaan ennen 0272:ta. Se nimeää forkin taulun
+  uudelleen vain, jos `email_messages` on olemassa ilman `endpoint_id`-saraketta.
+- **Tuore kanta:** 0126 on no-op. 0272 luo upstreamin taulun, 9000 parkkeeraa sen nimelle
+  `rk9tmp_email_messages`, 9002 luo forkin taulun ja 9011 vaihtaa molemmat lopullisiin nimiinsä.
+  Prodissa 9000 ja 9011 ovat no-opeja.
+- 9001–9010 pysyvät tavu tavulta ennallaan. Uudet tiedostot on pinnattu
+  `fork-migration-hashes.json`:iin, ja `check-pr-migration-order.mjs` hyväksyy pinnatun
+  tiedoston vapaassa numerossa (RK9 Custom).
+- Reitti `POST /api/companies/:companyId/email/send` on kummassakin reitittimessä. Forkin
+  `routes/rk9-email.ts` mountataan ennen upstreamin `routes/email.ts`:ää, joten fork omistaa reitin.
+- Suora SQL ja skriptit (`outreach-window-report.sh`, `upgrade-rehearsal.sh`) lukevat
+  forkin postia taulusta `rk9_email_messages`.
 
 Upstream käyttää 0000-sarjaa. Numerot eivät törmää (~17 vuoden marginaali).
-Journalissa (`meta/_journal.json`) upstreamin 0xxx-rivit ovat aina ensin ja 9001–9010
-niiden jälkeen numerojärjestyksessä. `scripts/upgrade-smoke.sh --offline` tarkistaa tämän.
+Journalissa (`meta/_journal.json`) upstreamin 0xxx-rivit ovat aina ensin ja forkin 9xxx-rivit
+niiden jälkeen numerojärjestyksessä. Poikkeus on pinnattu slot-tiedosto upstreamin vapaassa
+numerossa (0126, RK9-317), joka on journalissa numeronsa kohdalla. `scripts/upgrade-smoke.sh --offline` tarkistaa tämän.
 
 ## Hotspot-tiedostot
 
@@ -97,6 +123,14 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
   `InstanceGeneralSettings.tsx`:ssä (RK9-316).
 - `packages/paperclip-runner` (upstream, 831) — typecheck ja serverin `prepare:runner-vendor` tarvitsevat `cargo`n.
   Tuotanto ajaa TS-lähdettä `tsx`:llä, joten cargoa ei tarvita ajossa.
+- `packages/db/src/schema/email.ts` ja `server/src/routes/email.ts` (916.1) — upstreamin AgentMail. Forkin
+  Resend-skeema on `schema/rk9_email.ts` ja reitit `routes/rk9-email.ts` (RK9-317, ks. "`email_messages`-törmäys").
+  Uusi upstream-koodi, joka viittaa `emailMessages`iin, tarkoittaa AgentMail-taulua, ei forkin postia.
+- `server/src/services/agent-permissions.ts` (916.1) — upstream antaa `canCreateAgents`-oletuksen jokaiselle
+  standard-trust-agentille. RK9 Custom pinnaa `create`-oletuksen CEO-rooliin (RK9-317,
+  `hire-approval-policy.test.ts`, `hire-permission-default-rk9.test.ts`).
+- `server/src/services/productivity-review.ts` — upstream poisti productivity reviewt 916.1:ssä (#13263).
+  Forkissa ei ollut sille RK9 Custom -lohkoa.
 - `scripts/provision-worktree.sh`
 - `server/src/services/index.ts`, `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/constants.ts` — exportit
 
@@ -630,6 +664,7 @@ tarkistukset on kirjattu Porraslokiin.
 | 2026-09-27 | v2026.720.0 (porras 720, osa 3) | `7a2ceba556621ed2dbb6270ad788f5e203f2b082` (tagi `rk9/pre-upgrade-v2026.720.0`) | 42 | HTTP 11/11, offline 3/3, fork-testit 79/79 harjoituksessa ja 82/82 builder-02:lla | RK9-314. Koko vitest-sarja builder-02:lla: general-server 327/327, workspaces-a 370/370 + 44/44, workspaces-b 42/42 + 4/5 (skill-kuvausten pituusraja, korjattu), serialized 128/128. CI löysi lisäksi forkin SEC-91-UI-testin, upstreamin local-background-recovery-testit (RK9-87) ja kaksi teardown-flakea; korjattu. Harjoitus prod-kopiolla (`rehearsal-20260927-123935.dump`, ref `4db8db584`): putki 135 s, käynnistyksen migraatiot 0136–0181 (historia 144 → 190), 0 uutta built-in-agenttia. Routine-API: yksi routine run, yksi issue, yksi assignment-ajo ja upstreamin jatkoajo, ei kaksoisajoja 30 s seurannassa. Dry-run: 46 pendingiä 1,41 s, pisin lukko 0,24 s (`activity_log`); schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 52 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu. |
 | 2026-09-27 | v2026.817.0 (porras 4) | `d27bd45d3e77d3ae6883739c29423bd62a077f45` (tagi `rk9/pre-upgrade-v2026.817.0`) | 39 | HTTP 11/11, offline 3/3, fork-testit 84/84 (1121 testiä) harjoituksessa | RK9-315. Typecheck builder-02:lla (`pnpm -r typecheck`, cli tarvitsee `NODE_OPTIONS=--max-old-space-size=6144`). Harjoitus prod-kopiolla (`rehearsal-20260927-143012.dump`, ref `01856fe0`): putki 259 s, käynnistyksen migraatiot 0182–0211 (historia 190 → 220). Reititys ennen ja jälkeen (email_routes 11, issues 30 844 statuksineen, assigneineen ja execution policyineen, interaktiot 62, outreach, agentit 120): identtinen. `experimental`-työtilaliput pysyivät `false`. Dry-run: 30 pendingiä 11,2 s, hitain `0205_narrow_shiva` 7,4 s ja samalla pisin AccessExclusiveLock 7,35 s (`issue_comments`); journal-, hash- ja fork-rivimääräassertit OK; `0196`:n tauluissa 0 riviä; schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 91 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean` ajettu, dumppi poistettu. |
 | 2026-09-27 | v2026.831.1 (porras 5) | `917ae45d85605e3a622e6c0da4ff170728b7d062` (tagi `rk9/pre-upgrade-v2026.831.1`) | 32 | HTTP 11/11, offline 2/2, fork-testit 85/85 (1172 testiä) builder-02:lla | RK9-316. Typecheck builder-02:lla: 32 pakettia vihreänä, `server` ja `paperclip-runner` ilman cargoa TS-buildin kautta (ks. regressiomatriisi, "Konfliktit portaassa 831"). Harjoitus prod-kopiolla (`rehearsal-20260927-162340.dump`, ref `654410a6`): putki 272 s, käynnistyksen migraatiot 0212–0230 noin 15 s (historia 220 → 239). `experimental`-työtilaliput pysyivät `false`, `enableNativeRunner`-avainta ei ole (oletus `false`). `account.issuer` täytetty (0 NULLia) ja uniikki-indeksi luotu. Dry-run: 19 pendingiä 9,03 s, hitain `0227` 7,11 s ja pisin AccessExclusiveLock 7,09 s; journal-, hash- ja fork-rivimääräassertit OK (18 taulua). Vaikutukset: `0212`, `0226` ja `0230` 0 duplikaattia, `0218` muuttaa 62 interaktiota `board_only` → `human_only`, `0227` koskee 58 164 run-eventtiä ja 19 283 runia. 0229-auditointi: `brand_color` vain RK9:llä (kosmeettinen), `attachment_max_bytes` 10 MiB kaikilla 11 yhtiöllä = deploymentin oletus, ei siirrettävää dataa. Schema-diffin FAILit ovat jaetun kannan vieraita tauluja. Rollback 87 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean --dumps` ajettu. |
+| 2026-09-27 | v2026.916.1 (porras 6) | `9ebd60b333c3a743ffa1faa7c29ca3cb862f8d74` (tagi `rk9/pre-upgrade-v2026.916.1`) | 56 | HTTP 12/12 (uusi `outreach-send-queue`-tarkistus sender-avaimella), offline 2/2, koko vitest builder-02:lla (kaikki ryhmät) | RK9-317. Typecheck builder-02:lla vihreä (`server` ja `paperclip-runner` ilman cargoa TS-buildin kautta, `packages/db` myös skriptit). Vitestissä jäljelle jäävät vain `cargo`a vaativa `native-codex-runner.integration` ja kaksi ajoituksesta riippuvaa upstream-testiä (`adapter-utils`), joihin fork ei koske; muut 38 kaatunutta testiä sovitettiin (regressiomatriisi, "Konfliktit portaassa 916"). Harjoitus prod-kopiolla (`rehearsal-20260927-214724.dump`): putki 293 s, käynnistys ajoi 52 pendingiä (0126, 0231–0279, 9000, 9011) noin 16 s:ssa (historia 239 → 291). `email_messages`-jako: 50 528 forkin riviä taulussa `rk9_email_messages`, upstreamin AgentMail-taulu `email_messages` (sarake `endpoint_id`) tyhjänä, `rk9tmp_email_messages` puuttuu. `experimental`-liput ennallaan; `enableNativeRunner`-avainta ei ole, joten pre-deploy-SQL tarvitaan (testattu kopiolla: `UPDATE 1`, arvo `false`). 0236 ei koskenut yhteenkään agenttiin, ja kaikilla 26 elävällä `claude_local`-agentilla on eksplisiittinen malli. Dry-run: 52 pendingiä 14,55 s, hitain `0235` 11,03 s, pisin AccessExclusiveLock 0,30 s; journal-, hash-, pending-fork- (`--expect-pending-fork`) ja fork-rivimääräassertit OK (18 taulua). Schema-diffin 3 FAILia ovat jaetun kannan vieraita tauluja. Rollback 84 s, rivimäärät ja skeemasormenjälki täsmäsivät. `clean --dumps` ajettu. |
 
 ## Upgrade-loki
 
@@ -643,3 +678,4 @@ tarkistukset on kirjattu Porraslokiin.
 | 2026-09-27 | v2026.720.0 | Porras 3/6, osa 3 (RK9-314). 42 konfliktia, migraatiot 0136–0181 (forkin journal-idx 182–191), kesto prod-kopiolla 1,4 s. Porrasta ei pilkottu, koska 707 ja 720 ovat vierekkäiset tagit. Upstream teki ACP:stä `claude_local`in oletusmoottorin ja poisti `acpx_local`in: fork pinnaa asettamattoman moottorin CLI:hin ja siirsi RK9-312:n avainvartijan ACP-haaraan. Built-in-agenttien automaattiluonti on forkissa `enableBuiltInAgents`-lipun takana, oletusgrantit vain lisäävät puuttuvia rivejä, ja ACP-lapsi ei peri palvelimen `PAPERCLIP_*`-asetuksia. Cutoverissa kirjoitetaan työtilan korjauslippujen arvoksi `false` (ks. `defaults-hardening.md`). PR mergetään merge-commitilla. |
 | 2026-09-27 | v2026.817.0 | Porras 4/6 (RK9-315). 39 konfliktia, migraatiot 0182–0211 (forkin journal-idx 212–221), kesto prod-kopiolla 11 s. Upstream poisti cloud syncin (`0196`), toi resolver-politiikan (`0203`, oletus `board_only`), managed configin (`PAPERCLIP_MANAGED_CONFIG`, asettamatta) ja default-open-issue-kirjoitukset näkyville vertaisissueille. Forkin `tasks:assign`-kovennus (RK9-313) pidettiin. Blocked-tilaan siirto vaatii nyt syyn (blocker, odottava interaktio tai `unblockDescriptor`), muuten 422. ACP-wrapper pidettiin ilman env-tiedostoa. PR mergetään merge-commitilla. |
 | 2026-09-27 | v2026.831.1 | Porras 5/6 (RK9-316). 32 konfliktia, migraatiot 0212–0230 (forkin journal-idx 231–240), kesto prod-kopiolla 9 s. Upstream toi Node `>=24.11.0`:n, zod 4:n, TypeScript 7:n, better-auth 1.7:n (`account.issuer`, `0230`), Rust-runnerin (`@paperclipai/paperclip-runner`, oletus pois) ja agentin JWT:n oletus-TTL:n 48 h (ennen 1 h). Uusi CI-tarkistus `check-pr-migration-order.mjs` tehtiin sarjatietoiseksi (fork 9xxx erikseen), Node-politiikka ohittaa SES-Lambdan. Upstream poisti Heartbeats-asetussivun; forkin ajolaskuri siirtyi yleisiin instanssiasetuksiin. PR mergetään merge-commitilla. |
+| 2026-09-27 | v2026.916.1 | Porras 6/6 (RK9-317). 56 konfliktia (kaksi add/add: `schema/email.ts`, `routes/email.ts`), migraatiot 0231–0279 (forkin journal-idx 280–291), kesto prod-kopiolla 15 s. Upstreamin AgentMail-taulu `email_messages` törmäsi forkin Resend-tauluun: forkin taulu on nyt `rk9_email_messages` (slot-migraatio `0126`, tuoreen kannan polku `9000` + `9011`). Upstream poisti productivity reviewt ja halvat model profilet (`0236`), toi `DEFAULT_CLAUDE_LOCAL_MODEL = "claude-opus-5"` (hyväksytty), `enableNativeRunner`- ja `enableStreamlinedUi`-oletukset `true`, announcements-feedin (fork: `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false`) ja `canCreateAgents`-oletuksen kaikille (fork: vain CEO). PR mergetään merge-commitilla. |

@@ -45,14 +45,27 @@ function isForkMigrationTag(tag: string): boolean {
 }
 
 async function readForkTables(): Promise<Set<string>> {
-  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql") && isForkMigrationTag(file));
+  // RK9-317: pinned fork files also include the slot migration 0126, which renames the fork
+  // Resend table to rk9_email_messages. Its rename target is a fork table too.
+  const pinned = JSON.parse(
+    await readFile(path.join(migrationsDir, "..", "fork-migration-hashes.json"), "utf8"),
+  ) as Record<string, string>;
+  const files = (await readdir(migrationsDir)).filter(
+    (file) => file.endsWith(".sql") && (isForkMigrationTag(file) || file in pinned),
+  );
   const tables = new Set<string>();
   for (const file of files) {
     const sql = await readFile(path.join(migrationsDir, file), "utf8");
     for (const match of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?"?([a-z0-9_]+)"?/gi)) {
       tables.add(match[1]!);
     }
+    for (const match of sql.matchAll(/ALTER TABLE\s+(?:"public"\.)?"?[a-z0-9_]+"?\s+RENAME TO\s+"?(rk9_[a-z0-9_]+)"?/gi)) {
+      tables.add(match[1]!);
+    }
   }
+  // 9002 created the fork table as "email_messages"; after the 9011 split that name is
+  // upstream's AgentMail table again, so its drift must still fail this test.
+  tables.delete("email_messages");
   return tables;
 }
 

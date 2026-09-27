@@ -40,10 +40,11 @@ vi.mock("./acp.js", () => ({
   createClaudeAcpExecutor: () => executeClaudeAcp,
   formatClaudeAcpFallbackMessage: (reason: string) =>
     `[paperclip] Claude ACP default unavailable; falling back to Claude CLI. ${reason} Set engine=acp to require ACP or engine=cli to silence this fallback.\n`,
+  // v2026.916.1 has no CLI fallback; the fork resolver maps an unset engine to the CLI (RK9-305).
   resolveClaudeExecutionEngineForRun: async (ctx: { config: Record<string, unknown> }) =>
     ctx.config.engine === "acp"
       ? { engine: "acp", explicit: true }
-      : { engine: "acp", explicit: false },
+      : { engine: "cli", explicit: false },
 }));
 
 vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
@@ -123,7 +124,7 @@ describe("claude_local ACP host key guard (RK9-228)", () => {
     expect(ctx.onLog).toHaveBeenCalledWith("stderr", expect.stringContaining("ANTHROPIC_API_KEY"));
   });
 
-  it("runs an auto-selected ACP engine on the CLI instead", async () => {
+  it("runs an unset engine on the CLI while a host key is present", async () => {
     process.env[KEY] = "sk-test";
     const ctx = buildContext();
 

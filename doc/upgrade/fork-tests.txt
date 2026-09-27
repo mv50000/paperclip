@@ -33,6 +33,9 @@ server/src/__tests__/emit-approval-created.test.ts
 server/src/__tests__/github-webhook-routes.test.ts
 server/src/__tests__/heartbeat-idle-timer-skip.test.ts
 server/src/__tests__/hire-approval-policy.test.ts
+server/src/__tests__/hire-permission-default-rk9.test.ts
+server/src/__tests__/announcements-opt-out-rk9.test.ts
+server/src/__tests__/board-mutation-guard-proxy-rk9.test.ts
 server/src/__tests__/hire-authorization-rk9.test.ts
 server/src/__tests__/authorization-service.test.ts
 server/src/__tests__/permissions-upgrade-boundary-routes.test.ts

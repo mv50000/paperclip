@@ -71,7 +71,7 @@ psqlq() { local url=$1; shift; pg_with "$url" psql -qAt -v ON_ERROR_STOP=1 "$@";
 # Taulut, joiden häviö tai kaksoiskappale näkyisi cutoverissa. Puuttuva taulu ei ole virhe (vanhempi
 # skeema), mutta sen pitää puuttua molemmista.
 KEY_TABLES=(companies issues agents heartbeat_runs activity_log outreach_prospects outreach_messages
-  outreach_events outreach_sender_pauses email_messages email_routes)
+  outreach_events outreach_sender_pauses email_messages rk9_email_messages email_routes)
 
 count_state() { # <url> -> rivit "nimi=luku"; puuttuvan taulun arvo "-"
   local url=$1 t reg

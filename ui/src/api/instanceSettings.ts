@@ -3,7 +3,6 @@ import type {
   InstanceGeneralSettings,
   InstanceSystemPauseState,
   InstanceSettings,
-  IssueGraphLivenessAutoRecoveryPreview,
   PatchInstanceSettings,
   PatchInstanceGeneralSettings,
   PatchInstanceExperimentalSettings,
@@ -47,36 +46,4 @@ export const instanceSettingsApi = {
     api.post<SystemResumeResponse>("/instance/system-resume", {}),
   getConcurrency: () =>
     api.get<ConcurrencyResponse>("/instance/concurrency"),
-  previewIssueGraphLivenessAutoRecovery: (input: { lookbackHours?: number }) =>
-    api.post<IssueGraphLivenessAutoRecoveryPreview>(
-      "/instance/settings/experimental/issue-graph-liveness-auto-recovery/preview",
-      input,
-    ),
-  runIssueGraphLivenessAutoRecovery: (input: { lookbackHours?: number }) =>
-    api.post<{
-      findings: number;
-      autoRecoveryEnabled: boolean;
-      lookbackHours: number;
-      cutoff: string;
-      escalationsCreated: number;
-      existingEscalations: number;
-      skipped: number;
-      skippedAutoRecoveryDisabled: number;
-      skippedOutsideLookback: number;
-      dependencyWakeBackstopChecked: number;
-      dependencyWakesHealed: number;
-      dependencyWakeExistingSkipped: number;
-      dependencyWakeLivePathSkipped: number;
-      dependencyWakeInteractionSkipped: number;
-      dependencyWakePauseHoldSkipped: number;
-      dependencyWakeNotReadySkipped: number;
-      dependencyWakeCandidateLimitSkipped: number;
-      dependencyWakeDeferredOrFailed: number;
-      dependencyWakeEnqueueFailed: number;
-      dependencyWakeIssueIds: string[];
-      escalationIssueIds: string[];
-    }>(
-      "/instance/settings/experimental/issue-graph-liveness-auto-recovery/run",
-      input,
-    ),
 };

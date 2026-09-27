@@ -102,6 +102,9 @@ function createApp(db: any, deploymentMode: "authenticated" | "local_trusted" = 
   app.get("/actor", (req, res) => {
     res.json(req.actor);
   });
+  app.post("/mcp/gateways/:gatewayPublicId", (req, res) => {
+    res.json({ reachedGatewayProtocol: true, actorType: req.actor.type });
+  });
   app.get("/companies/:companyId/protected", (req, res) => {
     assertCompanyAccess(req, req.params.companyId);
     res.json({ ok: true });
@@ -221,6 +224,38 @@ describe("agent auth middleware", () => {
     expect(res.status).toBe(401);
     expect(res.body.error).toContain(error);
     expect(commentWrites).toBe(0);
+  });
+
+  it("leaves public MCP gateway bearers for the gateway protocol to validate", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+    const publicId = `gw_${"a".repeat(32)}`;
+
+    const res = await request(createApp(db, "local_trusted"))
+      .post(`/mcp/gateways/${publicId}`)
+      .set("Authorization", "Bearer pcgw_runtime_token")
+      .send({ jsonrpc: "2.0", id: 1, method: "initialize" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ reachedGatewayProtocol: true });
+  });
+
+  it("does not bypass actor authentication for lookalike MCP gateway paths", async () => {
+    const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
+
+    const res = await request(createApp(db, "local_trusted"))
+      .post("/mcp/gateways/not-a-public-id")
+      .set("Authorization", "Bearer pcgw_runtime_token")
+      .send({ jsonrpc: "2.0", id: 1, method: "initialize" });
+
+    // --- RK9 Custom (RK9-316, RK9-317): the fork hands non-JWT bearer tokens to the route as an
+    // anonymous actor so fork routes can check their own static keys. The token still gets no
+    // identity and never keeps the implicit local-board actor. ---
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reachedGatewayProtocol: true, actorType: "none" });
+    return;
+    // --- /RK9 Custom ---
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain("Agent token did not verify");
   });
 
   it.each([

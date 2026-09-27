@@ -6,7 +6,7 @@
 
 import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { emailMessages, emailTemplates } from "@paperclipai/db";
+import { rk9EmailMessages, emailTemplates } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import type { EmailService } from "./index.js";
 
@@ -82,9 +82,9 @@ export async function maybeSendAutoReply(
   }
 
   await db
-    .update(emailMessages)
+    .update(rk9EmailMessages)
     .set({ autoRepliedAt: new Date() })
-    .where(eq(emailMessages.id, args.inboundMessageId));
+    .where(eq(rk9EmailMessages.id, args.inboundMessageId));
 
   return { sent: true };
 }

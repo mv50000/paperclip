@@ -20,6 +20,12 @@ import { BUNDLED_PLUGIN_CATALOG } from "../services/bundled-plugins.js";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
 const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker.yml"), "utf8");
+// --- RK9 Custom (RK9-317): docker-cloud.yml is upstream-only and removed from the fork
+// (doc/CI-RUNNER.md). Checks that need it skip when it is absent. ---
+const cloudWorkflowPath = path.join(repoRoot, ".github", "workflows", "docker-cloud.yml");
+const hasCloudWorkflow = existsSync(cloudWorkflowPath);
+const cloudWorkflow = hasCloudWorkflow ? readFileSync(cloudWorkflowPath, "utf8") : "";
+// --- /RK9 Custom ---
 
 function parseList(source: string, pattern: RegExp, label: string): string[] {
   const match = source.match(pattern);
@@ -34,14 +40,17 @@ const dockerfileDefault = parseList(
   /^ARG CLOUD_BUNDLED_PLUGINS="([^"]*)"/m,
   "Dockerfile",
 );
-const workflowArg = parseList(
-  workflow,
-  /^\s*CLOUD_BUNDLED_PLUGINS=(.*)$/m,
-  "docker workflow",
-);
+// --- RK9 Custom (RK9-317): without docker-cloud.yml the Dockerfile default is the only list ---
+const workflowArg = hasCloudWorkflow
+  ? parseList(
+    cloudWorkflow,
+    /^\s*CLOUD_BUNDLED_PLUGINS=(.*)$/m,
+    "docker workflow",
+  )
+  : dockerfileDefault;
 
 describe("cloud image bundled plugins", () => {
-  it("keeps the Dockerfile default and the workflow build-arg in sync", () => {
+  it.skipIf(!hasCloudWorkflow)("keeps the Dockerfile default and the workflow build-arg in sync", () => {
     expect(workflowArg).toEqual(dockerfileDefault);
   });
 
@@ -76,17 +85,18 @@ describe("cloud image bundled plugins", () => {
     expect(workflow).toMatch(/^\s*target: production$/m);
   });
 
-  it("publishes the cloud image in its own job with no needs coupling", () => {
-    // The cloud publish runs as its own top-level job so the stock/production
-    // publish can never gate, delay, or skip it. Both jobs share only the
-    // single top-level concurrency slot; there is deliberately no `needs:`
-    // between them, so a failure in one is never coupled to the other.
-    const jobsSection = workflow.slice(workflow.indexOf("\njobs:\n"));
+  it.skipIf(!hasCloudWorkflow)("publishes the cloud image in its own job with no needs coupling", () => {
+    const caller = workflow.split("  build-and-push-cloud:")[1]?.split("  promote_canary_channel:")[0];
+    expect(caller, "tag and manual builds must call the cloud workflow").toContain("uses: ./.github/workflows/docker-cloud.yml");
+    expect(caller, "the reusable caller must also remain independent of production").not.toMatch(/^\s*needs:/m);
+    // The reusable cloud workflow owns its job and SHA concurrency group.
+    // Production publication must not gate, delay, or skip the cloud build.
+    const jobsSection = cloudWorkflow.slice(cloudWorkflow.indexOf("\njobs:\n"));
     const headers = [...jobsSection.matchAll(/^ {2}([\w-]+):[^\n]*$/gm)];
     expect(
       headers.length,
-      "docker.yml must declare at least two jobs under jobs:",
-    ).toBeGreaterThanOrEqual(2);
+      "docker-cloud.yml must declare a cloud build job under jobs:",
+    ).toBeGreaterThanOrEqual(1);
 
     // Locate the job block that carries the cloud build (target: cloud) and
     // assert it declares no `needs:` — coupling it to another job would

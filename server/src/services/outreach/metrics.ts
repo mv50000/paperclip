@@ -9,7 +9,7 @@
 // format is a handful of lines, so it's built by hand below.
 import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, emailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
+import { activityLog, rk9EmailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
 import { listActivePauses } from "./sender-pauses.js";
 import { getOutreachDnsblState, isDnsblListTrustworthy, type OutreachDnsblState } from "./dnsbl.js";
@@ -50,7 +50,7 @@ export interface OutreachPrometheusMetrics {
   // value here means something bypassed that (a direct `POST .../messages` call).
   approvedWithoutSequence: ApprovedWithoutSequenceByCompany[];
   // RK9-234: inbound mail we stored but could not route — the body is safe in
-  // `email_messages`, but no issue was opened and nobody owns it. Nonzero means
+  // `rk9_email_messages`, but no issue was opened and nobody owns it. Nonzero means
   // an outreach domain is missing an `email_routes` row. Kept visible here
   // because a prospect's reply going unanswered is the most expensive silence
   // in the pipeline.
@@ -109,12 +109,12 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
         .groupBy(outreachMessages.companyId),
       db
         .select({ count: sql<number>`count(*)` })
-        .from(emailMessages)
+        .from(rk9EmailMessages)
         .where(
           and(
-            eq(emailMessages.direction, "inbound"),
-            isNull(emailMessages.routeKey),
-            isNull(emailMessages.issueId),
+            eq(rk9EmailMessages.direction, "inbound"),
+            isNull(rk9EmailMessages.routeKey),
+            isNull(rk9EmailMessages.issueId),
           ),
         ),
       db
@@ -345,12 +345,12 @@ async function countApprovedWithoutSequence(db: Db): Promise<number> {
 async function countInboundUnrouted(db: Db): Promise<number> {
   const [row] = await db
     .select({ count: sql<number>`count(*)` })
-    .from(emailMessages)
+    .from(rk9EmailMessages)
     .where(
       and(
-        eq(emailMessages.direction, "inbound"),
-        isNull(emailMessages.routeKey),
-        isNull(emailMessages.issueId),
+        eq(rk9EmailMessages.direction, "inbound"),
+        isNull(rk9EmailMessages.routeKey),
+        isNull(rk9EmailMessages.issueId),
       ),
     );
   return Number(row?.count ?? 0);

@@ -82,3 +82,34 @@ test('fails a fork migration that reuses a 9xxx number', () => {
   assert.match(result.message, /already contains migrations through .*9010_rk9_on_master\.sql/);
   assert.match(result.message, /starting at 9011/);
 });
+
+// --- RK9 Custom (RK9-317) --- pinned fork files in free slots (0126 in the upstream gap, 9000).
+test('passes pinned fork files in free slots below the series maximum', () => {
+  const result = checkMigrationOrder(
+    [migration('0125_on_master'), migration('0230_on_master'), migration('9001_rk9_on_master'), migration('9010_rk9_on_master')],
+    [migration('0126_rk9_slot'), migration('9000_rk9_slot'), migration('0231_upstream_new')],
+    new Set(['0126_rk9_slot.sql', '9000_rk9_slot.sql']),
+  );
+
+  assert.equal(result.passed, true);
+});
+
+test('fails an unpinned file in a free slot below the series maximum', () => {
+  const result = checkMigrationOrder(
+    [migration('0125_on_master'), migration('0230_on_master')],
+    [migration('0126_not_pinned')],
+    new Set(['0126_rk9_slot.sql']),
+  );
+
+  assert.equal(result.passed, false);
+});
+
+test('fails a pinned fork file whose number the target branch already has', () => {
+  const result = checkMigrationOrder(
+    [migration('0126_on_master'), migration('0230_on_master')],
+    [migration('0126_rk9_slot')],
+    new Set(['0126_rk9_slot.sql']),
+  );
+
+  assert.equal(result.passed, false);
+});

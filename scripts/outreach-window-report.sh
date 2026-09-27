@@ -12,7 +12,7 @@
 #   - jonon syvyys: outreach_messages.status = 'queued' (sama kuin metriikan queueDepth) ja 'approved'
 #   - lähetetyt viestit yhteensä ja viimeisin onnistunut lähetys (sent_at)
 #   - aktiiviset lähettäjäpysäytykset (outreach_sender_pauses) ja järjestelmäpysäytys (SYSTEM_PAUSE)
-#   - saapuneet vastaukset: email_messages inbound yhteensä, ja käsittelemättömät (route_key ja
+#   - saapuneet vastaukset: rk9_email_messages inbound yhteensä, ja käsittelemättömät (route_key ja
 #     issue_id tyhjiä; sama kysely kuin metriikka outreach_inbound_unrouted, RK9-234)
 #   - outreach.reply_unmatched-rivit (RK9-235) ja kaksoiskappaleet (sama message_id kahdessa viestissä)
 #   - jokaisen outreach-viestin (id, status, message_id), jotta compare vertaa viestejä yksitellen
@@ -62,8 +62,8 @@ SELECT json_build_object(
   'system_paused', (SELECT jsonb_typeof(general -> 'systemPause') = 'object'
                     FROM instance_settings WHERE singleton_key = 'default'),
   'paused_companies', (SELECT count(*) FROM companies WHERE status = 'paused'),
-  'inbound_total', (SELECT count(*) FROM email_messages WHERE direction = 'inbound'),
-  'inbound_unrouted', (SELECT count(*) FROM email_messages
+  'inbound_total', (SELECT count(*) FROM rk9_email_messages WHERE direction = 'inbound'),
+  'inbound_unrouted', (SELECT count(*) FROM rk9_email_messages
                        WHERE direction = 'inbound' AND route_key IS NULL AND issue_id IS NULL),
   'reply_unmatched', (SELECT count(*) FROM activity_log WHERE action = 'outreach.reply_unmatched'),
   'messages',      (SELECT coalesce(json_agg(json_build_array(id, status, message_id)), '[]'::json) FROM outreach_messages)
@@ -172,7 +172,7 @@ export_window() {
   need_db
   ( umask 077; mkdir -p "$out" ); chmod 700 "$out"
   # Taulu:aikasarake. created_at riittää taulussa, jonka rivejä ei päivitetä.
-  for spec in outreach_suppressions:created_at email_suppression_list:created_at outreach_events:created_at email_messages:created_at \
+  for spec in outreach_suppressions:created_at email_suppression_list:created_at outreach_events:created_at rk9_email_messages:created_at \
               outreach_prospects:updated_at outreach_messages:updated_at outreach_sender_pauses:updated_at; do
     t=${spec%%:*}; file="$out/$t.csv"
     ( umask 077; ro_psql -c "\\copy (SELECT * FROM public.\"$t\" WHERE ${spec##*:} >= '$since') TO '$file' CSV HEADER" >/dev/null )

@@ -666,6 +666,10 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 917ae45d v20
 |---|---|
 | `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0230 tavu tavulta, sitten 9001–9010 muuttamattomina idx:llä 231–240 |
 | `.github/workflows/release.yml`, `release-smoke.yml` (ei konfliktia) | upstreamin versio; jokainen `runs-on: ubuntu-latest` sai RK9-350-runner-vivun, `verify_beta_candidate` sai `runner_label`-inputin ja uusi `smoke_service` vivun. `commitperclip-review.yml` pysyy poistettuna. |
+| `.github/scripts/tests/`, `scripts/__tests__/e2e-shard.test.mjs`, `release-verify-workflow.test.mjs` (policy-job) | Upstream toi 10 uutta CI-testitiedostoa. Viisi testaa vain upstreamin poistettuja workflowta tai AWS-fleet-reititystä, joten ne poistettiin: `cloud-runner-routing`, `docker-disk-workflow`, `post-merge-runner-routing`, `pr-dependency-cache` ja `pr-runner-rust-cache`. `lockfile-refresh-workflows` tarkistaa forkissa olevat workflowt. `cloud-readiness`-workflowtesti ohitetaan, kun tiedosto puuttuu. `e2e-shard`: upstreamin kuusi `pr-trusted.yml`-testiä ohitetaan, kun tiedosto puuttuu, ja masterin kaksi `pr.yml`-testiä palautettiin. `release-verify-workflow`: Runner eval- ja cloud-readiness-testit ohitetaan, kun workflowt puuttuvat, ja `publish_canary` odottaa forkin `if: false` -ehtoa. |
+| `packages/paperclip-runner/scripts/generate-capability-contract.mjs`, `scripts/lib/capability-inventory.mjs`, `spec/capability/*`, `generated/capability/*`, `docs/capability-contract.md` (runner build) | Upstreamin capability-sopimus laskee MCP-työkalut ja skillin otsikot rivinumeroineen. Forkin oma työkalu `paperclipRecallKnowledge` (RK9-17) suodatetaan pois RK9 Custom -lohkolla, koska upstreamin kiinteä määrä on 42. Inventaariot generoitiin uudelleen forkin `SKILL.md`:stä ja `tools.ts`:stä; eval-rivit pysyivät ennallaan, koska eval-korpus ei ole repossa. `src/generated/capability-contract.ts` sisältää vain määrät, joten se ei muuttunut. Ajonaikainen koodi ei lue inventaarioita; native runner (jolla ei ole recall-työkalua) pysyy pois päältä deployta edeltävän `enableNativeRunner`-SQL:n jälkeen. |
+| `scripts/preview-artifacts.test.mjs`, `scripts/cloud-migrator-artifacts.test.mjs` (`test:release-registry`) | Viisi upstreamin testiä lukee workflowt `docker-cloud.yml`, `cloud-readiness.yml` ja `cloud-migrator-artifacts.yml`, jotka on poistettu forkista. Testit ohitetaan, kun workflow puuttuu (RK9 Custom). |
+| `tests/e2e/legacy-failure-continuation.spec.ts` (e2e shard 3) | Uusi upstream-spec odottaa tasan yhtä uutta ajoa. Forkissa osoitettu backlog-issue alkaa todo-tilassa (RK9 Custom, `services/issues.ts`), joten fixture-issuen luonti jonouttaa assignment-heräteen. Täsmäytysportti peruu sen ennen käynnistystä (`execution_reconciliation_required`, `startedAt` tyhjä). Spec jättää tämän yhden perutun ajon laskematta; muut odotukset ovat upstreamin. |
 | `.github/scripts/check-pr-migration-order.mjs` (ei konfliktia) | upstreamin uusi CI-tarkistus (#12433) vertaa kaikkia migraationumeroita yhteen maksimiin, jolloin jokainen 02xx näyttäisi olevan 9010:n "takana". RK9 Custom: vertailu tehdään sarjoittain (upstream < 9000, fork ≥ 9000). Neljä testiä lisätty. |
 | `scripts/check-node-version-policy.mjs` (ei konfliktia) | RK9 Custom: `infra/ses-forwarder/package.json` ohitetaan, koska se on AWS Lambda (`nodejs20.x`) eikä ajeta palvelimen Nodella |
 | `.env.example`, `.gitignore`, `package.json`, `packages/db/package.json`, `server/package.json`, `pnpm-lock.yaml` | molemmat; lockfile upstreamista + `pnpm install`. Forkin riippuvuudet (`tsx`, AWS SDK, `jsdom`, `mailparser` ja tyypit) säilyivät. |
@@ -705,6 +709,76 @@ Tunnettu CI-rajoite: `paperclip-runner` (Rust) tarvitsee `cargo`n typecheckiin j
 `prepare:runner-vendor`iin. builder-02:lla ei ole cargoa, joten serverin typecheck ajettiin sieltä
 TypeScript-buildin kautta (`build:typescript` + `tsc --noEmit`). Tuotanto ajaa TS-lähdettä `tsx`:llä,
 eikä natiivia runneria käytetä (`enableNativeRunner` = false).
+
+## Konfliktit portaassa 916 (`origin/master` `9ebd60b33` + `v2026.916.1`, RK9-317)
+
+Porras 6/6. 56 konfliktitiedostoa (kaksi add/add-törmäystä) ja 49 upstream-migraatiota (0231–0279).
+Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 9ebd60b33 v2026.916.1`.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/schema/email.ts`, `server/src/routes/email.ts` (add/add) | upstreamin AgentMail-versiot. Forkin Resend-skeema siirtyi tiedostoon `schema/rk9_email.ts` (taulu `rk9_email_messages`, Drizzle `rk9EmailMessages`, indeksit `rk9_`-etuliitteellä) ja reitit tiedostoon `routes/rk9-email.ts` (`rk9EmailRoutes`). Ks. `UPSTREAM-UPGRADE.md`, "`email_messages`-törmäys". |
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0279 tavu tavulta + slot `0126_rk9_email_messages_rename` (idx 126), sitten `9000`, 9001–9010 muuttamattomina ja `9011` (idx 280–291) |
+| `packages/db/src/schema/index.ts` | upstreamin exportit (`export * from "./email.js"`) + forkin RK9 Custom -lohko, jossa `rk9EmailMessages` tiedostosta `rk9_email.js` |
+| `server/src/app.ts` | molemmat; `rk9EmailRoutes(db)` mountataan juuri ennen upstreamin `emailRoutes(db, emailChannels)`:ia, joten `POST /companies/:id/email/send` jää forkille |
+| `server/src/index.ts` | forkin Slack/risk/email/outreach-käynnistys ennen upstreamin uutta listen-lohkoa (listener sidotaan ennen startup recoverya); heartbeat-palvelu forkin optioilla ilman poistunutta `duplexAggregateByteLedger`ia; `closeQmdMcpSession()` ennen `finalizeServerShutdown`ia |
+| `server/src/services/index.ts`, `server/src/services/routines.ts`, `server/src/adapters/registry.ts` | molemmat |
+| `server/src/services/live-events.ts` | upstreamin versio; RK9 Custom -alias `subscribeAllLiveEvents = subscribeAllCompanyLiveEvents` forkin kuuntelijoille (risk, Slack) |
+| `server/src/services/heartbeat.ts` | forkin globaali cap, system pause -portit, human proxy -ohitus, `skipWhenIdle` ja knowledge-recall-lohko upstreamin uuden suoritusrakenteen sisään. Upstream poisti productivity reviewt (#13263), joten forkin import poistettiin. |
+| `server/src/services/recovery/service.ts` | forkin `isRk9RecoveryExcludedAgent`, RK9-316:n disposition repair -ohitus, SEC-91 ja `recoveryStrictInProgressOnly`. Upstream poisti `instanceSettings`-muuttujan, joten forkin lohko kutsuu `instanceSettingsService(db)`:tä. |
+| `server/src/routes/issues.ts` | upstreamin (uudelleenmuotoiltu) versio, johon forkin korjaukset lisättiin uudelleen: human proxy -ohitus run-capissa, `getAgentRunId` (checkout, release, omistajuus, interaktion luonti), human proxy/paused/terminated-assignee-vartija, `goalId`-suodatin, SEC-91-portti ja `assertKnownActorRunId` |
+| `server/src/services/issues.ts` | `goalId`-suodatin upstreamin muodossa ja forkin backlog → todo -sääntö |
+| `server/src/services/agents.ts`, `server/src/routes/agents.ts` | upstreamin `normalizeAgentPermissions(..., { context: "create" })`; forkin `human_proxy`-heartbeat-normalisointi sai `adapterType`-parametrin takaisin |
+| `server/src/services/agent-permissions.ts` (ei konfliktia) | upstream antaa `canCreateAgents`-oletuksen jokaiselle standard-trust-agentille. RK9 Custom: `create`-oletus vain roolille `ceo` (`role` välitetään `agents.ts`:stä). |
+| `server/src/middleware/auth.ts` (ei konfliktia) | PR #133:n RK9 Custom -lohko (ei-JWT-bearer → anonyymi aktori fork-reiteille) säilyi. Upstreamin uusi keskustelukierroksen 403 käytti `_res`-nimeä; forkissa parametri on `res`. |
+| `server/src/routes/instance-settings.ts`, `services/instance-settings.ts`, `packages/shared/src/{types,validators}/instance.ts`, `ui/src/api/instanceSettings.ts` | forkin system pause, concurrency ja liput; upstreamin poistamat issue-graph-liveness-asetukset (#12681) jäivät pois |
+| `packages/shared/src/feature-catalog.ts`, `index.ts`, `types/index.ts`, `validators/index.ts` | molemmat; forkin liput RK9 Custom -lohkossa upstreamin `enableFirstTaskPlanProposal`in jälkeen |
+| `packages/adapters/claude-local/src/server/execute.ts` | upstreamin `unavailableReason` ensin, sitten forkin ACP host key -esto (RK9-228) ja `resolveClaudeEffectiveEnv` |
+| `packages/adapters/claude-local/src/server/test.ts` | upstreamin viestit + forkin host-env (`inheritableHostEnv()`), API-avainhaara vain konfigin avaimelle |
+| `packages/adapters/claude-local/src/index.ts` | forkin mallilista ilman tuplaa, RK9-305:n moottoriteksti |
+| `packages/adapter-utils/src/acpx-engine/execute.ts` | forkin POSIX-wrapper + upstreamin `resolveRuntimeEnv`-allekirjoitus; perityt `PAPERCLIP_*`-muuttujat suodatetaan (`sanitizeInheritedPaperclipEnv`, RK9 Custom) |
+| `.github/workflows/pr.yml` | forkin versio (upstream korvasi rungon kutsulla `paperclipai/.../pr-trusted.yml@master`) |
+| `.github/workflows/docker.yml`, `release.yml`, `release-verify.yml`, `e2e.yml`, `storybook-visual.yml` | upstreamin versiot, runner-vipu jokaiseen jobiin; upstreamin pilvi- ja runner-evaluaatiojobit poistettu RK9 Custom -kommentilla. Upstream-only-workflowt (`pr-trusted`, `cloud-*`, `docker-cloud`, `docker-runner-check`, `runner-*-evals`, `runner-full-stack-e2e`, `storybook-deploy`) poistettu. |
+| `.github/scripts/check-pr-migration-order.mjs` (ei konfliktia) | RK9 Custom: pinnattu fork-tiedosto vapaassa numerossa (0126, 9000) ei ole "epäjärjestyksessä", kun kohdehaarassa ei ole samaa numeroa. Kolme testiä. |
+| `cli/src/commands/client/issue.ts` | forkin `--body`/`--body-file` + upstreamin `--attachment-id` |
+| `ui/src/App.tsx`, `components/Sidebar.tsx`, `pages/Routines.tsx`, `components/OnboardingWizard.tsx` | forkin Risks-reitti ja -navikohta sekä uudessa (streamlined) että vanhassa sivupalkissa; system pause -banneri Routines-sivulla; onboarding upstreamista |
+| `.env.example`, `package.json`, `server/package.json`, `pnpm-lock.yaml`, `doc/DEVELOPING.md`, `doc/DOCKER.md` | molemmat; lockfile upstreamista + `pnpm install --lockfile-only`. Forkin riippuvuudet pysyivät samoissa versioissa. |
+| testit (`adapter-models`, `agent-permissions-routes`, `heartbeat-comment-wake-batching`, `heartbeat-process-recovery`, `instance-settings-*`, `issue-comment-reopen-routes`, `issues-service`, `openapi-routes`, `acp`, `spawn-smoke`) | upstreamin versio + forkin lisäykset; `openapi-routes`in forkkilista sai `rk9-email.ts`:n |
+
+Mergen jälkeen koko vitest-ajo löysi 38 kaatuvaa testiä ja kaksi ajoituksesta riippuvaa upstream-testiä. Ne sovitettiin forkin käytökseen näin:
+
+| Testi | Syy | Sovitus |
+|---|---|---|
+| `hire-approval-policy.test.ts` (3× 500) | upstreamin hire-reitti kutsuu `builtInAgentService`ä ja `agentInstructionsBundleMode`a | mockit lisätty upstreamin `agent-permissions-routes.test.ts`:n mallin mukaan |
+| `agent-permissions-service.test.ts` | upstream odottaa `canCreateAgents`-oletusta jokaiselle | RK9 Custom: oletus vain CEO:lle (RK9-309) |
+| `agent-auth-middleware.test.ts` (lookalike MCP -polku) | PR #133: ei-JWT-bearer menee reitille anonyymina | RK9 Custom: odottaa aktoria `none`, ei local-boardia |
+| `chat-project-tools.test.ts` (MCP-handoff) | RK9-313: jokainen agentin assign vaatii `tasks:assign`-grantin tai creator-oikeuden | RK9 Custom: fixture-agentille `canCreateAgents` |
+| `heartbeat-stale-queue-invalidation.test.ts` (7 tapausta) | RK9-87 ohittaa issuen, jonka viimeisin ajo onnistui, ennen upstreamin requeueta | RK9 Custom: odottaa, ettei herätystä jonouteta |
+| `claude-local-execute.test.ts` | upstream antaa oletusmallin `claude-opus-5` | testi odottaa `--model DEFAULT_CLAUDE_LOCAL_MODEL` (päätös `acpx-claude-local.md`) |
+| `native-session-resumption.test.ts` (Sentry) | tulipalo-ja-unohda-raportti ei ehtinyt yhden DB-kierroksen aikana builderillä | odottaa raportit `waitForPendingRunFailureReports()`illa |
+| `adapters/registry.test.ts` | forkin `human_proxy`-adapteri | RK9 Custom: `human_proxy` → `undefined` |
+| `cloud-image-bundled-plugins`, `cloud-image-sentry`, `docker-build-stamp` | lukevat `docker-cloud.yml`:n, joka on poistettu forkista | RK9 Custom: pilvityönkulkua vaativat tarkistukset ohitetaan, kun tiedosto puuttuu |
+| `native-codex-runner.integration.test.ts` | builder-02:lla ei ole `cargo`a | ei muutosta; CI:ssä on `cargo` |
+| `ui/src/components/Sidebar.test.tsx` (streamlined-navi) | forkin Risks-sivu on Org-osiossa | RK9 Custom: odottaa `Risks`-kohtaa |
+| `packages/db/src/migration-snapshot-drift.test.ts` | `rk9_email_messages` syntyy uudelleennimeämällä (0126/9011), ei `CREATE TABLE`lla | fork-taulujen joukkoon pinnatut tiedostot ja `rk9_`-uudelleennimeämiset; `email_messages` on taas upstreamin, joten sen drift kaataa testin edelleen |
+| `company-portability.test.ts` (replace-import) | forkin `AGENT_DEFAULT_MAX_CONCURRENT_RUNS` on 5 (upstream 20) | RK9 Custom: odottaa vakiota |
+| `adapters/claude-local`: `acp.test.ts`, `engine-availability.test.ts`, `execute.acp-host-key-guard.test.ts` (5 testiä) | 916:ssa asettamaton ja `auto`-moottori tarkoittavat ACP:tä ilman CLI-fallbackia; fork ajaa ne CLI:llä (RK9-305) | RK9 Custom: asettamaton → `{ engine: "cli", explicit: false }`; ACP-tarkistukset ajetaan `engine: "acp"`:lla. Host key -vartijan mock palauttaa asettamattomalle CLI:n. |
+| `adapter-utils`: `execution-target-stdin-race.test.ts` (T22), `sandbox-callback-bridge.test.ts` (HTTP/2) | ajoituksesta riippuvia; builder-02:lla vuoroin läpi ja vuoroin kaatuu. Fork ei koske niihin. | ei muutosta |
+| `heartbeat-process-recovery.test.ts` (14 testiä) | RK9-87 ohittaa onnistuneen ajon ennen productive-continuation-requeueta | masterin RK9-87-testit palautettu, upstreamin requeue-testit skipattu (ks. alla) |
+
+Markkerit: 326 → 432 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Markkerimuutokset, jotka eivät ole pelkkiä lisäyksiä:
+
+- `agent-permissions-routes.test.ts`: testi "creates agents when optional adapter model profile discovery fails".
+  Upstream poisti halvat model profilet (#12683), joten testi ja sen RK9-rivi poistuivat.
+- `heartbeat-process-recovery.test.ts`: upstream kirjoitti tiedoston uudelleen, ja merge pudotti
+  ensin masterin RK9-87-korvaavat testit. Ne palautettiin masterista (productive-but-stranded,
+  "does not re-enqueue … already succeeded", local-background-wait ja GGU-809 RK9-87:n alla,
+  succeeded+satisfied). Upstreamin 12 uutta tai uudelleennimettyä requeue-testiä (chat,
+  shared workspace, productive terminal, GGU-809) ajetaan skipattuina aliaksella
+  `itUpstreamProductiveContinuation`, koska RK9-87 ohittaa onnistuneen ajon ennen sitä polkua.
+  Legacy summary -testi säilyi: se odottaa nyt `continuationRequeued` 0, ja sen tietoturva-assertiot
+  pysyvät. Forkin merkitty `instanceSettingsService`-import poistui, koska upstream lisäsi saman
+  importin tiedoston alkuun. Markkereita 10 → 16.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

@@ -26,7 +26,7 @@ import {
   companies,
   companyEmailConfig,
   companySecrets,
-  emailMessages,
+  rk9EmailMessages,
   emailOutboundAudit,
   emailRoutes,
   emailSuppressionList,
@@ -153,18 +153,18 @@ async function checkCompany(
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const outboundRows = await db
     .select({
-      status: emailMessages.status,
+      status: rk9EmailMessages.status,
       count: sql<number>`count(*)::int`,
     })
-    .from(emailMessages)
+    .from(rk9EmailMessages)
     .where(
       and(
-        eq(emailMessages.companyId, companyId),
-        eq(emailMessages.direction, "outbound"),
-        gt(emailMessages.createdAt, since),
+        eq(rk9EmailMessages.companyId, companyId),
+        eq(rk9EmailMessages.direction, "outbound"),
+        gt(rk9EmailMessages.createdAt, since),
       ),
     )
-    .groupBy(emailMessages.status);
+    .groupBy(rk9EmailMessages.status);
   const counts = { sent: 0, bounced: 0, complained: 0, total: 0 };
   for (const r of outboundRows) {
     if (r.status === "sent") counts.sent += r.count;
@@ -186,22 +186,22 @@ async function checkCompany(
 
   // Pending escalations: inbound emails past escalate_after_hours, issue still open, not yet escalated.
   const pendingEscalationsRows = await db
-    .select({ id: emailMessages.id })
-    .from(emailMessages)
-    .leftJoin(issues, eq(emailMessages.issueId, issues.id))
+    .select({ id: rk9EmailMessages.id })
+    .from(rk9EmailMessages)
+    .leftJoin(issues, eq(rk9EmailMessages.issueId, issues.id))
     .leftJoin(
       emailRoutes,
       and(
-        eq(emailRoutes.companyId, emailMessages.companyId),
-        eq(emailRoutes.routeKey, emailMessages.routeKey),
+        eq(emailRoutes.companyId, rk9EmailMessages.companyId),
+        eq(emailRoutes.routeKey, rk9EmailMessages.routeKey),
       ),
     )
     .where(
       and(
-        eq(emailMessages.companyId, companyId),
-        eq(emailMessages.direction, "inbound"),
-        sql`${emailMessages.escalatedAt} IS NULL`,
-        sql`${emailMessages.receivedAt} + (${emailRoutes.escalateAfterHours} * interval '1 hour') <= now()`,
+        eq(rk9EmailMessages.companyId, companyId),
+        eq(rk9EmailMessages.direction, "inbound"),
+        sql`${rk9EmailMessages.escalatedAt} IS NULL`,
+        sql`${rk9EmailMessages.receivedAt} + (${emailRoutes.escalateAfterHours} * interval '1 hour') <= now()`,
         sql`${issues.status} NOT IN ('done', 'cancelled', 'archived')`,
       ),
     );
@@ -210,11 +210,11 @@ async function checkCompany(
   // Recent inbound (last 5)
   const recentInbound = await db
     .select()
-    .from(emailMessages)
+    .from(rk9EmailMessages)
     .where(
-      and(eq(emailMessages.companyId, companyId), eq(emailMessages.direction, "inbound")),
+      and(eq(rk9EmailMessages.companyId, companyId), eq(rk9EmailMessages.direction, "inbound")),
     )
-    .orderBy(desc(emailMessages.receivedAt))
+    .orderBy(desc(rk9EmailMessages.receivedAt))
     .limit(5);
 
   // Recent audit (last 5)

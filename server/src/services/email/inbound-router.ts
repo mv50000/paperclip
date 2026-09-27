@@ -6,7 +6,7 @@
 // tenant. (Resend supports per-domain secrets; we lean on that.)
 //
 // Once resolved, we look up the recipient address against `email_routes`
-// (catch-all `*` is supported as a fallback), persist to `email_messages`,
+// (catch-all `*` is supported as a fallback), persist to `rk9_email_messages`,
 // create an issue assigned to the configured agent, and (Vaihe 6) trigger
 // auto-reply / escalation.
 //
@@ -20,7 +20,7 @@ import type { Db } from "@paperclipai/db";
 import {
   companyEmailConfig,
   companySecrets,
-  emailMessages,
+  rk9EmailMessages,
   emailRoutes,
   issueComments,
   issues,
@@ -367,7 +367,7 @@ export function createInboundRouter(
 
     const outcome = await db.transaction(async (tx): Promise<TxOutcome> => {
       const [persisted] = await tx
-        .insert(emailMessages)
+        .insert(rk9EmailMessages)
         .values({
           companyId,
           direction: "inbound",
@@ -389,9 +389,9 @@ export function createInboundRouter(
           inReplyToId: thread?.parentMessageId ?? null,
         })
         .onConflictDoNothing({
-          target: [emailMessages.companyId, emailMessages.providerMessageId],
+          target: [rk9EmailMessages.companyId, rk9EmailMessages.providerMessageId],
         })
-        .returning({ id: emailMessages.id });
+        .returning({ id: rk9EmailMessages.id });
 
       if (!persisted) {
         return { kind: "ignored" };
@@ -467,9 +467,9 @@ export function createInboundRouter(
         .returning({ id: issues.id });
 
       await tx
-        .update(emailMessages)
+        .update(rk9EmailMessages)
         .set({ issueId: issue.id })
-        .where(eq(emailMessages.id, persisted.id));
+        .where(eq(rk9EmailMessages.id, persisted.id));
 
       const autoReplyTemplateId = route.autoReplyTemplateId;
       const senderDomain = from.split("@")[1]?.toLowerCase();
@@ -574,21 +574,21 @@ export function createInboundRouter(
 
     const rows = await db
       .select({
-        id: emailMessages.id,
-        issueId: emailMessages.issueId,
+        id: rk9EmailMessages.id,
+        issueId: rk9EmailMessages.issueId,
       })
-      .from(emailMessages)
+      .from(rk9EmailMessages)
       .where(
         and(
-          eq(emailMessages.companyId, companyId),
-          isNotNull(emailMessages.issueId),
+          eq(rk9EmailMessages.companyId, companyId),
+          isNotNull(rk9EmailMessages.issueId),
           or(
-            inArray(emailMessages.providerMessageId, providerCandidates),
-            inArray(sql`${emailMessages.headers}->>'message-id'`, refs),
+            inArray(rk9EmailMessages.providerMessageId, providerCandidates),
+            inArray(sql`${rk9EmailMessages.headers}->>'message-id'`, refs),
           ),
         ),
       )
-      .orderBy(desc(emailMessages.createdAt))
+      .orderBy(desc(rk9EmailMessages.createdAt))
       .limit(1);
     const parent = rows[0];
     if (!parent?.issueId) return null;
@@ -617,12 +617,12 @@ export function createInboundRouter(
     await addSuppression(db, { companyId, address: recipient, reason });
     if (event.data.email_id) {
       await db
-        .update(emailMessages)
+        .update(rk9EmailMessages)
         .set({ status: "bounced", errorMessage: event.data.bounce?.type ?? "bounce" })
         .where(
           and(
-            eq(emailMessages.companyId, companyId),
-            eq(emailMessages.providerMessageId, event.data.email_id),
+            eq(rk9EmailMessages.companyId, companyId),
+            eq(rk9EmailMessages.providerMessageId, event.data.email_id),
           ),
         );
     }
@@ -638,12 +638,12 @@ export function createInboundRouter(
     await addSuppression(db, { companyId, address: recipient, reason: "complaint" });
     if (event.data.email_id) {
       await db
-        .update(emailMessages)
+        .update(rk9EmailMessages)
         .set({ status: "complained" })
         .where(
           and(
-            eq(emailMessages.companyId, companyId),
-            eq(emailMessages.providerMessageId, event.data.email_id),
+            eq(rk9EmailMessages.companyId, companyId),
+            eq(rk9EmailMessages.providerMessageId, event.data.email_id),
           ),
         );
     }

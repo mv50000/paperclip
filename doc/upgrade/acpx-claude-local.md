@@ -122,11 +122,12 @@ Porraskohtaiset toimet:
   `spawn-smoke.test.ts` (wrappers-hakemistossa vain `.sh`-tiedostoja).
 - **Porras, joka tuo v2026.831.0:n:** aseta `enableNativeRunner: false`
   instanssiasetuksiin ennen deployta.
-- **Porras, joka tuo v2026.916.0:n:** päätä `DEFAULT_CLAUDE_LOCAL_MODEL`.
-  Forkin nykyinen käytös on, ettei `--model`-lippua anneta, kun malli puuttuu.
-  Testi `passes no --model when the agent has no model configured` kaatuu
-  tarkoituksella, jos upstreamin oletus tulee voimaan. Jos oletus hyväksytään,
-  sen on oltava `DEFAULT_ALLOWED_MODELS`-listalla (`risk-monitors.ts`).
+- **Porras, joka tuo v2026.916.0:n (RK9-317, tehty):** `DEFAULT_CLAUDE_LOCAL_MODEL = "claude-opus-5"`
+  hyväksyttiin. Mallitta oleva agentti saa nyt `--model claude-opus-5`. Testi on nyt
+  `passes the adapter default --model when the agent has no model configured`.
+  Oletus on `DEFAULT_ALLOWED_MODELS`-listalla (`risk-monitors.ts`). Tuotannossa jokaisella
+  elävällä `claude_local`-agentilla on eksplisiittinen `claude-opus-5-5` (tarkistettu 2026-09-27),
+  joten oletus ei muuta yhtään ajoa.
 - **ACP:n käyttöönotto myöhemmin:** poista `ANTHROPIC_API_KEY` (ja harkitse
   `ANTHROPIC_AUTH_TOKEN`) `ACPX_INHERITED_PROVIDER_ENV_KEYS.claude`-listalta, ellei
   `PAPERCLIP_CLAUDE_INHERIT_ANTHROPIC_API_KEY` ole asetettu. Korjaa myös

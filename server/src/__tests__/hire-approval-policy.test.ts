@@ -10,7 +10,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultPermissionsForRole, normalizeAgentPermissions } from "../services/agent-permissions.js";
+import { defaultAgentPermissions, normalizeAgentPermissions } from "../services/agent-permissions.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const standardAgentId = "11111111-1111-4111-8111-111111111111";
@@ -108,6 +108,8 @@ function registerModuleMocks() {
     agentInstructionsService: () => mockAgentInstructionsService,
     accessService: () => mockAccessService,
     approvalService: () => mockApprovalService,
+    // v2026.916.1: agent creation ensures the company default agent grants first.
+    builtInAgentService: () => ({ ensureCompanyDefaultAgentGrants: vi.fn(async () => undefined) }),
     companySkillService: () => mockCompanySkillService,
     budgetService: () => ({ upsertPolicy: vi.fn() }),
     heartbeatService: () => ({}),
@@ -138,6 +140,11 @@ function registerModuleMocks() {
   vi.doMock("../services/environments.js", () => ({ environmentService: services.environmentService }));
   vi.doMock("../services/agent-instructions.js", () => ({
     agentInstructionsService: services.agentInstructionsService,
+    // v2026.916.1: the hire routes read the bundle mode (mirrors agent-permissions-routes.test.ts).
+    agentInstructionsBundleMode: (agent: { adapterConfig?: unknown }) => {
+      const config = agent.adapterConfig as Record<string, unknown> | undefined;
+      return config?.instructionsBundleMode === "external" ? "external" : "managed";
+    },
     syncInstructionsBundleConfigFromFilePath: mockSyncInstructionsBundleConfigFromFilePath,
   }));
   vi.doMock("../services/workspace-operations.js", () => ({
@@ -368,18 +375,27 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
 
 // Tripwire for v2026.916.1: upstream makes canCreateAgents default-on for every
 // standard-trust agent created through the hire/create path. The fork grants
-// it only to the CEO role. When this turns red during an upgrade stage, keep
-// the fork default (or require board approval for every company) before merge.
-describe("default hire permission (RK9-309)", () => {
-  it("grants canCreateAgents by default only to the CEO role", () => {
-    expect(defaultPermissionsForRole("ceo").canCreateAgents).toBe(true);
-    for (const role of ["engineer", "cto", "cmo", "qa", "general"]) {
-      expect(defaultPermissionsForRole(role).canCreateAgents).toBe(false);
+// it only to the CEO role (RK9-317 pin in services/agent-permissions.ts). When
+// this turns red during an upgrade stage, keep the fork default (or require
+// board approval for every company) before merge.
+describe("default hire permission (RK9-309, RK9-317)", () => {
+  it("grants canCreateAgents by default only to the CEO role on the create path", () => {
+    expect(defaultAgentPermissions({ context: "create", role: "ceo" }).canCreateAgents).toBe(true);
+    expect(defaultAgentPermissions({ context: "create", role: " CEO " }).canCreateAgents).toBe(true);
+    for (const role of ["engineer", "cto", "cmo", "qa", "general", undefined, null]) {
+      expect(defaultAgentPermissions({ context: "create", role }).canCreateAgents).toBe(false);
     }
   });
 
+  it("never grants the default to a low-trust CEO or to stored rows", () => {
+    expect(defaultAgentPermissions({ context: "create", role: "ceo", lowTrust: true }).canCreateAgents).toBe(false);
+    expect(defaultAgentPermissions({ context: "stored", role: "ceo" }).canCreateAgents).toBe(false);
+    expect(defaultAgentPermissions().canCreateAgents).toBe(false);
+  });
+
   it("keeps a new standard-trust agent without an explicit grant unable to hire", () => {
-    expect(normalizeAgentPermissions(undefined, "engineer").canCreateAgents).toBe(false);
-    expect(normalizeAgentPermissions({}, "engineer").canCreateAgents).toBe(false);
+    expect(normalizeAgentPermissions(undefined, { context: "create", role: "engineer" }).canCreateAgents).toBe(false);
+    expect(normalizeAgentPermissions({}, { context: "create", role: "engineer" }).canCreateAgents).toBe(false);
+    expect(normalizeAgentPermissions({ canCreateAgents: true }, { context: "create", role: "engineer" }).canCreateAgents).toBe(true);
   });
 });

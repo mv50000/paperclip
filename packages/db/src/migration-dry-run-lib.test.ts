@@ -6,7 +6,9 @@ import {
   checkPinnedForkHashes,
   destructiveStatementsIn,
   forkTableReferencesIn,
+  FORK_TABLE_RENAMES,
   migrationSha256,
+  parseFileList,
   scratchTargetViolations,
   tablesCreatedIn,
 } from "./migration-dry-run-lib.js";
@@ -141,5 +143,24 @@ describe("redactDbError", () => {
   it("tolerates non-string input", () => {
     expect(redactDbError(undefined)).toBe("");
     expect(redactDbError(new Error("boom"))).toBe("Error: boom");
+  });
+});
+
+// --- RK9 Custom (RK9-317) ---
+describe("fork table renames", () => {
+  it("names a pinned fork migration for every rename", () => {
+    const pinned = JSON.parse(
+      fs.readFileSync(new URL("./fork-migration-hashes.json", import.meta.url), "utf8"),
+    ) as Record<string, string>;
+    for (const rename of Object.values(FORK_TABLE_RENAMES)) {
+      expect(pinned).toHaveProperty(rename.migration);
+      const sql = fs.readFileSync(new URL(`./migrations/${rename.migration}`, import.meta.url), "utf8");
+      expect(sql).toContain(`RENAME TO "${rename.to}"`);
+    }
+  });
+
+  it("parses --expect-pending-fork lists", () => {
+    expect(parseFileList("a.sql, b.sql,,")).toEqual(["a.sql", "b.sql"]);
+    expect(parseFileList("")).toEqual([]);
   });
 });
