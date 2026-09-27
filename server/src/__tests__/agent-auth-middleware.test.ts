@@ -247,6 +247,13 @@ describe("agent auth middleware", () => {
       .set("Authorization", "Bearer pcgw_runtime_token")
       .send({ jsonrpc: "2.0", id: 1, method: "initialize" });
 
+    // --- RK9 Custom (RK9-316, RK9-317): the fork hands non-JWT bearer tokens to the route as an
+    // anonymous actor so fork routes can check their own static keys. The token still gets no
+    // identity and never keeps the implicit local-board actor. ---
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reachedGatewayProtocol: true, actorType: "none" });
+    return;
+    // --- /RK9 Custom ---
     expect(res.status).toBe(401);
     expect(res.body.error).toContain("Agent token did not verify");
   });

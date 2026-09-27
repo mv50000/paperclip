@@ -567,6 +567,11 @@ describe("P6-25 pre-result native session recovery", () => {
     // follow-up round trip to the real database gives that fire-and-forget
     // call room to complete before this test reads the spy.
     await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, freshRunId));
+    // --- RK9 Custom (RK9-317): one round trip did not always let the report finish on the
+    // builder; drain the pending reports with the shutdown helper instead. ---
+    const { waitForPendingRunFailureReports } = await import("../services/run-failure-report.js");
+    await waitForPendingRunFailureReports();
+    // --- /RK9 Custom ---
 
     const newCaptures = mockCaptureRunFailure.mock.calls.slice(captureCallsBefore);
     expect(newCaptures).toHaveLength(1);

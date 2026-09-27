@@ -11,14 +11,22 @@ import {
 } from "../services/agent-permissions.js";
 
 describe("agent permissions service", () => {
-  it("grants agent-creation authority to new agents by default", () => {
-    expect(defaultAgentPermissions({ context: "create" }).canCreateAgents).toBe(true);
-    expect(normalizeAgentPermissions(undefined, { context: "create" }).canCreateAgents).toBe(true);
-    expect(normalizeAgentPermissions({}, { context: "create" }).canCreateAgents).toBe(true);
+  // --- RK9 Custom (RK9-309, RK9-317): upstream grants agent-creation authority to every new agent;
+  // the fork keeps it CEO-only, so a new non-CEO agent needs an explicit grant to hire. ---
+  it("grants agent-creation authority to new CEO agents only by default", () => {
+    expect(defaultAgentPermissions({ context: "create" }).canCreateAgents).toBe(false);
+    expect(defaultAgentPermissions({ context: "create", role: "engineer" }).canCreateAgents).toBe(false);
+    expect(defaultAgentPermissions({ context: "create", role: "ceo" }).canCreateAgents).toBe(true);
+    expect(normalizeAgentPermissions(undefined, { context: "create" }).canCreateAgents).toBe(false);
+    expect(normalizeAgentPermissions({}, { context: "create", role: "ceo" }).canCreateAgents).toBe(true);
+    expect(
+      normalizeAgentPermissions({ trustPreset: "standard" }, { context: "create", role: "ceo" }).canCreateAgents,
+    ).toBe(true);
     expect(
       normalizeAgentPermissions({ trustPreset: "standard" }, { context: "create" }).canCreateAgents,
-    ).toBe(true);
+    ).toBe(false);
   });
+  // --- /RK9 Custom ---
 
   it("keeps stored rows without an explicit value fail-closed", () => {
     expect(defaultAgentPermissions().canCreateAgents).toBe(false);

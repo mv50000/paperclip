@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -21,7 +21,12 @@ import { describe, expect, it } from "vitest";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
 const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker.yml"), "utf8");
-const cloudWorkflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker-cloud.yml"), "utf8");
+// --- RK9 Custom (RK9-317): docker-cloud.yml is upstream-only and removed from the fork
+// (doc/CI-RUNNER.md). Checks that need it skip when it is absent. ---
+const cloudWorkflowPath = path.join(repoRoot, ".github", "workflows", "docker-cloud.yml");
+const hasCloudWorkflow = existsSync(cloudWorkflowPath);
+const cloudWorkflow = hasCloudWorkflow ? readFileSync(cloudWorkflowPath, "utf8") : "";
+// --- /RK9 Custom ---
 
 /**
  * Return the text of the Dockerfile stage that starts at the named target.
@@ -73,7 +78,7 @@ describe("docker build-stamp wiring", () => {
     expect(
       argLines.length,
       "the docker workflow must pass PAPERCLIP_BUILD_COMMIT for the production and cloud builds",
-    ).toBeGreaterThanOrEqual(2);
+    ).toBeGreaterThanOrEqual(hasCloudWorkflow ? 2 : 1);
   });
 });
 

@@ -3,7 +3,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { issues, heartbeatRuns } from "@paperclipai/db";
+import { agents, issues, heartbeatRuns } from "@paperclipai/db";
 import { startRunnerApiTestServer } from "./helpers/runner-api-server.js";
 import { issueService } from "../services/issues.js";
 import { documentService } from "../services/documents.js";
@@ -65,6 +65,11 @@ const support = await getEmbeddedPostgresTestSupport();
 
   it("hands off through the same API used by Claude/Codex MCP with the plan present on return", async () => {
     const f = await server.fixture({ conversation: true });
+    // --- RK9 Custom (RK9-317): the fork RK9-313 rule needs a tasks:assign grant or legacy creator
+    // authority for every agent assignment, self-assignment included. The HTTP handoff assigns the
+    // new task, so give the fixture agent creator authority. ---
+    await server.db.update(agents).set({ permissions: { canCreateAgents: true } }).where(eq(agents.id, f.agentId));
+    // --- /RK9 Custom ---
     const result = await callProjectTool({ name: "create_task", arguments: { title: "MCP handoff", projectId: f.projectId, initialPlan: "# Plan\nImplement in the execution task.", idempotencyKey: "mcp" },
       apiUrl: server.apiUrl, token: createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!,
       companyId: f.companyId, issueId: f.issueId, agentId: f.agentId, conversation: true });

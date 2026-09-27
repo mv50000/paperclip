@@ -37,7 +37,12 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
-const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker-cloud.yml"), "utf8");
+// --- RK9 Custom (RK9-317): docker-cloud.yml is upstream-only and removed from the fork
+// (doc/CI-RUNNER.md). Checks that need it skip when it is absent. ---
+const workflowPath = path.join(repoRoot, ".github", "workflows", "docker-cloud.yml");
+const hasCloudWorkflow = existsSync(workflowPath);
+const workflow = hasCloudWorkflow ? readFileSync(workflowPath, "utf8") : "";
+// --- /RK9 Custom ---
 const serverPackageJson = JSON.parse(
   readFileSync(path.join(repoRoot, "server", "package.json"), "utf8"),
 ) as { peerDependencies?: Record<string, string> };
@@ -164,7 +169,7 @@ describe("cloud image Sentry install", () => {
     ).toContain("@sentry/node");
   });
 
-  it("passes CLOUD_BUNDLED_SERVER_DEPS to the cloud build in the docker workflow", () => {
+  it.skipIf(!hasCloudWorkflow)("passes CLOUD_BUNDLED_SERVER_DEPS to the cloud build in the docker workflow", () => {
     expect(workflow).toMatch(/^\s*CLOUD_BUNDLED_SERVER_DEPS=@sentry\/node\s*$/m);
   });
 

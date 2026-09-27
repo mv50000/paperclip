@@ -11,6 +11,7 @@ import {
   resetClaudeCliCapabilitiesCacheForTests,
   sessionCodec,
 } from "@paperclipai/adapter-claude-local/server";
+import { DEFAULT_CLAUDE_LOCAL_MODEL } from "@paperclipai/adapter-claude-local";
 
 async function writeFailingClaudeCommand(
   commandPath: string,
@@ -1980,10 +1981,14 @@ describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", ()
 
   // Upstream resolves an unset model to its own default (Opus 5). This fork
   // passes no --model at all, so the CLI's own configuration decides (RK9-305).
-  it("passes no --model when the agent has no model configured", async () => {
+  // v2026.916.1 defaults a missing model to DEFAULT_CLAUDE_LOCAL_MODEL (RK9-317 accepts it; every
+  // live RK9 claude_local agent sets its model explicitly).
+  it("passes the adapter default --model when the agent has no model configured", async () => {
     const { captured } = await runWithHostEnv({});
 
-    expect(captured.argv).not.toContain("--model");
+    const modelIndex = captured.argv.indexOf("--model");
+    expect(modelIndex).toBeGreaterThanOrEqual(0);
+    expect(captured.argv[modelIndex + 1]).toBe(DEFAULT_CLAUDE_LOCAL_MODEL);
   });
 
   it("passes the configured model through unchanged", async () => {

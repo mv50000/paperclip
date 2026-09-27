@@ -497,6 +497,26 @@ Forkin reittien tarkistus #12776:ta vasten:
 `redact-sensitive.ts` muuttuu. Tarkista, ettei se peitä webhook-reittien raakarunkoa ennen
 allekirjoituksen tarkistusta.
 
+### Mergen tila (RK9-317)
+
+| Kohta | Tila |
+|---|---|
+| Announcement feed | Koodin oletus on upstreamin (päällä). Forkin testi `announcements-opt-out-rk9.test.ts` lukitsee ketjun env → config → syöte: vain arvo `false` sulkee syötteen, eikä suljettu syöte kutsu fetchiä. Prodissa `PAPERCLIP_ANNOUNCEMENTS_ENABLED=false` pitää lisätä `paperclip-start.sh`:hen ennen deployta. Harjoitusinstanssi asettaa arvon jo. |
+| Standard-trust-agenttien hire-oikeus | Pinnattu: `defaultAgentPermissions` antaa `create`-oletuksen vain roolille `ceo` (RK9 Custom, `agent-permissions.ts`). Laukaisintesti siirtyi upstreamin funktioon (`hire-approval-policy.test.ts`). Uusi kantatesti `hire-permission-default-rk9.test.ts` tarkistaa tallennetut oikeudet, koska reittitestit mockaavat agenttipalvelun. |
+| Proxy trust | `board-mutation-guard.ts` ja sen testi ovat upstreamin sellaisenaan. Kolme tapausta yllä on testissä `board-mutation-guard-proxy-rk9.test.ts`. Tuotantotodennus deployn jälkeen tehdään yllä kuvatulla tavalla. |
+| `enableNativeRunner` | Prodin `experimental`-rivillä ei ollut avainta portaan 831.1 harjoituksessa. 916.1:n oletus `true` kytkisi natiivirunnerin päälle. Kirjoita avain arvoon `false` ennen deployta (SQL alla). |
+| `enableStreamlinedUi` (uusi) | Oletus `true` (`packages/shared/src/validators/instance.ts`). Board saa upstreamin uuden sivupalkin ja routines-näkymän. Forkin Risks-navikohta on kummassakin sivupalkissa. Ei tietoturvavaikutusta. Vanhan näkymän saa pitämällä avaimen arvossa `false`. |
+| #12776 | Forkin reittitiedostoja ei muutettu. `redact-sensitive.ts` tekee lokille kopion eikä muuta pyynnön runkoa, joten webhookien raakatavut säilyvät. Ulkoisten ohjeiden hallinta API:n kautta vaatii nyt instanssiadminin. |
+| JWT-TTL | `agent-auth-jwt.ts` ei muuttunut 831.1:stä. Drop-inin `PAPERCLIP_AGENT_JWT_TTL_SECONDS=3600` toimii kuten ennen. |
+
+Deployta edeltävä SQL (`experimental`-avaimet, jotka puuttuvat, kirjoitetaan eksplisiittisesti):
+
+```sql
+UPDATE instance_settings
+SET experimental = experimental || '{"enableNativeRunner": false}'::jsonb
+WHERE NOT (experimental ? 'enableNativeRunner');
+```
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on

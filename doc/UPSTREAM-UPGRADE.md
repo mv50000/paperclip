@@ -23,13 +23,39 @@ Custom-migraatiot käyttävät **9000-sarjaa** (`9NNN_rk9_<feature>.sql`):
 | 9008   | Outreach: sekvenssimoottori (lähetyskirjanpito, unsubscribe) |
 | 9009   | Outreach: metriikat ja auto-pause (`outreach_sender_pauses`) |
 | 9010   | Outreach: CS-desk-sähköpostireitti jokaiselle lähettäjälle (RK9-234) |
+| 9000   | `email_messages`-jako, tuore kanta: upstreamin AgentMail-taulu parkkiin ennen 9002:ta (RK9-317) |
+| 9011   | `email_messages`-jako, tuore kanta: forkin taulu → `rk9_email_messages`, upstreamin taulu takaisin (RK9-317) |
+| 0126 (slot) | `email_messages`-jako, päivityspolku: forkin taulu → `rk9_email_messages` ennen upstreamin 0272:ta (RK9-317) |
 
-Seuraava vapaa numero: **9011** (tarkistettu 2026-09-26: `packages/db/src/migrations/`
-ei sisällä 9011+-tiedostoja).
+Seuraava vapaa numero: **9012** (tarkistettu 2026-09-27: `packages/db/src/migrations/`
+ei sisällä 9012+-tiedostoja).
+
+### `email_messages`-törmäys (RK9-317, porras 916.1)
+
+Upstream v2026.916.1 luo oman `email_messages`-taulunsa (AgentMail, `0272`). Forkin Resend-taulu
+(9002) on samanniminen. Forkin taulu on nyt `rk9_email_messages` (Drizzle `rk9EmailMessages`,
+`packages/db/src/schema/rk9_email.ts`), ja upstreamin taulu pitää nimensä. Kaikki taulun
+indeksit ja rajoitteet saavat `rk9_`-etuliitteen. Muut forkin sähköpostitaulut pitävät nimensä.
+
+- **Päivityspolku (prod):** slot-migraatio `0126_rk9_email_messages_rename.sql` käyttää upstreamin
+  vapaata numeroa 0126 (idx 126). Migraattori tunnistaa ajetut migraatiot hashista ja ajaa
+  odottavat idx-järjestyksessä, joten 0126 ajetaan ennen 0272:ta. Se nimeää forkin taulun
+  uudelleen vain, jos `email_messages` on olemassa ilman `endpoint_id`-saraketta.
+- **Tuore kanta:** 0126 on no-op. 0272 luo upstreamin taulun, 9000 parkkeeraa sen nimelle
+  `rk9tmp_email_messages`, 9002 luo forkin taulun ja 9011 vaihtaa molemmat lopullisiin nimiinsä.
+  Prodissa 9000 ja 9011 ovat no-opeja.
+- 9001–9010 pysyvät tavu tavulta ennallaan. Uudet tiedostot on pinnattu
+  `fork-migration-hashes.json`:iin, ja `check-pr-migration-order.mjs` hyväksyy pinnatun
+  tiedoston vapaassa numerossa (RK9 Custom).
+- Reitti `POST /api/companies/:companyId/email/send` on kummassakin reitittimessä. Forkin
+  `routes/rk9-email.ts` mountataan ennen upstreamin `routes/email.ts`:ää, joten fork omistaa reitin.
+- Suora SQL ja skriptit (`outreach-window-report.sh`, `upgrade-rehearsal.sh`) lukevat
+  forkin postia taulusta `rk9_email_messages`.
 
 Upstream käyttää 0000-sarjaa. Numerot eivät törmää (~17 vuoden marginaali).
-Journalissa (`meta/_journal.json`) upstreamin 0xxx-rivit ovat aina ensin ja 9001–9010
-niiden jälkeen numerojärjestyksessä. `scripts/upgrade-smoke.sh --offline` tarkistaa tämän.
+Journalissa (`meta/_journal.json`) upstreamin 0xxx-rivit ovat aina ensin ja forkin 9xxx-rivit
+niiden jälkeen numerojärjestyksessä. Poikkeus on pinnattu slot-tiedosto upstreamin vapaassa
+numerossa (0126, RK9-317), joka on journalissa numeronsa kohdalla. `scripts/upgrade-smoke.sh --offline` tarkistaa tämän.
 
 ## Hotspot-tiedostot
 
@@ -97,6 +123,14 @@ Täysi lista omistavine kykyineen ja ratkaisuohjeineen on regressiomatriisissa. 
   `InstanceGeneralSettings.tsx`:ssä (RK9-316).
 - `packages/paperclip-runner` (upstream, 831) — typecheck ja serverin `prepare:runner-vendor` tarvitsevat `cargo`n.
   Tuotanto ajaa TS-lähdettä `tsx`:llä, joten cargoa ei tarvita ajossa.
+- `packages/db/src/schema/email.ts` ja `server/src/routes/email.ts` (916.1) — upstreamin AgentMail. Forkin
+  Resend-skeema on `schema/rk9_email.ts` ja reitit `routes/rk9-email.ts` (RK9-317, ks. "`email_messages`-törmäys").
+  Uusi upstream-koodi, joka viittaa `emailMessages`iin, tarkoittaa AgentMail-taulua, ei forkin postia.
+- `server/src/services/agent-permissions.ts` (916.1) — upstream antaa `canCreateAgents`-oletuksen jokaiselle
+  standard-trust-agentille. RK9 Custom pinnaa `create`-oletuksen CEO-rooliin (RK9-317,
+  `hire-approval-policy.test.ts`, `hire-permission-default-rk9.test.ts`).
+- `server/src/services/productivity-review.ts` — upstream poisti productivity reviewt 916.1:ssä (#13263).
+  Forkissa ei ollut sille RK9 Custom -lohkoa.
 - `scripts/provision-worktree.sh`
 - `server/src/services/index.ts`, `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/constants.ts` — exportit
 

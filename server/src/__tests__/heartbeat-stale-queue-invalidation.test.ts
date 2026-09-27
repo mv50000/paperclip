@@ -465,6 +465,20 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const recovery = recoveryService(db, { enqueueWakeup });
     const result = await recovery.reconcileStrandedAssignedIssues();
 
+    // --- RK9 Custom (RK9-317): the fork RK9-87 gate skips an in_progress issue whose latest run
+    // succeeded before upstream's productive-continuation requeue, so the sweep never enqueues
+    // and the lock race cannot happen. The upstream guard itself is covered by the direct
+    // heartbeat.wakeup issueStateGuard test above. ---
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ continuationRequeued: 0, escalated: 0, skipped: 1, issueIds: [] });
+    expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)).toEqual([{ id: runId }]);
+    expect(await db.select().from(issueComments)).toHaveLength(0);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    const [unchanged] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(unchanged).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
+    return;
+    // --- /RK9 Custom ---
     expect(enqueueWakeup).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ continuationRequeued: 0, escalated: 0, skipped: 1, issueIds: [] });
     expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)).toEqual([{ id: runId }]);

@@ -108,6 +108,8 @@ function registerModuleMocks() {
     agentInstructionsService: () => mockAgentInstructionsService,
     accessService: () => mockAccessService,
     approvalService: () => mockApprovalService,
+    // v2026.916.1: agent creation ensures the company default agent grants first.
+    builtInAgentService: () => ({ ensureCompanyDefaultAgentGrants: vi.fn(async () => undefined) }),
     companySkillService: () => mockCompanySkillService,
     budgetService: () => ({ upsertPolicy: vi.fn() }),
     heartbeatService: () => ({}),
@@ -138,6 +140,11 @@ function registerModuleMocks() {
   vi.doMock("../services/environments.js", () => ({ environmentService: services.environmentService }));
   vi.doMock("../services/agent-instructions.js", () => ({
     agentInstructionsService: services.agentInstructionsService,
+    // v2026.916.1: the hire routes read the bundle mode (mirrors agent-permissions-routes.test.ts).
+    agentInstructionsBundleMode: (agent: { adapterConfig?: unknown }) => {
+      const config = agent.adapterConfig as Record<string, unknown> | undefined;
+      return config?.instructionsBundleMode === "external" ? "external" : "managed";
+    },
     syncInstructionsBundleConfigFromFilePath: mockSyncInstructionsBundleConfigFromFilePath,
   }));
   vi.doMock("../services/workspace-operations.js", () => ({

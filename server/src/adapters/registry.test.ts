@@ -69,6 +69,8 @@ describe("built-in runtime connection tool delivery", () => {
     ["pi_local", "environment"],
     ["process", "environment"],
     ["http", "invocation_context"],
+    // --- RK9 Custom: the fork human_proxy adapter never runs, so it delivers no runtime tools ---
+    ["human_proxy", undefined],
   ] as const);
 
   it("requires every built-in adapter to declare its expected delivery strategy", () => {
