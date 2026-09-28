@@ -37,6 +37,9 @@ import {
   type SandboxAdditionalSource,
 } from "@paperclipai/adapter-utils/execution-target";
 import { captureLocalProcess, capturedProcessExited, killCapturedLocalProcess } from "./local-process-control.js";
+// --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
+import { moveProcessToAgentCgroup } from "../agent-cgroup.js";
+// --- /RK9 Custom ---
 import type { DuplexLossReason } from "../duplex-observability.js";
 import { DUPLEX_CHANNEL_LOST_ERROR_CODE } from "../bridge-transport-contract.js";
 import type { WorkspaceRestoreFailureCode, WorkspaceRestoreOutcome } from "../workspace-restore-merge.js";
@@ -4324,6 +4327,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             ? (chunk) => routeChildStderr(childStderrState, chunk)
             : undefined,
           onAgentSpawn: async (meta) => {
+            // --- RK9 Custom (RK9-357): ACPX spawns the provider child locally; move it into the agent cgroup leaf ---
+            void moveProcessToAgentCgroup(meta.pid);
+            // --- /RK9 Custom ---
             processIdentitySink.latest = meta;
             processIdentitySink.localProcess = prepared.processSessionBridge ? undefined : captureLocalProcess(meta.pid);
             await processIdentitySink.current?.({

@@ -7,6 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
+// --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
+import { moveProcessToAgentCgroup } from "@paperclipai/adapter-utils/agent-cgroup";
+// --- /RK9 Custom ---
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
@@ -6396,6 +6399,9 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
   } finally {
     await serviceLog.handle.close();
   }
+  // --- RK9 Custom (RK9-357): runtime services (dev servers, previews) are agent load; move them into the agent cgroup leaf ---
+  void moveProcessToAgentCgroup(child.pid);
+  // --- /RK9 Custom ---
   record.child = child;
   record.providerRef = child.pid ? String(child.pid) : null;
   record.processGroupId = child.pid ?? null;

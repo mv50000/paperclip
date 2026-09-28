@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import { and, eq } from "drizzle-orm";
 
 import type { AdapterExecutionResult } from "@paperclipai/adapter-utils";
+// --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
+import { moveProcessToAgentCgroup } from "@paperclipai/adapter-utils/agent-cgroup";
+// --- /RK9 Custom ---
 import type { Db } from "@paperclipai/db";
 import { agentSessionGoalActions, agentTaskSessions } from "@paperclipai/db";
 
@@ -402,6 +405,9 @@ export async function executeNativeCodexRunner(input: {
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // --- RK9 Custom (RK9-357): move the runner into the agent cgroup leaf. Fails open ---
+  void moveProcessToAgentCgroup(child.pid);
+  // --- /RK9 Custom ---
   const exit = waitForExit(child);
   child.stdout?.on("data", (chunk: Buffer) => {
     void input.onLog("stdout", chunk.toString("utf8"));
