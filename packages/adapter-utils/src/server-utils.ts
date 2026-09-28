@@ -11,6 +11,9 @@ import {
   type LocalProcessSandboxOptions,
 } from "./local-process-sandbox.js";
 import { buildSshSpawnTarget, type SshRemoteExecutionSpec } from "./ssh.js";
+// --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
+import { moveProcessToAgentCgroup } from "./agent-cgroup.js";
+// --- /RK9 Custom ---
 import { redactCommandText } from "./command-redaction.js";
 import { paperclipChatFilePreparationDelivery } from "./chat-file-delivery.js";
 import {
@@ -4640,6 +4643,9 @@ export async function runChildProcess(
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
+        // --- RK9 Custom (RK9-357): move the run into the agent cgroup leaf. Fails open. See doc/upgrade/agent-cgroup.md ---
+        moveProcessToAgentCgroup(child.pid);
+        // --- /RK9 Custom ---
 
         const spawnPersistPromise =
           typeof child.pid === "number" && child.pid > 0 && opts.onSpawn

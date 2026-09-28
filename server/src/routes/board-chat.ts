@@ -4,6 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
+// --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
+import { moveProcessToAgentCgroup, withoutAgentCgroupEnv } from "@paperclipai/adapter-utils/agent-cgroup";
+// --- /RK9 Custom ---
 import type { DeploymentMode } from "@paperclipai/shared";
 import { instanceSettingsService, issueService } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -250,12 +253,17 @@ export function boardChatRoutes(
     const proc = spawn("claude", args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: "/tmp",
-      env: {
+      // --- RK9 Custom (RK9-357): the agent cgroup variable is server-only ---
+      env: withoutAgentCgroupEnv({
         ...process.env,
         PAPERCLIP_API_URL: apiUrl,
         PAPERCLIP_COMPANY_ID: companyId,
-      },
+      }),
+      // --- /RK9 Custom ---
     });
+    // --- RK9 Custom (RK9-357): the board chat CLI is agent load; move it into the agent cgroup leaf ---
+    moveProcessToAgentCgroup(proc.pid);
+    // --- /RK9 Custom ---
 
     let fullResponse = "";
     let streamedViaDelta = false;
