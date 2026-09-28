@@ -24,9 +24,11 @@
 // the agent leaf, so a few passes converge. The sweep never moves the server
 // process itself or anything outside the child's subtree.
 //
-// After a successful move the child's oom_score_adj is raised, so a
-// service-wide OOM picks an agent process before the server. Descendants
-// inherit the value. Raising it needs no privilege.
+// Once the leaf is known to be writable, the child's oom_score_adj is raised
+// (before the move, so a process it forks meanwhile inherits the value), and a
+// service-wide OOM picks an agent process before the server. Raising it needs
+// no privilege. If the kernel still rejects the move, the child keeps the
+// raised value in the server cgroup: only its OOM preference changes.
 //
 // The feature fails open. When the variable is unset, nothing happens. When it
 // is set but the move is impossible (not Linux, a path outside /sys/fs/cgroup,
