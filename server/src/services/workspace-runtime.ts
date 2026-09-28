@@ -8,7 +8,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
 // --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
-import { moveProcessToAgentCgroup } from "@paperclipai/adapter-utils/agent-cgroup";
+import { moveProcessToAgentCgroup, withoutAgentCgroupEnv } from "@paperclipai/adapter-utils/agent-cgroup";
 // --- /RK9 Custom ---
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
@@ -867,6 +867,9 @@ async function executeProcess(input: {
   args: string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  // --- RK9 Custom (RK9-357): provision/seed shell commands are agent load ---
+  agentLoad?: boolean;
+  // --- /RK9 Custom ---
   maxStdoutBytes?: number;
   maxStderrBytes?: number;
 }): Promise<{
@@ -886,8 +889,12 @@ async function executeProcess(input: {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: input.env ?? process.env,
+      // RK9 Custom (RK9-357): the agent cgroup variable is server-only.
+      env: input.agentLoad ? withoutAgentCgroupEnv(input.env ?? process.env) : input.env ?? process.env,
     });
+    // --- RK9 Custom (RK9-357): move provision/seed commands into the agent cgroup leaf ---
+    if (input.agentLoad) moveProcessToAgentCgroup(child.pid);
+    // --- /RK9 Custom ---
     const stdout = createProcessOutputCapture(input.maxStdoutBytes ?? DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES);
     const stderr = createProcessOutputCapture(input.maxStderrBytes ?? DEFAULT_EXECUTE_PROCESS_OUTPUT_BYTES);
     child.stdout?.on("data", (chunk) => {
@@ -2959,6 +2966,7 @@ async function runWorkspaceCommand(input: {
     args: ["-c", input.resolvedCommand ?? input.command],
     cwd: input.cwd,
     env: input.env,
+    agentLoad: true, // RK9 Custom (RK9-357)
   });
   if (proc.stdout && input.onLog) await input.onLog("stdout", `[runtime-provision] ${proc.stdout}`);
   if (proc.stderr && input.onLog) await input.onLog("stderr", `[runtime-provision] ${proc.stderr}`);
@@ -3068,6 +3076,7 @@ async function recordWorkspaceCommandOperation(
         args: ["-c", input.resolvedCommand ?? input.command],
         cwd: input.cwd,
         env: input.env,
+        agentLoad: true, // RK9 Custom (RK9-357)
       });
       const seedEvidence = input.phase === "workspace_seed"
         ? readWorkspaceSeedOperationEvidence(input.cwd)
@@ -6396,12 +6405,12 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
       // on an orphaned socketpair during startup reconciliation.
       stdio: ["ignore", serviceLog.handle.fd, serviceLog.handle.fd],
     });
+    // --- RK9 Custom (RK9-357): runtime services (dev servers, previews) are agent load; move them into the agent cgroup leaf ---
+    moveProcessToAgentCgroup(child.pid);
+    // --- /RK9 Custom ---
   } finally {
     await serviceLog.handle.close();
   }
-  // --- RK9 Custom (RK9-357): runtime services (dev servers, previews) are agent load; move them into the agent cgroup leaf ---
-  void moveProcessToAgentCgroup(child.pid);
-  // --- /RK9 Custom ---
   record.child = child;
   record.providerRef = child.pid ? String(child.pid) : null;
   record.processGroupId = child.pid ?? null;

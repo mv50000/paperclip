@@ -4644,7 +4644,7 @@ export async function runChildProcess(
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
         // --- RK9 Custom (RK9-357): move the run into the agent cgroup leaf. Fails open. See doc/upgrade/agent-cgroup.md ---
-        void moveProcessToAgentCgroup(child.pid);
+        moveProcessToAgentCgroup(child.pid);
         // --- /RK9 Custom ---
 
         const spawnPersistPromise =

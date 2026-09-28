@@ -7,7 +7,7 @@ import { and, eq } from "drizzle-orm";
 
 import type { AdapterExecutionResult } from "@paperclipai/adapter-utils";
 // --- RK9 Custom (RK9-357): agent cgroup leaf. See doc/upgrade/agent-cgroup.md ---
-import { moveProcessToAgentCgroup } from "@paperclipai/adapter-utils/agent-cgroup";
+import { moveProcessToAgentCgroup, withoutAgentCgroupEnv } from "@paperclipai/adapter-utils/agent-cgroup";
 // --- /RK9 Custom ---
 import type { Db } from "@paperclipai/db";
 import { agentSessionGoalActions, agentTaskSessions } from "@paperclipai/db";
@@ -398,15 +398,17 @@ export async function executeNativeCodexRunner(input: {
   }), {
     cwd: input.cwd,
     detached: process.platform !== "win32",
-    env: {
+    // --- RK9 Custom (RK9-357): the agent cgroup variable is server-only ---
+    env: withoutAgentCgroupEnv({
       ...process.env,
       ...input.environment,
       PAPERCLIP_RUNNER_BOOTSTRAP_TICKET: prepared.bootstrapTicket,
-    },
+    }),
+    // --- /RK9 Custom ---
     stdio: ["ignore", "pipe", "pipe"],
   });
   // --- RK9 Custom (RK9-357): move the runner into the agent cgroup leaf. Fails open ---
-  void moveProcessToAgentCgroup(child.pid);
+  moveProcessToAgentCgroup(child.pid);
   // --- /RK9 Custom ---
   const exit = waitForExit(child);
   child.stdout?.on("data", (chunk: Buffer) => {

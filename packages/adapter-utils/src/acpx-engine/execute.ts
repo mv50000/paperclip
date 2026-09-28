@@ -4328,7 +4328,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             : undefined,
           onAgentSpawn: async (meta) => {
             // --- RK9 Custom (RK9-357): ACPX spawns the provider child locally; move it into the agent cgroup leaf ---
-            void moveProcessToAgentCgroup(meta.pid);
+            moveProcessToAgentCgroup(meta.pid);
             // --- /RK9 Custom ---
             processIdentitySink.latest = meta;
             processIdentitySink.localProcess = prepared.processSessionBridge ? undefined : captureLocalProcess(meta.pid);
