@@ -125,6 +125,12 @@ describe("agent cgroup leaf", () => {
     expect((await fs.readFile(path.join(leaf, "cgroup.procs"), "utf8")).trim()).toBe("4321");
   });
 
+  it("never moves the server's own pid", async () => {
+    expect(moveProcessToAgentCgroup(4321, { ...linuxOptions(leaf), selfPid: 4321 })).toBe(false);
+    expect(await fs.readFile(path.join(leaf, "cgroup.procs"), "utf8")).toBe("");
+    expect((await fs.readFile(path.join(procRoot, "4321", "oom_score_adj"), "utf8")).trim()).toBe("0");
+  });
+
   it("strips the server-only variable from a child env", () => {
     const env = { [AGENT_CGROUP_ENV]: leaf, PATH: "/usr/bin" };
     expect(withoutAgentCgroupEnv(env)).toEqual({ PATH: "/usr/bin" });
@@ -159,6 +165,14 @@ describe("agent cgroup leaf", () => {
     expect(moveProcessToAgentCgroup(1, linuxOptions(root))).toBe(false);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("must point under");
+  });
+
+  it("leaves oom_score_adj untouched when the leaf cannot take the pid", async () => {
+    await fs.chmod(path.join(leaf, "cgroup.procs"), 0o444);
+    if (process.getuid?.() !== 0) {
+      expect(moveProcessToAgentCgroup(4321, linuxOptions(leaf))).toBe(false);
+      expect((await fs.readFile(path.join(procRoot, "4321", "oom_score_adj"), "utf8")).trim()).toBe("0");
+    }
   });
 
   it("fails open with one warning when the leaf is missing", async () => {

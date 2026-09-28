@@ -45,7 +45,7 @@ Ne ovat lyhytikäisiä tai osa palvelinta.
 - Muuttuja asettamatta: ei mitään, ei lokia. Upstream-käytös.
 - Muuttuja asetettu, mutta alusta ei ole Linux, polku ei ole `/sys/fs/cgroup`in alla tai lehteä ei voi kirjoittaa:
   lapsi jää palvelimen cgroupiin, ja prosessi kirjoittaa yhden varoituksen per syy (`[agent-cgroup] ...`).
-- Jos `oom_score_adj`:ia ei voi nostaa, siirto pätee silti; varoitus kerran.
+- Jos `oom_score_adj`:ia ei voi nostaa, siirto pätee silti; varoitus kerran. Arvo nostetaan ennen siirtoa (jälkeläiset perivät sen), mutta vasta kun lehden `cgroup.procs` on todettu kirjoitettavaksi: rikkinäinen asetus ei muuta lasta mitenkään.
 - `ESRCH` (lapsi ehti jo päättyä) ei ole virhe eikä tuota varoitusta.
 - Apufunktio ei heitä. Testit: `packages/adapter-utils/src/agent-cgroup.test.ts`.
 

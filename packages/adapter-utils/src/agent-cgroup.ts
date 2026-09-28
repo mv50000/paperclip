@@ -35,7 +35,7 @@
 // throws. Kill, cancel and timeout paths do not depend on it: they signal the
 // process group, and a cgroup move does not change the group.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export const AGENT_CGROUP_ENV = "PAPERCLIP_AGENT_CGROUP";
@@ -147,8 +147,8 @@ function resolveOwnCgroupProcsPath(procRoot: string, cgroupRoot: string): string
 }
 
 /**
- * Moves the processes in the server cgroup that descend from `rootPid`.
- * Returns the moved pids.
+ * Moves the processes in the server cgroup that descend from `rootPid` and
+ * raises their oom_score_adj. Returns the moved pids.
  */
 function sweepDescendants(
   rootPid: number,
@@ -156,6 +156,7 @@ function sweepDescendants(
   procRoot: string,
   cgroupRoot: string,
   selfPid: number,
+  warn: (message: string) => void,
 ): number[] {
   const ownProcsPath = resolveOwnCgroupProcsPath(procRoot, cgroupRoot);
   if (!ownProcsPath || ownProcsPath === procsPath) return [];
@@ -184,6 +185,7 @@ function sweepDescendants(
       }
       if (!descends) continue;
       seen.add(pid);
+      raiseOomScoreAdj(procRoot, pid, warn);
       try {
         writeFileSync(procsPath, `${pid}\n`, { flag: "a" });
         moved.push(pid);
@@ -222,6 +224,20 @@ export function moveProcessToAgentCgroup(
     const warn = options.warn ?? ((message: string) => console.warn(message));
     const procsPath = resolveAgentCgroupProcsPath({ ...options, warn });
     if (!procsPath) return false;
+    const selfPid = options.selfPid ?? process.pid;
+    if (pid === selfPid) return false;
+    const procRoot = options.procRoot ?? "/proc";
+    const cgroupRoot = path.resolve(options.cgroupRoot ?? CGROUP_FS_ROOT);
+    try {
+      // A leaf that cannot take the pid must leave the child untouched (fail-open).
+      accessSync(procsPath, fsConstants.W_OK);
+    } catch (err) {
+      const code = errorCode(err);
+      warnOnce(warn, `move:${code}`, `cannot write pid to ${procsPath} (${code}); agent processes stay in the server cgroup`);
+      return false;
+    }
+    // Raise before the move, so a process the child forks meanwhile inherits 500.
+    raiseOomScoreAdj(procRoot, pid, warn);
     try {
       writeFileSync(procsPath, `${pid}\n`, { flag: "a" });
     } catch (err) {
@@ -231,13 +247,7 @@ export function moveProcessToAgentCgroup(
       warnOnce(warn, `move:${code}`, `cannot write pid to ${procsPath} (${code}); agent processes stay in the server cgroup`);
       return false;
     }
-    const procRoot = options.procRoot ?? "/proc";
-    const cgroupRoot = path.resolve(options.cgroupRoot ?? CGROUP_FS_ROOT);
-    raiseOomScoreAdj(procRoot, pid, warn);
-    const selfPid = options.selfPid ?? process.pid;
-    for (const descendant of sweepDescendants(pid, procsPath, procRoot, cgroupRoot, selfPid)) {
-      raiseOomScoreAdj(procRoot, descendant, warn);
-    }
+    sweepDescendants(pid, procsPath, procRoot, cgroupRoot, selfPid, warn);
     return true;
   } catch {
     return false;
