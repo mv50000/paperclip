@@ -25,6 +25,7 @@ import { logger } from "../middleware/logger.js";
  */
 export const DEFAULT_ALLOWED_MODELS: readonly string[] = [
   "claude-sonnet-5",
+  "claude-sonnet-5-5",
   "claude-opus-5-5",
   "claude-opus-5",
   "claude-fable-5-1",
