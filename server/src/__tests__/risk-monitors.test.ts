@@ -294,5 +294,6 @@ describe("default model allow-list", () => {
     const { DEFAULT_ALLOWED_MODELS } = await import("../services/risk-monitors.js");
 
     expect(DEFAULT_ALLOWED_MODELS).toContain("claude-opus-5-5");
+    expect(DEFAULT_ALLOWED_MODELS).toContain("claude-sonnet-5-5");
   });
 });

@@ -66,6 +66,7 @@ describe("adapter model listing", () => {
     // --- RK9 Custom: the fork lists Claude 5 models first; Opus 5.5 is the default (first) option. ---
     expect(models[0]?.id).toBe("claude-opus-5-5");
     expect(models.some((model) => model.id === "claude-sonnet-5")).toBe(true);
+    expect(models.some((model) => model.id === "claude-sonnet-5-5")).toBe(true);
     expect(new Set(models.map((model) => model.id)).size).toBe(models.length);
     expect(models.some((model) => model.id === "claude-fable-5-1")).toBe(true);
     expect(models.some((model) => model.id === "claude-fable-5")).toBe(true);
