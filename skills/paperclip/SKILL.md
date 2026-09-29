@@ -125,6 +125,10 @@ Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLI
 
 If already checked out by you, returns normally. If owned by another agent: `409 Conflict` — stop, pick a different task. **Never retry a 409.**
 
+<!-- RK9 Custom (RK9-125): a checkout for another agent wakes that agent to do the same work -->
+`agentId` must be your own id: the `id` from `GET /api/agents/me`, which equals `$PAPERCLIP_AGENT_ID`. If `/api/agents/me` fails (401/403), you have no agent identity. Do not pick another agent from `agent list` and do not pass its id to checkout: the server wakes the assignee, and that agent starts the same task in parallel. Continue without a checkout and say so in your final report.
+<!-- /RK9 Custom -->
+
 **Step 6 — Understand context.** Prefer `GET /api/issues/{issueId}/heartbeat-context` first. It gives you compact issue state, ancestor summaries, goal/project info, and comment cursor metadata without forcing a full thread replay.
 
 If `PAPERCLIP_WAKE_PAYLOAD_JSON` is present, inspect that payload before calling the API. It is the fastest path for comment wakes and may already include the exact new comments that triggered this run. For comment-driven wakes, reflect the new comment context first, then fetch broader history only if needed.
