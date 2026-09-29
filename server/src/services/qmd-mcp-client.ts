@@ -70,6 +70,74 @@ let session: string | null = null;
 // both call qmdInit and open two sessions, only one of which anything ever remembers.
 let initPromise: Promise<string> | null = null;
 
+/** Consecutive daemon failures before the outage is escalated to an ERROR log line (RK9-369). */
+export function qmdAlertThreshold(): number {
+  const n = Number(process.env.PAPERCLIP_QMD_ALERT_THRESHOLD);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 3;
+}
+
+/** Health probe interval; 0 disables it. The probe is a cheap lex-only query (no model load), so
+ *  a daemon outage is noticed even when nobody is calling recall. */
+export function qmdHealthProbeIntervalMs(): number {
+  const n = Number(process.env.PAPERCLIP_QMD_HEALTH_INTERVAL_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 60_000;
+}
+
+export interface QmdDaemonStatus {
+  healthy: boolean;
+  consecutiveFailures: number;
+  /** Recalls (or probes) that failed on the daemon since process start. */
+  totalFailures: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastError: string | null;
+}
+
+// Daemon health, updated by every real query and by the health probe. Before RK9-369 a daemon
+// outage only produced one WARN per recall and recall silently kept working through the slower CLI
+// path, so nobody noticed the daemon was down (CT 364 :8181). Caller aborts are not counted: they
+// say nothing about the daemon.
+const daemonHealth = { consecutiveFailures: 0, totalFailures: 0, lastSuccessAt: null as number | null, lastFailureAt: null as number | null, lastError: null as string | null };
+
+function recordDaemonSuccess(): void {
+  if (daemonHealth.consecutiveFailures >= qmdAlertThreshold()) {
+    logger.warn(
+      { downForFailures: daemonHealth.consecutiveFailures },
+      "qmd-mcp daemon RECOVERED: recall is using the daemon again",
+    );
+  }
+  daemonHealth.consecutiveFailures = 0;
+  daemonHealth.lastSuccessAt = Date.now();
+}
+
+function recordDaemonFailure(error: unknown): void {
+  daemonHealth.consecutiveFailures++;
+  daemonHealth.totalFailures++;
+  daemonHealth.lastFailureAt = Date.now();
+  daemonHealth.lastError = errorMessage(error);
+  // Log on the threshold crossing and every 10th failure after it, not on every one, so a
+  // sustained outage stays visible without flooding the log.
+  const over = daemonHealth.consecutiveFailures - qmdAlertThreshold();
+  if (over >= 0 && over % 10 === 0) {
+    logger.error(
+      { consecutiveFailures: daemonHealth.consecutiveFailures, lastError: daemonHealth.lastError, url: qmdMcpUrl() },
+      "qmd-mcp daemon DOWN: knowledge recall is falling back to the slow qmd CLI path",
+    );
+  }
+}
+
+export function getQmdDaemonStatus(): QmdDaemonStatus {
+  const iso = (t: number | null) => (t === null ? null : new Date(t).toISOString());
+  return {
+    healthy: daemonHealth.consecutiveFailures < qmdAlertThreshold(),
+    consecutiveFailures: daemonHealth.consecutiveFailures,
+    totalFailures: daemonHealth.totalFailures,
+    lastSuccessAt: iso(daemonHealth.lastSuccessAt),
+    lastFailureAt: iso(daemonHealth.lastFailureAt),
+    lastError: daemonHealth.lastError,
+  };
+}
+
 /** Message-only view of a caught value, for the WARN-without-stack cases below. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -213,6 +281,7 @@ export async function queryQmdDaemon(
       throw new Error(`qmd-mcp daemon: tool error: ${JSON.stringify(result?.content ?? result)}`);
     }
     const rows = result?.structuredContent?.results;
+    recordDaemonSuccess();
     return Array.isArray(rows) ? rows : [];
   } catch (error) {
     // The caller (HTTP client) disconnected — expected/abandoned, not a daemon problem. Logging
@@ -225,6 +294,7 @@ export async function queryQmdDaemon(
         "knowledge-recall: qmd-mcp daemon query aborted by caller; falling back to CLI",
       );
     } else if (timeoutSignal.aborted) {
+      recordDaemonFailure(error);
       // Our own deadline fired — the daemon being slow IS worth a WARN, but the stack trace of an
       // AbortError points at this module, not at the daemon, so it adds nothing; keep just the
       // message.
@@ -233,6 +303,7 @@ export async function queryQmdDaemon(
         "knowledge-recall: qmd-mcp daemon query timed out; falling back to CLI",
       );
     } else {
+      recordDaemonFailure(error);
       logger.warn({ err: error }, "knowledge-recall: qmd-mcp daemon query failed; falling back to CLI");
     }
     return null;
@@ -254,6 +325,32 @@ export async function keepwarmPing(deps: QmdMcpDeps = {}): Promise<void> {
   } catch (error) {
     logger.warn({ err: error }, "knowledge-recall: qmd-mcp keepwarm ping failed");
   }
+}
+
+/** One cheap lex-only query against the daemon; feeds the health state. Never throws. */
+export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  try {
+    await qmdCall(
+      "query",
+      { searches: [{ type: "lex", query: "health" }], rerank: false, collections: [KEEPWARM_COLLECTION], limit: 1 },
+      AbortSignal.timeout(qmdMcpTimeoutMs()),
+      fetchImpl,
+    );
+    recordDaemonSuccess();
+  } catch (error) {
+    recordDaemonFailure(error);
+  }
+}
+
+/** Starts the periodic health probe (default 60s; PAPERCLIP_QMD_HEALTH_INTERVAL_MS=0 disables). */
+export function startQmdHealthProbe(opts: { intervalMs?: number; deps?: QmdMcpDeps } = {}): QmdKeepwarmHandle {
+  const intervalMs = opts.intervalMs ?? qmdHealthProbeIntervalMs();
+  if (intervalMs <= 0) return { stop: () => {} };
+  const interval = setInterval(() => void probeQmdDaemon(opts.deps), intervalMs);
+  if (typeof interval.unref === "function") interval.unref();
+  logger.info({ intervalMs }, "qmd-mcp health probe started");
+  return { stop: () => clearInterval(interval) };
 }
 
 export interface QmdKeepwarmHandle {
@@ -294,4 +391,9 @@ export async function closeQmdMcpSession(deps: QmdMcpDeps = {}): Promise<void> {
 export function _resetQmdMcpSessionForTests(): void {
   session = null;
   initPromise = null;
+  daemonHealth.consecutiveFailures = 0;
+  daemonHealth.totalFailures = 0;
+  daemonHealth.lastSuccessAt = null;
+  daemonHealth.lastFailureAt = null;
+  daemonHealth.lastError = null;
 }

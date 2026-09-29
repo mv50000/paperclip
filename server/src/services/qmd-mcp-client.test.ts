@@ -3,6 +3,8 @@ import { logger } from "../middleware/logger.js";
 import {
   _resetQmdMcpSessionForTests,
   closeQmdMcpSession,
+  getQmdDaemonStatus,
+  probeQmdDaemon,
   keepwarmPing,
   queryQmdDaemon,
   startQmdKeepwarm,
@@ -390,5 +392,34 @@ describe("closeQmdMcpSession", () => {
     await closeQmdMcpSession({ fetchImpl });
     await queryQmdDaemon("q2", ["rk9"], 5, { deps: { fetchImpl } });
     expect(server.initCount()).toBe(2);
+  });
+});
+
+describe("daemon health (RK9-369)", () => {
+  const down = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
+
+  it("escalates to an ERROR log after the failure threshold and recovers on success", async () => {
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+    vi.spyOn(logger, "warn").mockImplementation(() => {});
+    for (let i = 0; i < 2; i++) await queryQmdDaemon("q", ["rk9"], 5, { deps: { fetchImpl: down } });
+    expect(getQmdDaemonStatus().healthy).toBe(true);
+    expect(errorSpy).not.toHaveBeenCalled();
+    await probeQmdDaemon({ fetchImpl: down });
+    const status = getQmdDaemonStatus();
+    expect(status).toMatchObject({ healthy: false, consecutiveFailures: 3, lastError: "ECONNREFUSED" });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const server = fakeQmdServer({ onQuery: () => [] });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0, totalFailures: 3 });
+    vi.restoreAllMocks();
+  });
+
+  it("does not count a caller abort as a daemon failure", async () => {
+    vi.spyOn(logger, "debug").mockImplementation(() => {});
+    const ac = new AbortController();
+    ac.abort();
+    await queryQmdDaemon("q", ["rk9"], 5, { signal: ac.signal, deps: { fetchImpl: down } });
+    expect(getQmdDaemonStatus().totalFailures).toBe(0);
+    vi.restoreAllMocks();
   });
 });

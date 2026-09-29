@@ -96,7 +96,7 @@ import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
 import { startSlackEventForwarder, startAgentLivenessWatchdog, createSystemPauseSlackNotifier } from "./services/slack/index.js";
 import { startQmdOrphanWatchdog } from "./services/qmd-orphan-watchdog.js";
-import { closeQmdMcpSession, startQmdKeepwarm } from "./services/qmd-mcp-client.js";
+import { closeQmdMcpSession, startQmdHealthProbe, startQmdKeepwarm } from "./services/qmd-mcp-client.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
 import { startDeliverabilityMonitor } from "./services/email/deliverability-monitor.js";
 import { startOutreachSendCron } from "./services/outreach/scheduler.js";
@@ -1047,6 +1047,8 @@ async function startServerWithDatabaseTeardown(
   // meets the recall latency budget, so keepwarm buys nothing under normal conditions) — escape
   // hatch via PAPERCLIP_QMD_KEEPWARM_INTERVAL_MS for an operator who wants it anyway.
   startQmdKeepwarm();
+  // RK9-369: notice a dead daemon even when no recall is running.
+  startQmdHealthProbe();
 
   {
     const RISK_MONITOR_INTERVAL_MS = 60 * 60 * 1000;

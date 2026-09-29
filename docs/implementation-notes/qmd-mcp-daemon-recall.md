@@ -63,3 +63,18 @@ Ported from `/home/rk9admin/vault-mcp/server.js`, the existing running client
 for the same daemon: same SSE-or-plain-JSON response parsing, same
 `initialize` → `notifications/initialized` → `tools/call` handshake, same
 personal-vault exclusion contract.
+
+## Daemon health monitoring (RK9-369)
+
+The CLI fallback keeps recall working when the daemon (CT 364 `:8181`) is
+down, so an outage used to show up only as one WARN per recall. Now:
+
+- `qmd-mcp-client.ts` tracks consecutive daemon failures (real queries and the
+  probe). At `PAPERCLIP_QMD_ALERT_THRESHOLD` (default 3) it logs one ERROR
+  line, `qmd-mcp daemon DOWN`, then repeats every 10th failure. On recovery it
+  logs a WARN `qmd-mcp daemon RECOVERED`. Caller aborts are not counted.
+- A lex-only probe runs every `PAPERCLIP_QMD_HEALTH_INTERVAL_MS` (default
+  60000, `0` disables), so an idle server also notices the outage.
+- `GET /api/knowledge/qmd-status` (instance admin) returns the state; HTTP 503
+  when unhealthy, so an external monitor can alert on it. Wiring that monitor
+  (Alertmanager/rk9claude) is an operator step, not part of this repo.
