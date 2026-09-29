@@ -51,6 +51,7 @@ import {
 } from "./acpx-engine/startup-timing.js";
 import { createSandboxRunLogTailFactory, type SandboxRunLogTailFactory } from "./sandbox-run-log-stream.js";
 import { runChildProcess } from "./server-utils.js";
+import { reapProcessesUnder } from "./test-support/reap-process-session-orphans.js";
 import { shellQuote } from "./ssh.js";
 import type { CommandManagedDuplexChannel } from "./command-managed-runtime.js";
 import {
@@ -126,6 +127,8 @@ describe("sandbox adapter execution targets", () => {
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    // Reap the wrapper, agent and bridge-server processes first: they outlive a failed or timed-out run.
+    await reapProcessesUnder(cleanupDirs);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;

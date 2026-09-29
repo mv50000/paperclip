@@ -8,6 +8,7 @@ import {
   startAdapterExecutionTargetProcessSessionBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import { runChildProcess } from "../server-utils.js";
+import { reapProcessesUnder } from "../test-support/reap-process-session-orphans.js";
 import { classifyWorkspaceRestoreFailure } from "../workspace-restore-merge.js";
 
 // The composed fault matrix.
@@ -55,6 +56,8 @@ async function makeTempRoot() {
 }
 
 afterEach(async () => {
+  // Reap the wrapper, agent and bridge-server processes first: they outlive a failed or timed-out run.
+  await reapProcessesUnder(tempRoots);
   await Promise.all(
     tempRoots.splice(0).map((root) =>
       fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),

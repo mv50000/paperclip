@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reapProcessesUnder } from "./test-support/reap-process-session-orphans.js";
+import { reapProcessesUnder, reaperMarkerEnv } from "./test-support/reap-process-session-orphans.js";
 
 import { getActiveStepContext, measureStartupStep } from "./acpx-engine/startup-timing.js";
 import { prepareCommandManagedRuntime } from "./command-managed-runtime.js";
@@ -3069,6 +3069,51 @@ describe("sandbox callback bridge", () => {
     expect(stderr).toContain("[paperclip-bridge] server error");
     expect(stderr).toContain("EADDRINUSE");
   }, 15_000);
+
+  for (const removed of ["queue", "cwd", "recreated cwd"] as const) {
+    it(`exits once its ${removed} directory is gone instead of lingering as an orphan (RK9-361)`, async () => {
+      const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-watchdog-"));
+      cleanupDirs.push(rootDir);
+      const entrypoint = path.join(rootDir, "paperclip-bridge-server.mjs");
+      await writeFile(entrypoint, getSandboxCallbackBridgeServerSource(), "utf8");
+      const queueDir = path.join(rootDir, "queue");
+      const cwd = path.join(rootDir, "cwd");
+      await mkdir(queueDir, { recursive: true });
+      await mkdir(cwd, { recursive: true });
+
+      const child = spawn(process.execPath, [entrypoint], {
+        cwd,
+        env: {
+          PATH: process.env.PATH ?? "",
+          ...reaperMarkerEnv(),
+          PAPERCLIP_BRIDGE_QUEUE_DIR: queueDir,
+          PAPERCLIP_BRIDGE_TOKEN: "test-token",
+          PAPERCLIP_BRIDGE_WATCH_INTERVAL_MS: "100",
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const closed = new Promise<number | null>((resolve) => {
+        child.on("close", resolve);
+      });
+      const readyFile = path.join(queueDir, "ready.json");
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && !(await readFile(readyFile, "utf8").catch(() => ""))) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(child.exitCode).toBeNull();
+
+      await rm(removed === "queue" ? queueDir : cwd, { recursive: true, force: true });
+      // A timed-out run can keep writing and recreate the same pathname.
+      if (removed === "recreated cwd") await mkdir(cwd, { recursive: true });
+
+      expect(await closed).toBe(1);
+      expect(stderr).toContain("a watched directory is gone");
+    }, 15_000);
+  }
 
   it("exits nonzero for the retired duplex_v1 mode instead of starting the queue gateway", async () => {
     // The closed mode allowlist rejects `duplex_v1` before the queue-directory

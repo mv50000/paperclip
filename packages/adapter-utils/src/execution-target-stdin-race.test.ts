@@ -14,6 +14,7 @@ import {
 } from "./execution-target.js";
 import { createCommandManagedSandboxCallbackBridgeQueueClient } from "./sandbox-callback-bridge.js";
 import { runChildProcess, type RunProcessResult } from "./server-utils.js";
+import { reapProcessesUnder } from "./test-support/reap-process-session-orphans.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -27,6 +28,8 @@ describe("stdin file race (parent PAP-4037)", () => {
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
+    // Reap the wrapper, agent and bridge-server processes first: they outlive a failed or timed-out run.
+    await reapProcessesUnder(cleanupDirs);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
@@ -632,6 +635,8 @@ describe("deterministic remote process-session wrapper shutdown (PAP-5316)", () 
   const cleanupDirs: string[] = [];
 
   afterEach(async () => {
+    // Reap the wrapper, agent and bridge-server processes first: they outlive a failed or timed-out run.
+    await reapProcessesUnder(cleanupDirs);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);

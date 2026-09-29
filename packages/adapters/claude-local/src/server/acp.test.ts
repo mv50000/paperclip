@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { reapProcessesUnder } from "@paperclipai/adapter-utils/test-support/reap-process-session-orphans";
 
 // Wrap the shared staging seam in a call-recording spy that still delegates to
 // the real implementation (a runner-backed sandbox test exercises it end to
@@ -99,6 +100,8 @@ afterEach(async () => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+  // Reap the wrapper, agent and bridge-server processes first: they outlive a failed or timed-out run.
+  await reapProcessesUnder(tempRoots);
   // The sandbox process-session bridge writes event files asynchronously; on slow
   // CI shards a final write can race the recursive rm (ENOTEMPTY on the events
   // dir), so let fs.rm retry until the writer has quiesced.
