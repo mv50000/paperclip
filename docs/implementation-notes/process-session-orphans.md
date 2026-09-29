@@ -10,7 +10,7 @@ Fixes:
   the session directory or the child cwd disappears (watchdog timer, interval
   `PAPERCLIP_PROCESS_SESSION_WATCH_INTERVAL_MS`, default 2 s), on SIGTERM/SIGHUP/SIGINT,
   when the stdin poll loop dies, and always SIGKILLs the child in its `exit` hook.
-- `terminate()` has a backstop `process.exit()` after the kill grace period.
+- `terminate()` has a backstop `process.exit()` after the kill grace period, only while the child still runs (never before pending output drains).
 - Tests call `reapProcessesUnder(roots)` (`src/test-support/reap-process-session-orphans.ts`)
   in `afterEach` before deleting temp roots. It kills every process whose cmdline, cwd
   or environ names a root. Linux only.

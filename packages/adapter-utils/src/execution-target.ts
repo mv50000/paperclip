@@ -2633,11 +2633,13 @@ async function terminate() {
     }, terminateGraceMs);
     killTimer.unref?.();
   }
-  // Backstop: once the child is gone nothing else needs this wrapper. If a
-  // stray handle keeps the event loop alive past the kill grace, exit anyway so
+  // Backstop: if the child is still running well past the kill grace, exit so
   // the wrapper never lingers as an orphan. The exit hook below sends the last
-  // SIGKILL to the child.
-  setTimeout(() => process.exit(), terminateGraceMs + 2000).unref?.();
+  // SIGKILL to the child. Never exit once the child has ended: pending stdout
+  // or event-file writes must drain first, and the loop then ends by itself.
+  setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) process.exit();
+  }, terminateGraceMs + 2000).unref?.();
   // This event is an untrusted latency hint, not proof. Any process that can
   // reach this session's event directory can write the same event type. It
   // can only shorten the host's shutdown wait and suppress the host's
