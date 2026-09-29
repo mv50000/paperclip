@@ -4182,6 +4182,14 @@ export function recoveryService(
     );
   }
 
+  // RK9-89: per-issue dedupe for the stranded-issue decision log. Same decision is logged
+  // on the first hit and then at most once per interval with a suppressed count.
+  const STRANDED_DECISION_LOG_INTERVAL_MS = 60 * 60 * 1000;
+  const strandedDecisionLogState = new Map<
+    string,
+    { decision: string; lastLoggedAt: number; lastSeenAt: number; suppressed: number }
+  >();
+
   async function reconcileStrandedAssignedIssues(opts?: {
     issueCreatedAtGte?: Date | null;
   }) {
@@ -4238,6 +4246,32 @@ export function recoveryService(
       latestRun: LatestIssueRun,
       extra?: Record<string, unknown>,
     ) => {
+      const nowMs = Date.now();
+      const prev = strandedDecisionLogState.get(issue.id);
+      let suppressedSinceLastLog = 0;
+      if (
+        prev &&
+        prev.decision === decision &&
+        nowMs - prev.lastLoggedAt < STRANDED_DECISION_LOG_INTERVAL_MS
+      ) {
+        prev.suppressed += 1;
+        prev.lastSeenAt = nowMs;
+        return;
+      }
+      if (prev && prev.decision === decision) suppressedSinceLastLog = prev.suppressed;
+      strandedDecisionLogState.set(issue.id, {
+        decision,
+        lastLoggedAt: nowMs,
+        lastSeenAt: nowMs,
+        suppressed: 0,
+      });
+      if (strandedDecisionLogState.size > 500) {
+        for (const [key, value] of strandedDecisionLogState) {
+          if (nowMs - value.lastSeenAt > 2 * STRANDED_DECISION_LOG_INTERVAL_MS) {
+            strandedDecisionLogState.delete(key);
+          }
+        }
+      }
       logger.info(
         {
           scope: "recovery.reconcile_stranded_assigned_issue",
@@ -4250,6 +4284,7 @@ export function recoveryService(
           latestRunStatus: latestRun?.status ?? null,
           strictInProgressOnly,
           wouldRecoverUnderStrictPolicy: issue.status === "in_progress",
+          ...(suppressedSinceLastLog > 0 ? { suppressedSinceLastLog } : {}),
           ...(extra ?? {}),
         },
         "stranded assigned issue decision",
