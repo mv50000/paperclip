@@ -3039,15 +3039,29 @@ process.on("exit", () => {
 // it returns at once when it already ran, and its backstop only fires while the
 // child runs. A child that exited while its own subprocess still holds the
 // stdout or stderr pipe never fires "close", so without this the wrapper would
-// live as long as that subprocess. Exit a moment after the child has exited, so
-// a queued exit event can still land, with the conventional 128 + signal code.
+// live as long as that subprocess. Once the child has exited, give "close" a
+// bounded window: a "close" means the pipes drained, and the normal path then
+// writes the exit event and ends the wrapper with the child's own code. Only a
+// wrapper whose pipes stay held exits here, with the conventional 128 + signal
+// code. The timer is unref'd, so it never keeps a draining wrapper alive.
+let childClosed = false;
+child.once("close", () => {
+  childClosed = true;
+});
 const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+const heldPipeExitDelayMs = 1000;
 for (const [signal, exitCode] of Object.entries(signalExitCodes)) {
   process.on(signal, () => {
     void terminate();
-    const exitSoon = () => setTimeout(() => process.exit(exitCode), 200);
-    if (child.exitCode !== null || child.signalCode !== null) exitSoon();
-    else child.once("exit", exitSoon);
+    const exitIfPipesHeld = () => {
+      if (childClosed) return;
+      const timer = setTimeout(() => {
+        if (!childClosed) process.exit(exitCode);
+      }, heldPipeExitDelayMs);
+      timer.unref?.();
+    };
+    if (child.exitCode !== null || child.signalCode !== null) exitIfPipesHeld();
+    else child.once("exit", exitIfPipesHeld);
   });
 }
 const watchIntervalMs = (() => {
