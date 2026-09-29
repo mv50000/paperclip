@@ -19,7 +19,8 @@ Fixes:
 ## RK9-361 follow-up
 
 - A termination signal (SIGTERM/SIGHUP/SIGINT) always ends the wrapper: it runs
-  `terminate()`, then exits 200 ms after the child has exited (128 + signal number).
+  `terminate()`, then exits 1 s after the child has exited (128 + signal number).
+  Before that exit it writes the exit event with the child's own code and signal.
   Before this, a child that exited while its own subprocess held the stdout/stderr
   pipe never fired `close`, so SIGTERM left the wrapper alive. The backstop exits 1.
 - The wrapper still signals only its direct child through the handle (I2). A

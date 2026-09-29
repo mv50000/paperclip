@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -73,9 +73,27 @@ describe.skipIf(process.platform !== "linux")("process session wrapper orphan de
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    wrapper.stdout.resume();
+    const stdout: Buffer[] = [];
+    wrapper.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     wrapper.stderr.resume();
-    return { root, sessionDir, cwd, wrapper };
+    return { root, sessionDir, cwd, wrapper, stdout };
+  }
+
+  // The terminal events the wrapper wrote: stdout frames in stream mode, event
+  // files otherwise.
+  async function terminalEvents(handle: Awaited<ReturnType<typeof launch>>, outputToStdout: boolean) {
+    const texts = outputToStdout
+      ? Buffer.concat(handle.stdout).toString("utf8").split("\n")
+      : await Promise.all(
+          (await readdir(path.join(handle.sessionDir, "events")))
+            .filter((name) => name.endsWith(".json"))
+            .sort()
+            .map((name) => readFile(path.join(handle.sessionDir, "events", name), "utf8")),
+        );
+    return texts
+      .filter((text) => text.trim() !== "")
+      .map((text) => JSON.parse(text) as { type: string; code?: number | null; signal?: string | null })
+      .filter((event) => event.type === "exit" || event.type === "error");
   }
 
   async function childPid(handle: Awaited<ReturnType<typeof launch>>): Promise<number> {
@@ -140,6 +158,10 @@ describe.skipIf(process.platform !== "linux")("process session wrapper orphan de
       expect(alive(wrapperPid)).toBe(false);
       expect(Date.now() - sentAt).toBeLessThan(3_000);
       expect(handle.wrapper.exitCode ?? handle.wrapper.signalCode).not.toBe(0);
+      // "close" never fired, so the forced exit must report the child's own exit.
+      expect(await terminalEvents(handle, outputToStdout)).toEqual([
+        expect.objectContaining({ type: "exit", code: 0, signal: null }),
+      ]);
     });
   }
 });

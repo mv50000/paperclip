@@ -3043,21 +3043,31 @@ process.on("exit", () => {
 // bounded window: a "close" means the pipes drained, and the normal path then
 // writes the exit event and ends the wrapper with the child's own code. Only a
 // wrapper whose pipes stay held exits here, with the conventional 128 + signal
-// code. The timer is unref'd, so it never keeps a draining wrapper alive.
+// code. It first writes the exit event with the child's own code and signal,
+// since "close" never will: without it the host sees no terminal event and
+// reports a lost run. In event-file mode the exit waits for that write. The
+// timer is unref'd, so it never keeps a draining wrapper alive.
 let childClosed = false;
+let heldPipeExitStarted = false;
 child.once("close", () => {
   childClosed = true;
 });
 const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
 const heldPipeExitDelayMs = 1000;
+async function exitWithHeldPipes(exitCode) {
+  if (childClosed || heldPipeExitStarted) return;
+  heldPipeExitStarted = true;
+  try {
+    await writeEvent({ type: "exit", code: child.exitCode, signal: child.signalCode });
+  } catch {}
+  process.exit(exitCode);
+}
 for (const [signal, exitCode] of Object.entries(signalExitCodes)) {
   process.on(signal, () => {
     void terminate();
     const exitIfPipesHeld = () => {
       if (childClosed) return;
-      const timer = setTimeout(() => {
-        if (!childClosed) process.exit(exitCode);
-      }, heldPipeExitDelayMs);
+      const timer = setTimeout(() => void exitWithHeldPipes(exitCode), heldPipeExitDelayMs);
       timer.unref?.();
     };
     if (child.exitCode !== null || child.signalCode !== null) exitIfPipesHeld();
