@@ -46,6 +46,48 @@ describe("outreach metrics/digest observability API", () => {
     expect(res.status).toBe(401);
   });
 
+  it("401s a same-length wrong key (RK9-208: timingSafeEqual path, not just length check)", async () => {
+    // Same length as `Bearer ${API_KEY}` ("Bearer test-secret") but wrong content.
+    const wrongSameLength = "Bearer test-decoyx";
+    expect(wrongSameLength.length).toBe(`Bearer ${API_KEY}`.length);
+    const app = await createApp();
+    const res = await request(app).get("/metrics").set("authorization", wrongSameLength);
+    expect(res.status).toBe(401);
+    expect(mockMetrics.collectOutreachPrometheusMetrics).not.toHaveBeenCalled();
+  });
+
+  it("401s a shorter key without throwing (timingSafeEqual length guard)", async () => {
+    const app = await createApp();
+    const res = await request(app).get("/metrics").set("authorization", "Bearer short");
+    expect(res.status).toBe(401);
+    expect(mockMetrics.collectOutreachPrometheusMetrics).not.toHaveBeenCalled();
+  });
+
+  it("401s a longer key without throwing (timingSafeEqual length guard)", async () => {
+    const app = await createApp();
+    const res = await request(app)
+      .get("/metrics")
+      .set("authorization", `Bearer ${API_KEY}-and-then-some-extra-characters`);
+    expect(res.status).toBe(401);
+    expect(mockMetrics.collectOutreachPrometheusMetrics).not.toHaveBeenCalled();
+  });
+
+  it("401s /api/outreach/digest for same-length, shorter and longer wrong keys", async () => {
+    const app = await createApp();
+    for (const header of ["Bearer test-decoyx", "Bearer short", `Bearer ${API_KEY}x`]) {
+      const res = await request(app).get("/api/outreach/digest").set("authorization", header);
+      expect(res.status).toBe(401);
+    }
+    expect(mockMetrics.buildOutreachDigest).not.toHaveBeenCalled();
+  });
+
+  it("401s /api/outreach/digest when the server has no key configured (fail closed)", async () => {
+    const app = await createApp(undefined);
+    const res = await request(app).get("/api/outreach/digest").set("authorization", "Bearer anything");
+    expect(res.status).toBe(401);
+    expect(mockMetrics.buildOutreachDigest).not.toHaveBeenCalled();
+  });
+
   it("returns the rendered Prometheus text with a valid bearer secret", async () => {
     mockMetrics.collectOutreachPrometheusMetrics.mockResolvedValue({ sent: [] });
     mockMetrics.renderOutreachPrometheusText.mockReturnValue("outreach_queue_depth 0\n");
