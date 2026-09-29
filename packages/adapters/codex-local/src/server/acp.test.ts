@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionContext, AdapterInvocationMeta } from "@paperclipai/adapter-utils";
 import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
+import { reapProcessesUnder } from "@paperclipai/adapter-utils/test-support/reap-process-session-orphans";
 
 // Every test in this file needs a real teardown, so the mock below delegates
 // to the actual factory by default. Only the wiring test further down reads
@@ -139,6 +140,8 @@ afterEach(async () => {
   else process.env.CODEX_HOME = originalCodexHome;
   if (originalOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
   else process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+  // Reap the wrapper, agent and bridge-server processes first: they outlive a failed or timed-out run.
+  await reapProcessesUnder(tempRoots);
   await Promise.all(tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 

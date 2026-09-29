@@ -2246,6 +2246,64 @@ if (bridgeMode !== "${SANDBOX_CALLBACK_BRIDGE_HTTP2_MODE}" && !queueDir) {
   throw new Error("PAPERCLIP_BRIDGE_QUEUE_DIR and PAPERCLIP_BRIDGE_TOKEN are required.");
 }
 
+// Orphan defense (RK9-361), the same watchdog the process-session wrapper runs.
+// The host starts this gateway with nohup from a shell that exits at once, so
+// the parent pid says nothing: nobody reaps the gateway when the run, the test
+// or the sandbox workspace goes away. A timer ends it once the queue directory
+// or the working directory it started in is gone. A late writer can recreate
+// the same pathname, so "gone" means missing OR a different directory (device
+// and inode) than the one this gateway started with. Capture the working
+// directory now: process.cwd() throws after the directory is removed, and
+// stat(".") still reports the original inode.
+async function bridgeDirIdentity(candidatePath) {
+  try {
+    const stats = await fs.stat(candidatePath);
+    return { dev: stats.dev, ino: stats.ino };
+  } catch (error) {
+    if (error && error.code === "ENOENT") return "missing";
+    return null;
+  }
+}
+const bridgeStartCwd = (() => {
+  try {
+    return process.cwd();
+  } catch {
+    return "";
+  }
+})();
+const bridgeWatchIntervalMs = (() => {
+  const raw = Number.parseInt(process.env.PAPERCLIP_BRIDGE_WATCH_INTERVAL_MS || "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 2000;
+})();
+// Only the file gateway uses the queue directory; the http2 gateway may carry
+// a stale value it never reads. A watched directory that does not exist yet
+// latches its identity on the first tick that finds it.
+const bridgeWatched = [];
+if (bridgeStartCwd) {
+  const identity = await bridgeDirIdentity(".");
+  if (identity && identity !== "missing") bridgeWatched.push({ path: bridgeStartCwd, identity });
+}
+if (bridgeMode === "${SANDBOX_CALLBACK_BRIDGE_FILE_MODE}" && queueDir) {
+  const identity = await bridgeDirIdentity(queueDir);
+  bridgeWatched.push({ path: queueDir, identity: identity === "missing" ? null : identity });
+}
+const bridgeWatchTimer = setInterval(async () => {
+  for (const watched of bridgeWatched) {
+    const current = await bridgeDirIdentity(watched.path);
+    if (current === null) continue;
+    if (current !== "missing" && watched.identity === null) {
+      watched.identity = current;
+      continue;
+    }
+    if (watched.identity === null) continue;
+    if (current === "missing" || current.dev !== watched.identity.dev || current.ino !== watched.identity.ino) {
+      process.stderr.write("[paperclip-bridge] exiting: a watched directory is gone: " + watched.path + "\\n");
+      process.exit(1);
+    }
+  }
+}, bridgeWatchIntervalMs);
+bridgeWatchTimer.unref?.();
+
 // A crashed gateway is a dead loopback port for the rest of the run: nothing
 // inside the sandbox respawns this process, and every later agent API call
 // then fails at the connection level. Once the gateway is ready, log an

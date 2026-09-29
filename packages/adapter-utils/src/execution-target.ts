@@ -2608,8 +2608,9 @@ const terminateGraceMs = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 3000;
 })();
 
-// I2: terminate() is the only function in this wrapper that calls
-// child.kill(). No child event handler and no sibling callback calls it.
+// I2: terminate() and the process exit hook are the only places in this
+// wrapper that call child.kill(). No child event handler and no sibling
+// callback calls it. Both signal through the child handle only.
 // terminate() is idempotent: a second call, or a first call after the child
 // already exited on its own, does nothing beyond what already ran.
 async function terminate() {
@@ -2637,8 +2638,9 @@ async function terminate() {
   // the wrapper never lingers as an orphan. The exit hook below sends the last
   // SIGKILL to the child. Never exit once the child has ended: pending stdout
   // or event-file writes must drain first, and the loop then ends by itself.
+  // Exit nonzero: a child that outlived SIGKILL is never a clean end.
   setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) process.exit();
+    if (child.exitCode === null && child.signalCode === null) process.exit(1);
   }, terminateGraceMs + 2000).unref?.();
   // This event is an untrusted latency hint, not proof. Any process that can
   // reach this session's event directory can write the same event type. It
@@ -3021,7 +3023,8 @@ async function pollStdin() {
 // its child:
 // 1. The exit hook kills the child on every way this wrapper can exit, so the
 //    child never outlives it.
-// 2. A termination signal runs the same terminate() path as a shutdown message.
+// 2. A termination signal runs the same terminate() path as a shutdown message,
+//    then always ends this wrapper (see below).
 // 3. A watchdog timer, separate from the stdin poll loop, ends the session when
 //    the session directory or the child's working directory disappears. The
 //    poll loop cannot do this alone: it stops after an unexpected error and
@@ -3031,8 +3034,45 @@ process.on("exit", () => {
     child.kill("SIGKILL");
   } catch {}
 });
-for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) {
-  process.on(signal, () => void terminate());
+// A termination signal always ends this wrapper, as the default signal action
+// did before these handlers existed (RK9-361). terminate() alone is not enough:
+// it returns at once when it already ran, and its backstop only fires while the
+// child runs. A child that exited while its own subprocess still holds the
+// stdout or stderr pipe never fires "close", so without this the wrapper would
+// live as long as that subprocess. Once the child has exited, give "close" a
+// bounded window: a "close" means the pipes drained, and the normal path then
+// writes the exit event and ends the wrapper with the child's own code. Only a
+// wrapper whose pipes stay held exits here, with the conventional 128 + signal
+// code. It first writes the exit event with the child's own code and signal,
+// since "close" never will: without it the host sees no terminal event and
+// reports a lost run. In event-file mode the exit waits for that write. The
+// timer is unref'd, so it never keeps a draining wrapper alive.
+let childClosed = false;
+let heldPipeExitStarted = false;
+child.once("close", () => {
+  childClosed = true;
+});
+const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+const heldPipeExitDelayMs = 1000;
+async function exitWithHeldPipes(exitCode) {
+  if (childClosed || heldPipeExitStarted) return;
+  heldPipeExitStarted = true;
+  try {
+    await writeEvent({ type: "exit", code: child.exitCode, signal: child.signalCode });
+  } catch {}
+  process.exit(exitCode);
+}
+for (const [signal, exitCode] of Object.entries(signalExitCodes)) {
+  process.on(signal, () => {
+    void terminate();
+    const exitIfPipesHeld = () => {
+      if (childClosed) return;
+      const timer = setTimeout(() => void exitWithHeldPipes(exitCode), heldPipeExitDelayMs);
+      timer.unref?.();
+    };
+    if (child.exitCode !== null || child.signalCode !== null) exitIfPipesHeld();
+    else child.once("exit", exitIfPipesHeld);
+  });
 }
 const watchIntervalMs = (() => {
   const raw = Number.parseInt(process.env.PAPERCLIP_PROCESS_SESSION_WATCH_INTERVAL_MS || "", 10);
