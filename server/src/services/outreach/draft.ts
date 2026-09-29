@@ -218,17 +218,30 @@ export function outreachAnthropicApiKey(): string | undefined {
   return process.env.OUTREACH_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
 }
 
+/**
+ * Request headers for the Messages API. An org-level API key is rejected with
+ * 400 unless the request names a workspace, so `ANTHROPIC_WORKSPACE_ID` is sent
+ * as `anthropic-workspace-id` when set and omitted otherwise. The id is never
+ * logged next to the key (RK9-203).
+ */
+export function outreachAnthropicHeaders(apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+  };
+  const workspaceId = process.env.ANTHROPIC_WORKSPACE_ID?.trim();
+  if (workspaceId) headers["anthropic-workspace-id"] = workspaceId;
+  return headers;
+}
+
 async function callClaudeForDraft(system: string, user: string): Promise<ClaudeDraftCall> {
   const apiKey = outreachAnthropicApiKey();
   if (!apiKey) throw new Error("OUTREACH_ANTHROPIC_API_KEY is not set");
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
+    headers: outreachAnthropicHeaders(apiKey),
     body: JSON.stringify({
       model: CLAUDE_MODEL,
       max_tokens: MAX_TOKENS,

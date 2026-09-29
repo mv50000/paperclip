@@ -196,3 +196,10 @@ The adapter no longer inherits that variable, but drafting should not be the
 reason the generic name is present at all. Set `OUTREACH_ANTHROPIC_API_KEY` in
 `/etc/paperclip/paperclip-server.env` and leave `ANTHROPIC_API_KEY` unset unless
 something else genuinely needs it.
+
+## Workspace-tunniste (RK9-203)
+
+Org-tason API-avain palauttaa Messages API:lta 400, ellei pyyntö nimeä workspacea.
+`callClaudeForDraft` lähettää otsakkeen `anthropic-workspace-id`, kun
+`ANTHROPIC_WORKSPACE_ID` on asetettu. Ilman muuttujaa otsaketta ei lähetetä.
+Tunnusta ei lokiteta avaimen kanssa.
