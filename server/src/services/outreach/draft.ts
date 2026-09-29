@@ -247,7 +247,7 @@ async function callClaudeForDraft(system: string, user: string): Promise<ClaudeD
 
 export type DraftOutcome =
   | { ok: true; messageId: string; gate: "passed" | "rejected"; costUsd: number }
-  | { ok: false; reason: "prospect_not_found" | "missing_email" | "generation_failed"; costUsd: number };
+  | { ok: false; reason: "prospect_not_found" | "missing_email" | "sequence_not_found" | "generation_failed"; costUsd: number };
 
 /**
  * Drafts one prospect's first-step message. Gate failures still create the
@@ -303,7 +303,11 @@ export async function draftMessageForProspect(
     subject: parsed.subject,
     bodyText: parsed.bodyText,
   });
-  if (!created.ok) return { ok: false, reason: "generation_failed", costUsd: call.costUsd };
+  if (!created.ok) {
+    // RK9-230: the sequence resolved at batch start can be deleted mid-batch.
+    const reason = created.reason === "sequence_not_found" ? "sequence_not_found" : "generation_failed";
+    return { ok: false, reason, costUsd: call.costUsd };
+  }
 
   const suppressed = (await findOutreachSuppressed(db, [prospect.email])).size > 0;
   const verdict = runQualityGate({ email: prospect.email, bodyText: parsed.bodyText, suppressed, company });

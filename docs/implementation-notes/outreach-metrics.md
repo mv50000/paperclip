@@ -34,7 +34,7 @@ Gauges/counters exposed:
 | `outreach_unsubscribe_total` | counter | — | Unsubscribe events recorded. |
 | `outreach_queue_depth` | gauge | — | Messages currently `status='queued'`. |
 | `outreach_sender_paused` | gauge | `sender` | 1 if that identity is currently auto/manually paused. |
-| `outreach_approved_without_sequence` | gauge | `company` | RK9-224: `approved` messages with `sequence_id IS NULL` — the scheduler (`outreach-sender.md`) can never promote these. Should always read 0; drafting resolves a sequence at creation time now, so a nonzero value means a direct `POST .../messages` call bypassed that. |
+| `outreach_approved_without_sequence` | gauge | `company` | RK9-224: `approved` messages with `sequence_id IS NULL`, or (RK9-230) whose sequence is deactivated (`active = false`) — the scheduler (`outreach-sender.md`) can never promote these. Should always read 0; drafting resolves a sequence at creation time now, so a nonzero value means a direct `POST .../messages` call bypassed that. |
 | `outreach_inbound_unrouted` | gauge | — | RK9-234: inbound mail stored with no `route_key` and no issue — the body is safe, but nobody owns it. Read it in `email_messages`; a nonzero value means an `email_routes` row is missing for that recipient. |
 | `outreach_inbound_reply_unmatched` | counter | — | RK9-235: replies that could not be threaded back to a message we sent, so they were dropped. Counted from `activity_log` (action `outreach.reply_unmatched`), never from process memory — a restart must not be able to report a clean zero. Metadata only; the body is not kept in phase 1. Deliberately **not** alerted on yet: this is measurement, and the daily digest carries the same number for the day. |
 | `outreach_ip_listed` | gauge | `list` | 1 if the configured sending IP is listed on that DNSBL. **Only exported for a list we can currently query** (RK9-225) — a blind list exports nothing here. |
@@ -277,7 +277,7 @@ sending).
 calendar day (sent/bounce/replies/unsubscribes/effective ramp cap/paused) plus
 a ready-to-send Finnish `text` field. RK9-224: also `approvedWithoutSequenceTotal`
 (the same count as `outreach_approved_without_sequence`, summed across
-companies) — nonzero adds a `⚠️ N hyväksyttyä viestiä ilman sekvenssiä` line
+companies) — nonzero adds a `⚠️ N hyväksyttyä viestiä ilman aktiivista sekvenssiä` line
 to `text`, omitted entirely on a quiet day.
 
 **This repo does not call the Telegram API.** The issue text explicitly names
