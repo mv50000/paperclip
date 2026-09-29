@@ -162,7 +162,10 @@ export async function enrichProspectFromWebsite(
   });
   if (!result.ok) {
     if (result.reason === "duplicate_email") {
-      await recordFailedAttempt(db, companyId, prospect, "duplicate_email");
+      // Keep the scraped snippet: store enrichment without the clashing
+      // address, so the row counts as enriched and retries do not repeat.
+      const saved = await updateProspect(db, companyId, prospectId, { enrichment });
+      if (!saved.ok) await recordFailedAttempt(db, companyId, prospect, "duplicate_email");
       return { ok: false, reason: "duplicate_email" };
     }
     return { ok: false, reason: "not_found" };

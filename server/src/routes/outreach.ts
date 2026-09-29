@@ -77,7 +77,8 @@ function parseLimit(value: unknown): number | undefined {
 /** Accepts true/1 and false/0 case-insensitively; anything else is a 400 rather than silently ignored. */
 function parseBoolQuery(name: string, value: unknown): boolean {
   if (value === undefined) return false;
-  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (typeof value !== "string") throw badRequest(`${name} must be true, false, 1 or 0`);
+  const v = value.trim().toLowerCase();
   if (v === "true" || v === "1") return true;
   if (v === "false" || v === "0" || v === "") return false;
   throw badRequest(`${name} must be true, false, 1 or 0`);

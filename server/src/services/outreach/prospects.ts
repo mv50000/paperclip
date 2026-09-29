@@ -37,7 +37,8 @@ export async function listProspects(
     .select()
     .from(outreachProspects)
     .where(and(...conditions))
-    .orderBy(desc(outreachProspects.createdAt))
+    // With `retryFailed`, never-attempted rows come first so failed rows cannot starve them.
+    .orderBy(sql`(${outreachProspects.enrichment} ? 'website')`, desc(outreachProspects.createdAt))
     .limit(Math.max(1, Math.min(1000, opts.limit ?? 200)));
 }
 

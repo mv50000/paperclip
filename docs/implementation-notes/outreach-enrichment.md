@@ -208,7 +208,7 @@ Tunnusta ei lokiteta avaimen kanssa.
 
 `enrichProspectFromWebsite` records a failed attempt (`scrape_failed`,
 `duplicate_email`) as `enrichment.website = { attemptedAt, error }` (no
-snippet; an earlier successful snippet is never overwritten). The
+snippet; a snippet already present at read time is kept). On `duplicate_email` the scraped snippet is saved without the clashing address, so the row counts as enriched. The
 `unenriched` list filter skips any row that has `enrichment.website`, so
 broken sites no longer fill `--limit N` on every run. `paperclipai outreach
 enrich --retry-failed` (API: `retryFailed=true`) re-includes rows whose

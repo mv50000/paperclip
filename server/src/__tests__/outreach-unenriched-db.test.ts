@@ -48,6 +48,11 @@ describe("listProspects unenriched filter against a real database", () => {
     expect(await idsOf({ unenriched: true, retryFailed: true })).toEqual([ids.failed, ids.fresh].sort());
   });
 
+  it("retryFailed lists never-attempted rows before failed ones", async () => {
+    const rows = await listProspects(db, companyId, { unenriched: true, retryFailed: true });
+    expect(rows.map((r) => r.id)).toEqual([ids.fresh, ids.failed]);
+  });
+
   it("without unenriched returns everything", async () => {
     expect(await idsOf({})).toHaveLength(4);
   });
