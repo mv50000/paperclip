@@ -300,7 +300,26 @@ describe.sequential("outreach routes", () => {
       request(base).get("/api/companies/company-1/outreach/prospects?status=bogus&limit=10"),
     );
     expect(res.status).toBe(200);
-    expect(mockOutreach.listProspects).toHaveBeenCalledWith(expect.anything(), "company-1", { status: undefined, limit: 10 });
+    expect(mockOutreach.listProspects).toHaveBeenCalledWith(expect.anything(), "company-1", {
+      status: undefined,
+      limit: 10,
+      unenriched: false,
+    });
+  });
+
+  // RK9-351: the CLI asks the server for prospects enrichment can still act on.
+  it("passes unenriched=true through to the service", async () => {
+    mockOutreach.listProspects.mockResolvedValue([]);
+    const app = await createApp();
+    const res = await requestApp(app, (base) =>
+      request(base).get("/api/companies/company-1/outreach/prospects?status=new&limit=5&unenriched=true"),
+    );
+    expect(res.status).toBe(200);
+    expect(mockOutreach.listProspects).toHaveBeenCalledWith(expect.anything(), "company-1", {
+      status: "new",
+      limit: 5,
+      unenriched: true,
+    });
   });
 
   // --- RK9-196 ---------------------------------------------------------

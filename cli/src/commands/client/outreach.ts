@@ -165,7 +165,7 @@ export function registerOutreachCommands(program: Command): void {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
           const prospects = await ctx.api.get<OutreachProspect[]>(
-            `/api/companies/${ctx.companyId}/outreach/prospects?status=${encodeURIComponent(opts.status ?? "new")}&limit=${encodeURIComponent(opts.limit ?? "50")}`,
+            `/api/companies/${ctx.companyId}/outreach/prospects?status=${encodeURIComponent(opts.status ?? "new")}&limit=${encodeURIComponent(opts.limit ?? "50")}&unenriched=true`,
           );
           const candidateIds = (prospects ?? []).filter((p) => p.sourceUrl).map((p) => p.id);
           if (candidateIds.length === 0) {
