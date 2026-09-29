@@ -57,6 +57,37 @@ describeEmbeddedPostgres("outreach approved_without_sequence metric (real DB, RK
     return companyId;
   }
 
+  // RK9-230: a deactivated (not deleted) sequence keeps the FK, so only the join on `active` catches it.
+  async function seedApprovedOnSequence(active: boolean) {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: `test-${companyId}`, issuePrefix: companyId.slice(0, 6).toUpperCase() });
+    const [prospect] = await db
+      .insert(outreachProspects)
+      .values({ companyId, orgName: "org", email: "seq@example.com", source: "manual", status: "approved" })
+      .returning();
+    const [sequence] = await db
+      .insert(outreachSequences)
+      .values({ companyId, name: "seq", senderIdentity: "a@example.com", active })
+      .returning();
+    await db.insert(outreachMessages).values({
+      companyId,
+      prospectId: prospect.id,
+      sequenceId: sequence.id,
+      subject: "hi",
+      bodyText: "hi",
+      status: "approved",
+    });
+    return companyId;
+  }
+
+  it("counts approved messages on a deactivated sequence, but not on an active one (RK9-230)", async () => {
+    const inactiveCompany = await seedApprovedOnSequence(false);
+    await seedApprovedOnSequence(true);
+
+    const metrics = await collectOutreachPrometheusMetrics(db);
+    expect(metrics.approvedWithoutSequence).toEqual([{ companyId: inactiveCompany, count: 1 }]);
+  });
+
   it("collectOutreachPrometheusMetrics counts it by company, and renders as a gauge", async () => {
     const companyId = await seedOrphanApprovedMessage();
 
@@ -77,12 +108,12 @@ describeEmbeddedPostgres("outreach approved_without_sequence metric (real DB, RK
 
     const digest = await buildOutreachDigest(db, new Date(Date.UTC(2026, 0, 13, 8, 0, 0)));
     expect(digest.approvedWithoutSequenceTotal).toBe(1);
-    expect(digest.text).toContain("1 hyväksyttyä viestiä ilman sekvenssiä");
+    expect(digest.text).toContain("1 hyväksyttyä viestiä ilman aktiivista sekvenssiä");
   });
 
   it("buildOutreachDigest omits the warning when the count is 0", async () => {
     const digest = await buildOutreachDigest(db, new Date(Date.UTC(2026, 0, 13, 8, 0, 0)));
     expect(digest.approvedWithoutSequenceTotal).toBe(0);
-    expect(digest.text).not.toContain("ilman sekvenssiä");
+    expect(digest.text).not.toContain("ilman aktiivista sekvenssiä");
   });
 });

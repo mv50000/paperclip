@@ -7,7 +7,7 @@
 // change on a feature branch — same reasoning `outreach-sender.md` gives for
 // hand-rolling the SMTP client instead of pulling in nodemailer) — the text
 // format is a handful of lines, so it's built by hand below.
-import { and, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, rk9EmailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
@@ -105,7 +105,8 @@ export async function collectOutreachPrometheusMetrics(db: Db): Promise<Outreach
       db
         .select({ companyId: outreachMessages.companyId, count: sql<number>`count(*)` })
         .from(outreachMessages)
-        .where(and(eq(outreachMessages.status, "approved"), isNull(outreachMessages.sequenceId)))
+        .leftJoin(outreachSequences, eq(outreachMessages.sequenceId, outreachSequences.id))
+        .where(and(eq(outreachMessages.status, "approved"), orphanedSequenceCondition()))
         .groupBy(outreachMessages.companyId),
       db
         .select({ count: sql<number>`count(*)` })
@@ -187,7 +188,7 @@ export function renderOutreachPrometheusText(metrics: OutreachPrometheusMetrics)
   }
 
   // RK9-224: should stay at 0 — see OutreachPrometheusMetrics.approvedWithoutSequence.
-  lines.push("# HELP outreach_approved_without_sequence Approved outreach messages with no sequence attached — the scheduler can never promote these to queued.");
+  lines.push("# HELP outreach_approved_without_sequence Approved outreach messages with no sequence, or an inactive one — the scheduler can never promote these to queued.");
   lines.push("# TYPE outreach_approved_without_sequence gauge");
   for (const r of metrics.approvedWithoutSequence) {
     lines.push(metricLine("outreach_approved_without_sequence", { company: r.companyId }, r.count));
@@ -332,12 +333,23 @@ function formatDnsblDigestLine(dnsbl: OutreachDnsblState): string | null {
   return `DNSBL${ip}: ${parts.join(" | ")}`;
 }
 
-/** RK9-224: total `approved` messages with `sequence_id IS NULL`, across all companies — see `outreach_approved_without_sequence`. */
+/**
+ * RK9-230: the scheduler only reaches messages through an *active* sequence, so a
+ * message is unreachable when it has no sequence (`sequence_id IS NULL`, e.g. the
+ * sequence was deleted) or its sequence was merely deactivated. Needs a left join
+ * on `outreachSequences` in the caller.
+ */
+function orphanedSequenceCondition() {
+  return or(isNull(outreachMessages.sequenceId), eq(outreachSequences.active, false));
+}
+
+/** RK9-224/RK9-230: total `approved` messages with no sequence or an inactive one, across all companies — see `outreach_approved_without_sequence`. */
 async function countApprovedWithoutSequence(db: Db): Promise<number> {
   const [row] = await db
     .select({ count: sql<number>`count(*)` })
     .from(outreachMessages)
-    .where(and(eq(outreachMessages.status, "approved"), isNull(outreachMessages.sequenceId)));
+    .leftJoin(outreachSequences, eq(outreachMessages.sequenceId, outreachSequences.id))
+    .where(and(eq(outreachMessages.status, "approved"), orphanedSequenceCondition()));
   return Number(row?.count ?? 0);
 }
 
@@ -386,7 +398,7 @@ function formatDigestText(
 ): string {
   const warningLine =
     approvedWithoutSequenceTotal > 0
-      ? `⚠️ ${approvedWithoutSequenceTotal} hyväksyttyä viestiä ilman sekvenssiä — scheduler ei koskaan lähetä niitä (RK9-224).`
+      ? `⚠️ ${approvedWithoutSequenceTotal} hyväksyttyä viestiä ilman aktiivista sekvenssiä — scheduler ei koskaan lähetä niitä (RK9-224).`
       : null;
   // A stored-but-unrouted reply is a human waiting for an answer, so it says
   // where to read it rather than just counting.
