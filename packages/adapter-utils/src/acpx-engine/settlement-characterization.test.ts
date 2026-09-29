@@ -16,6 +16,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reapProcessesUnder } from "../test-support/reap-process-session-orphans.js";
 import type { AdapterExecutionContext, AdapterRuntimeMcpAccess } from "@paperclipai/adapter-utils";
 import {
   startAdapterExecutionTargetPaperclipBridge,
@@ -58,6 +59,8 @@ async function makeTempRoot() {
 }
 
 afterEach(async () => {
+  // Reap the wrapper and agent processes first: they outlive a failed or timed-out run.
+  await reapProcessesUnder(tempRoots);
   await Promise.all(
     tempRoots.splice(0).map((root) =>
       fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),

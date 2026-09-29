@@ -2633,6 +2633,11 @@ async function terminate() {
     }, terminateGraceMs);
     killTimer.unref?.();
   }
+  // Backstop: once the child is gone nothing else needs this wrapper. If a
+  // stray handle keeps the event loop alive past the kill grace, exit anyway so
+  // the wrapper never lingers as an orphan. The exit hook below sends the last
+  // SIGKILL to the child.
+  setTimeout(() => process.exit(), terminateGraceMs + 2000).unref?.();
   // This event is an untrusted latency hint, not proof. Any process that can
   // reach this session's event directory can write the same event type. It
   // can only shorten the host's shutdown wait and suppress the host's
@@ -3009,9 +3014,53 @@ async function pollStdin() {
   }
 }
 
+// Orphan defense. This wrapper runs detached, so nobody reaps it when the run,
+// the test or the sandbox shell goes away. Three independent guards end it and
+// its child:
+// 1. The exit hook kills the child on every way this wrapper can exit, so the
+//    child never outlives it.
+// 2. A termination signal runs the same terminate() path as a shutdown message.
+// 3. A watchdog timer, separate from the stdin poll loop, ends the session when
+//    the session directory or the child's working directory disappears. The
+//    poll loop cannot do this alone: it stops after an unexpected error and
+//    never checks the working directory.
+process.on("exit", () => {
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+});
+for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) {
+  process.on(signal, () => void terminate());
+}
+const watchIntervalMs = (() => {
+  const raw = Number.parseInt(process.env.PAPERCLIP_PROCESS_SESSION_WATCH_INTERVAL_MS || "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 2000;
+})();
+const watchedPaths = [sessionDir, config.cwd].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+const watchTimer = setInterval(async () => {
+  if (terminated) {
+    clearInterval(watchTimer);
+    return;
+  }
+  for (const watched of watchedPaths) {
+    const missing = await fs.access(watched).then(() => false, (error) => error && error.code === "ENOENT");
+    if (missing) {
+      process.stderr.write("Terminating: a watched path no longer exists: " + watched + ".\\n");
+      await latchAndTerminate();
+      return;
+    }
+  }
+}, watchIntervalMs);
+watchTimer.unref?.();
+
 await captureSessionIdentity();
 
-void pollStdin().catch((error) => void writeEvent({ type: "error", message: error instanceof Error ? error.message : String(error) }));
+void pollStdin().catch(async (error) => {
+  void writeEvent({ type: "error", message: error instanceof Error ? error.message : String(error) });
+  // A dead poll loop leaves a wrapper that can never read stdin or a shutdown
+  // message again. Terminate instead of lingering with a live child.
+  await terminate();
+});
 `;
 
 // Streamed variant: the wrapper writes each output frame as one newline-

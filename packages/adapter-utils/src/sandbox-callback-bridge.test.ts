@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { reapProcessesUnder } from "./test-support/reap-process-session-orphans.js";
 
 import { getActiveStepContext, measureStartupStep } from "./acpx-engine/startup-timing.js";
 import { prepareCommandManagedRuntime } from "./command-managed-runtime.js";
@@ -118,6 +119,7 @@ describe("sandbox callback bridge", () => {
       if (!cleanup) continue;
       await cleanup().catch(() => undefined);
     }
+    await reapProcessesUnder(cleanupDirs);
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
