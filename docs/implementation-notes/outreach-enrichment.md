@@ -203,3 +203,15 @@ Org-tason API-avain palauttaa Messages API:lta 400, ellei pyyntö nimeä workspa
 `callClaudeForDraft` lähettää otsakkeen `anthropic-workspace-id`, kun
 `ANTHROPIC_WORKSPACE_ID` on asetettu. Ilman muuttujaa otsaketta ei lähetetä.
 Tunnusta ei lokiteta avaimen kanssa.
+
+## Failed attempts and `--retry-failed` (RK9-368)
+
+`enrichProspectFromWebsite` records a failed attempt (`scrape_failed`,
+`duplicate_email`) as `enrichment.website = { attemptedAt, error }` (no
+snippet; an earlier successful snippet is never overwritten). The
+`unenriched` list filter skips any row that has `enrichment.website`, so
+broken sites no longer fill `--limit N` on every run. `paperclipai outreach
+enrich --retry-failed` (API: `retryFailed=true`) re-includes rows whose
+`website` has an `error`. `unenriched`/`retryFailed` accept `true|1|false|0`
+case-insensitively; other values return 400. SQL filter is covered by
+`outreach-unenriched-db.test.ts` (embedded PG).

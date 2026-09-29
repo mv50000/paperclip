@@ -161,11 +161,12 @@ export function registerOutreachCommands(program: Command): void {
       .description("Scrape each prospect's website via Firecrawl and fill in `enrichment` (+ e-mail if missing)")
       .option("--status <status>", "Prospect status to target", "new")
       .option("--limit <n>", "Max prospects to enrich in this run", "50")
-      .action(async (opts: CompanyOption) => {
+      .option("--retry-failed", "Also retry prospects whose earlier enrichment attempt failed")
+      .action(async (opts: CompanyOption & { retryFailed?: boolean }) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
           const prospects = await ctx.api.get<OutreachProspect[]>(
-            `/api/companies/${ctx.companyId}/outreach/prospects?status=${encodeURIComponent(opts.status ?? "new")}&limit=${encodeURIComponent(opts.limit ?? "50")}&unenriched=true`,
+            `/api/companies/${ctx.companyId}/outreach/prospects?status=${encodeURIComponent(opts.status ?? "new")}&limit=${encodeURIComponent(opts.limit ?? "50")}&unenriched=true${opts.retryFailed ? "&retryFailed=true" : ""}`,
           );
           const candidateIds = (prospects ?? []).filter((p) => p.sourceUrl).map((p) => p.id);
           if (candidateIds.length === 0) {
