@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+# Fast path (RK9-393): changed packages only, no Rust runner build.
+# CI still runs the full `pnpm -r typecheck` and the Rust checks.
 echo "pre-push: running typecheck..."
-pnpm -r typecheck
+bash scripts/pre-push-typecheck.sh
 echo "pre-push: typecheck passed."
