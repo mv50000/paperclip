@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { outreachAnthropicApiKey } from "../services/outreach/draft.js";
+import { outreachAnthropicApiKey, outreachAnthropicHeaders } from "../services/outreach/draft.js";
 
 /**
  * RK9-228: drafting is why a bare `ANTHROPIC_API_KEY` ended up in the server
@@ -9,6 +9,7 @@ import { outreachAnthropicApiKey } from "../services/outreach/draft.js";
  */
 const ORIGINAL_SPECIFIC = process.env.OUTREACH_ANTHROPIC_API_KEY;
 const ORIGINAL_GENERIC = process.env.ANTHROPIC_API_KEY;
+const ORIGINAL_WORKSPACE = process.env.ANTHROPIC_WORKSPACE_ID;
 
 function restore(key: string, value: string | undefined) {
   if (value === undefined) delete process.env[key];
@@ -18,6 +19,7 @@ function restore(key: string, value: string | undefined) {
 afterEach(() => {
   restore("OUTREACH_ANTHROPIC_API_KEY", ORIGINAL_SPECIFIC);
   restore("ANTHROPIC_API_KEY", ORIGINAL_GENERIC);
+  restore("ANTHROPIC_WORKSPACE_ID", ORIGINAL_WORKSPACE);
 });
 
 describe("outreach drafting api key", () => {
@@ -40,5 +42,21 @@ describe("outreach drafting api key", () => {
     delete process.env.ANTHROPIC_API_KEY;
 
     expect(outreachAnthropicApiKey()).toBeUndefined();
+  });
+});
+
+describe("outreach drafting workspace header (RK9-203)", () => {
+  it("sends anthropic-workspace-id when ANTHROPIC_WORKSPACE_ID is set", () => {
+    process.env.ANTHROPIC_WORKSPACE_ID = "wrkspc_123";
+
+    expect(outreachAnthropicHeaders("sk-x")["anthropic-workspace-id"]).toBe("wrkspc_123");
+  });
+
+  it("omits the header when ANTHROPIC_WORKSPACE_ID is unset or blank", () => {
+    delete process.env.ANTHROPIC_WORKSPACE_ID;
+    expect(outreachAnthropicHeaders("sk-x")).not.toHaveProperty("anthropic-workspace-id");
+
+    process.env.ANTHROPIC_WORKSPACE_ID = "  ";
+    expect(outreachAnthropicHeaders("sk-x")).not.toHaveProperty("anthropic-workspace-id");
   });
 });
