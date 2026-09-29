@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reapProcessesUnder } from "../test-support/reap-process-session-orphans.js";
 import type { AcpRuntimeOptions } from "acpx/runtime";
 import type { AdapterExecutionContext, AdapterRuntimeMcpAccess } from "@paperclipai/adapter-utils";
 import {
@@ -65,6 +66,8 @@ afterEach(async () => {
   // between this recursive delete's directory snapshot and its `rmdir`, surfacing as
   // `ENOTEMPTY`. `maxRetries`/`retryDelay` make the cleanup ride out that window the
   // same way production tolerates it, instead of failing the just-passed test.
+  // Reap the wrapper and agent processes first: they outlive a failed or timed-out run.
+  await reapProcessesUnder(tempRoots);
   await Promise.all(
     tempRoots.splice(0).map((root) =>
       fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
