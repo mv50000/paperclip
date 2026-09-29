@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachProspects } from "@paperclipai/db";
 import type {
@@ -12,10 +12,16 @@ import { findOutreachSuppressed } from "./suppressions.js";
 export async function listProspects(
   db: Db,
   companyId: string,
-  opts: { status?: OutreachProspectStatus; limit?: number } = {},
+  opts: { status?: OutreachProspectStatus; limit?: number; unenriched?: boolean } = {},
 ) {
   const conditions = [eq(outreachProspects.companyId, companyId)];
   if (opts.status) conditions.push(eq(outreachProspects.status, opts.status));
+  // RK9-351: rows enrichment can still act on (has a source URL, no
+  // `enrichment.website` yet), so repeated enrich runs advance past done rows.
+  if (opts.unenriched) {
+    conditions.push(isNotNull(outreachProspects.sourceUrl));
+    conditions.push(sql`NOT (${outreachProspects.enrichment} ? 'website')`);
+  }
   return db
     .select()
     .from(outreachProspects)

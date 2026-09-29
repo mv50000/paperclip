@@ -127,6 +127,7 @@ export function outreachRoutes(db: Db) {
     const rows = await listProspects(db, companyId, {
       status: pickEnum<OutreachProspectStatus>(req.query.status, OUTREACH_PROSPECT_STATUSES),
       limit: parseLimit(req.query.limit),
+      unenriched: req.query.unenriched === "true",
     });
     res.json(rows);
   });
