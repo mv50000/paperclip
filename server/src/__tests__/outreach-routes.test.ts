@@ -304,6 +304,7 @@ describe.sequential("outreach routes", () => {
       status: undefined,
       limit: 10,
       unenriched: false,
+      retryFailed: false,
     });
   });
 
@@ -319,7 +320,26 @@ describe.sequential("outreach routes", () => {
       status: "new",
       limit: 5,
       unenriched: true,
+      retryFailed: false,
     });
+  });
+
+  it("accepts unenriched=1/TRUE and retryFailed, rejects garbage with 400", async () => {
+    mockOutreach.listProspects.mockResolvedValue([]);
+    const app = await createApp();
+    const ok = await requestApp(app, (base) =>
+      request(base).get("/api/companies/company-1/outreach/prospects?unenriched=TRUE&retryFailed=1"),
+    );
+    expect(ok.status).toBe(200);
+    expect(mockOutreach.listProspects).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "company-1",
+      expect.objectContaining({ unenriched: true, retryFailed: true }),
+    );
+    const bad = await requestApp(app, (base) =>
+      request(base).get("/api/companies/company-1/outreach/prospects?unenriched=yes"),
+    );
+    expect(bad.status).toBe(400);
   });
 
   // --- RK9-196 ---------------------------------------------------------

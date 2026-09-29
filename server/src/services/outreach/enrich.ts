@@ -94,6 +94,34 @@ export type EnrichResult =
   | { ok: false; reason: "not_found" | "no_source_url" | "scrape_failed" | "duplicate_email" };
 
 /**
+ * RK9-368: records a failed attempt as `enrichment.website = { attemptedAt,
+ * error }` (no snippet) so the `unenriched` filter skips the row instead of
+ * re-selecting it on every run. Never clobbers a snippet from an earlier
+ * successful scrape. Best-effort: a write failure must not mask the outcome.
+ */
+async function recordFailedAttempt(
+  db: Db,
+  companyId: string,
+  prospect: typeof outreachProspects.$inferSelect,
+  error: "scrape_failed" | "duplicate_email",
+): Promise<void> {
+  const existing = (prospect.enrichment as Record<string, unknown>)?.website as
+    | { snippet?: unknown }
+    | undefined;
+  if (existing && typeof existing.snippet === "string") return;
+  try {
+    await updateProspect(db, companyId, prospect.id, {
+      enrichment: {
+        ...(prospect.enrichment as Record<string, unknown>),
+        website: { attemptedAt: new Date().toISOString(), error },
+      },
+    });
+  } catch (err) {
+    logger.warn({ err, prospectId: prospect.id }, "outreach enrichment: could not record failed attempt");
+  }
+}
+
+/**
  * Scrapes `prospect.sourceUrl`, writes a services snippet into
  * `enrichment.website` and, if the prospect has no address yet, fills one in
  * with a discovered generic/role e-mail (never overwriting a human-entered
@@ -109,7 +137,10 @@ export async function enrichProspectFromWebsite(
   if (!prospect.sourceUrl) return { ok: false, reason: "no_source_url" };
 
   const scraped = await runFirecrawlScrape(prospect.sourceUrl);
-  if (!scraped) return { ok: false, reason: "scrape_failed" };
+  if (!scraped) {
+    await recordFailedAttempt(db, companyId, prospect, "scrape_failed");
+    return { ok: false, reason: "scrape_failed" };
+  }
 
   const snippet = buildEnrichmentSnippet(scraped.markdown);
   const enrichment = {
@@ -130,7 +161,14 @@ export async function enrichProspectFromWebsite(
     ...(discoveredEmail ? { email: discoveredEmail } : {}),
   });
   if (!result.ok) {
-    return { ok: false, reason: result.reason === "duplicate_email" ? "duplicate_email" : "not_found" };
+    if (result.reason === "duplicate_email") {
+      // Keep the scraped snippet: store enrichment without the clashing
+      // address, so the row counts as enriched and retries do not repeat.
+      const saved = await updateProspect(db, companyId, prospectId, { enrichment });
+      if (!saved.ok) await recordFailedAttempt(db, companyId, prospect, "duplicate_email");
+      return { ok: false, reason: "duplicate_email" };
+    }
+    return { ok: false, reason: "not_found" };
   }
   return { ok: true, prospect: result.prospect };
 }

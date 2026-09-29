@@ -25,7 +25,7 @@ import {
   type OutreachProspectStatus,
 } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
-import { forbidden, notFound } from "../errors.js";
+import { badRequest, forbidden, notFound } from "../errors.js";
 import { logActivity } from "../services/index.js";
 import {
   addOutreachSuppression,
@@ -72,6 +72,16 @@ function pickEnum<T extends string>(value: unknown, allowed: readonly T[]): T | 
 function parseLimit(value: unknown): number | undefined {
   const n = typeof value === "string" ? Number(value) : NaN;
   return Number.isFinite(n) ? n : undefined;
+}
+
+/** Accepts true/1 and false/0 case-insensitively; anything else is a 400 rather than silently ignored. */
+function parseBoolQuery(name: string, value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "string") throw badRequest(`${name} must be true, false, 1 or 0`);
+  const v = value.trim().toLowerCase();
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0" || v === "") return false;
+  throw badRequest(`${name} must be true, false, 1 or 0`);
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -127,7 +137,8 @@ export function outreachRoutes(db: Db) {
     const rows = await listProspects(db, companyId, {
       status: pickEnum<OutreachProspectStatus>(req.query.status, OUTREACH_PROSPECT_STATUSES),
       limit: parseLimit(req.query.limit),
-      unenriched: req.query.unenriched === "true",
+      unenriched: parseBoolQuery("unenriched", req.query.unenriched),
+      retryFailed: parseBoolQuery("retryFailed", req.query.retryFailed),
     });
     res.json(rows);
   });

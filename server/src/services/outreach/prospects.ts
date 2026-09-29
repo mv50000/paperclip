@@ -12,21 +12,33 @@ import { findOutreachSuppressed } from "./suppressions.js";
 export async function listProspects(
   db: Db,
   companyId: string,
-  opts: { status?: OutreachProspectStatus; limit?: number; unenriched?: boolean } = {},
+  opts: {
+    status?: OutreachProspectStatus;
+    limit?: number;
+    unenriched?: boolean;
+    retryFailed?: boolean;
+  } = {},
 ) {
   const conditions = [eq(outreachProspects.companyId, companyId)];
   if (opts.status) conditions.push(eq(outreachProspects.status, opts.status));
   // RK9-351: rows enrichment can still act on (has a source URL, no
   // `enrichment.website` yet), so repeated enrich runs advance past done rows.
+  // RK9-368: a failed attempt is recorded as `enrichment.website = { attemptedAt,
+  // error }`, so it also counts as attempted; `retryFailed` re-includes those.
   if (opts.unenriched) {
     conditions.push(isNotNull(outreachProspects.sourceUrl));
-    conditions.push(sql`NOT (${outreachProspects.enrichment} ? 'website')`);
+    conditions.push(
+      opts.retryFailed
+        ? sql`(NOT (${outreachProspects.enrichment} ? 'website') OR (${outreachProspects.enrichment}->'website') ? 'error')`
+        : sql`NOT (${outreachProspects.enrichment} ? 'website')`,
+    );
   }
   return db
     .select()
     .from(outreachProspects)
     .where(and(...conditions))
-    .orderBy(desc(outreachProspects.createdAt))
+    // With `retryFailed`, never-attempted rows come first so failed rows cannot starve them.
+    .orderBy(sql`(${outreachProspects.enrichment} ? 'website')`, desc(outreachProspects.createdAt))
     .limit(Math.max(1, Math.min(1000, opts.limit ?? 200)));
 }
 
