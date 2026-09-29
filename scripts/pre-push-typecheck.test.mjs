@@ -27,7 +27,15 @@ fi
 exit 0
 `;
 
-function run({ diff = "", pkgs = "", listFail = false, gitDiffFail = false, distExists = true }) {
+// Stands in for the RK9 host script; records its arguments and exits with $FAKE_REMOTE_RC.
+const REMOTE_STUB = `#!/usr/bin/env bash
+echo "REMOTE PCP_REMOTE_LOCK_WAIT=$PCP_REMOTE_LOCK_WAIT $*" >> "$CALLS"
+exit "\${FAKE_REMOTE_RC:-0}"
+`;
+
+// `remote`: undefined disables the offload (the host PATH may hold the real pcp-remote-verify.sh);
+// a number stubs pcp-remote-verify.sh with that exit code.
+function run({ diff = "", pkgs = "", listFail = false, gitDiffFail = false, distExists = true, remote, env = {} }) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "prepush-"));
   try {
     const bin = path.join(dir, "bin");
@@ -35,14 +43,19 @@ function run({ diff = "", pkgs = "", listFail = false, gitDiffFail = false, dist
     const calls = path.join(dir, "calls.log");
     spawnSync("mkdir", ["-p", bin, path.join(root, "packages/paperclip-runner/dist")]);
     if (distExists) writeFileSync(path.join(root, "packages/paperclip-runner/dist/index.d.ts"), "");
-    for (const [name, body] of [["git", GIT_STUB], ["pnpm", PNPM_STUB]]) {
+    const stubs = [["git", GIT_STUB], ["pnpm", PNPM_STUB]];
+    if (remote !== undefined) stubs.push(["pcp-remote-verify.sh", REMOTE_STUB]);
+    for (const [name, body] of stubs) {
       writeFileSync(path.join(bin, name), body);
       chmodSync(path.join(bin, name), 0o755);
     }
     writeFileSync(calls, "");
     const res = spawnSync("bash", [script], {
       encoding: "utf8",
+      cwd: root,
       env: {
+        ...(remote === undefined ? { PREPUSH_TYPECHECK_REMOTE: "0" } : { FAKE_REMOTE_RC: String(remote) }),
+        ...env,
         PATH: `${bin}:${process.env.PATH}`,
         FAKE_ROOT: root,
         FAKE_DIFF: diff,
@@ -102,4 +115,43 @@ test("cli-only change does not rebuild runner types when dist exists", () => {
   const res = run({ diff: "cli/src/a.ts\n", pkgs: "paperclipai\n", distExists: true });
   assert.equal(res.status, 0, res.stderr);
   assert.doesNotMatch(res.calls, /build:typescript/);
+});
+
+test("remote worker success skips the local typecheck", () => {
+  const res = run({ diff: "cli/src/a.ts\n", pkgs: "paperclipai\n@paperclipai/shared\n", remote: 0 });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.calls, /^REMOTE PCP_REMOTE_LOCK_WAIT=120 \. -- env PREPUSH_TYPECHECK_REMOTE=0 PREPUSH_TYPECHECK_PKGS=paperclipai @paperclipai\/shared  bash scripts\/pre-push-typecheck\.sh$/m);
+  assert.doesNotMatch(res.calls, /typecheck$/m);
+});
+
+test("remote type errors fail the hook without a local rerun", () => {
+  const res = run({ diff: "cli/src/a.ts\n", pkgs: "paperclipai\n", remote: 2 });
+  assert.equal(res.status, 2);
+  assert.doesNotMatch(res.calls, /^-r .* typecheck$/m);
+});
+
+test("worker down, busy or failed install falls back to the local typecheck", () => {
+  for (const rc of [3, 90, 91]) {
+    const res = run({ diff: "cli/src/a.ts\n", pkgs: "paperclipai\n", remote: rc });
+    assert.equal(res.status, 0, `${rc}: ${res.stderr}`);
+    assert.match(res.stdout, /typechecking locally/, String(rc));
+    assert.match(res.calls, /--filter \.\.\.\[origin\/master\] --workspace-concurrency=2 --filter !@paperclipai\/server --filter !@paperclipai\/paperclip-runner typecheck/, String(rc));
+  }
+});
+
+test("nothing changed skips the remote call", () => {
+  const res = run({ diff: "doc/a.md\n", pkgs: "No projects matched the filters in \"/x\"\n", remote: 0 });
+  assert.equal(res.status, 0);
+  assert.doesNotMatch(res.calls, /REMOTE/);
+});
+
+test("remote side typechecks the given packages without git", () => {
+  const res = run({
+    gitDiffFail: true,
+    env: { PREPUSH_TYPECHECK_PKGS: "paperclipai @paperclipai/server " },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.doesNotMatch(res.calls, /exec node -p/);
+  assert.match(res.calls, /^-r --filter paperclipai --filter @paperclipai\/server --workspace-concurrency=2 --filter !@paperclipai\/server --filter !@paperclipai\/paperclip-runner typecheck$/m);
+  assert.match(res.calls, /--filter @paperclipai\/server exec tsc --noEmit/);
 });
