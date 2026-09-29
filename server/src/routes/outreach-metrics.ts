@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { unauthorized } from "../errors.js";
@@ -9,10 +10,18 @@ import { collectOutreachPrometheusMetrics, renderOutreachPrometheusText, buildOu
 // because these are scraped/polled by external infra (Prometheus, a host
 // cron script), not called from the UI.
 
+// RK9-208: constant-time comparison, same as outreach-sender.ts (RK9-205).
+// timingSafeEqual throws on mismatched buffer lengths, so check length first.
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+}
+
 function requireKey(apiKey: string | undefined): RequestHandler {
   return (req, _res, next) => {
     const provided = req.header("authorization");
-    if (!apiKey || provided !== `Bearer ${apiKey}`) {
+    if (!apiKey || !provided || !safeEqual(provided, `Bearer ${apiKey}`)) {
       next(unauthorized());
       return;
     }
