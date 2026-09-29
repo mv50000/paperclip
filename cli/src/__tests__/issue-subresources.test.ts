@@ -100,6 +100,76 @@ describe("issue subresource commands", () => {
     });
   });
 
+  it("keeps content after the acceptance criteria section on issue update", async () => {
+    const description = [
+      "Intro",
+      "",
+      "## Acceptance Criteria",
+      "",
+      "- old",
+      "",
+      "```md",
+      "## Not a heading",
+      "```",
+      "",
+      "## Rollout notes",
+      "Keep me",
+    ].join("\n");
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve(jsonResponse({ description })))
+      .mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["issue", "update", ISSUE_ID, "--acceptance-criteria", "new"]);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(body).toEqual({
+      description: [
+        "Intro",
+        "",
+        "## Acceptance Criteria",
+        "",
+        "- new",
+        "",
+        "## Rollout notes",
+        "Keep me",
+      ].join("\n"),
+    });
+    expect(Object.keys(body)).not.toContain("blockedByIssueIds");
+  });
+
+  it("ignores acceptance criteria headings inside fenced code blocks", async () => {
+    const description = "Intro\n\n```md\n## Acceptance Criteria\n- example\n```\n\nTail";
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve(jsonResponse({ description })))
+      .mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["issue", "update", ISSUE_ID, "--acceptance-criteria", "new"]);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).description).toBe(
+      `${description}\n\n## Acceptance Criteria\n\n- new`,
+    );
+  });
+
+  it("resolves identifier-shaped blockers to UUIDs", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve(jsonResponse({ id: COMMENT_ID })))
+      .mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["issue", "update", ISSUE_ID, "--blocked-by-issue-ids", `RK9-12,${ISSUE_ID}`]);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:3100/api/issues/RK9-12");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).blockedByIssueIds).toEqual([
+      COMMENT_ID,
+      ISSUE_ID,
+    ]);
+  });
+
   it("binds explicit uploaded attachments when adding a comment", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
     vi.stubGlobal("fetch", fetchMock);

@@ -296,7 +296,7 @@ export function registerIssueCommands(program: Command): void {
       .option("--billing-code <code>", "Billing code")
       .option(
         "--blocked-by-issue-ids <csv>",
-        "Comma-separated blocker issue IDs (replaces the current set; empty string clears)",
+        "Comma-separated blocker issue IDs or identifiers such as RK9-12 (replaces the current set; empty string clears)",
       )
       .option(
         "--acceptance-criteria <text>",
@@ -318,7 +318,7 @@ export function registerIssueCommands(program: Command): void {
             parentId: opts.parentId,
             requestDepth: parseOptionalInt(opts.requestDepth),
             billingCode: opts.billingCode,
-            blockedByIssueIds: parseCsvIds(opts.blockedByIssueIds),
+            blockedByIssueIds: await resolveBlockerIds(ctx.api, parseCsvIds(opts.blockedByIssueIds)),
           });
 
           const created = await ctx.api.post<Issue>(apiPath`/api/companies/${ctx.companyId}/issues`, payload);
@@ -349,11 +349,11 @@ export function registerIssueCommands(program: Command): void {
       .option("--hidden-at <iso8601|null>", "Set hiddenAt timestamp or literal 'null'")
       .option(
         "--blocked-by-issue-ids <csv>",
-        "Comma-separated blocker issue IDs (replaces the current set; empty string clears)",
+        "Comma-separated blocker issue IDs or identifiers such as RK9-12 (replaces the current set; empty string clears)",
       )
       .option(
         "--acceptance-criteria <text>",
-        "Acceptance criterion, repeatable; written as an '## Acceptance Criteria' section in the description",
+        "Acceptance criterion, repeatable; replaces the '## Acceptance Criteria' section in the description. On update the description is read and written back (GET then PATCH) without a version check, so a concurrent edit in between is overwritten",
         collectOption,
         [] as string[],
       )
@@ -381,7 +381,7 @@ export function registerIssueCommands(program: Command): void {
             billingCode: opts.billingCode,
             comment: opts.comment,
             hiddenAt: parseHiddenAt(opts.hiddenAt),
-            blockedByIssueIds: parseCsvIds(opts.blockedByIssueIds),
+            blockedByIssueIds: await resolveBlockerIds(ctx.api, parseCsvIds(opts.blockedByIssueIds)),
           });
 
           const updated = await ctx.api.patch<Issue & { comment?: IssueComment | null }>(apiPath`/api/issues/${issueId}`, payload);
@@ -1421,21 +1421,67 @@ function parseCsvIds(value: string | undefined): string[] | undefined {
 
 const ACCEPTANCE_CRITERIA_HEADING = "## Acceptance Criteria";
 
-/** Same markdown shape the server uses for child:create; replaces an existing trailing section. */
+/**
+ * Same markdown shape the server uses for child:create. An existing AC section is replaced in
+ * place: it ends at the next level 1-2 heading (or the end), so later sections are kept.
+ * Headings inside fenced code blocks are ignored.
+ */
 export function withAcceptanceCriteria(
   description: string | undefined,
   criteria: string[] | undefined,
 ): string | undefined {
   const items = (criteria ?? []).map((item) => item.trim()).filter(Boolean);
   if (items.length === 0) return description;
-  let base = description ?? "";
-  const headingIndex = base.lastIndexOf(ACCEPTANCE_CRITERIA_HEADING);
-  if (headingIndex >= 0 && (headingIndex === 0 || base[headingIndex - 1] === "\n")) {
-    base = base.slice(0, headingIndex);
-  }
-  base = base.trim();
   const section = [ACCEPTANCE_CRITERIA_HEADING, "", ...items.map((item) => `- ${item}`)].join("\n");
-  return base ? `${base}\n\n${section}` : section;
+  const lines = (description ?? "").split("\n");
+  let fence: { char: string; length: number } | null = null;
+  let start = -1;
+  let end = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!fence) fence = { char: marker[0], length: marker.length };
+      else if (marker[0] === fence.char && marker.length >= fence.length && /^ {0,3}[`~]+\s*$/.test(line)) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    if (start >= 0) {
+      if (/^#{1,2}\s/.test(line)) {
+        end = i;
+        break;
+      }
+    } else if (/^## Acceptance Criteria\s*$/.test(line)) {
+      start = i;
+    } else {
+      continue;
+    }
+  }
+  if (start < 0) {
+    const base = lines.join("\n").trim();
+    return base ? `${base}\n\n${section}` : section;
+  }
+  const before = lines.slice(0, start).join("\n").trim();
+  const after = lines.slice(end).join("\n").trim();
+  return [before, section, after].filter(Boolean).join("\n\n");
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function resolveBlockerIds(
+  api: { get<T>(path: string): Promise<T | null> },
+  ids: string[] | undefined,
+): Promise<string[] | undefined> {
+  if (!ids) return ids;
+  return Promise.all(
+    ids.map(async (id) => {
+      if (UUID_PATTERN.test(id)) return id;
+      const found = await api.get<Issue>(apiPath`/api/issues/${id}`);
+      if (!found?.id) throw new Error(`Blocker issue not found: ${id}`);
+      return found.id;
+    }),
+  );
 }
 
 function parseOptionalInt(value: string | undefined): number | undefined {
