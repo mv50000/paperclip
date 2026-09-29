@@ -62,6 +62,44 @@ describe("issue subresource commands", () => {
     ]);
   });
 
+  it("sends blockers and acceptance criteria on issue create", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run([
+      "issue", "create", "-C", COMPANY_ID, "--title", "T", "--description", "Body",
+      "--blocked-by-issue-ids", `${ISSUE_ID},${COMMENT_ID}`,
+      "--acceptance-criteria", "First", "--acceptance-criteria", "Second",
+    ]);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      blockedByIssueIds: [ISSUE_ID, COMMENT_ID],
+      description: "Body\n\n## Acceptance Criteria\n\n- First\n- Second",
+    });
+  });
+
+  it("clears blockers and replaces acceptance criteria on issue update", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        Promise.resolve(jsonResponse({ description: "Old\n\n## Acceptance Criteria\n\n- Stale" })),
+      )
+      .mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run([
+      "issue", "update", ISSUE_ID,
+      "--blocked-by-issue-ids", "",
+      "--acceptance-criteria", "Fresh",
+    ]);
+
+    expect(fetchMock.mock.calls[0]?.[1]?.method ?? "GET").toBe("GET");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      blockedByIssueIds: [],
+      description: "Old\n\n## Acceptance Criteria\n\n- Fresh",
+    });
+  });
+
   it("binds explicit uploaded attachments when adding a comment", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
     vi.stubGlobal("fetch", fetchMock);

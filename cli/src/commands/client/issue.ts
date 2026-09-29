@@ -62,6 +62,8 @@ interface IssueCreateOptions extends BaseClientOptions {
   parentId?: string;
   requestDepth?: string;
   billingCode?: string;
+  blockedByIssueIds?: string;
+  acceptanceCriteria?: string[];
 }
 
 interface IssueUpdateOptions extends BaseClientOptions {
@@ -77,6 +79,8 @@ interface IssueUpdateOptions extends BaseClientOptions {
   billingCode?: string;
   comment?: string;
   hiddenAt?: string;
+  blockedByIssueIds?: string;
+  acceptanceCriteria?: string[];
 }
 
 interface IssueCommentOptions extends BaseClientOptions {
@@ -290,12 +294,22 @@ export function registerIssueCommands(program: Command): void {
       .option("--parent-id <id>", "Parent issue ID")
       .option("--request-depth <n>", "Request depth integer")
       .option("--billing-code <code>", "Billing code")
+      .option(
+        "--blocked-by-issue-ids <csv>",
+        "Comma-separated blocker issue IDs (replaces the current set; empty string clears)",
+      )
+      .option(
+        "--acceptance-criteria <text>",
+        "Acceptance criterion, repeatable; written as an '## Acceptance Criteria' section in the description",
+        collectOption,
+        [] as string[],
+      )
       .action(async (opts: IssueCreateOptions) => {
         try {
           const ctx = resolveCommandContext(opts, { requireCompany: true });
           const payload = createIssueSchema.parse({
             title: opts.title,
-            description: opts.description,
+            description: withAcceptanceCriteria(opts.description, opts.acceptanceCriteria),
             status: opts.status,
             priority: opts.priority,
             assigneeAgentId: opts.assigneeAgentId,
@@ -304,6 +318,7 @@ export function registerIssueCommands(program: Command): void {
             parentId: opts.parentId,
             requestDepth: parseOptionalInt(opts.requestDepth),
             billingCode: opts.billingCode,
+            blockedByIssueIds: parseCsvIds(opts.blockedByIssueIds),
           });
 
           const created = await ctx.api.post<Issue>(apiPath`/api/companies/${ctx.companyId}/issues`, payload);
@@ -332,12 +347,30 @@ export function registerIssueCommands(program: Command): void {
       .option("--billing-code <code>", "Billing code")
       .option("--comment <text>", "Optional comment to add with update")
       .option("--hidden-at <iso8601|null>", "Set hiddenAt timestamp or literal 'null'")
+      .option(
+        "--blocked-by-issue-ids <csv>",
+        "Comma-separated blocker issue IDs (replaces the current set; empty string clears)",
+      )
+      .option(
+        "--acceptance-criteria <text>",
+        "Acceptance criterion, repeatable; written as an '## Acceptance Criteria' section in the description",
+        collectOption,
+        [] as string[],
+      )
       .action(async (issueId: string, opts: IssueUpdateOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
+          let description = opts.description;
+          if (opts.acceptanceCriteria?.length) {
+            if (description === undefined) {
+              const current = await ctx.api.get<Issue>(apiPath`/api/issues/${issueId}`);
+              description = current?.description ?? undefined;
+            }
+            description = withAcceptanceCriteria(description, opts.acceptanceCriteria);
+          }
           const payload = updateIssueSchema.parse({
             title: opts.title,
-            description: opts.description,
+            description,
             status: opts.status,
             priority: opts.priority,
             assigneeAgentId: opts.assigneeAgentId,
@@ -348,6 +381,7 @@ export function registerIssueCommands(program: Command): void {
             billingCode: opts.billingCode,
             comment: opts.comment,
             hiddenAt: parseHiddenAt(opts.hiddenAt),
+            blockedByIssueIds: parseCsvIds(opts.blockedByIssueIds),
           });
 
           const updated = await ctx.api.patch<Issue & { comment?: IssueComment | null }>(apiPath`/api/issues/${issueId}`, payload);
@@ -1371,6 +1405,37 @@ function addIssuePostDeleteMarkerCommand(
 
 function parseJson(value: string): unknown {
   return JSON.parse(value) as unknown;
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function parseCsvIds(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const ACCEPTANCE_CRITERIA_HEADING = "## Acceptance Criteria";
+
+/** Same markdown shape the server uses for child:create; replaces an existing trailing section. */
+export function withAcceptanceCriteria(
+  description: string | undefined,
+  criteria: string[] | undefined,
+): string | undefined {
+  const items = (criteria ?? []).map((item) => item.trim()).filter(Boolean);
+  if (items.length === 0) return description;
+  let base = description ?? "";
+  const headingIndex = base.lastIndexOf(ACCEPTANCE_CRITERIA_HEADING);
+  if (headingIndex >= 0 && (headingIndex === 0 || base[headingIndex - 1] === "\n")) {
+    base = base.slice(0, headingIndex);
+  }
+  base = base.trim();
+  const section = [ACCEPTANCE_CRITERIA_HEADING, "", ...items.map((item) => `- ${item}`)].join("\n");
+  return base ? `${base}\n\n${section}` : section;
 }
 
 function parseOptionalInt(value: string | undefined): number | undefined {
