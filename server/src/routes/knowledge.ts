@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import { validate } from "../middleware/validate.js";
 import { recallKnowledge } from "../services/knowledge-recall.js";
-import { assertCompanyAccess, getActorInfo, isInstanceAdmin } from "./authz.js";
+import { getQmdDaemonStatus } from "../services/qmd-mcp-client.js";
+import { assertCompanyAccess, assertInstanceAdmin, getActorInfo, isInstanceAdmin } from "./authz.js";
 
 const recallSchema = z.object({
   query: z.string().trim().min(1).max(1000),
@@ -76,6 +77,13 @@ export function knowledgeRoutes(db: Db) {
       }
     },
   );
+
+  // RK9-369: qmd-mcp daemon health, so monitoring can alert on the silent CLI fallback.
+  router.get("/knowledge/qmd-status", (req, res) => {
+    assertInstanceAdmin(req);
+    const status = getQmdDaemonStatus();
+    res.status(status.healthy ? 200 : 503).json(status);
+  });
 
   return router;
 }
