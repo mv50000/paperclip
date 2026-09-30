@@ -1,3 +1,4 @@
+import { simpleParser } from "mailparser";
 import { describe, expect, it } from "vitest";
 import {
   appendComplianceFooter,
@@ -6,6 +7,7 @@ import {
   buildReferences,
   buildUnsubscribeHeaders,
   buildUnsubscribeUrl,
+  encodeHeaderText,
   generateMessageId,
   generateUnsubscribeToken,
 } from "../services/outreach/message-format.js";
@@ -129,6 +131,24 @@ describe("buildRawEmail", () => {
     expect(raw).toContain("Subject: Hei Bcc: attacker@evil.example");
   });
 
+  // RK9-427: hostingservice.fi rejected raw UTF-8 subjects with
+  // `550 Subject contains invalid characters` → hard bounce → auto-pause.
+  it("RFC 2047-encodes a non-ASCII subject so the header block stays ASCII", async () => {
+    const subject = "Uusi varauskalenteri käytössä – vertailun vuoksi, 19 €/kk";
+    const raw = buildRawEmail({
+      from: "outreach@x.fi",
+      to: "prospect@example.fi",
+      subject,
+      bodyText: "Hei!",
+      messageId: "<abc@x.fi>",
+      unsubscribe: UNSUB,
+    });
+    const headerBlock = raw.slice(0, raw.indexOf("\r\n\r\n"));
+    expect(headerBlock).toMatch(/^[\x00-\x7f]*$/);
+    for (const line of headerBlock.split("\r\n")) expect(line.length).toBeLessThanOrEqual(78);
+    expect((await simpleParser(raw)).subject).toBe(subject);
+  });
+
   it("never includes tracking pixels or image tags by construction", () => {
     const raw = buildRawEmail({
       from: "outreach@x.fi",
@@ -186,5 +206,36 @@ describe("compliance footer (RK9-198)", () => {
     const [headers, ...rest] = raw.split("\r\n\r\n");
     expect(headers).not.toContain("Jos et halua");
     expect(rest.join("\r\n\r\n")).toContain("lopeta yhdellä klikkauksella: https://paperclip.rk9.fi/u/tok123");
+  });
+});
+
+describe("encodeHeaderText", () => {
+  it("passes plain ASCII through unchanged", () => {
+    expect(encodeHeaderText("Timma vs. 19 EUR/kk")).toBe("Timma vs. 19 EUR/kk");
+  });
+
+  it("never splits a multi-byte character across encoded-words", () => {
+    const value = "€".repeat(40) + "ä".repeat(30);
+    const words = encodeHeaderText(value).split("\r\n ");
+    expect(words.length).toBeGreaterThan(1);
+    const decoded = words.map((w) => {
+      const m = /^=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=$/.exec(w);
+      expect(m).not.toBeNull();
+      expect(w.length).toBeLessThanOrEqual(75);
+      const text = Buffer.from(m![1], "base64").toString("utf8");
+      expect(text).not.toContain("\uFFFD");
+      return text;
+    });
+    expect(decoded.join("")).toBe(value);
+  });
+
+  it("strips CR/LF before encoding", () => {
+    const encoded = encodeHeaderText("Hyvää\r\nBcc: attacker@evil.example");
+    expect(encoded).not.toMatch(/Bcc:/);
+    const text = encoded
+      .split("\r\n ")
+      .map((w) => Buffer.from(w.slice(10, -2), "base64").toString("utf8"))
+      .join("");
+    expect(text).toBe("Hyvää  Bcc: attacker@evil.example");
   });
 });
