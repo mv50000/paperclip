@@ -103,6 +103,34 @@ function foldHeaderValue(value: string): string {
   return value.replace(/[\r\n]/g, " ");
 }
 
+// 39 bytes → 52 base64 chars → a 64-char encoded-word, so even the first
+// line ("Subject: " + word) stays under the RFC 5322 78-char soft limit.
+const ENCODED_WORD_MAX_BYTES = 39;
+
+/**
+ * RK9-427: RFC 5322 headers are ASCII-only. A raw UTF-8 subject (ä, –, €)
+ * is accepted by most MXs but strict ones reject it with `550 Subject
+ * contains invalid characters`, which counted as a hard bounce and
+ * auto-paused the RK9-198 pilot. Non-ASCII values become RFC 2047
+ * `=?UTF-8?B?…?=` words, split on code-point boundaries (a word must hold
+ * whole characters) and folded with CRLF + space. Plain ASCII passes through.
+ */
+export function encodeHeaderText(value: string): string {
+  const clean = foldHeaderValue(value);
+  if (/^[\x20-\x7e]*$/.test(clean)) return clean;
+  const words: string[] = [];
+  let chunk = "";
+  for (const char of clean) {
+    if (chunk && Buffer.byteLength(chunk + char, "utf8") > ENCODED_WORD_MAX_BYTES) {
+      words.push(chunk);
+      chunk = "";
+    }
+    chunk += char;
+  }
+  if (chunk) words.push(chunk);
+  return words.map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`).join("\r\n ");
+}
+
 export interface OutreachEnvelope {
   from: string;
   to: string;
@@ -121,7 +149,7 @@ export function buildRawEmail(env: OutreachEnvelope): string {
   const headers: string[] = [
     `From: ${foldHeaderValue(env.from)}`,
     `To: ${foldHeaderValue(env.to)}`,
-    `Subject: ${foldHeaderValue(env.subject)}`,
+    `Subject: ${encodeHeaderText(env.subject)}`,
     `Date: ${(env.date ?? new Date()).toUTCString()}`,
     `Message-ID: ${foldHeaderValue(env.messageId)}`,
     "MIME-Version: 1.0",
