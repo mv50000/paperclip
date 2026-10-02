@@ -10,7 +10,7 @@ export interface CompanyTarget {
   authRedirects: boolean;
 }
 
-export const COMPANIES: CompanyTarget[] = [
+const ALL_COMPANIES: CompanyTarget[] = [
   {
     name: "ololla",
     displayName: "Ololla (booking-killer)",
@@ -68,6 +68,20 @@ export const COMPANIES: CompanyTarget[] = [
     authRedirects: false,
   },
 ];
+
+/**
+ * Comma-separated company names to leave out of the run, e.g. a parked app whose dev
+ * instance is down (`E2E_COMPANIES_SKIP=uutisvertailu`). Applies to both Playwright
+ * projects and the failure report.
+ */
+const SKIPPED = new Set(
+  (process.env.E2E_COMPANIES_SKIP ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean),
+);
+
+export const COMPANIES: CompanyTarget[] = ALL_COMPANIES.filter((co) => !SKIPPED.has(co.name));
 
 export function companyByName(name: string): CompanyTarget {
   const co = COMPANIES.find((c) => c.name === name);

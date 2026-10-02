@@ -61,6 +61,10 @@ Happy-pathit (booking-flow, audit-luonti, dashboard, lasku-flow) lisätään my�
 
 Routines-rutiini `e2e-companies-weekly`: cron `0 5 * * 1` (maanantai 05:00). Manuaalinen trigger Paperclip API:lla.
 
+## Yrityksen ohitus
+
+Parkissa olevan sovelluksen voi jättää pois ajosta ympäristömuuttujalla `E2E_COMPANIES_SKIP` (pilkuilla eroteltu `name`-lista, esim. `E2E_COMPANIES_SKIP=uutisvertailu`). Ohitus koskee sekä Playwright-projekteja että tikettiraporttia. Systemd-ajossa muuttuja asetetaan tiedostoon `/etc/default/paperclip-e2e-companies`.
+
 ## Raportit
 
 HTML-raportti: `playwright-report/index.html`. Tuotantoajot kopioidaan `https://nginx.rk9.fi/e2e-reports/<timestamp>/` jotta agentit voivat linkittää tiketteihin.
