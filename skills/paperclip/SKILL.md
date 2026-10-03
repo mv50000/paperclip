@@ -27,6 +27,10 @@ Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli
 
 **Run audit trail:** You MUST include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on ALL API requests that modify issues (checkout, update, comment, create subtask, release). This links your actions to the current heartbeat run for traceability.
 
+<!-- RK9 Custom (RK9-433): interactive and headless worktree sessions have no run id; inventing one gives 400/422/403 -->
+If `$PAPERCLIP_RUN_ID` is empty or unset (interactive and headless worktree sessions), do not send the `X-Paperclip-Run-Id` header. An empty `-H "X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID"` is safe with curl, which drops a header with an empty value. Never invent a run id (`x`, a random UUID): the server answers 400, 422 or 403. The fork's human-proxy exception (RK9-76, RK9-315) lets AI-agent writes through without a run id. This overrides the MUST above whenever no run id exists.
+<!-- /RK9 Custom -->
+
 ## Conversation tasks
 
 When the task context says **Chat mode** (the issue has `conversationAgentId`),
