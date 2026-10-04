@@ -184,3 +184,32 @@ constraint, see `packages/db/src/migrations/9006_rk9_outreach.sql`) — this is
 exactly why `resolveDraftSequence` 422s `sequence_required` instead of
 picking one when a company's active sequences for a template aren't unique;
 guessing which one an approver meant would be worse than asking.
+
+## RK9-434 addendum: recipients whose domain cannot receive mail
+
+On 1.10. a message to `info@8aisi.com` hard-bounced with `5.4.4 Host or domain
+name not found`. Hard bounces feed the auto-pause rule (>2 % over 7 d, min
+sample 10), so one dead address per ~50 sends pauses the sender identity.
+`server/src/services/outreach/recipient-domain.ts#checkRecipientDomain` now
+asks DNS before a send is promised: MX present is `ok` (an RFC 7505 null MX is
+not); no MX falls back to the implicit MX, so an A or AAAA record is `ok`;
+NXDOMAIN, a null MX, no address at all, or a malformed address is
+`unresolvable`; a timeout, SERVFAIL or any other resolver error is `transient`
+(5 s per lookup, one try).
+
+`runQueueDueMessages` runs it after the contactable/suppressed check and before
+`approved -> queued`. `unresolvable` rejects the message like a no-longer-
+contactable prospect, with `reject_reason = recipient_domain_unresolvable` and
+`rejected_by = system:scheduler`, and counts in `rejected`. `transient` leaves
+the message `approved` for the next tick and counts nowhere. Verdicts are
+cached per domain for one tick only. `draftMessageForProspect` runs the same
+check before the Claude call: `unresolvable` and `transient` both return
+`ok: false` (`recipient_domain_unresolvable` / `recipient_domain_transient`)
+with no Claude call and no message row; the batch lists them under `failed`.
+
+Neither outcome writes an `outreach_events` row. This is deliberate: a
+pre-send rejection is not a bounce and must not move the auto-pause rate. Tests
+inject a resolver (`server/src/__tests__/helpers/recipient-domain-resolver.ts`);
+no test makes a real DNS query, and any test calling `queueDueMessages` must
+pass one. Coverage: `outreach-recipient-domain.test.ts` (pure verdicts) and
+`outreach-recipient-domain-db.test.ts` (scheduler + drafting, embedded PG).

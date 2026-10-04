@@ -117,6 +117,10 @@ the CLI's `review` command does not re-run it — a gate-passed draft reaching
 review is assumed clean, and an edited draft is re-approved by the operator,
 not re-gated automatically (a human just read it).
 
+Before the Claude call (so before this gate) `draftMessageForProspect` also
+checks that the recipient's domain can receive mail (RK9-434). That check is
+not a gate reason and never writes a message row — see `outreach-sender.md`.
+
 **Per-template link host (RK9-349, 26.9.2026).** `runQualityGate` takes the
 template `company`, and `allowedLinkHostSuffix` maps it to the one host its
 drafts may link to: `saatavilla` → `saatavilla.fi`, `rk9` → `rk9.fi`. Any

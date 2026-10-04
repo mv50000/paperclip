@@ -13,6 +13,12 @@ import { findOutreachSuppressed } from "./suppressions.js";
 import { recordEvent } from "./events.js";
 import { listActivePauses } from "./sender-pauses.js";
 import {
+  checkRecipientDomain,
+  recipientDomain,
+  type RecipientDomainResolver,
+  type RecipientDomainVerdict,
+} from "./recipient-domain.js";
+import {
   MAX_SEND_ATTEMPTS,
   classifySmtpCode,
   effectiveDailyCap,
@@ -72,8 +78,17 @@ async function countSentOrQueuedToday(
   return Number(rows[0]?.count ?? 0);
 }
 
-/** A message whose prospect is no longer contactable never leaves the queue silently. */
-async function rejectAsNoLongerContactable(db: Db, id: string, fromStatus: "approved" | "queued") {
+/**
+ * A message that can no longer be sent never leaves the queue silently.
+ * RK9-434: `reason` distinguishes "prospect no longer contactable" from
+ * "recipient domain cannot receive mail"; neither records an outreach event.
+ */
+async function rejectQueuedMessage(
+  db: Db,
+  id: string,
+  fromStatus: "approved" | "queued",
+  reason: "prospect_no_longer_contactable" | "recipient_domain_unresolvable" = "prospect_no_longer_contactable",
+) {
   const now = new Date();
   await db
     .update(outreachMessages)
@@ -81,7 +96,7 @@ async function rejectAsNoLongerContactable(db: Db, id: string, fromStatus: "appr
       status: "rejected",
       rejectedBy: "system:scheduler",
       rejectedAt: now,
-      rejectReason: "prospect_no_longer_contactable",
+      rejectReason: reason,
       updatedAt: now,
     })
     .where(and(eq(outreachMessages.id, id), eq(outreachMessages.status, fromStatus)));
@@ -130,7 +145,11 @@ async function tryAcquireSchedulerLock(tx: Db): Promise<boolean> {
  * A tick that can't get the lock is a no-op, not an error — the next one
  * will pick up whatever is still due.
  */
-export async function queueDueMessages(db: Db, now: Date = new Date()): Promise<QueueDueMessagesResult> {
+export async function queueDueMessages(
+  db: Db,
+  now: Date = new Date(),
+  recipientResolver?: RecipientDomainResolver,
+): Promise<QueueDueMessagesResult> {
   return db.transaction(async (tx) => {
     // A drizzle transaction handle is structurally missing `Db`'s `$client`
     // field, which nothing here actually uses (only .select/.update/.execute
@@ -141,11 +160,15 @@ export async function queueDueMessages(db: Db, now: Date = new Date()): Promise<
       logger.info("outreach send-scheduler tick skipped: another tick already holds the lock");
       return { queued: 0, rejected: 0 };
     }
-    return runQueueDueMessages(txDb, now);
+    return runQueueDueMessages(txDb, now, recipientResolver);
   });
 }
 
-async function runQueueDueMessages(db: Db, now: Date): Promise<QueueDueMessagesResult> {
+async function runQueueDueMessages(
+  db: Db,
+  now: Date,
+  recipientResolver?: RecipientDomainResolver,
+): Promise<QueueDueMessagesResult> {
   const sequences = await db.select().from(outreachSequences).where(eq(outreachSequences.active, true));
   let queued = 0;
   let rejected = 0;
@@ -156,6 +179,9 @@ async function runQueueDueMessages(db: Db, now: Date): Promise<QueueDueMessagesR
   // — a handful of active sequences, one extra query either way, but this
   // keeps the common (nothing paused) case to a single round trip.
   const pausedIdentities = new Set((await listActivePauses(db)).map((p) => p.senderIdentity));
+  // RK9-434: recipient-domain verdicts, cached per domain for this tick only
+  // (a transient DNS failure must be retried next tick, not remembered).
+  const domainVerdicts = new Map<string, RecipientDomainVerdict>();
 
   for (const seq of sequences) {
     if (pausedIdentities.has(seq.senderIdentity)) continue;
@@ -184,9 +210,37 @@ async function runQueueDueMessages(db: Db, now: Date): Promise<QueueDueMessagesR
       const suppressed =
         !!prospect?.email && (await findOutreachSuppressed(db, [prospect.email])).size > 0;
       if (!prospect || !isProspectContactable(prospect.status as OutreachProspectStatus) || suppressed) {
-        await rejectAsNoLongerContactable(db, message.id, "approved");
+        await rejectQueuedMessage(db, message.id, "approved");
         rejected += 1;
         continue;
+      }
+      // RK9-434: a domain that cannot receive mail is rejected here, not sent
+      // and bounced — a bounce would count against the auto-pause rate. No
+      // outreach_events row is written either way. A transient DNS failure
+      // leaves the message `approved` for the next tick.
+      if (prospect.email) {
+        const domain = recipientDomain(prospect.email) ?? prospect.email;
+        let verdict = domainVerdicts.get(domain);
+        if (!verdict) {
+          verdict = await checkRecipientDomain(prospect.email, recipientResolver);
+          domainVerdicts.set(domain, verdict);
+        }
+        if (verdict.status === "unresolvable") {
+          logger.info(
+            { domain, messageId: message.id, detail: verdict.detail },
+            "outreach send-scheduler: recipient domain cannot receive mail, rejecting message",
+          );
+          await rejectQueuedMessage(db, message.id, "approved", "recipient_domain_unresolvable");
+          rejected += 1;
+          continue;
+        }
+        if (verdict.status === "transient") {
+          logger.warn(
+            { domain, messageId: message.id, detail: verdict.detail },
+            "outreach send-scheduler: recipient domain check inconclusive, leaving message approved",
+          );
+          continue;
+        }
       }
       const [updated] = await db
         .update(outreachMessages)
@@ -259,7 +313,7 @@ export async function listSendQueue(
     const suppressed =
       !!row.prospectEmail && (await findOutreachSuppressed(db, [row.prospectEmail])).size > 0;
     if (!row.prospectEmail || !isProspectContactable(row.prospectStatus as OutreachProspectStatus) || suppressed) {
-      await rejectAsNoLongerContactable(db, row.message.id, "queued");
+      await rejectQueuedMessage(db, row.message.id, "queued");
       continue;
     }
 

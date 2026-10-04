@@ -12,6 +12,7 @@ import { createDb, companies, outreachProspects, outreachSequences, outreachMess
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { resolveDraftSequence } from "../services/outreach/draft.js";
 import { createDraftMessage } from "../services/outreach/messages.js";
+import { okResolver } from "./helpers/recipient-domain-resolver.js";
 import { queueDueMessages } from "../services/outreach/scheduler.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -174,7 +175,7 @@ describeEmbeddedPostgres("outreach draft sequence attachment (real DB, RK9-224)"
       })
       .returning();
 
-    const result = await queueDueMessages(db, NOW);
+    const result = await queueDueMessages(db, NOW, okResolver);
     expect(result.queued).toBe(0);
 
     const [reloaded] = await db.select().from(outreachMessages).where(eq(outreachMessages.id, orphan.id));

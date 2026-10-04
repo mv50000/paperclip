@@ -15,6 +15,7 @@ import { findOutreachSuppressed } from "./suppressions.js";
 import { getProspect } from "./prospects.js";
 import { createDraftMessage, rejectMessage } from "./messages.js";
 import { runQualityGate } from "./quality-gate.js";
+import { checkRecipientDomain, type RecipientDomainResolver } from "./recipient-domain.js";
 import { getSequence, listActiveSequencesForTemplate } from "./sequences.js";
 
 const CLAUDE_MODEL = "claude-opus-5-5";
@@ -260,7 +261,17 @@ async function callClaudeForDraft(system: string, user: string): Promise<ClaudeD
 
 export type DraftOutcome =
   | { ok: true; messageId: string; gate: "passed" | "rejected"; costUsd: number }
-  | { ok: false; reason: "prospect_not_found" | "missing_email" | "sequence_not_found" | "generation_failed"; costUsd: number };
+  | {
+      ok: false;
+      reason:
+        | "prospect_not_found"
+        | "missing_email"
+        | "recipient_domain_unresolvable"
+        | "recipient_domain_transient"
+        | "sequence_not_found"
+        | "generation_failed";
+      costUsd: number;
+    };
 
 /**
  * Drafts one prospect's first-step message. Gate failures still create the
@@ -274,10 +285,24 @@ export async function draftMessageForProspect(
   company: OutreachTemplateCompany,
   prospectId: string,
   sequenceId: string,
+  recipientResolver?: RecipientDomainResolver,
 ): Promise<DraftOutcome> {
   const prospect = await getProspect(db, companyId, prospectId);
   if (!prospect) return { ok: false, reason: "prospect_not_found", costUsd: 0 };
   if (!prospect.email) return { ok: false, reason: "missing_email", costUsd: 0 };
+
+  // RK9-434: no Claude call (and no message row) for an address whose domain
+  // cannot receive mail; a bounce there would feed the auto-pause rate. A
+  // transient DNS failure skips the prospect for this run only.
+  const domainVerdict = await checkRecipientDomain(prospect.email, recipientResolver);
+  if (domainVerdict.status === "unresolvable") {
+    logger.info({ prospectId, detail: domainVerdict.detail }, "outreach draft: recipient domain cannot receive mail, skipping");
+    return { ok: false, reason: "recipient_domain_unresolvable", costUsd: 0 };
+  }
+  if (domainVerdict.status === "transient") {
+    logger.warn({ prospectId, detail: domainVerdict.detail }, "outreach draft: recipient domain check inconclusive, skipping this run");
+    return { ok: false, reason: "recipient_domain_transient", costUsd: 0 };
+  }
 
   const enrichment = prospect.enrichment as
     | { website?: { snippet?: string; url?: string }; providers?: unknown; seg?: string }
@@ -387,6 +412,7 @@ export async function draftMessages(
   prospectIds: string[],
   maxCostUsd: number,
   sequenceId?: string,
+  recipientResolver?: RecipientDomainResolver,
 ): Promise<DraftMessagesResult> {
   const resolved = await resolveDraftSequence(db, companyId, company, sequenceId);
   if (!resolved.ok) return resolved;
@@ -403,7 +429,14 @@ export async function draftMessages(
       outcome.stoppedForBudget = true;
       break;
     }
-    const result = await draftMessageForProspect(db, companyId, company, prospectId, resolved.sequenceId);
+    const result = await draftMessageForProspect(
+      db,
+      companyId,
+      company,
+      prospectId,
+      resolved.sequenceId,
+      recipientResolver,
+    );
     outcome.totalCostUsd += result.costUsd;
     if (!result.ok) {
       outcome.failed.push({ prospectId, reason: result.reason });
