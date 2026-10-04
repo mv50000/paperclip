@@ -19,6 +19,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { okResolver } from "./helpers/recipient-domain-resolver.js";
 import { queueDueMessages, listSendQueue } from "../services/outreach/scheduler.js";
 import { pauseSender } from "../services/outreach/sender-pauses.js";
 
@@ -110,7 +111,7 @@ describeEmbeddedPostgres("outreach auto-pause gate (real DB)", () => {
     await seedMessage(seq.id, prospect.id, "approved");
     await pauseSender(db, { senderIdentity: "paused@example.com", reason: "hard_bounce_rate" });
 
-    const result = await queueDueMessages(db, NOW);
+    const result = await queueDueMessages(db, NOW, okResolver);
     expect(result.queued).toBe(0);
 
     const [message] = await db.select().from(outreachMessages).where(eq(outreachMessages.sequenceId, seq.id));
@@ -123,7 +124,7 @@ describeEmbeddedPostgres("outreach auto-pause gate (real DB)", () => {
     const prospect = await seedProspect("prospect2@example.com");
     await seedMessage(seq.id, prospect.id, "approved");
 
-    const result = await queueDueMessages(db, NOW);
+    const result = await queueDueMessages(db, NOW, okResolver);
     expect(result.queued).toBe(1);
   });
 
