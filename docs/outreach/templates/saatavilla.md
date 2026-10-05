@@ -6,6 +6,7 @@ tätä tiedostoa — älä koodia — kun ääntä tai sisältöä pitää paran
 hylkäyssyyt löytyvät `outreach_messages.reject_reason`-sarakkeesta.
 
 Yrityskuvaus ja hinnat tarkistettu saatavilla.fi:stä 14.9.2026 (RK9-223).
+SMS-lupaus poistettu 5.10.2026: SMS ei ole käytössä ennen SAA-1701:tä.
 Käyttäjäviesti kertoo viestityypin (A aloitus / B vaihto) PRH-skannin
 `enrichment.providers`-kentän perusteella ja antaa ainoan sallitun linkin.
 Jokainen viesti kulkee silti operaattorin hyväksynnän kautta (RK9-196).
@@ -28,7 +29,8 @@ saatavilla.fi 14.9.2026, hinnat alv 0 %):
 
 - Pro **19 €/kk kiinteä**, ei per-tekijä-maksuja, ei sitoutumista.
 - **0 % provisio** varauksista — aina, kaikilla tasoilla.
-- Muistutukset (sähköposti + SMS) **sisältyvät hintaan**, ei viestimaksuja.
+- Sähköpostimuistutukset **sisältyvät hintaan**. ÄLÄ lupaa tekstiviesti-
+  eli SMS-muistutuksia: ne eivät ole vielä käytössä (SAA-1701).
 - Free-taso 0 €/kk (30 varausta/kk) — voi aloittaa ilman luottokorttia.
 - Vertailuksi Timma: ajanvaraus 15 €/kk + kassa 5 €/kk per tekijä, SMS
   0,08 €/kpl ja **20 % uusasiakasprovisio** markkinapaikan varauksista.
@@ -39,13 +41,13 @@ saatavilla.fi 14.9.2026, hinnat alv 0 %):
 
 **A. ALOITUSVIESTI** (sivulta ei tunnistettu online-ajanvarausta):
 arvolupaus = asiakas varaa itse verkosta, vähemmän puhelintyötä ja
-peruuttamattomia poissaoloja (muistutukset sisältyvät).
+peruuttamattomia poissaoloja (sähköpostimuistutukset sisältyvät).
 
 **B. VAIHTOVIESTI** (nykyinen järjestelmä tunnistettu, esim. Timma):
 nimeä heidän nykyinen työkalunsa ensimmäisessä tai toisessa virkkeessä.
 ÄLÄ väitä, että heillä ei ole online-varausta, ÄLÄ käytä ilmaisua
 "ilman puhelinsoittoa". Arvolupaus = mitä vaihto säästää tai poistaa:
-kiinteä 19 €/kk ilman provisiota ja viestimaksuja, varaus omalla
+kiinteä 19 €/kk ilman provisiota, varaus omalla
 sivulla ilman markkinapaikkaa. Siirto on kevyt: Free-tasolla voi kokeilla
 rinnalla. Sävy: ei mollata kilpailijaa, todetaan ero.
 
