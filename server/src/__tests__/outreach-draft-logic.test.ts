@@ -5,7 +5,7 @@ import {
   estimateCostUsd,
   parseDraftResponse,
   parseProviders,
-  RK9_EXPLAINER_URL,
+  RK9_NO_LINK_LINE,
 } from "../services/outreach/draft.js";
 
 describe("outreach AI drafting — pure logic (RK9-196)", () => {
@@ -79,7 +79,8 @@ describe("outreach AI drafting — pure logic (RK9-196)", () => {
     expect(msg).toContain("Yrityksen nimi: Acme Oy");
     expect(msg).toContain("Verkkosivu löytyi: https://www.acme.fi/. → Kirjoita viestityyppi B (SIVU ON).");
     expect(msg).toContain("Sivulla on vain puhelinnumero.");
-    expect(msg).toContain("Ainoa sallittu linkki viestissä: https://rk9.fi/selitys");
+    expect(msg).toContain(RK9_NO_LINK_LINE);
+    expect(msg).not.toMatch(/Ainoa sallittu linkki|rk9\.fi\/selitys/);
     expect(msg).not.toMatch(/ajanvaraus|VAIHTOVIESTI|ALOITUSVIESTI|Timma|saatavilla/i);
     expect(msg).toContain("SUBJECT:");
   });
@@ -89,7 +90,8 @@ describe("outreach AI drafting — pure logic (RK9-196)", () => {
     expect(msg).toContain("Verkkosivua ei löytynyt. → Kirjoita viestityyppi A (EI SIVUA).");
     expect(msg).not.toContain("viestityyppi B");
     expect(msg).toMatch(/älä keksi/i);
-    expect(msg).toContain(`Ainoa sallittu linkki viestissä: ${RK9_EXPLAINER_URL}`);
+    expect(msg).toContain(RK9_NO_LINK_LINE);
+    expect(msg).not.toMatch(/Ainoa sallittu linkki|rk9\.fi\/selitys/);
     expect(msg).not.toMatch(/ajanvaraus|saatavilla/i);
     // websiteUrl omitted behaves as "not found"
     expect(buildDraftUserMessage({ company: "rk9", orgName: "Acme Oy", observation: null })).toContain(

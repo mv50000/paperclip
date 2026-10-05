@@ -116,8 +116,11 @@ export function demoUrlForSegment(segment: string | null | undefined): string {
   return (segment && DEMO_URL_BY_SEGMENT[segment.toLowerCase()]) || DEFAULT_DEMO_URL;
 }
 
-/** RK9-349: the only link an rk9 draft may carry (30-second intro page). */
-export const RK9_EXPLAINER_URL = "https://rk9.fi/selitys";
+/**
+ * RK9 template v2: an rk9 first touch carries no link. Link-free first
+ * emails get more replies, and the goal is a reply, not a click.
+ */
+export const RK9_NO_LINK_LINE = "Älä lisää viestiin linkkejä.";
 
 /**
  * Builds the user turn. The template file (loaded by the caller) is the
@@ -161,7 +164,7 @@ function buildRk9UserMessage(facts: DraftProspectFacts, observationLine: string)
     `Yrityksen nimi: ${facts.orgName}`,
     websiteLine,
     observationLine,
-    `Ainoa sallittu linkki viestissä: ${RK9_EXPLAINER_URL}`,
+    RK9_NO_LINK_LINE,
     "",
     "Vastaa TÄSMÄLLEEN tässä muodossa, ei muuta tekstiä ennen tai jälkeen:",
     "SUBJECT: <otsikko>",
