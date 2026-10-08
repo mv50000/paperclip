@@ -9326,6 +9326,25 @@ export function resolveHeartbeatSchedulingSuppression(
   return { suppressed: false, reason: null };
 }
 
+export function createReadOnlySystemPause(
+  instanceSvc: ReturnType<typeof instanceSettingsService>,
+): Pick<SystemPauseService, "isPaused" | "getState"> {
+  const getState = async () => (await instanceSvc.getGeneral()).systemPause ?? null;
+  return {
+    getState,
+    // Expired auto pauses count as resumed; clearing stays with the owning service (it fires the Slack hooks).
+    isPaused: async (now: Date = new Date()) => {
+      const state = await getState();
+      if (!state) return false;
+      if (state.pausedUntil !== null && state.source === "auto") {
+        const until = Date.parse(state.pausedUntil);
+        if (!Number.isNaN(until) && now.getTime() > until) return false;
+      }
+      return true;
+    },
+  };
+}
+
 export function heartbeatService(
   db: Db,
   options: HeartbeatServiceOptions = {},
@@ -9333,7 +9352,10 @@ export function heartbeatService(
   let shutdownInProgress = false;
   const instanceSettings = instanceSettingsService(db);
   // --- RK9 Custom: system pause ---
-  const systemPause = options.systemPause;
+  // Routes build their own instances without the option; fall back to a
+  // read-only view of instance_settings so system pause still gates them.
+  const systemPause: Pick<SystemPauseService, "isPaused" | "getState"> =
+    options.systemPause ?? createReadOnlySystemPause(instanceSettings);
   const getCurrentUserRedactionOptions = async () => ({
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
