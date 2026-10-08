@@ -2134,19 +2134,20 @@ export function agentRoutes(
     return adapterType;
   }
 
-  // --- RK9 Custom (RK9-436): only a board user may switch an existing agent onto human_proxy.
+  // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy.
   // A runless human_proxy agent write skips the cross-issue run cap in routes/issues.ts
   // (RK9-76, RK9-315), so an agent that switched itself, or another agent, to human_proxy
-  // would escape that cap with its API key. Keeping human_proxy as it is stays allowed. ---
+  // would escape that cap with its API key. Create and hire pass a null current adapter.
+  // Keeping human_proxy as it is stays allowed. ---
   function assertAgentActorDoesNotSelectHumanProxy(
     req: Request,
     nextAdapterType: string,
-    currentAdapterType: string,
+    currentAdapterType: string | null,
   ) {
     if (req.actor.type !== "agent") return;
     if (nextAdapterType !== HUMAN_PROXY_ADAPTER_TYPE) return;
     if (currentAdapterType === HUMAN_PROXY_ADAPTER_TYPE) return;
-    throw forbidden("Only a board user can switch an agent to the human_proxy adapter", {
+    throw forbidden("Only a board user can put an agent on the human_proxy adapter", {
       code: "human_proxy_switch_board_only",
     });
   }
@@ -4438,6 +4439,7 @@ export function agentRoutes(
       ...hireInput
     } = req.body;
     hireInput.adapterType = await assertSelectableAdapterType(hireInput.adapterType);
+    assertAgentActorDoesNotSelectHumanProxy(req, hireInput.adapterType, null);
     const rawHireAdapterConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, hireInput.runtimeConfig);
     await assertFreshPaperclipRunnerProvider(
@@ -4740,6 +4742,7 @@ export function agentRoutes(
       ...createInput
     } = req.body;
     createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType);
+    assertAgentActorDoesNotSelectHumanProxy(req, createInput.adapterType, null);
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
     await assertFreshPaperclipRunnerProvider(

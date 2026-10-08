@@ -680,6 +680,14 @@ export function assertLegacyAgentInviteAdapterType(
       { code: "paperclip_runner_invite_onboarding_disabled" },
     );
   }
+  // RK9 Custom (RK9-436): a runless human_proxy key skips the cross-issue run cap,
+  // so an invite join never creates a human_proxy agent. The board creates those.
+  if (adapterType === "human_proxy") {
+    throw badRequest(
+      "The human_proxy adapter is not available through agent invite onboarding.",
+      { code: "human_proxy_invite_onboarding_disabled" },
+    );
+  }
 }
 
 function summarizeSecretForLog(

@@ -1028,8 +1028,30 @@ describe.sequential("agent permission routes", () => {
       .patch(`/api/agents/${agentId}`)
       .send({ adapterType: "human_proxy", title: "Operator" }));
 
-    expect(res.body.details?.code).not.toBe("human_proxy_switch_board_only");
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalled();
   });
+
+  for (const route of ["agents", "agent-hires"] as const) {
+    it(`blocks agent-authenticated ${route} requests that create a human_proxy agent`, async () => {
+      mockAccessService.hasPermission.mockResolvedValue(true);
+      const app = await createApp({
+        type: "agent",
+        agentId,
+        companyId,
+        source: "agent_key",
+        runId: "run-1",
+      });
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/${route}`)
+        .send({ name: "Proxy", role: "engineer", adapterType: "human_proxy", adapterConfig: {} }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+    });
+  }
 
   it("allows board users to switch an agent to human_proxy", async () => {
     mockAgentService.update.mockResolvedValue({ ...baseAgent, adapterType: "human_proxy" });
