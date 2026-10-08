@@ -82,6 +82,7 @@ import {
 } from "../services/index.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
+import { HUMAN_PROXY_ADAPTER_TYPE } from "../services/human-proxy.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
@@ -2132,6 +2133,24 @@ export function agentRoutes(
     }
     return adapterType;
   }
+
+  // --- RK9 Custom (RK9-436): only a board user may switch an existing agent onto human_proxy.
+  // A runless human_proxy agent write skips the cross-issue run cap in routes/issues.ts
+  // (RK9-76, RK9-315), so an agent that switched itself, or another agent, to human_proxy
+  // would escape that cap with its API key. Keeping human_proxy as it is stays allowed. ---
+  function assertAgentActorDoesNotSelectHumanProxy(
+    req: Request,
+    nextAdapterType: string,
+    currentAdapterType: string,
+  ) {
+    if (req.actor.type !== "agent") return;
+    if (nextAdapterType !== HUMAN_PROXY_ADAPTER_TYPE) return;
+    if (currentAdapterType === HUMAN_PROXY_ADAPTER_TYPE) return;
+    throw forbidden("Only a board user can switch an agent to the human_proxy adapter", {
+      code: "human_proxy_switch_board_only",
+    });
+  }
+  // --- end RK9 Custom ---
 
   /**
    * Adapter validation for the paths that CHOOSE a harness for a new agent
@@ -4289,6 +4308,7 @@ export function agentRoutes(
         ? rollbackConfig.adapterType
         : null,
     );
+    assertAgentActorDoesNotSelectHumanProxy(req, rollbackAdapterType, existing.adapterType);
     if (rollbackAdapterType !== existing.adapterType) {
       await assertSelectableAdapterType(rollbackAdapterType);
     }
@@ -5189,6 +5209,7 @@ export function agentRoutes(
     const nextAdapterType = hasOwn(patchData, "adapterType")
       ? assertKnownAdapterType(patchData.adapterType as string | null | undefined)
       : existing.adapterType;
+    assertAgentActorDoesNotSelectHumanProxy(req, nextAdapterType, existing.adapterType);
     const requestedAdapterType = nextAdapterType === existing.adapterType
       ? nextAdapterType
       : await assertSelectableAdapterType(nextAdapterType);
