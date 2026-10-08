@@ -29,7 +29,9 @@ function assertAgentHireApprovalNotHumanProxy(req: Request, type: string, payloa
   if (req.actor.type !== "agent" || type !== "hire_agent") return;
   const adapterType =
     payload && typeof payload === "object" ? (payload as Record<string, unknown>).adapterType : undefined;
-  if (typeof adapterType !== "string" || adapterType.trim() !== HUMAN_PROXY_ADAPTER_TYPE) return;
+  // Approval creates the agent with String(payload.adapterType), so compare the same way:
+  // ["human_proxy"] must not slip past as a non-string.
+  if (adapterType == null || String(adapterType).trim() !== HUMAN_PROXY_ADAPTER_TYPE) return;
   throw forbidden("Only a board user can put an agent on the human_proxy adapter", {
     code: "human_proxy_switch_board_only",
   });
