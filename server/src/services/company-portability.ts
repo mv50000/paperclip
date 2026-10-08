@@ -203,7 +203,9 @@ const DEFAULT_IMPORTED_LABEL_COLOR = "#6366f1";
 // type-agnostic, so blob files always travel as opaque octet streams while
 // each attachment entry carries the real content type.
 const PORTABLE_BLOB_CONTENT_TYPE = "application/octet-stream";
-const IMPORT_FORBIDDEN_ADAPTER_TYPES = new Set(["process", "http"]);
+// RK9 Custom (RK9-436): human_proxy is board-only, because a runless human_proxy
+// write skips the cross-issue run cap.
+const IMPORT_FORBIDDEN_ADAPTER_TYPES = new Set(["process", "http", "human_proxy"]);
 const execFileAsync = promisify(execFile);
 let bundledSkillsCommitPromise: Promise<string | null> | null = null;
 

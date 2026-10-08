@@ -19,6 +19,22 @@ import {
   secretService,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
+import { forbidden } from "../errors.js";
+import { HUMAN_PROXY_ADAPTER_TYPE } from "../services/human-proxy.js";
+
+// --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
+// human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
+// human_proxy hire in an approval payload, on create or on resubmit. ---
+function assertAgentHireApprovalNotHumanProxy(req: Request, type: string, payload: unknown) {
+  if (req.actor.type !== "agent" || type !== "hire_agent") return;
+  const adapterType =
+    payload && typeof payload === "object" ? (payload as Record<string, unknown>).adapterType : undefined;
+  if (typeof adapterType !== "string" || adapterType.trim() !== HUMAN_PROXY_ADAPTER_TYPE) return;
+  throw forbidden("Only a board user can put an agent on the human_proxy adapter", {
+    code: "human_proxy_switch_board_only",
+  });
+}
+// --- end RK9 Custom ---
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { createEmailService } from "../services/email/index.js";
@@ -272,6 +288,7 @@ export function approvalRoutes(
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
+    assertAgentHireApprovalNotHumanProxy(req, approvalInput.type, approvalInput.payload);
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -574,6 +591,7 @@ export function approvalRoutes(
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
       return;
     }
+    assertAgentHireApprovalNotHumanProxy(req, existing.type, req.body.payload);
 
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"

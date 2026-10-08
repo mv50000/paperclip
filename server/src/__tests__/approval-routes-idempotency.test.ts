@@ -366,6 +366,38 @@ describe("approval routes idempotent retries", () => {
     );
   });
 
+  it("blocks agents from requesting a human_proxy hire approval (RK9-436)", async () => {
+    const res = await request(await createAgentApp())
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "hire_agent",
+        payload: { name: "Proxy", role: "engineer", adapterType: "human_proxy" },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+    expect(mockApprovalService.create).not.toHaveBeenCalled();
+  });
+
+  it("blocks agents from resubmitting a hire approval onto human_proxy (RK9-436)", async () => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-8",
+      companyId: "company-1",
+      type: "hire_agent",
+      status: "revision_requested",
+      payload: { name: "Builder", adapterType: "claude_local" },
+      requestedByAgentId: "agent-1",
+    });
+
+    const res = await request(await createAgentApp())
+      .post("/api/approvals/approval-8/resubmit")
+      .send({ payload: { name: "Builder", adapterType: "human_proxy" } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+    expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
+  });
+
   it("blocks status-only recovery runs from creating approvals", async () => {
     const res = await request(await createAgentApp({
       contextSnapshot: {
