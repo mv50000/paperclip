@@ -272,6 +272,7 @@ export type DraftOutcome =
         | "recipient_domain_unresolvable"
         | "recipient_domain_transient"
         | "sequence_not_found"
+        | "prospect_not_contactable"
         | "generation_failed";
       costUsd: number;
     };
@@ -346,7 +347,11 @@ export async function draftMessageForProspect(
   });
   if (!created.ok) {
     // RK9-230: the sequence resolved at batch start can be deleted mid-batch.
-    const reason = created.reason === "sequence_not_found" ? "sequence_not_found" : "generation_failed";
+    // RK9-370: a prospect that turned terminal or suppressed mid-batch is not a generation failure either.
+    const reason =
+      created.reason === "sequence_not_found" || created.reason === "prospect_not_contactable"
+        ? created.reason
+        : "generation_failed";
     return { ok: false, reason, costUsd: call.costUsd };
   }
 

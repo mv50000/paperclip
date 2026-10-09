@@ -58,7 +58,8 @@ describeEmbeddedPostgres("outreach approved_without_sequence metric (real DB, RK
   }
 
   // RK9-230: a deactivated (not deleted) sequence keeps the FK, so only the join on `active` catches it.
-  async function seedApprovedOnSequence(active: boolean) {
+  // RK9-370: `activatedAt` null = never activated (setup stage); set = activated once.
+  async function seedApprovedOnSequence(active: boolean, activatedAt: Date | null = active ? new Date() : null) {
     const companyId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: `test-${companyId}`, issuePrefix: companyId.slice(0, 6).toUpperCase() });
     const [prospect] = await db
@@ -67,7 +68,7 @@ describeEmbeddedPostgres("outreach approved_without_sequence metric (real DB, RK
       .returning();
     const [sequence] = await db
       .insert(outreachSequences)
-      .values({ companyId, name: "seq", senderIdentity: "a@example.com", active })
+      .values({ companyId, name: "seq", senderIdentity: "a@example.com", active, activatedAt })
       .returning();
     await db.insert(outreachMessages).values({
       companyId,
@@ -80,12 +81,21 @@ describeEmbeddedPostgres("outreach approved_without_sequence metric (real DB, RK
     return companyId;
   }
 
-  it("counts approved messages on a deactivated sequence, but not on an active one (RK9-230)", async () => {
-    const inactiveCompany = await seedApprovedOnSequence(false);
+  it("counts approved messages on a deactivated-after-activation sequence, but not on an active one (RK9-230)", async () => {
+    const pausedCompany = await seedApprovedOnSequence(false, new Date());
     await seedApprovedOnSequence(true);
 
     const metrics = await collectOutreachPrometheusMetrics(db);
-    expect(metrics.approvedWithoutSequence).toEqual([{ companyId: inactiveCompany, count: 1 }]);
+    expect(metrics.approvedWithoutSequence).toEqual([{ companyId: pausedCompany, count: 1 }]);
+  });
+
+  it("does not count approved messages on a sequence that was never activated — the setup stage (RK9-370)", async () => {
+    await seedApprovedOnSequence(false, null);
+
+    const metrics = await collectOutreachPrometheusMetrics(db);
+    expect(metrics.approvedWithoutSequence).toEqual([]);
+    const digest = await buildOutreachDigest(db, new Date(Date.UTC(2026, 0, 13, 8, 0, 0)));
+    expect(digest.approvedWithoutSequenceTotal).toBe(0);
   });
 
   it("collectOutreachPrometheusMetrics counts it by company, and renders as a gauge", async () => {
