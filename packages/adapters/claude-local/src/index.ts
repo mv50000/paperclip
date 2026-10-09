@@ -58,6 +58,7 @@ Core fields:
 - dangerouslySkipPermissions (boolean, optional, default true): allow non-interactive Claude runs to proceed without approval prompts. Local targets receive --dangerously-skip-permissions; remote targets receive a curated --allowedTools list so they do not inherit local bypass permissions.
 - command (string, optional): defaults to "claude"
 - extraArgs (string[], optional): additional CLI args
+- additionalMcpConfigPaths (string[], optional, default empty): MCP config files (".mcp.json" format) whose mcpServers are merged into the Paperclip runtime MCP config. Relative paths resolve against the agent cwd. A Paperclip runtime server wins a name collision. A missing or invalid file logs a warning and is skipped. Opt-in, because --mcp-config skips the Claude CLI project-MCP trust prompt (RK9-454).
 - env (object, optional): KEY=VALUE environment variables
 - workspaceStrategy (object, optional): execution workspace strategy; currently supports { type: "git_worktree", baseRef?, branchTemplate?, worktreeParentDir? }
 - workspaceRuntime (object, optional): reserved for workspace runtime metadata; workspace runtime services are manually controlled from the workspace UI and are not auto-started by heartbeats
