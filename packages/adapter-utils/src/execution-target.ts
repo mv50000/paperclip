@@ -3063,6 +3063,7 @@ child.once("close", () => {
 });
 const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
 const heldPipeExitDelayMs = 1000;
+const heldPipeFlushMs = 500;
 async function exitWithHeldPipes() {
   if (childClosed || heldPipeExitStarted) return;
   // Set before anything else: the "close" handler checks this flag, so a
@@ -3077,6 +3078,18 @@ async function exitWithHeldPipes() {
   try {
     await writeEvent({ type: "exit", code: child.exitCode, signal: child.signalCode });
   } catch {}
+  // In stream mode writeEvent() only queues the frame on process.stdout, and
+  // process.exit() drops whatever a pipe has not taken yet, the exit frame
+  // included. Exit once the queued frames have flushed, bounded, so a host
+  // that stopped reading cannot hold the wrapper. In event-file mode stdout is
+  // not read, and the callback fires at once.
+  await new Promise((resolve) => {
+    const flushTimer = setTimeout(resolve, heldPipeFlushMs);
+    process.stdout.write("", () => {
+      clearTimeout(flushTimer);
+      resolve();
+    });
+  });
   process.exit(heldPipeExitCode);
 }
 function armHeldPipeExit() {
