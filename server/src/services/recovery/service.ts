@@ -4329,6 +4329,8 @@ export function recoveryService(
         } catch (err) {
           // A system pause skips the wake; undeliveredConversationComments ignores system.paused skips, so the next sweep after resume redelivers it.
           if (!isSystemPausedConflict(err)) throw err;
+          result.skipped += 1;
+          continue;
         }
       }
       if (isWaitingConversation(issue)) { result.skipped += 1; continue; }
