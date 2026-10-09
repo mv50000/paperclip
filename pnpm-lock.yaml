@@ -136,6 +136,9 @@ importers:
       embedded-postgres:
         specifier: ^18.1.0-beta.16
         version: 18.1.0-beta.16(patch_hash=55uhvnotpqyiy37rn3pqpukhei)
+      mdast-util-from-markdown:
+        specifier: ^2.0.3
+        version: 2.0.3
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
