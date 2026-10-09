@@ -16,7 +16,7 @@ describe("withAcceptanceCriteria edge cases", () => {
 
   it("keeps content after an indented ## heading", () => {
     const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- a\n\n   ## Notes\n\nkeep", AC);
-    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep".replace("## Notes", "   ## Notes"));
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n   ## Notes\n\nkeep");
   });
 
   it("ignores an AC heading inside an HTML comment", () => {
@@ -40,5 +40,10 @@ describe("withAcceptanceCriteria edge cases", () => {
   it("does not treat a list item before --- as a setext heading", () => {
     const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- a\n---\n\n## Notes", AC);
     expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes");
+  });
+
+  it("does not treat <!-- inside inline code as a comment", () => {
+    const out = withAcceptanceCriteria("Use `<!--` here.\n\n## Acceptance Criteria\n\n- a\n\n## Notes\n\nkeep", AC);
+    expect(out).toBe("Use `<!--` here.\n\n## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
   });
 });

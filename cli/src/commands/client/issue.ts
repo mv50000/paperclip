@@ -1454,10 +1454,12 @@ export function withAcceptanceCriteria(
     open = -1;
   };
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    let line = lines[i];
     if (inComment) {
-      if (line.includes("-->")) inComment = false;
-      continue;
+      const closeIndex = line.indexOf("-->");
+      if (closeIndex < 0) continue;
+      inComment = false;
+      line = line.slice(closeIndex + 3);
     }
     const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (fenceMatch) {
@@ -1468,7 +1470,8 @@ export function withAcceptanceCriteria(
     }
     if (fence) continue;
     const commentStart = line.lastIndexOf("<!--");
-    if (commentStart >= 0 && !line.includes("-->", commentStart)) {
+    const backticksBefore = commentStart >= 0 ? (line.slice(0, commentStart).match(/`/g) ?? []).length : 0;
+    if (commentStart >= 0 && backticksBefore % 2 === 0 && !line.includes("-->", commentStart)) {
       inComment = true;
       if (commentStart === 0 || !line.slice(0, commentStart).trim()) continue;
     }
