@@ -10126,6 +10126,10 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
+      // --- RK9 Custom (RK9-78): document_revisions.created_by_run_id has an FK to
+      // heartbeat_runs. A stale or unknown run id (e.g. an API-key actor with an old
+      // PAPERCLIP_RUN_ID) must fail as a clean 422 before the write, not as an FK 500.
+      await svc.assertKnownActorRunId(actor.runId ?? null, issue.companyId);
       const sourceTrust = await sourceTrustForActorWrite(issue, actor);
       const referenceSummaryBefore =
         await issueReferencesSvc.listIssueReferenceSummary(issue.id);

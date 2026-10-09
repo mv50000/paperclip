@@ -16,6 +16,8 @@ const recoveryActionId = "77777777-7777-4777-8777-777777777777";
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  // --- RK9 Custom (RK9-78) ---
+  assertKnownActorRunId: vi.fn(async () => undefined),
   checkout: vi.fn(),
   create: vi.fn(),
   createChild: vi.fn(),
@@ -1117,6 +1119,25 @@ describe("agent issue mutation checkout ownership", () => {
         lockedDocumentStrategy: "create_new_document",
       }),
     );
+  });
+
+  // --- RK9 Custom (RK9-78): an API-key agent with a stale run id gets a clean 422 on a
+  // document PUT, before document_revisions (FK to heartbeat_runs) is written. ---
+  it("rejects a document update with an unknown run id as 422 before writing a revision (RK9-78)", async () => {
+    const app = await createApp(ownerActor());
+    // Same module instance as the app's errorHandler, so the HttpError maps to 422.
+    const { unprocessable } = await import("../errors.js");
+    mockIssueService.assertKnownActorRunId.mockRejectedValueOnce(
+      unprocessable("Unknown actorRunId: no matching heartbeat run", { actorRunId: ownerRunId }),
+    );
+
+    const res = await request(app)
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({ format: "markdown", body: "# updated" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(mockIssueService.assertKnownActorRunId).toHaveBeenCalledWith(ownerRunId, companyId);
+    expect(mockDocumentService.upsertIssueDocument).not.toHaveBeenCalled();
   });
 
   it("stores the authenticated agent run id when creating work products", async () => {
