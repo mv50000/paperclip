@@ -19,12 +19,30 @@ import {
   secretService,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
+import { forbidden } from "../errors.js";
+import { HUMAN_PROXY_ADAPTER_TYPE } from "../services/human-proxy.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { createEmailService } from "../services/email/index.js";
 import type { EmailSendApprovalPayload } from "./rk9-email.js";
 import { issueService } from "../services/issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
+
+// --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
+// human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
+// human_proxy hire in an approval payload, on create or on resubmit. ---
+function assertAgentHireApprovalNotHumanProxy(req: Request, type: string, payload: unknown) {
+  if (req.actor.type !== "agent" || type !== "hire_agent") return;
+  const adapterType =
+    payload && typeof payload === "object" ? (payload as Record<string, unknown>).adapterType : undefined;
+  // Approval creates the agent with String(payload.adapterType), so compare the same way:
+  // ["human_proxy"] must not slip past as a non-string.
+  if (adapterType == null || String(adapterType).trim() !== HUMAN_PROXY_ADAPTER_TYPE) return;
+  throw forbidden("Only a board user can put an agent on the human_proxy adapter", {
+    code: "human_proxy_switch_board_only",
+  });
+}
+// --- end RK9 Custom ---
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -272,6 +290,7 @@ export function approvalRoutes(
       : [];
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
+    assertAgentHireApprovalNotHumanProxy(req, approvalInput.type, approvalInput.payload);
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -574,6 +593,7 @@ export function approvalRoutes(
       res.status(403).json({ error: "Only requesting agent can resubmit this approval" });
       return;
     }
+    assertAgentHireApprovalNotHumanProxy(req, existing.type, req.body.payload);
 
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"

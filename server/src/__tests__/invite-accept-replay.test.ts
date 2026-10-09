@@ -14,6 +14,12 @@ describe("assertLegacyAgentInviteAdapterType", () => {
     expect(() => assertLegacyAgentInviteAdapterType("claude_local")).not.toThrow();
     expect(() => assertLegacyAgentInviteAdapterType(null)).not.toThrow();
   });
+
+  it("rejects human_proxy for agent-invite onboarding (RK9-436)", () => {
+    expect(() => assertLegacyAgentInviteAdapterType("human_proxy")).toThrow(
+      "The human_proxy adapter is not available through agent invite onboarding.",
+    );
+  });
 });
 
 describe("canReplayOpenClawGatewayInviteAccept", () => {

@@ -942,6 +942,139 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   }, 15_000);
 
+  // RK9-436: a runless human_proxy write skips the cross-issue run cap, so only a
+  // board user may switch an agent onto human_proxy.
+  it("blocks agent-authenticated self-updates that switch the adapter to human_proxy", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterType: "human_proxy" }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("blocks agent-authenticated updates that switch another agent to human_proxy", async () => {
+    const otherAgentId = "44444444-4444-4444-8444-444444444444";
+    mockAgentService.getById.mockImplementation(async (id: string) =>
+      id === otherAgentId ? { ...baseAgent, id: otherAgentId, name: "Other" } : { ...baseAgent },
+    );
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${otherAgentId}`)
+      .send({ adapterType: "human_proxy", adapterConfig: {} }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks agent-authenticated rollback onto a human_proxy revision", async () => {
+    mockAgentService.getConfigRevision.mockResolvedValue({
+      id: "33333333-3333-4333-8333-333333333333",
+      afterConfig: {
+        adapterType: "human_proxy",
+        adapterConfig: {},
+        runtimeConfig: {},
+      },
+    });
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(
+        `/api/agents/${agentId}/config-revisions/33333333-3333-4333-8333-333333333333/rollback`,
+      ),
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+    expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+  });
+
+  it("lets a human_proxy agent update itself without changing its adapter", async () => {
+    const humanProxyAgent = { ...baseAgent, adapterType: "human_proxy" };
+    mockAgentService.getById.mockResolvedValue(humanProxyAgent);
+    mockAgentService.update.mockResolvedValue({ ...humanProxyAgent, title: "Operator" });
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterType: "human_proxy", title: "Operator" }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalled();
+  });
+
+  for (const route of ["agents", "agent-hires"] as const) {
+    it(`blocks agent-authenticated ${route} requests that create a human_proxy agent`, async () => {
+      mockAccessService.hasPermission.mockResolvedValue(true);
+      const app = await createApp({
+        type: "agent",
+        agentId,
+        companyId,
+        source: "agent_key",
+        runId: "run-1",
+      });
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .post(`/api/companies/${companyId}/${route}`)
+        .send({ name: "Proxy", role: "engineer", adapterType: "human_proxy", adapterConfig: {} }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.details?.code).toBe("human_proxy_switch_board_only");
+      expect(mockAgentService.create).not.toHaveBeenCalled();
+    });
+  }
+
+  it("allows board users to switch an agent to human_proxy", async () => {
+    mockAgentService.update.mockResolvedValue({ ...baseAgent, adapterType: "human_proxy" });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterType: "human_proxy", adapterConfig: {} }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({ adapterType: "human_proxy" }),
+      expect.anything(),
+    );
+  });
+
   it("blocks agent-authenticated instructions-path updates", async () => {
     const app = await createApp({
       type: "agent",

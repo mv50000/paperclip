@@ -5575,6 +5575,51 @@ describe("company portability", () => {
     expect(agentSvc.create).not.toHaveBeenCalled();
   });
 
+  it("rejects human_proxy adapter overrides on agent-safe import (RK9-436)", async () => {
+    const portability = companyPortabilityService({} as any);
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+    });
+
+    agentSvc.list.mockResolvedValue([]);
+
+    await expect(portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: false,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "existing_company",
+        companyId: "company-1",
+      },
+      agents: ["claudecoder"],
+      collisionStrategy: "rename",
+      adapterOverrides: {
+        claudecoder: {
+          adapterType: "human_proxy",
+          adapterConfig: {},
+        },
+      },
+    }, "user-1", {
+      mode: "agent_safe",
+      sourceCompanyId: "company-1",
+    })).rejects.toThrow('Adapter type "human_proxy" is not allowed in safe imports');
+
+    expect(agentSvc.create).not.toHaveBeenCalled();
+  });
+
   it("reports unsafe project workspace commands on agent-safe import preview", async () => {
     const portability = companyPortabilityService({} as any);
 
