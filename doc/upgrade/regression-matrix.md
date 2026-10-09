@@ -294,6 +294,7 @@ tarkistus.
 | 188 | `c3337709e` | test(upgrade): restore the fork SEC-91 expectation in the monitor-clear UI test (RK9-314) | SEC-91 (UI) | `ui/src/components/IssueProperties.test.tsx` | `npx vitest run ui/src/components/IssueProperties.test.tsx` |
 | 189 | `9ff918377` | docs(upgrade): agent keys and runs without a valid responsible user on the prod copy (RK9-314) | docs | `doc/upgrade/defaults-hardening.md` | _manuaalinen:_ ei ajonaikaista käytöstä |
 | 190 | `ddaf75727` | test(upgrade): retry run cleanup in the branch-containment test on late activity rows (RK9-314) | heartbeat (testi) | `server/src/__tests__/heartbeat-workspace-branch-containment.test.ts` | `npx vitest run server/src/__tests__/heartbeat-workspace-branch-containment.test.ts` |
+| 191 | _RK9-454 (PR)_ | feat(claude-local): opt-in additionalMcpConfigPaths merges agent MCP config into the strict runtime config (RK9-454) | claude-local | `packages/adapters/claude-local/src/server/claude-config.ts`, `packages/adapters/claude-local/src/server/execute.ts`, `packages/adapters/claude-local/src/server/execute.additional-mcp.test.ts`, `packages/adapters/claude-local/src/index.ts` (+2) | `npx vitest run packages/adapters/claude-local/src/server/execute.additional-mcp.test.ts`; _manuaalinen:_ Salkunhoitajan heartbeat käyttää Quantimodon MCP-työkaluja ilman `extraArgs`-kiertotietä |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 

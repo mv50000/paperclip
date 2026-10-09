@@ -154,15 +154,79 @@ export function resolveManagedClaudeRuntimeStateDir(
   return path.join(instanceRoot, "companies", companyId, "agents", agentId, "claude-runtime");
 }
 
+// --- RK9 Custom (RK9-454): opt-in additional MCP config files ---
+// Paperclip runs Claude with --strict-mcp-config whenever it has runtime MCP
+// servers, so the agent's own .mcp.json never loads. An agent can list MCP
+// config files in adapterConfig.additionalMcpConfigPaths; their mcpServers are
+// merged into the runtime config. The list is opt-in on purpose: most agents
+// run in app checkouts where auto-merged PRs land, and --mcp-config skips the
+// Claude CLI project-MCP trust prompt. A missing or invalid file logs a
+// warning and is skipped; it never fails the run.
+export async function readAdditionalClaudeMcpServers(input: {
+  paths: string[];
+  cwd: string;
+  onLog: AdapterExecutionContext["onLog"];
+}): Promise<Record<string, Record<string, unknown>>> {
+  const merged: Record<string, Record<string, unknown>> = {};
+  for (const rawPath of input.paths) {
+    const trimmed = rawPath.trim();
+    if (!trimmed) continue;
+    const filePath = path.resolve(input.cwd, trimmed);
+    const warn = (reason: string) =>
+      input.onLog(
+        "stderr",
+        `[paperclip] Warning: additional MCP config "${filePath}" ${reason}; its servers were not loaded.\n`,
+      );
+    let raw: string;
+    try {
+      raw = await fs.readFile(filePath, "utf8");
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "read error";
+      await warn(`could not be read (${code})`);
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      await warn("is not valid JSON");
+      continue;
+    }
+    const servers =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>).mcpServers
+        : undefined;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+      await warn('has no "mcpServers" object');
+      continue;
+    }
+    for (const [name, server] of Object.entries(servers as Record<string, unknown>)) {
+      if (!server || typeof server !== "object" || Array.isArray(server)) {
+        await input.onLog(
+          "stderr",
+          `[paperclip] Warning: MCP server "${name}" in "${filePath}" is not an object and was skipped.\n`,
+        );
+        continue;
+      }
+      merged[name] = server as Record<string, unknown>;
+    }
+  }
+  return merged;
+}
+// --- /RK9 Custom ---
+
 export async function writePaperclipClaudeMcpConfig(input: {
   stateDir: string;
   runId: string;
   servers: AdapterRuntimeMcpServer[];
+  // RK9 Custom (RK9-454): servers from additionalMcpConfigPaths. A runtime
+  // server with the same name replaces the additional one.
+  additionalServers?: Record<string, Record<string, unknown>>;
 }): Promise<string> {
   const configDir = path.join(input.stateDir, "runs", input.runId, "mcp");
   const configPath = path.join(configDir, "mcp-config.json");
   const usedNames = new Set<string>();
-  const mcpServers: Record<string, unknown> = {};
+  const mcpServers: Record<string, unknown> = { ...(input.additionalServers ?? {}) };
   for (const server of input.servers) {
     let name = server.name;
     if (usedNames.has(name)) name = `${name}-${server.connectionId.slice(0, 8)}`;

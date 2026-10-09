@@ -78,6 +78,7 @@ import {
 import {
   materializeRemoteClaudeConfig,
   prepareClaudeConfigSeed,
+  readAdditionalClaudeMcpServers,
   resolveManagedClaudeRuntimeStateDir,
   resolveSharedClaudeConfigDir,
   writePaperclipClaudeMcpConfig,
@@ -594,10 +595,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     agent.companyId,
     agent.id,
   );
+  // --- RK9 Custom (RK9-454): merge opt-in MCP config files into the runtime config ---
+  const additionalMcpServers = await readAdditionalClaudeMcpServers({
+    paths: asStringArray(config.additionalMcpConfigPaths),
+    cwd,
+    onLog,
+  });
+  const additionalMcpServerCount = Object.keys(additionalMcpServers).length;
+  const writesMcpConfig = runtimeMcpServers.length > 0 || additionalMcpServerCount > 0;
+  // --- /RK9 Custom ---
   const localMcpConfigPath = await writePaperclipClaudeMcpConfig({
     stateDir: claudeRuntimeStateDir,
     runId,
     servers: runtimeMcpServers,
+    additionalServers: additionalMcpServers,
   });
   const localMcpConfigDir = path.dirname(localMcpConfigPath);
   const sharedClaudeConfigDir = config.managedAiConnection ? asString(configEnv.CLAUDE_CONFIG_DIR, "") : resolveSharedClaudeConfigDir(process.env);
@@ -954,9 +965,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (attemptInstructionsFilePath && !resumeSessionId) {
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
-    if (runtimeMcpServers.length > 0) {
-      args.push("--mcp-config", effectiveMcpConfigPath, "--strict-mcp-config");
-    }
+    // RK9 Custom (RK9-454): additional servers alone pass --mcp-config without
+    // --strict-mcp-config, so an agent without runtime servers keeps its other
+    // MCP scopes as before.
+    if (writesMcpConfig) args.push("--mcp-config", effectiveMcpConfigPath);
+    if (runtimeMcpServers.length > 0) args.push("--strict-mcp-config");
     args.push("--add-dir", effectivePromptBundleAddDir);
     if (disallowedTools.length > 0) args.push("--disallowedTools", disallowedTools.join(","));
     if (allowedTools.length > 0) args.push("--allowedTools", allowedTools.join(","));
@@ -1000,6 +1013,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (runtimeMcpServers.length > 0) {
       commandNotes.push(
         `Using ${runtimeMcpServers.length} Paperclip-managed MCP server(s) from strict config ${effectiveMcpConfigPath}.`,
+      );
+    }
+    if (additionalMcpServerCount > 0) {
+      commandNotes.push(
+        `Merged ${additionalMcpServerCount} MCP server(s) from additionalMcpConfigPaths into ${effectiveMcpConfigPath} (RK9-454).`,
       );
     }
     if (onMeta) {
