@@ -1421,10 +1421,20 @@ function parseCsvIds(value: string | undefined): string[] | undefined {
 
 const ACCEPTANCE_CRITERIA_HEADING = "## Acceptance Criteria";
 
+const ACCEPTANCE_CRITERIA_HEADING_PATTERN = /^ {0,3}##[ \t]+acceptance criteria(?:[ \t]*\([^)]*\))?[ \t]*#*[ \t]*$/i;
+const ATX_HEADING_PATTERN = /^ {0,3}#{1,2}(?:[ \t]|$)/;
+const SETEXT_UNDERLINE_PATTERN = /^ {0,3}(?:=+|-+)[ \t]*$/;
+const NON_SETEXT_TEXT_PATTERN = /^ {0,3}(?:#|>|[-*+][ \t]|\d+[.)][ \t])/;
+
+function trimBlankLines(text: string): string {
+  return text.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+}
+
 /**
- * Same markdown shape the server uses for child:create. An existing AC section is replaced in
- * place: it ends at the next level 1-2 heading (or the end), so later sections are kept.
- * Headings inside fenced code blocks are ignored.
+ * Same markdown shape the server uses for child:create. Every existing AC section is replaced:
+ * the first in place, the rest removed. A section ends at the next level 1-2 heading (ATX with up
+ * to 3 spaces of indent, or setext) or the end, so later sections are kept. Headings inside
+ * fenced code blocks and HTML comments are ignored. CRLF descriptions stay CRLF.
  */
 export function withAcceptanceCriteria(
   description: string | undefined,
@@ -1433,12 +1443,22 @@ export function withAcceptanceCriteria(
   const items = (criteria ?? []).map((item) => item.trim()).filter(Boolean);
   if (items.length === 0) return description;
   const section = [ACCEPTANCE_CRITERIA_HEADING, "", ...items.map((item) => `- ${item}`)].join("\n");
-  const lines = (description ?? "").split("\n");
+  const crlf = (description ?? "").includes("\r\n");
+  const lines = (description ?? "").replace(/\r\n/g, "\n").split("\n");
+  const ranges: Array<{ start: number; end: number }> = [];
   let fence: { char: string; length: number } | null = null;
-  let start = -1;
-  let end = lines.length;
+  let inComment = false;
+  let open = -1;
+  const closeAt = (i: number) => {
+    if (open >= 0) ranges.push({ start: open, end: i });
+    open = -1;
+  };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (inComment) {
+      if (line.includes("-->")) inComment = false;
+      continue;
+    }
     const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (fenceMatch) {
       const marker = fenceMatch[1];
@@ -1447,37 +1467,54 @@ export function withAcceptanceCriteria(
       continue;
     }
     if (fence) continue;
-    if (start >= 0) {
-      if (/^#{1,2}\s/.test(line)) {
-        end = i;
-        break;
-      }
-    } else if (/^## Acceptance Criteria\s*$/.test(line)) {
-      start = i;
-    } else {
+    const commentStart = line.lastIndexOf("<!--");
+    if (commentStart >= 0 && !line.includes("-->", commentStart)) {
+      inComment = true;
+      if (commentStart === 0 || !line.slice(0, commentStart).trim()) continue;
+    }
+    if (ACCEPTANCE_CRITERIA_HEADING_PATTERN.test(line)) {
+      closeAt(i);
+      open = i;
       continue;
     }
+    if (open < 0) continue;
+    const isSetext =
+      line.trim() !== "" &&
+      !NON_SETEXT_TEXT_PATTERN.test(line) &&
+      i + 1 < lines.length &&
+      SETEXT_UNDERLINE_PATTERN.test(lines[i + 1]);
+    if (ATX_HEADING_PATTERN.test(line) || isSetext) closeAt(i);
   }
-  if (start < 0) {
+  closeAt(lines.length);
+  let result: string;
+  if (ranges.length === 0) {
     const base = lines.join("\n").trim();
-    return base ? `${base}\n\n${section}` : section;
+    result = base ? `${base}\n\n${section}` : section;
+  } else {
+    const parts: string[] = [];
+    let cursor = 0;
+    ranges.forEach((range, index) => {
+      parts.push(trimBlankLines(lines.slice(cursor, range.start).join("\n")));
+      if (index === 0) parts.push(section);
+      cursor = range.end;
+    });
+    parts.push(trimBlankLines(lines.slice(cursor).join("\n")));
+    result = parts.filter(Boolean).join("\n\n");
   }
-  const before = lines.slice(0, start).join("\n").trim();
-  const after = lines.slice(end).join("\n").trim();
-  return [before, section, after].filter(Boolean).join("\n\n");
+  return crlf ? result.replace(/\n/g, "\r\n") : result;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function resolveBlockerIds(
-  api: { get<T>(path: string): Promise<T | null> },
+  api: { get<T>(path: string, opts?: { ignoreNotFound?: boolean }): Promise<T | null> },
   ids: string[] | undefined,
 ): Promise<string[] | undefined> {
   if (!ids) return ids;
   return Promise.all(
     ids.map(async (id) => {
       if (UUID_PATTERN.test(id)) return id;
-      const found = await api.get<Issue>(apiPath`/api/issues/${id}`);
+      const found = await api.get<Issue>(apiPath`/api/issues/${id}`, { ignoreNotFound: true });
       if (!found?.id) throw new Error(`Blocker issue not found: ${id}`);
       return found.id;
     }),
