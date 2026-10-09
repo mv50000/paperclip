@@ -5,6 +5,7 @@ import {
   closeQmdMcpSession,
   getQmdDaemonStatus,
   probeQmdDaemon,
+  probeSeedFromRow,
   keepwarmPing,
   queryQmdDaemon,
   startQmdHealthProbe,
@@ -52,8 +53,13 @@ function fakeQmdServer(opts: {
     }
     if (body.method === "tools/call" && body.params?.name === "query") {
       queryAttempt++;
-      const rows = opts.onQuery?.(body.params.arguments ?? {}, queryAttempt) ?? [];
-      const rpcResponse = { jsonrpc: "2.0", id: 2, result: { structuredContent: { results: rows } } };
+      // Same check as qmd's validateSemanticQuery: a vec query with a `-term` token is an error result.
+      const searches = (body.params.arguments?.searches ?? []) as Array<{ type: string; query: string }>;
+      const negation = searches.find((x) => x.type === "vec" && /(^|\s)-[\w"]/.test(x.query));
+      const rows = negation ? [] : (opts.onQuery?.(body.params.arguments ?? {}, queryAttempt) ?? []);
+      const rpcResponse = negation
+        ? { jsonrpc: "2.0", id: 2, result: { isError: true, content: [{ type: "text", text: "Structured search (vec): Negation (-term) is not supported in vec/hyde queries. Use lex for exclusions." }] } }
+        : { jsonrpc: "2.0", id: 2, result: { structuredContent: { results: rows } } };
       if (opts.sse) {
         return new Response(`event: message\ndata: ${JSON.stringify(rpcResponse)}\n\n`, {
           status: 200,
@@ -460,9 +466,12 @@ describe("daemon health (RK9-369)", () => {
     const server = fakeQmdServer({
       onQuery: (args) => {
         const search = (args.searches as Array<{ type: string; query: string }>)[0];
-        if (search.type === "lex") return [{ file: "rk9/a.md", title: "Operator todo", snippet: "Pay the invoice" }];
+        // A real qmd snippet: hunk header and numbered lines (RK9-467).
+        if (search.type === "lex") {
+          return [{ file: "rk9/a.md", title: "Operator todo", snippet: "7: @@ -6,4 @@ (5 before, 40 after)\n8: Pay the invoice\n9: -50 € refund" }];
+        }
         // Orphan vectors crowd out "health"; the active document's own text still matches.
-        return search.query === "Operator todo Pay the invoice" ? [{ file: "rk9/a.md" }] : [];
+        return search.query === "Operator todo Pay the invoice 50 € refund" ? [{ file: "rk9/a.md" }] : [];
       },
     });
     await probeQmdDaemon({ fetchImpl: server.fetchImpl });
@@ -482,6 +491,30 @@ describe("daemon health (RK9-369)", () => {
     expect(lexCalls()).toBe(2);
     await probeQmdDaemon({ fetchImpl: server.fetchImpl });
     expect(lexCalls()).toBe(2);
+    expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0 });
+  });
+
+  it("builds the seed without qmd's hunk header, line numbers or negation tokens (RK9-467)", () => {
+    // Lex hit seen on CT 364 on 9.10.2026; the raw text made qmd reject the vec query as negation.
+    const seed = probeSeedFromRow({
+      title: "Webhook health monitor",
+      snippet: "7: @@ -6,4 @@ (5 before, 40 after)\n8: status: active\n9: legacy_name: GitHub webh",
+    });
+    expect(seed).toBe("Webhook health monitor status: active legacy_name: GitHub webh");
+    expect(seed).not.toMatch(/(^|\s)-[\w"]/);
+    expect(probeSeedFromRow({ title: "Kulut", snippet: "3: -50 € --force real-time" })).toBe("Kulut 50 € force real-time");
+    expect(probeSeedFromRow(undefined)).toBe("");
+  });
+
+  it("a fake daemon with qmd's negation check rejects the raw snippet but accepts the seed (RK9-467)", async () => {
+    const server = fakeQmdServer({
+      onQuery: (args) => {
+        const search = (args.searches as Array<{ type: string }>)[0];
+        if (search.type === "lex") return [{ file: "rk9/a.md", title: "Webhook health monitor", snippet: "7: @@ -6,4 @@ (5 before, 40 after)\n8: status: active" }];
+        return [{ file: "rk9/a.md" }];
+      },
+    });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
     expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0 });
   });
 
