@@ -1,16 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 import fs from "node:fs/promises";
 
+import { REAPER_MARKER_ENV_KEY, sweepProcessesSync } from "./proc-sweep.js";
+
 /**
- * The environment key that marks a process as spawned by this test run.
- *
- * The name must not start with `PAPERCLIP_`: `runChildProcess` strips inherited
- * `PAPERCLIP_*` keys, so such a marker would never reach the wrapper or the
- * bridge server. The first test module that loads this file sets the value, and
- * every process the test run spawns afterwards inherits it.
+ * The environment key that marks a process as spawned by this test run (see
+ * `proc-sweep.ts` for why it has no `PAPERCLIP_` prefix). In
+ * `@paperclipai/adapter-utils` the vitest globalSetup (`reaper-global-setup.ts`)
+ * sets the value before any worker starts, so every worker and every process it
+ * spawns inherits it, and the globalTeardown can sweep by it after a worker was
+ * killed by a signal. A project without that globalSetup falls back to the
+ * first test module that loads this file.
  */
-export const REAPER_MARKER_ENV_KEY = "PCP_TEST_REAPER_MARKER";
+export { REAPER_MARKER_ENV_KEY };
 if (!process.env[REAPER_MARKER_ENV_KEY]) process.env[REAPER_MARKER_ENV_KEY] = randomUUID();
 
 /** The marker entry, for a test that spawns a process with a hand-built env. */
@@ -45,39 +47,13 @@ function ownedByRoots(
   return false;
 }
 
+// This hook does not run when the worker is killed by a signal; the
+// globalTeardown in `reaper-global-setup.ts` covers that case (RK9-462).
 process.once("exit", () => {
   const marker = process.env[REAPER_MARKER_ENV_KEY];
   if (seenRoots.size === 0 || !marker) return;
-  let entries: string[];
-  try {
-    entries = readdirSync("/proc");
-  } catch {
-    return;
-  }
-  const read = (file: string) => {
-    try {
-      return readFileSync(file, "utf8");
-    } catch {
-      return "";
-    }
-  };
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue;
-    const base = `/proc/${entry}`;
-    let cwd = "";
-    try {
-      cwd = readlinkSync(`${base}/cwd`);
-    } catch {
-      // Gone, or owned by another user.
-    }
-    const candidate = { cmdline: read(`${base}/cmdline`), environ: read(`${base}/environ`), cwd };
-    if (!ownedByRoots(candidate, seenRoots, `${REAPER_MARKER_ENV_KEY}=${marker}`)) continue;
-    try {
-      process.kill(Number(entry), "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
+  const markerEntry = `${REAPER_MARKER_ENV_KEY}=${marker}`;
+  sweepProcessesSync((candidate) => ownedByRoots(candidate, seenRoots, markerEntry));
 });
 
 /**
