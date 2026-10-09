@@ -374,6 +374,48 @@ describe.sequential("outreach routes", () => {
     expect(mockOutreach.updateDraftMessage).not.toHaveBeenCalled();
   });
 
+  // --- RK9-453: edit / approve / reject are board-only ----------------------
+
+  const MESSAGE_URL = "/api/companies/company-1/outreach/messages/11111111-1111-1111-1111-111111111111";
+
+  it("an agent key of the same company gets 403 on message edit, approve and reject", async () => {
+    const app = await createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key" });
+    let res = await requestApp(app, (base) => request(base).patch(MESSAGE_URL).send({ subject: "Agent edit" }));
+    expect(res.status).toBe(403);
+    res = await requestApp(app, (base) => request(base).post(`${MESSAGE_URL}/approve`).send({}));
+    expect(res.status).toBe(403);
+    res = await requestApp(app, (base) => request(base).post(`${MESSAGE_URL}/reject`).send({ reason: "agent" }));
+    expect(res.status).toBe(403);
+    expect(mockOutreach.updateDraftMessage).not.toHaveBeenCalled();
+    expect(mockOutreach.approveMessage).not.toHaveBeenCalled();
+    expect(mockOutreach.rejectMessage).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["user session", BOARD_ACTOR],
+    // The Telegram approval listener authenticates with a pcp_board_ key.
+    ["board API key", { ...BOARD_ACTOR, source: "board_key", keyId: "key-1" }],
+  ])("a %s can still edit, approve and reject a message", async (_label, actor) => {
+    mockOutreach.updateDraftMessage.mockResolvedValueOnce({ ok: true, message: { id: "m1", subject: "New" } });
+    mockOutreach.approveMessage.mockResolvedValueOnce({ ok: true, message: { id: "m1", status: "approved" } });
+    mockOutreach.rejectMessage.mockResolvedValueOnce({ ok: false, reason: "invalid_transition", status: "approved" });
+    const app = await createApp(actor);
+    let res = await requestApp(app, (base) => request(base).patch(MESSAGE_URL).send({ subject: "New" }));
+    expect(res.status).toBe(200);
+    res = await requestApp(app, (base) => request(base).post(`${MESSAGE_URL}/approve`).send({}));
+    expect(res.status).toBe(200);
+    expect(mockOutreach.approveMessage).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "company-1",
+      "11111111-1111-1111-1111-111111111111",
+      "user-1",
+    );
+    res = await requestApp(app, (base) => request(base).post(`${MESSAGE_URL}/reject`).send({ reason: "too late" }));
+    expect(res.status).toBe(409);
+    expect(mockOutreach.rejectMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("prospect enrich batches ids and audits the outcome", async () => {
     mockOutreach.enrichProspects.mockResolvedValueOnce([
       { prospectId: "11111111-1111-1111-1111-111111111111", ok: true },

@@ -388,11 +388,14 @@ export function outreachRoutes(db: Db) {
   });
 
   // RK9-196: review tool's "edit" action — rewrite a still-`draft` message.
+  // RK9-453: edit, approve and reject are the operator's approval gate, so
+  // they are board-only. An agent key of the same company gets 403.
   router.patch(
     "/companies/:companyId/outreach/messages/:messageId",
     validate(updateOutreachMessageSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
+      assertBoard(req);
       assertCompanyAccess(req, companyId);
       const id = pathId(req.params.messageId);
       const result = await updateDraftMessage(db, companyId, id, req.body);
@@ -412,6 +415,7 @@ export function outreachRoutes(db: Db) {
     validate(approveOutreachMessageSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
+      assertBoard(req);
       assertCompanyAccess(req, companyId);
       const actor = getActorInfo(req);
       const id = pathId(req.params.messageId);
@@ -430,6 +434,7 @@ export function outreachRoutes(db: Db) {
     validate(rejectOutreachMessageSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
+      assertBoard(req);
       assertCompanyAccess(req, companyId);
       const actor = getActorInfo(req);
       const id = pathId(req.params.messageId);
