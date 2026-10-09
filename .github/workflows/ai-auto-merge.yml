@@ -89,9 +89,82 @@ jobs:
               return;
             }
 
+            // --- RK9 Custom (RK9-470) --- polkuporras (RK9-403-malli rk9-ai-repoista).
+            // Toimitusketjun polut eivät koskaan mergeydy automaattisesti, vaan ihminen
+            // mergeää ne. workflow_run ajaa aina masterin version tästä tiedostosta, joten
+            // PR ei voi muuttaa omaa porttiaan. Lukkotiedostoon rajattu nosto menee myös
+            // ihmiselle; operaattorisessiolla on pysyvä lupa mergetä se käsin.
+            const protectedPatterns = [
+              // Koko .github/: workflowt, skriptit, CODEOWNERS ja tämä portti.
+              /^\.github\//,
+              // Drizzle-migraatiot (packages/db/drizzle.config.ts: out ./src/migrations)
+              // ja muut migrations/-hakemistot missä tahansa.
+              /^packages\/db\/src\/migrations\//,
+              /(^|\/)migrations\//,
+              /^paperclip-service\//,
+              // Juuren Dockerfile ja docker/**/Dockerfile.*.
+              /(^|\/)Dockerfile[^/]*$/,
+              // Lukkotiedostot: CI asentaa lukosta, joten riippuvuuspuun muutos on täällä.
+              /(^|\/)pnpm-lock\.yaml$/,
+              /(^|\/)package-lock\.json$/,
+              /(^|\/)yarn\.lock$/,
+              /(^|\/)Cargo\.lock$/,
+            ];
+            const lockfilePattern = /(^|\/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|Cargo\.lock)$/;
+            const isProtected = (n) => protectedPatterns.some((re) => re.test(n));
+
+            const prFiles = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: prNumber, per_page: 100,
+            });
+            const touched = new Set();
+            for (const f of prFiles) {
+              touched.add(f.filename);
+              if (f.previous_filename) touched.add(f.previous_filename);
+            }
+            const protectedFiles = [...touched].filter(isProtected).sort();
+            // Fail closed: jos koko tiedostolistaa ei nähdä (listFiles palauttaa enintään
+            // 3000 tiedostoa), PR menee ihmiselle.
+            const incomplete = prFiles.length !== pr.changed_files;
+            if (protectedFiles.length > 0 || incomplete) {
+              const lockfileOnly = !incomplete && touched.size > 0 && [...touched].every((n) => lockfilePattern.test(n));
+              const reasons = [];
+              if (incomplete) reasons.push(`Tiedostolista ei ole täydellinen (${pr.changed_files} tiedostoa, nähtiin ${prFiles.length}).`);
+              if (protectedFiles.length > 0) reasons.push(`Suojatut polut: ${protectedFiles.map((n) => `\`${n}\``).join(', ')}`);
+              core.notice(`PR #${prNumber} needs a human merge (RK9-470): ${reasons.join(' ')}`);
+
+              const marker = `<!-- ai-auto-merge:human:${pr.head.sha} -->`;
+              try {
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner, repo, issue_number: prNumber, per_page: 100,
+                });
+                const alreadyPosted = comments.some((c) => c.user?.login === 'github-actions[bot]' && c.body?.includes(marker));
+                if (!alreadyPosted) {
+                  const body = [
+                    marker,
+                    '**Auto-merge pysäytetty: PR koskee suojattuja polkuja, joten ihminen mergeää sen (RK9-470).**',
+                    '',
+                    ...reasons.map((r) => `- ${r}`),
+                    '',
+                    lockfileOnly
+                      ? 'PR muuttaa vain lukkotiedostoa. Operaattorisessio saa mergetä sen käsin, kun CI on vihreä ja audit on ajettu (pysyvä lupa).'
+                      : 'Katselmoi muutos ja mergeä käsin.',
+                    '',
+                    `Head: \`${pr.head.sha}\``,
+                  ].join('\n');
+                  await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+                }
+              } catch (err) {
+                core.warning(`Could not post the human-merge comment: ${err.message}`);
+              }
+              return;
+            }
+
             try {
               const result = await github.rest.pulls.merge({
                 owner, repo, pull_number: prNumber, merge_method: 'squash',
+                // --- RK9 Custom (RK9-470) --- merge vain tarkastettu head: myöhempi push
+                // (esim. .github/-muutos) ei pääse mergeen ohi polkuportin.
+                sha: pr.head.sha,
                 commit_title: `Auto-merge PR #${prNumber} (CI green + AI pipeline)`,
               });
               core.info(`Merged PR #${prNumber}: ${result.data.sha}`);
