@@ -1505,7 +1505,9 @@ function htmlBlockHeadingLines(
   const start = lineStartOffset(text, origin + (node.position?.start.offset ?? 0));
   const end = origin + (node.position?.end.offset ?? 0);
   const source = text.slice(start, end);
-  if (HTML_BLOCKS_WITH_END_MARKER.some((block) => block.start.test(source.split("\n", 1)[0]))) return [];
+  // `value` has no list marker or `>` before the tag, so `- <!-- x` is still seen as a comment.
+  const firstLine = (node.value ?? "").split("\n", 1)[0];
+  if (HTML_BLOCKS_WITH_END_MARKER.some((block) => block.start.test(firstLine))) return [];
   const headings: Array<{ lineStart: number; isAc: boolean }> = [];
   let offset = start;
   for (const [index, line] of source.split("\n").entries()) {

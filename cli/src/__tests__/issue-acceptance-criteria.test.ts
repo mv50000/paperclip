@@ -239,4 +239,17 @@ describe("withAcceptanceCriteria edge cases", () => {
     expect(out).toBe("<details>\n\nx\n\n</details>\n\n## Acceptance Criteria\n\n- new\n\n## Notes\nkeep");
     expect(withAcceptanceCriteria(out, AC)).toBe(out);
   });
+  it.each([
+    "Intro\n\n- step one\n- <!-- disabled for now\n  ## Acceptance Criteria\n  - old item\n  -->\n- step two\n\n## Notes\n\nkeep",
+    "1. <script>\n   ## Acceptance Criteria\n   </script>\n2. visible\n\ntail",
+  ])("does not split a comment or <script> block on a list marker line: %j", (src) => {
+    expect(withAcceptanceCriteria(src, AC)).toBe(`${src}\n\n## Acceptance Criteria\n\n- new`);
+  });
+
+  it.each([
+    "## Acceptance Criteria\n\n- a\n\n- <!-- c\n  ## Notes\n  -->\n- b\n\nkeep",
+    "## Acceptance Criteria\n\n- a\n- <pre>\n  # install\n  npm i\n  </pre>\n- b\n\nkeep",
+  ])("replaces a list item comment or <pre> block with the AC section: %j", (src) => {
+    expect(withAcceptanceCriteria(src, AC)).toBe("## Acceptance Criteria\n\n- new");
+  });
 });
