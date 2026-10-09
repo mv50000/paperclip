@@ -5,9 +5,11 @@ The `qmd-mcp` daemon on CT 364 (`192.168.1.64:8181`) serves recall. When it is d
 
 ## Layer 1: the Paperclip server (inside the app)
 
-- `probeQmdDaemon` runs every 60 s and only when `QMD_MCP_URL` is set. It sends the same lex+vec query as a
-  real recall, so a broken embedding model or a vec timeout counts as a failure. A tool-level `isError` result
-  is a failure too (RK9-371; before that the probe was lex-only and hid vec faults).
+- `probeQmdDaemon` runs every 60 s and only when `QMD_MCP_URL` is set. It sends a vec-only query to the `rk9`
+  collection and requires at least one hit (RK9-463). A lex+vec query is not enough: qmd swallows embedding-model
+  load and embed errors (`embedBatch` returns null embeddings) and `structuredSearch` skips the vec search without
+  an error, so the tool returns a lex-only result without `isError`. A vec-only query has no lex fallback and returns
+  zero rows when the model is broken. Zero hits, a tool-level `isError` result and a vec timeout all count as failures.
 - After `PAPERCLIP_QMD_ALERT_THRESHOLD` (default 3) consecutive failures the server logs
   `qmd-mcp daemon DOWN` at ERROR, then again on every 10th failure.
 - `GET /api/knowledge/qmd-status` (instance admin) returns 200 when healthy and 503 when not.
@@ -17,7 +19,7 @@ The `qmd-mcp` daemon on CT 364 (`192.168.1.64:8181`) serves recall. When it is d
 
 ## Layer 2: Prometheus on skynet (CT 342)
 
-A TCP probe sees the daemon port only. It does not see vec faults; layer 1 covers those.
+A TCP probe sees the daemon port only. It does not see vec faults, including a model that failed to load; layer 1 covers those.
 
 Versioned sources, because skynet's `/opt/prometheus` is not a git repo:
 
@@ -50,3 +52,11 @@ docker exec -w /tmp prometheus promtool test rules qmd-mcp-alert-rules.test.yml
 
 Run on 2026-10-09: SUCCESS. The skynet apply (steps 1-5) was not done by the agent that wrote this note: the
 harness denied remote writes to skynet. See `rk9/areas/operator_todo.md` in the vault.
+
+## Open follow-ups (RK9-463, not done)
+
+- A JSON-RPC error unrelated to the session (e.g. -32603) discards the shared session and makes a parallel recall retry.
+- `stop()` of the probe does not wait for a running probe, so it can open a session after `closeQmdMcpSession()`.
+- The 60 s vec probe keeps the embedding model loaded on CT 364, unlike the deliberately disabled keepwarm. Review the interval.
+- Skynet `/opt/prometheus/alert_rules.yml` needs the new `QmdMcpDaemonDown` annotation from
+  `infra/prometheus/qmd-mcp-alert-rules.yml` (parent applies; agents cannot write to skynet).

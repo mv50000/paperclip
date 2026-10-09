@@ -411,7 +411,7 @@ describe("daemon health (RK9-369)", () => {
     const status = getQmdDaemonStatus();
     expect(status).toMatchObject({ healthy: false, consecutiveFailures: 3, lastError: "ECONNREFUSED" });
     expect(errorSpy).toHaveBeenCalledTimes(1);
-    const server = fakeQmdServer({ onQuery: () => [] });
+    const server = fakeQmdServer({ onQuery: () => [{ file: "rk9/x.md" }] });
     await probeQmdDaemon({ fetchImpl: server.fetchImpl });
     expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0, totalFailures: 3 });
   });
@@ -443,7 +443,17 @@ describe("daemon health (RK9-369)", () => {
     await probeQmdDaemon({ fetchImpl });
     expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 1 });
     expect(getQmdDaemonStatus().lastError).toContain("embedding model failed");
-    expect((calls[0].searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["lex", "vec"]);
+    expect((calls[0].searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["vec"]);
+  });
+
+  it("counts a vec-only probe with zero hits as a failure (qmd swallowed a model load error, RK9-463)", async () => {
+    vi.spyOn(logger, "error").mockImplementation(() => {});
+    const server = fakeQmdServer({ onQuery: () => [] });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    expect(getQmdDaemonStatus()).toMatchObject({ consecutiveFailures: 1, totalFailures: 1 });
+    expect(getQmdDaemonStatus().lastError).toContain("no hits");
+    const query = server.calls.find((c) => c.name === "query");
+    expect((query?.args?.searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["vec"]);
   });
 
   it("logs the DOWN error at the threshold and then only every 10th failure", async () => {
