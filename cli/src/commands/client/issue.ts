@@ -1423,6 +1423,7 @@ function parseCsvIds(value: string | undefined): string[] | undefined {
 const ACCEPTANCE_CRITERIA_HEADING = "## Acceptance Criteria";
 
 const ACCEPTANCE_CRITERIA_TITLE_PATTERN = /^acceptance criteria(?:\s*\([^)]*\))?$/i;
+const MAX_UNTERMINATED_RESCANS = 50;
 
 type MarkdownNode = {
   type: string;
@@ -1431,37 +1432,6 @@ type MarkdownNode = {
   children?: MarkdownNode[];
   position?: { start: { offset?: number }; end: { offset?: number } };
 };
-
-function trimBlankLines(text: string): string {
-  return text.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
-}
-
-function lineStartOffset(text: string, offset: number): number {
-  return text.lastIndexOf("\n", offset - 1) + 1;
-}
-
-function headingText(node: MarkdownNode): string {
-  if (node.type === "text" || node.type === "inlineCode") return node.value ?? "";
-  return (node.children ?? []).map(headingText).join("");
-}
-
-/**
- * Line start of the first level 1-2 heading nested in a list or blockquote that starts its own line
- * (only indent or `>` before it). It also ends an AC section, so its text is kept. A heading on a list
- * item marker line (`- # x`) does not, or the old AC items after it would join the new list. -1 if none.
- */
-function nestedSectionStart(node: MarkdownNode, text: string, base: number): number {
-  for (const child of node.children ?? []) {
-    if (child.type === "heading" && (child.depth ?? 0) <= 2) {
-      const offset = base + (child.position?.start.offset ?? 0);
-      const lineStart = lineStartOffset(text, offset);
-      if (/^[ \t>]*$/.test(text.slice(lineStart, offset))) return lineStart;
-    }
-    const nested = nestedSectionStart(child, text, base);
-    if (nested >= 0) return nested;
-  }
-  return -1;
-}
 
 // CommonMark HTML block types 1-5 end only at their end marker, so an unclosed one runs to the end.
 // `overlap` lets the end marker share characters with the start (`<!-->`, `<?>`).
@@ -1473,32 +1443,64 @@ const HTML_BLOCKS_WITH_END_MARKER: Array<{ start: RegExp; end: RegExp; overlap: 
   { start: /^ {0,3}<!\[CDATA\[/, end: /\]\]>/, overlap: 0 },
 ];
 
+function trimBlankLines(text: string): string {
+  return text.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+}
+
+function lineStartOffset(text: string, offset: number): number {
+  return text.lastIndexOf("\n", offset - 1) + 1;
+}
+
+/** Depth-first, in document order. Iterative, so deeply nested input cannot overflow the stack. */
+function* walkMarkdown(nodes: MarkdownNode[]): Generator<MarkdownNode> {
+  const stack = [...nodes].reverse();
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    yield node;
+    for (let i = (node.children?.length ?? 0) - 1; i >= 0; i--) stack.push(node.children![i]);
+  }
+}
+
+function headingText(node: MarkdownNode): string {
+  let text = "";
+  for (const child of walkMarkdown(node.children ?? [])) {
+    if (child.type === "text" || child.type === "inlineCode") text += child.value ?? "";
+  }
+  return text;
+}
+
 /**
  * A top-level HTML block (`<!--`, `<pre>`, `<?`, ...) or code fence that never closes hides the rest
- * of the document. The caller keeps its opening line and scans the lines after it as markdown again.
+ * of the document from the parser.
  */
 function isUnterminatedBlock(node: MarkdownNode, source: string): boolean {
+  const firstLine = source.split("\n", 1)[0];
   if (node.type === "html") {
     for (const block of HTML_BLOCKS_WITH_END_MARKER) {
-      const open = block.start.exec(source);
+      const open = block.start.exec(firstLine);
       if (open) return !block.end.test(source.slice(open[0].length - block.overlap));
     }
     return false;
   }
   if (node.type !== "code") return false;
-  const fence = /^ {0,3}(`{3,}|~{3,})/.exec(source)?.[1];
+  const fence = /^ {0,3}(`{3,}|~{3,})/.exec(firstLine)?.[1];
   if (!fence) return false;
   const lines = source.split("\n");
   const closing = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`);
   return lines.length < 2 || !closing.test(lines[lines.length - 1]);
 }
 
-const MAX_UNTERMINATED_RESCANS = 50;
-
 /**
- * Finds every AC section with a CommonMark parser. A section starts at a top-level level 2 heading
- * "Acceptance Criteria" (optionally followed by "(...)") and ends at the next level 1-2 heading
- * (ATX or setext, also one nested in a list or blockquote) or the end. Offsets are line starts in `text`.
+ * Finds every AC section with a CommonMark parser. Offsets are line starts in `text`.
+ *
+ * - A level 1-2 heading (ATX or setext) is a section boundary when it starts its own line: only indent
+ *   or `>` before it, so also one nested in a list item or blockquote. A heading on a list marker line
+ *   (`- # x`) is not, or the old AC items after it would join the new list.
+ * - An AC heading is such a level 2 heading "Acceptance Criteria" (optionally "(...)") with only indent
+ *   before it. Its section ends at the next boundary or the end.
+ * - A top-level `<!--`, `<pre>`, `<?`, ... or code fence that never closes hides the rest of the
+ *   document. An AC section ends where it starts, so the hidden text is kept. Only when no AC section
+ *   is found before it, the lines after its first line are scanned again (at most 50 times, to bound
+ *   the run time). So an AC section that an earlier run appended there is found and replaced.
  */
 function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
@@ -1508,29 +1510,29 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
     open = -1;
   };
   let base = 0;
-  // Each rescan parses the rest again; the cap keeps many unclosed blocks from making this quadratic.
   for (let pass = 0; base >= 0 && pass < MAX_UNTERMINATED_RESCANS; pass++) {
     const segment = text.slice(base);
     const nodes = (fromMarkdown(segment) as { children: MarkdownNode[] }).children;
-    let next = -1;
-    for (const [index, node] of nodes.entries()) {
-      const from = lineStartOffset(text, base + (node.position?.start.offset ?? 0));
-      const to = base + (node.position?.end.offset ?? segment.length);
-      if (index === nodes.length - 1 && isUnterminatedBlock(node, text.slice(from, to))) {
-        const lineEnd = text.indexOf("\n", from);
-        next = lineEnd < 0 ? -1 : lineEnd + 1;
-        break;
-      }
-      if (node.type !== "heading") {
-        const nested = nestedSectionStart(node, text, base);
-        if (nested >= 0) closeAt(nested);
-        continue;
-      }
-      if ((node.depth ?? 0) > 2) continue;
-      closeAt(from);
-      if (node.depth === 2 && ACCEPTANCE_CRITERIA_TITLE_PATTERN.test(headingText(node).trim())) open = from;
+    const last = nodes[nodes.length - 1];
+    const lastStart = last ? lineStartOffset(text, base + (last.position?.start.offset ?? 0)) : -1;
+    const unterminated =
+      last !== undefined &&
+      isUnterminatedBlock(last, text.slice(lastStart, base + (last.position?.end.offset ?? segment.length)));
+    for (const node of walkMarkdown(unterminated ? nodes.slice(0, -1) : nodes)) {
+      if (node.type !== "heading" || (node.depth ?? 0) > 2) continue;
+      const offset = base + (node.position?.start.offset ?? 0);
+      const lineStart = lineStartOffset(text, offset);
+      const prefix = text.slice(lineStart, offset);
+      if (!/^[ \t>]*$/.test(prefix)) continue;
+      closeAt(lineStart);
+      const isAc = node.depth === 2 && /^[ \t]*$/.test(prefix) && ACCEPTANCE_CRITERIA_TITLE_PATTERN.test(headingText(node).trim());
+      if (isAc) open = lineStart;
     }
-    base = next;
+    if (!unterminated) break;
+    closeAt(lastStart);
+    if (ranges.length > 0) break;
+    const lineEnd = text.indexOf("\n", lastStart);
+    base = lineEnd < 0 ? -1 : lineEnd + 1;
   }
   closeAt(text.length);
   return ranges;
@@ -1540,7 +1542,7 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
  * Same markdown shape the server uses for child:create. Every existing AC section is replaced:
  * the first in place, the rest removed. Sections are found with a CommonMark parser
  * (see findAcceptanceCriteriaRanges), so headings in code blocks and HTML comments are ignored and
- * text outside the AC sections is kept byte for byte. CRLF descriptions stay CRLF.
+ * text outside the AC sections is kept byte for byte. CRLF (or lone CR) descriptions keep their line ending.
  */
 export function withAcceptanceCriteria(
   description: string | undefined,
@@ -1549,8 +1551,9 @@ export function withAcceptanceCriteria(
   const items = (criteria ?? []).map((item) => item.trim()).filter(Boolean);
   if (items.length === 0) return description;
   const section = [ACCEPTANCE_CRITERIA_HEADING, "", ...items.map((item) => `- ${item}`)].join("\n");
-  const crlf = (description ?? "").includes("\r\n");
-  const text = (description ?? "").replace(/\r\n?/g, "\n");
+  const source = description ?? "";
+  const eol = source.includes("\r\n") ? "\r\n" : source.includes("\r") && !source.includes("\n") ? "\r" : "\n";
+  const text = source.replace(/\r\n?/g, "\n");
   const ranges = findAcceptanceCriteriaRanges(text);
   let result: string;
   if (ranges.length === 0) {
@@ -1568,7 +1571,7 @@ export function withAcceptanceCriteria(
     parts.push(trimBlankLines(text.slice(cursor)));
     result = parts.filter(Boolean).join("\n\n");
   }
-  return crlf ? result.replace(/\n/g, "\r\n") : result;
+  return eol === "\n" ? result : result.replace(/\n/g, eol);
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

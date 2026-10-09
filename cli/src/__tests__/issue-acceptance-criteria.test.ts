@@ -84,9 +84,16 @@ describe("withAcceptanceCriteria edge cases", () => {
     );
   });
 
-  it("keeps later sections after an unclosed code fence", () => {
+  it("keeps an unclosed code fence and everything after it", () => {
     const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- a\n\n```\ncode\n\n## Notes\n\nkeep", AC);
-    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n```\ncode\n\n## Notes\n\nkeep");
+  });
+
+  it("keeps an AC-like heading inside an unclosed fence after a visible AC section", () => {
+    const tail = "## Notes\n\n```md\n## Acceptance Criteria\n- example\nmore code";
+    const out = withAcceptanceCriteria(`## Acceptance Criteria\n\n- a\n\n${tail}`, AC);
+    expect(out).toBe(`## Acceptance Criteria\n\n- new\n\n${tail}`);
+    expect(withAcceptanceCriteria(out, AC)).toBe(out);
   });
 
   it("replaces the AC section after an unclosed code fence", () => {
@@ -124,9 +131,25 @@ describe("withAcceptanceCriteria edge cases", () => {
     "<?php\necho 1;",
     "<![CDATA[ raw",
     "<!DOCTYPE html",
-  ])("keeps later sections after an unclosed HTML block: %s", (block) => {
+    "<pre\nx",
+    "<script",
+  ])("keeps an unclosed HTML block and everything after it: %j", (block) => {
     const out = withAcceptanceCriteria(`## Acceptance Criteria\n\n- a\n\n${block}\n\n## Notes\n\nkeep`, AC);
-    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+    expect(out).toBe(`## Acceptance Criteria\n\n- new\n\n${block}\n\n## Notes\n\nkeep`);
+  });
+
+  it("replaces the AC section after an unclosed <pre without >", () => {
+    const out = withAcceptanceCriteria("<pre\nx\n\n## Acceptance Criteria\n\n- a\n\n## Notes\n\nkeep", AC);
+    expect(out).toBe("<pre\nx\n\n## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+  });
+
+  it("replaces an AC heading nested on its own line in a list item", () => {
+    const out = withAcceptanceCriteria("- item\n\n  ## Acceptance Criteria\n\n  - a", AC);
+    expect(out).toBe("- item\n\n## Acceptance Criteria\n\n- new");
+  });
+
+  it("does not overflow the stack on deeply nested blockquotes", () => {
+    expect(() => withAcceptanceCriteria(`${"> ".repeat(6000)}x`, AC)).not.toThrow();
   });
 
   it("replaces the AC section after an unclosed <style> block", () => {
@@ -140,6 +163,8 @@ describe("withAcceptanceCriteria edge cases", () => {
     "```\ncode",
     "    ## Acceptance Criteria\n\nbody",
     "## Acceptance Criteria\n\n- a\n\n<script>\n\n## Notes\n\nkeep",
+    "<pre\nx\n\n## Acceptance Criteria\n\n- a",
+    "Intro\n\n<pre\n",
   ])("is idempotent for %j", (src) => {
     const once = withAcceptanceCriteria(src, AC);
     expect(withAcceptanceCriteria(once, AC)).toBe(once);
@@ -156,9 +181,9 @@ describe("withAcceptanceCriteria edge cases", () => {
     expect(out).toBe("## Acceptance Criteria\n\n- new");
   });
 
-  it("treats lone CR as a line ending", () => {
+  it("treats lone CR as a line ending and keeps it", () => {
     const out = withAcceptanceCriteria("## Acceptance Criteria\r\r- a\r\r## Notes\r\rkeep", AC);
-    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+    expect(out).toBe("## Acceptance Criteria\r\r- new\r\r## Notes\r\rkeep");
   });
 
   it("finds the AC section after many unclosed comment lines", () => {
