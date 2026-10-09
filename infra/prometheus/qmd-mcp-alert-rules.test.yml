@@ -1,0 +1,32 @@
+rule_files:
+  - qmd-mcp-alert-rules.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # down from minute 2 onward
+      - series: 'probe_success{job="blackbox-qmd", instance="192.168.1.64:8181", host="qmd-mcp"}'
+        values: "1 1 0x20"
+    alert_rule_test:
+      - eval_time: 5m # down for 3 min: pending, not firing
+        alertname: QmdMcpDaemonDown
+        exp_alerts: []
+      - eval_time: 10m # down for >= 5 min: firing
+        alertname: QmdMcpDaemonDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              host: qmd-mcp
+              job: blackbox-qmd
+              instance: 192.168.1.64:8181
+            exp_annotations:
+              summary: "qmd-mcp (CT 364 192.168.1.64:8181) ei vastaa TCP-yhteyteen yli 5 min"
+              description: "Recall putoaa hitaaseen qmd CLI -varapolkuun (~93 s vs <1 s), mikä hidastaa jokaista agenttiajoa. rk9claude: tee vain diagnoosi (pct status 364, pct exec 364 -- systemctl status qmd-mcp, journalctl -u qmd-mcp). ÄLÄ käynnistä qmd-mcp:tä tai CT 364:ää uudelleen; operaattori päättää korjauksesta. TCP-probe ei havaitse vec-hakujen vikoja: ne näkyvät Paperclip-palvelimen lokissa (\"qmd-mcp daemon DOWN\") ja reitillä /api/knowledge/qmd-status."
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox-qmd", instance="192.168.1.64:8181", host="qmd-mcp"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: QmdMcpDaemonDown
+        exp_alerts: []

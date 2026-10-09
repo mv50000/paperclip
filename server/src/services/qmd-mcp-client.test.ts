@@ -7,6 +7,7 @@ import {
   probeQmdDaemon,
   keepwarmPing,
   queryQmdDaemon,
+  startQmdHealthProbe,
   startQmdKeepwarm,
 } from "./qmd-mcp-client.js";
 
@@ -105,6 +106,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   _resetQmdMcpSessionForTests();
   vi.useRealTimers();
 });
@@ -411,7 +414,6 @@ describe("daemon health (RK9-369)", () => {
     const server = fakeQmdServer({ onQuery: () => [] });
     await probeQmdDaemon({ fetchImpl: server.fetchImpl });
     expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0, totalFailures: 3 });
-    vi.restoreAllMocks();
   });
 
   it("does not count a caller abort as a daemon failure", async () => {
@@ -420,6 +422,72 @@ describe("daemon health (RK9-369)", () => {
     ac.abort();
     await queryQmdDaemon("q", ["rk9"], 5, { signal: ac.signal, deps: { fetchImpl: down } });
     expect(getQmdDaemonStatus().totalFailures).toBe(0);
-    vi.restoreAllMocks();
+  });
+
+  it("counts a tool-level isError result as a probe failure (vec broken, lex fine)", async () => {
+    vi.spyOn(logger, "error").mockImplementation(() => {});
+    const calls: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_u: unknown, init: RequestInit) => {
+      if (init.method === "DELETE") return new Response("", { status: 200 });
+      const body = JSON.parse(String(init.body)) as { method: string; params?: { arguments?: Record<string, unknown> } };
+      if (body.method === "initialize") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "mcp-session-id": "s" } });
+      }
+      if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+      calls.push(body.params?.arguments ?? {});
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: 2, result: { isError: true, content: [{ type: "text", text: "embedding model failed" }] } }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    await probeQmdDaemon({ fetchImpl });
+    expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 1 });
+    expect(getQmdDaemonStatus().lastError).toContain("embedding model failed");
+    expect((calls[0].searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["lex", "vec"]);
+  });
+
+  it("logs the DOWN error at the threshold and then only every 10th failure", async () => {
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+    for (let i = 0; i < 12; i++) await probeQmdDaemon({ fetchImpl: down });
+    expect(errorSpy).toHaveBeenCalledTimes(1); // failures 3..12: only #3 (over=0); #13 would be next
+    await probeQmdDaemon({ fetchImpl: down });
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes the sessions it discards when tools/call returns a JSON-RPC error", async () => {
+    const deleted: string[] = [];
+    let n = 0;
+    const fetchImpl = (async (_u: unknown, init: RequestInit) => {
+      if (init.method === "DELETE") {
+        deleted.push((init.headers as Record<string, string>)["mcp-session-id"]);
+        return new Response("", { status: 200 });
+      }
+      const body = JSON.parse(String(init.body)) as { method: string };
+      if (body.method === "initialize") {
+        n++;
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "mcp-session-id": `s${n}` } });
+      }
+      if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 2, error: { message: "boom" } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await probeQmdDaemon({ fetchImpl });
+    expect(deleted).toEqual(["s1", "s2"]);
+  });
+});
+
+describe("startQmdHealthProbe", () => {
+  it("does not start without QMD_MCP_URL", () => {
+    vi.stubEnv("QMD_MCP_URL", "");
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    startQmdHealthProbe({ intervalMs: 1000 }).stop();
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+  });
+
+  it("starts when QMD_MCP_URL is set", () => {
+    vi.stubEnv("QMD_MCP_URL", "http://127.0.0.1:1/mcp");
+    vi.spyOn(logger, "info").mockImplementation(() => {});
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    startQmdHealthProbe({ intervalMs: 1000 }).stop();
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
   });
 });

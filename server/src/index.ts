@@ -425,6 +425,7 @@ async function startServerWithDatabaseTeardown(
     }
   }
   
+  let qmdHealthProbe: { stop(): void } | null = null;
   let db;
   let pluginMigrationDb;
   let embeddedPostgres: EmbeddedPostgresInstance | null = null;
@@ -1048,7 +1049,7 @@ async function startServerWithDatabaseTeardown(
   // hatch via PAPERCLIP_QMD_KEEPWARM_INTERVAL_MS for an operator who wants it anyway.
   startQmdKeepwarm();
   // RK9-369: notice a dead daemon even when no recall is running.
-  startQmdHealthProbe();
+  qmdHealthProbe = startQmdHealthProbe();
 
   {
     const RISK_MONITOR_INTERVAL_MS = 60 * 60 * 1000;
@@ -2173,6 +2174,7 @@ async function startServerWithDatabaseTeardown(
       : null;
 
     // --- RK9 Custom: qmd MCP session shutdown ---
+    qmdHealthProbe?.stop(); // before closing the session, or the next tick would open a new one
     await closeQmdMcpSession();
 
     // Await the ordered application teardown before the process exits. A live
