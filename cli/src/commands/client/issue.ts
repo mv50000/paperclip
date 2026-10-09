@@ -1434,7 +1434,7 @@ function trimBlankLines(text: string): string {
  * Same markdown shape the server uses for child:create. Every existing AC section is replaced:
  * the first in place, the rest removed. A section ends at the next level 1-2 heading (ATX with up
  * to 3 spaces of indent, or setext) or the end, so later sections are kept. Headings inside
- * fenced code blocks and HTML comments are ignored. CRLF descriptions stay CRLF.
+ * fenced code blocks and HTML comment blocks (`<!--` at line start) are ignored. CRLF descriptions stay CRLF.
  */
 export function withAcceptanceCriteria(
   description: string | undefined,
@@ -1469,11 +1469,11 @@ export function withAcceptanceCriteria(
       continue;
     }
     if (fence) continue;
-    const commentStart = line.lastIndexOf("<!--");
-    const backticksBefore = commentStart >= 0 ? (line.slice(0, commentStart).match(/`/g) ?? []).length : 0;
-    if (commentStart >= 0 && backticksBefore % 2 === 0 && !line.includes("-->", commentStart)) {
+    // Only a `<!--` at the start of a line (up to 3 spaces of indent) opens an HTML comment block.
+    // Mid-line or 4-space-indented code `<!--` renders as text, so later headings stay real.
+    if (/^ {0,3}<!--/.test(line) && !line.includes("-->", line.indexOf("<!--"))) {
       inComment = true;
-      if (commentStart === 0 || !line.slice(0, commentStart).trim()) continue;
+      continue;
     }
     if (ACCEPTANCE_CRITERIA_HEADING_PATTERN.test(line)) {
       closeAt(i);
