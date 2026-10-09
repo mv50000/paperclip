@@ -443,7 +443,7 @@ describe("daemon health (RK9-369)", () => {
     await probeQmdDaemon({ fetchImpl });
     expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 1 });
     expect(getQmdDaemonStatus().lastError).toContain("embedding model failed");
-    expect((calls[0].searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["vec"]);
+    expect((calls[0].searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["lex"]);
   });
 
   it("counts a vec-only probe with zero hits as a failure (qmd swallowed a model load error, RK9-463)", async () => {
@@ -452,8 +452,48 @@ describe("daemon health (RK9-369)", () => {
     await probeQmdDaemon({ fetchImpl: server.fetchImpl });
     expect(getQmdDaemonStatus()).toMatchObject({ consecutiveFailures: 1, totalFailures: 1 });
     expect(getQmdDaemonStatus().lastError).toContain("no hits");
-    const query = server.calls.find((c) => c.name === "query");
+    const query = server.calls.filter((c) => c.name === "query").at(-1);
     expect((query?.args?.searches as Array<{ type: string }>).map((x) => x.type)).toEqual(["vec"]);
+  });
+
+  it("stays healthy when the index is full of orphan vectors: a generic vec query finds nothing but the seeded one does (RK9-465)", async () => {
+    const server = fakeQmdServer({
+      onQuery: (args) => {
+        const search = (args.searches as Array<{ type: string; query: string }>)[0];
+        if (search.type === "lex") return [{ file: "rk9/a.md", title: "Operator todo", snippet: "Pay the invoice" }];
+        // Orphan vectors crowd out "health"; the active document's own text still matches.
+        return search.query === "Operator todo Pay the invoice" ? [{ file: "rk9/a.md" }] : [];
+      },
+    });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0 });
+  });
+
+  it("tries the next seed term when the first has no lex hit, and reuses the seed on the next probe", async () => {
+    const server = fakeQmdServer({
+      onQuery: (args) => {
+        const search = (args.searches as Array<{ type: string; query: string }>)[0];
+        if (search.type === "lex") return search.query === "operator" ? [{ file: "rk9/a.md", title: "Operator todo" }] : [];
+        return search.query === "Operator todo" ? [{ file: "rk9/a.md" }] : [];
+      },
+    });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    const lexCalls = () => server.calls.filter((c) => c.name === "query" && (c.args?.searches as Array<{ type: string }>)[0].type === "lex").length;
+    expect(lexCalls()).toBe(2);
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    expect(lexCalls()).toBe(2);
+    expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0 });
+  });
+
+  it("still fails when a seeded vec query returns nothing (model load failure with orphans present)", async () => {
+    vi.spyOn(logger, "error").mockImplementation(() => {});
+    const server = fakeQmdServer({
+      onQuery: (args) =>
+        (args.searches as Array<{ type: string }>)[0].type === "lex" ? [{ file: "rk9/a.md", title: "Operator todo" }] : [],
+    });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    expect(getQmdDaemonStatus()).toMatchObject({ consecutiveFailures: 1 });
+    expect(getQmdDaemonStatus().lastError).toContain("active document");
   });
 
   it("logs the DOWN error at the threshold and then only every 10th failure", async () => {

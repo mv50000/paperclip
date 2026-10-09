@@ -59,6 +59,11 @@ export function qmdKeepwarmIntervalMs(): number {
 /** One collection that always exists in the index, safe for an unattended keepwarm ping
  *  (never personal). */
 const KEEPWARM_COLLECTION = "rk9";
+/** Lex terms the health probe tries, in order, to find an active document to seed its vec query. */
+const PROBE_SEED_TERMS = ["health", "operator", "todo"];
+const PROBE_SEED_MAX_CHARS = 300;
+/** Seed text that last produced a vec hit; reused so a probe normally makes a single daemon call. */
+let probeSeed: string | null = null;
 
 // Single cached MCP session for the process's lifetime — re-initialized only after a genuine
 // protocol failure (stale/expired session), never per-call and never on a mere abort/timeout.
@@ -348,34 +353,71 @@ export async function keepwarmPing(deps: QmdMcpDeps = {}): Promise<void> {
   }
 }
 
+/** Runs one `query` tool call for the probe and returns its result rows. Throws on a tool-level
+ *  `isError` result; qmdCall throws on protocol failures and timeouts. */
+async function probeQuery(
+  searches: Array<{ type: "lex" | "vec"; query: string }>,
+  fetchImpl: typeof fetch,
+): Promise<QmdMcpQueryRow[]> {
+  const result = await qmdCall(
+    "query",
+    { searches, rerank: false, collections: [KEEPWARM_COLLECTION], limit: 1 },
+    AbortSignal.timeout(qmdMcpTimeoutMs()),
+    fetchImpl,
+  );
+  if (result?.isError) {
+    throw new Error(`qmd-mcp daemon: tool error: ${JSON.stringify(result?.content ?? result)}`);
+  }
+  const rows = result?.structuredContent?.results;
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** Picks the text of one ACTIVE document with a lex-only query (lex needs no embedding model).
+ *  Returns null when no seed query matches. */
+async function probeSeedText(fetchImpl: typeof fetch): Promise<string | null> {
+  for (const term of PROBE_SEED_TERMS) {
+    const [row] = await probeQuery([{ type: "lex", query: term }], fetchImpl);
+    const text = [row?.title, row?.snippet]
+      .filter((part): part is string => typeof part === "string" && part.trim() !== "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, PROBE_SEED_MAX_CHARS);
+    if (text) return text;
+  }
+  return null;
+}
+
 /** Vec-only query against the daemon that must return at least one hit. qmd swallows embedding-model
  *  load and embed errors (`embedBatch` returns null embeddings) and `structuredSearch` then skips the
  *  vec search without an error, so a lex+vec query still succeeds as lex-only (RK9-463). A vec-only
- *  query has no lex fallback: with a broken model it returns zero rows. The `rk9` collection always
- *  holds notes, and vec search returns nearest neighbours for any text, so zero rows means the
- *  embedding path is broken. A tool-level `isError` result and a vec timeout count as failures too.
+ *  query has no lex fallback: with a broken model it returns zero rows.
+ *
+ *  Zero rows alone is ambiguous (RK9-465): qmd's `searchVec` takes the 60 nearest vectors of the WHOLE
+ *  index and only then drops inactive documents, so an index full of orphan vectors can return zero
+ *  rows for a healthy model. The probe therefore seeds the vec query with the text of an active
+ *  document found by a lex-only query. That document's own vector is a near-exact match, so it lands
+ *  in the top 60 however many orphans exist, and zero rows still means the embedding path is broken.
+ *  A tool-level `isError` result and a vec timeout count as failures too.
  *  Feeds the health state; never throws. */
 export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   try {
-    const result = await qmdCall(
-      "query",
-      {
-        searches: [{ type: "vec", query: "health" }],
-        rerank: false,
-        collections: [KEEPWARM_COLLECTION],
-        limit: 1,
-      },
-      AbortSignal.timeout(qmdMcpTimeoutMs()),
-      fetchImpl,
-    );
-    if (result?.isError) {
-      throw new Error(`qmd-mcp daemon: tool error: ${JSON.stringify(result?.content ?? result)}`);
+    // Reuse the seed of the previous run (one daemon call per probe). If the cached seed finds
+    // nothing, the document may have been deactivated, so look up a fresh seed once before failing.
+    let seed = probeSeed ?? (await probeSeedText(fetchImpl));
+    let rows = await probeQuery([{ type: "vec", query: seed ?? "health" }], fetchImpl);
+    if (rows.length === 0 && probeSeed) {
+      probeSeed = null;
+      seed = await probeSeedText(fetchImpl);
+      rows = await probeQuery([{ type: "vec", query: seed ?? "health" }], fetchImpl);
     }
-    const rows = result?.structuredContent?.results;
-    if (!Array.isArray(rows) || rows.length === 0) {
+    probeSeed = rows.length > 0 ? seed : null;
+    if (rows.length === 0) {
       throw new Error(
-        `qmd-mcp daemon: vec-only probe returned no hits in collection "${KEEPWARM_COLLECTION}" (embedding model not loaded or index empty)`,
+        seed
+          ? `qmd-mcp daemon: vec-only probe returned no hits in collection "${KEEPWARM_COLLECTION}" for the text of an active document (embedding model not loaded)`
+          : `qmd-mcp daemon: vec-only probe returned no hits in collection "${KEEPWARM_COLLECTION}" and no active document was found to seed it (embedding model not loaded, index empty, or orphan vectors crowding out the nearest neighbours)`,
       );
     }
     recordDaemonSuccess();
@@ -441,6 +483,7 @@ export async function closeQmdMcpSession(deps: QmdMcpDeps = {}): Promise<void> {
 export function _resetQmdMcpSessionForTests(): void {
   session = null;
   initPromise = null;
+  probeSeed = null;
   daemonHealth.consecutiveFailures = 0;
   daemonHealth.totalFailures = 0;
   daemonHealth.lastSuccessAt = null;
