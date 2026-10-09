@@ -56,6 +56,7 @@
     "dotenv": "^17.4.2",
     "commander": "^15.0.0",
     "embedded-postgres": "^18.1.0-beta.16",
+    "mdast-util-from-markdown": "^2.0.3",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
