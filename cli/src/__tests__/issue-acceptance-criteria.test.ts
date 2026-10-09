@@ -46,4 +46,19 @@ describe("withAcceptanceCriteria edge cases", () => {
     const out = withAcceptanceCriteria("Use `<!--` here.\n\n## Acceptance Criteria\n\n- a\n\n## Notes\n\nkeep", AC);
     expect(out).toBe("Use `<!--` here.\n\n## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
   });
+
+  it("keeps later sections after an unclosed mid-line <!--", () => {
+    const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- a <!-- todo\n\n## Notes\n\nkeep", AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+  });
+
+  it("keeps later sections after an unclosed <!-- in an indented code block", () => {
+    const out = withAcceptanceCriteria("## Acceptance Criteria\n\n    <!-- todo\n\n## Notes\n\nkeep", AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+  });
+
+  it("recognizes the AC heading after an unclosed mid-line <!--", () => {
+    const out = withAcceptanceCriteria("intro <!-- x\n\n## Acceptance Criteria\n\n- a", AC);
+    expect(out).toBe("intro <!-- x\n\n## Acceptance Criteria\n\n- new");
+  });
 });
