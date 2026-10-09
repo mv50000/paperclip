@@ -41,6 +41,10 @@ Same process, same bot, same `state.json` — one bot token allows exactly one
 Only taps from `TG_CHAT_ID` are honoured (existing rule). `OUTREACH_TG_ENABLED=0`
 turns the outreach source off without touching email_send approvals.
 
+The message edit, approve and reject routes are board-only (RK9-453). An agent
+key gets 403 there. `PAPERCLIP_TOKEN` must therefore be a board key
+(`pcp_board_…`), not an agent key, or every tap ends as a ⚠️ card.
+
 ## Test
 
 `server/src/__tests__/approval-telegram-listener-outreach.test.ts` runs the
