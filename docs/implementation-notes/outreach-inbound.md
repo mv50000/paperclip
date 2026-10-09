@@ -172,6 +172,14 @@ oversized body, same rule as `ses-inbound.ts`/`resend-inbound.ts`.
     a human must answer, so no robot ever answers it and no agent run is
     burned. `escalate_after_hours` 24 emails the operator if it sits unanswered.
 
+    9010 only covered the identities that existed when it ran.
+    `rk9@outreach.rk9.fi` was created on 26.9.2026 and had no route until
+    8.10., so its replies stayed `stored_unrouted`. `createSequence` and a
+    sender change in `updateSequence` now create the route with the same
+    values (`ensureSenderReplyRoute` in `sequences.ts`), and migration
+    `9012_rk9_outreach_sender_reply_routes_backfill.sql` backfills the
+    identities that already exist. An existing route is never changed.
+
     Still wrapped in try/catch so a handoff failure never loses the
     `recordEvent` write.
 

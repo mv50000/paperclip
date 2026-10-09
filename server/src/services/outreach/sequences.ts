@@ -1,6 +1,6 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { outreachSequences } from "@paperclipai/db";
+import { emailRoutes, outreachSequences } from "@paperclipai/db";
 import type { CreateOutreachSequence, UpdateOutreachSequence } from "@paperclipai/shared";
 
 export async function listSequences(db: Db, companyId: string) {
@@ -38,12 +38,40 @@ export async function listActiveSequencesForTemplate(db: Db, companyId: string, 
   });
 }
 
+/**
+ * Give a sender identity the inbound route its replies need. Migration 9010
+ * seeded one route per identity that existed on 17.9.2026; an identity added
+ * later (rk9@outreach.rk9.fi, 26.9.) had none, so its replies were stored but
+ * never opened an issue or escalated, and an unthreadable reply to it could
+ * not be tied to a company at all (`resolveCompanyByRecipient`). Same values
+ * as 9010: NULL agent and NULL auto-reply template on purpose — a human
+ * answers a prospect's reply. An existing route is left as the operator set it.
+ */
+async function ensureSenderReplyRoute(db: Db, companyId: string, senderIdentity: string) {
+  const at = senderIdentity.lastIndexOf("@");
+  if (at <= 0 || at === senderIdentity.length - 1) return;
+  await db
+    .insert(emailRoutes)
+    .values({
+      companyId,
+      localPart: senderIdentity.slice(0, at).toLowerCase(),
+      domain: senderIdentity.slice(at + 1).toLowerCase(),
+      routeKey: "outreach",
+      assignedAgentId: null,
+      autoReplyTemplateId: null,
+      escalateAfterHours: 24,
+      approvalRequired: true,
+    })
+    .onConflictDoNothing({ target: [emailRoutes.companyId, emailRoutes.localPart, emailRoutes.domain] });
+}
+
 export async function createSequence(db: Db, companyId: string, input: CreateOutreachSequence) {
   const [row] = await db
     .insert(outreachSequences)
     .values({ companyId, ...input, activatedAt: input.active ? new Date() : null })
     .onConflictDoNothing({ target: [outreachSequences.companyId, outreachSequences.name] })
     .returning();
+  if (row) await ensureSenderReplyRoute(db, companyId, row.senderIdentity);
   return row ?? null;
 }
 
@@ -66,6 +94,7 @@ export async function updateSequence(
     .set(setClause)
     .where(and(eq(outreachSequences.companyId, companyId), eq(outreachSequences.id, id)))
     .returning();
+  if (row && patch.senderIdentity !== undefined) await ensureSenderReplyRoute(db, companyId, row.senderIdentity);
   return row ?? null;
 }
 
