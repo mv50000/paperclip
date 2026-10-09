@@ -62,6 +62,8 @@ const KEEPWARM_COLLECTION = "rk9";
 /** Lex terms the health probe tries, in order, to find an active document to seed its vec query. */
 const PROBE_SEED_TERMS = ["health", "operator", "todo"];
 const PROBE_SEED_MAX_CHARS = 300;
+/** Seed text that last produced a vec hit; reused so a probe normally makes a single daemon call. */
+let probeSeed: string | null = null;
 
 // Single cached MCP session for the process's lifetime — re-initialized only after a genuine
 // protocol failure (stale/expired session), never per-call and never on a mere abort/timeout.
@@ -401,8 +403,16 @@ async function probeSeedText(fetchImpl: typeof fetch): Promise<string | null> {
 export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   try {
-    const seed = await probeSeedText(fetchImpl);
-    const rows = await probeQuery([{ type: "vec", query: seed ?? "health" }], fetchImpl);
+    // Reuse the seed of the previous run (one daemon call per probe). If the cached seed finds
+    // nothing, the document may have been deactivated, so look up a fresh seed once before failing.
+    let seed = probeSeed ?? (await probeSeedText(fetchImpl));
+    let rows = await probeQuery([{ type: "vec", query: seed ?? "health" }], fetchImpl);
+    if (rows.length === 0 && probeSeed) {
+      probeSeed = null;
+      seed = await probeSeedText(fetchImpl);
+      rows = await probeQuery([{ type: "vec", query: seed ?? "health" }], fetchImpl);
+    }
+    probeSeed = rows.length > 0 ? seed : null;
     if (rows.length === 0) {
       throw new Error(
         seed
@@ -473,6 +483,7 @@ export async function closeQmdMcpSession(deps: QmdMcpDeps = {}): Promise<void> {
 export function _resetQmdMcpSessionForTests(): void {
   session = null;
   initPromise = null;
+  probeSeed = null;
   daemonHealth.consecutiveFailures = 0;
   daemonHealth.totalFailures = 0;
   daemonHealth.lastSuccessAt = null;

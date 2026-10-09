@@ -469,6 +469,22 @@ describe("daemon health (RK9-369)", () => {
     expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0 });
   });
 
+  it("tries the next seed term when the first has no lex hit, and reuses the seed on the next probe", async () => {
+    const server = fakeQmdServer({
+      onQuery: (args) => {
+        const search = (args.searches as Array<{ type: string; query: string }>)[0];
+        if (search.type === "lex") return search.query === "operator" ? [{ file: "rk9/a.md", title: "Operator todo" }] : [];
+        return search.query === "Operator todo" ? [{ file: "rk9/a.md" }] : [];
+      },
+    });
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    const lexCalls = () => server.calls.filter((c) => c.name === "query" && (c.args?.searches as Array<{ type: string }>)[0].type === "lex").length;
+    expect(lexCalls()).toBe(2);
+    await probeQmdDaemon({ fetchImpl: server.fetchImpl });
+    expect(lexCalls()).toBe(2);
+    expect(getQmdDaemonStatus()).toMatchObject({ healthy: true, consecutiveFailures: 0 });
+  });
+
   it("still fails when a seeded vec query returns nothing (model load failure with orphans present)", async () => {
     vi.spyOn(logger, "error").mockImplementation(() => {});
     const server = fakeQmdServer({
