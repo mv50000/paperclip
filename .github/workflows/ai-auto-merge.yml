@@ -102,6 +102,12 @@ jobs:
               /^packages\/db\/src\/migrations\//,
               /(^|\/)migrations\//,
               /^paperclip-service\//,
+              /^deploy\//,
+              // Salaisuusskannauksen ja auditin poikkeuslistat (RK9-403 gatePatterns):
+              // .gitleaksignore tai .gitleaks.toml voi sallia vuotavan avaimen, ja
+              // pr.yml:n secret-scan lukee ne PR:n omasta checkoutista.
+              /(^|\/)\.gitleaks[^/]*$/,
+              /(^|\/)\.npmauditignore$/,
               // Juuren Dockerfile ja docker/**/Dockerfile.*.
               /(^|\/)Dockerfile[^/]*$/,
               // Lukkotiedostot: CI asentaa lukosta, joten riippuvuuspuun muutos on täällä.
