@@ -1579,6 +1579,19 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
 }
 
 /**
+ * RK9 Custom (RK9-468): text joined right after the new `- item` list whose first line is indented
+ * 2-3 spaces continues the last list item. A setext heading there becomes a paragraph, and an unclosed
+ * `<!--` or fence is no longer top-level, so the next run takes that text into the AC section and
+ * deletes it. Only then does the first line lose its indent; otherwise the text stays byte for byte.
+ */
+function tailAfterSection(section: string, tail: string): string {
+  if (!/^ {1,3}\S/.test(tail)) return tail;
+  const [range] = findAcceptanceCriteriaRanges(`${section}\n\n${tail}`);
+  if (!range || range.end <= section.length + 2) return tail;
+  return tail.replace(/^ {1,3}/, "");
+}
+
+/**
  * Same markdown shape the server uses for child:create. Every existing AC section is replaced:
  * the first in place, the rest removed. Sections are found with a CommonMark parser
  * (see findAcceptanceCriteriaRanges), so headings in code blocks and HTML comments are ignored and
@@ -1610,7 +1623,10 @@ export function withAcceptanceCriteria(
       cursor = range.end;
     });
     parts.push(trimBlankLines(text.slice(cursor)));
-    result = parts.filter(Boolean).join("\n\n");
+    const kept = parts.filter(Boolean);
+    const next = kept.indexOf(section) + 1;
+    if (next > 0 && next < kept.length) kept[next] = tailAfterSection(section, kept[next]);
+    result = kept.join("\n\n");
   }
   return bom + (eol === "\n" ? result : result.replace(/\n/g, eol));
 }

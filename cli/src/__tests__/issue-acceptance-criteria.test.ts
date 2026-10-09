@@ -252,4 +252,49 @@ describe("withAcceptanceCriteria edge cases", () => {
   ])("replaces a list item comment or <pre> block with the AC section: %j", (src) => {
     expect(withAcceptanceCriteria(src, AC)).toBe("## Acceptance Criteria\n\n- new");
   });
+
+  // RK9-468: a tail indented 2-3 spaces must not join the new `- new` list item.
+  it.each([
+    [
+      "## Acceptance Criteria\n\nSome text\n\n  <!-- todo\n## Notes\nkeep",
+      "## Acceptance Criteria\n\n- new\n\n<!-- todo\n## Notes\nkeep",
+    ],
+    ["## Acceptance Criteria\n   Notes\n---\n\nkeep", "## Acceptance Criteria\n\n- new\n\nNotes\n---\n\nkeep"],
+    [
+      "## Acceptance Criteria\n\nSome text\n\n  ```\n## Notes\nkeep",
+      "## Acceptance Criteria\n\n- new\n\n```\n## Notes\nkeep",
+    ],
+  ])("keeps an indented tail out of the new list and stays idempotent: %j", (src, expected) => {
+    const once = withAcceptanceCriteria(src, AC);
+    expect(once).toBe(expected);
+    expect(withAcceptanceCriteria(once, AC)).toBe(once);
+  });
+
+  it("keeps the indent of a tail that does not join the new list", () => {
+    const src = "## Acceptance Criteria\n\n- a\n\n  > ## Quote\n\nkeep";
+    const out = withAcceptanceCriteria(src, AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n  > ## Quote\n\nkeep");
+    expect(withAcceptanceCriteria(out, AC)).toBe(out);
+  });
+
+  it("dedents the tail of a removed second AC section that follows the new list directly", () => {
+    const src = "## Acceptance Criteria\n- a\n## Acceptance Criteria\n   Notes\n---\n\nkeep";
+    const out = withAcceptanceCriteria(src, AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\nNotes\n---\n\nkeep");
+    expect(withAcceptanceCriteria(out, AC)).toBe(out);
+  });
 });
+
+/*
+ * Accepted trade-offs (RK9-466 verifier rounds 3-6, RK9-468). These are not tested as wanted behavior:
+ * - An AC heading nested in a list item (up to 3 spaces) takes the later items of the same list into
+ *   the AC section, as the old heuristic did.
+ * - Mixed line endings: a lone CR in an LF document becomes LF.
+ * - Parser run time on pathological input (about 15 s for 80 KB of `[a](`), and up to 50 rescans when
+ *   there are many unclosed blocks.
+ * - An AC heading inside a `<details>` or `<table>` block takes the closing tag and the text after it,
+ *   because a section ends only at the next level 1-2 heading.
+ * - With no visible AC section, an AC-like heading inside an unclosed fence is replaced: it cannot be
+ *   told apart from an AC section that an earlier run appended there.
+ * - A BOM in the middle of the text is not handled.
+ */
