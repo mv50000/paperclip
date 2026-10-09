@@ -76,8 +76,8 @@ export function qmdAlertThreshold(): number {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 3;
 }
 
-/** Health probe interval; 0 disables it. The probe is a lex+vec query, so
- *  a daemon outage is noticed even when nobody is calling recall. */
+/** Health probe interval; 0 disables it. The probe is a vec-only query that must
+ *  return a hit, so a daemon outage is noticed even when nobody is calling recall. */
 export function qmdHealthProbeIntervalMs(): number {
   const n = Number(process.env.PAPERCLIP_QMD_HEALTH_INTERVAL_MS);
   return Number.isFinite(n) && n >= 0 ? n : 60_000;
@@ -348,20 +348,20 @@ export async function keepwarmPing(deps: QmdMcpDeps = {}): Promise<void> {
   }
 }
 
-/** One query against the daemon, shaped like a real recall (lex + vec), so a broken embedding
- *  model or a vec-search timeout shows up as a failure instead of hiding behind a lex-only success
- *  (RK9-371). A tool-level `isError` result counts as a failure. Feeds the health state; never
- *  throws. */
+/** Vec-only query against the daemon that must return at least one hit. qmd swallows embedding-model
+ *  load and embed errors (`embedBatch` returns null embeddings) and `structuredSearch` then skips the
+ *  vec search without an error, so a lex+vec query still succeeds as lex-only (RK9-463). A vec-only
+ *  query has no lex fallback: with a broken model it returns zero rows. The `rk9` collection always
+ *  holds notes, and vec search returns nearest neighbours for any text, so zero rows means the
+ *  embedding path is broken. A tool-level `isError` result and a vec timeout count as failures too.
+ *  Feeds the health state; never throws. */
 export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   try {
     const result = await qmdCall(
       "query",
       {
-        searches: [
-          { type: "lex", query: "health" },
-          { type: "vec", query: "health" },
-        ],
+        searches: [{ type: "vec", query: "health" }],
         rerank: false,
         collections: [KEEPWARM_COLLECTION],
         limit: 1,
@@ -371,6 +371,12 @@ export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
     );
     if (result?.isError) {
       throw new Error(`qmd-mcp daemon: tool error: ${JSON.stringify(result?.content ?? result)}`);
+    }
+    const rows = result?.structuredContent?.results;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new Error(
+        `qmd-mcp daemon: vec-only probe returned no hits in collection "${KEEPWARM_COLLECTION}" (embedding model not loaded or index empty)`,
+      );
     }
     recordDaemonSuccess();
   } catch (error) {
