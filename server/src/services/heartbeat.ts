@@ -9326,10 +9326,21 @@ export function resolveHeartbeatSchedulingSuppression(
   return { suppressed: false, reason: null };
 }
 
+const READ_ONLY_SYSTEM_PAUSE_CACHE_TTL_MS = 10_000;
+
 export function createReadOnlySystemPause(
   instanceSvc: ReturnType<typeof instanceSettingsService>,
+  cacheTtlMs: number = READ_ONLY_SYSTEM_PAUSE_CACHE_TTL_MS,
 ): Pick<SystemPauseService, "isPaused" | "getState"> {
-  const getState = async () => (await instanceSvc.getGeneral()).systemPause ?? null;
+  // Same 10 s cache as the owning service so every wake does not read instance_settings.
+  let cache: { value: Awaited<ReturnType<SystemPauseService["getState"]>>; expiresAt: number } | null = null;
+  const getState = async () => {
+    const now = Date.now();
+    if (cache && cache.expiresAt > now) return cache.value;
+    const value = (await instanceSvc.getGeneral()).systemPause ?? null;
+    cache = { value, expiresAt: now + cacheTtlMs };
+    return value;
+  };
   return {
     getState,
     // Expired auto pauses count as resumed; clearing stays with the owning service (it fires the Slack hooks).

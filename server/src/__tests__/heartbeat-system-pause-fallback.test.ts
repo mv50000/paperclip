@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createReadOnlySystemPause } from "../services/heartbeat.js";
+import { conflict, isSystemPausedConflict } from "../errors.js";
 
 function svc(systemPause: unknown) {
   return { getGeneral: async () => ({ systemPause }) } as any;
@@ -20,5 +21,28 @@ describe("createReadOnlySystemPause (route-built heartbeatService fallback)", ()
     const now = new Date("2026-06-01T00:00:00Z");
     expect(await createReadOnlySystemPause(svc(mk("2026-05-01T00:00:00Z"))).isPaused(now)).toBe(false);
     expect(await createReadOnlySystemPause(svc(mk("2026-07-01T00:00:00Z"))).isPaused(now)).toBe(true);
+  });
+});
+
+describe("createReadOnlySystemPause cache", () => {
+  it("reads instance settings once within the TTL and again after it", async () => {
+    let reads = 0;
+    const instanceSvc = { getGeneral: async () => { reads += 1; return { systemPause: null }; } } as any;
+    const pause = createReadOnlySystemPause(instanceSvc, 20);
+    await pause.isPaused();
+    await pause.isPaused();
+    await pause.getState();
+    expect(reads).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await pause.isPaused();
+    expect(reads).toBe(2);
+  });
+});
+
+describe("isSystemPausedConflict", () => {
+  it("matches only the system pause conflict", () => {
+    expect(isSystemPausedConflict(conflict("System paused: r"))).toBe(true);
+    expect(isSystemPausedConflict(conflict("Company paused"))).toBe(false);
+    expect(isSystemPausedConflict(new Error("System paused: r"))).toBe(false);
   });
 });

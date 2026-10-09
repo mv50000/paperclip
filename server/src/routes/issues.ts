@@ -217,6 +217,7 @@ import {
   conflict,
   forbidden,
   HttpError,
+  isSystemPausedConflict,
   notFound,
   unauthorized,
   unprocessable,
@@ -17259,7 +17260,13 @@ export function issueRoutes(
         });
         for (const publication of publications) publishActivity(publication);
         await issueReferencesSvc.syncComment(comment.id);
-        await deliverConversationComments(db, issue, heartbeat.wakeup);
+        try {
+          await deliverConversationComments(db, issue, heartbeat.wakeup);
+        } catch (err) {
+          // The comment is already saved; a system pause only skips the wake.
+          if (!isSystemPausedConflict(err)) throw err;
+          logger.info({ issueId: issue.id, commentId: comment.id }, "conversation comment wake skipped: system paused");
+        }
         res.status(201).json(comment);
         return;
       }
