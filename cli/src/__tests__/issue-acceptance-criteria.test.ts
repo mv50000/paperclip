@@ -117,4 +117,58 @@ describe("withAcceptanceCriteria edge cases", () => {
     const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- a\n\n> ## Quote\n\nkeep", AC);
     expect(out).toBe("## Acceptance Criteria\n\n- new\n\n> ## Quote\n\nkeep");
   });
+  it.each([
+    "<pre> blocks must be escaped",
+    "<script> tags in comments must be escaped.",
+    "<textarea> grows",
+    "<?php\necho 1;",
+    "<![CDATA[ raw",
+    "<!DOCTYPE html",
+  ])("keeps later sections after an unclosed HTML block: %s", (block) => {
+    const out = withAcceptanceCriteria(`## Acceptance Criteria\n\n- a\n\n${block}\n\n## Notes\n\nkeep`, AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+  });
+
+  it("replaces the AC section after an unclosed <style> block", () => {
+    const out = withAcceptanceCriteria("<style> blocks leak.\n\n## Acceptance Criteria\n\n- a", AC);
+    expect(out).toBe("<style> blocks leak.\n\n## Acceptance Criteria\n\n- new");
+  });
+
+  it.each([
+    "Sanitize <pre> output.\n\n<pre> blocks must be escaped",
+    "<!-- x\n\nIntro",
+    "```\ncode",
+    "    ## Acceptance Criteria\n\nbody",
+    "## Acceptance Criteria\n\n- a\n\n<script>\n\n## Notes\n\nkeep",
+  ])("is idempotent for %j", (src) => {
+    const once = withAcceptanceCriteria(src, AC);
+    expect(withAcceptanceCriteria(once, AC)).toBe(once);
+    expect(once!.match(/^## Acceptance Criteria$/gm)).toHaveLength(1);
+  });
+
+  it("keeps an indented code block indented when it appends the AC section", () => {
+    const out = withAcceptanceCriteria("    ## Acceptance Criteria\n\nbody", AC);
+    expect(out).toBe("    ## Acceptance Criteria\n\nbody\n\n## Acceptance Criteria\n\n- new");
+  });
+
+  it("replaces old AC items after an item that contains a heading", () => {
+    const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- # big\n- b\n\nafter", AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new");
+  });
+
+  it("treats lone CR as a line ending", () => {
+    const out = withAcceptanceCriteria("## Acceptance Criteria\r\r- a\r\r## Notes\r\rkeep", AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\n\nkeep");
+  });
+
+  it("finds the AC section after many unclosed comment lines", () => {
+    const src = `${"<!-- x\n".repeat(40)}\n## Acceptance Criteria\n\n- a`;
+    expect(withAcceptanceCriteria(src, AC)!.match(/^## Acceptance Criteria$/gm)).toHaveLength(1);
+  });
+
+  it("stops rescanning after 50 unclosed blocks so the run time stays bounded", () => {
+    const started = Date.now();
+    withAcceptanceCriteria(`${"<!-- x\n".repeat(3000)}\n## Acceptance Criteria\n\n- a`, AC);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
 });

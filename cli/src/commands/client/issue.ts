@@ -1445,24 +1445,45 @@ function headingText(node: MarkdownNode): string {
   return (node.children ?? []).map(headingText).join("");
 }
 
-/** First level 1-2 heading nested in a list or blockquote. It also ends an AC section, so its text is kept. */
-function firstSectionHeading(node: MarkdownNode): MarkdownNode | undefined {
+/**
+ * Line start of the first level 1-2 heading nested in a list or blockquote that starts its own line
+ * (only indent or `>` before it). It also ends an AC section, so its text is kept. A heading on a list
+ * item marker line (`- # x`) does not, or the old AC items after it would join the new list. -1 if none.
+ */
+function nestedSectionStart(node: MarkdownNode, text: string, base: number): number {
   for (const child of node.children ?? []) {
-    if (child.type === "heading" && (child.depth ?? 0) <= 2) return child;
-    const nested = firstSectionHeading(child);
-    if (nested) return nested;
+    if (child.type === "heading" && (child.depth ?? 0) <= 2) {
+      const offset = base + (child.position?.start.offset ?? 0);
+      const lineStart = lineStartOffset(text, offset);
+      if (/^[ \t>]*$/.test(text.slice(lineStart, offset))) return lineStart;
+    }
+    const nested = nestedSectionStart(child, text, base);
+    if (nested >= 0) return nested;
   }
-  return undefined;
+  return -1;
 }
 
+// CommonMark HTML block types 1-5 end only at their end marker, so an unclosed one runs to the end.
+// `overlap` lets the end marker share characters with the start (`<!-->`, `<?>`).
+const HTML_BLOCKS_WITH_END_MARKER: Array<{ start: RegExp; end: RegExp; overlap: number }> = [
+  { start: /^ {0,3}<(?:pre|script|style|textarea)(?=[ \t>]|$)/i, end: /<\/(?:pre|script|style|textarea)>/i, overlap: 0 },
+  { start: /^ {0,3}<!--/, end: /-->/, overlap: 2 },
+  { start: /^ {0,3}<\?/, end: /\?>/, overlap: 1 },
+  { start: /^ {0,3}<![a-z]/i, end: />/, overlap: 0 },
+  { start: /^ {0,3}<!\[CDATA\[/, end: /\]\]>/, overlap: 0 },
+];
+
 /**
- * A top-level `<!--` comment or code fence that never closes hides the rest of the document.
- * The caller keeps its opening line and scans the lines after it as markdown again.
+ * A top-level HTML block (`<!--`, `<pre>`, `<?`, ...) or code fence that never closes hides the rest
+ * of the document. The caller keeps its opening line and scans the lines after it as markdown again.
  */
 function isUnterminatedBlock(node: MarkdownNode, source: string): boolean {
   if (node.type === "html") {
-    const open = /^ {0,3}<!--/.exec(source);
-    return open !== null && !source.includes("-->", open[0].length - 2);
+    for (const block of HTML_BLOCKS_WITH_END_MARKER) {
+      const open = block.start.exec(source);
+      if (open) return !block.end.test(source.slice(open[0].length - block.overlap));
+    }
+    return false;
   }
   if (node.type !== "code") return false;
   const fence = /^ {0,3}(`{3,}|~{3,})/.exec(source)?.[1];
@@ -1471,6 +1492,8 @@ function isUnterminatedBlock(node: MarkdownNode, source: string): boolean {
   const closing = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`);
   return lines.length < 2 || !closing.test(lines[lines.length - 1]);
 }
+
+const MAX_UNTERMINATED_RESCANS = 50;
 
 /**
  * Finds every AC section with a CommonMark parser. A section starts at a top-level level 2 heading
@@ -1485,7 +1508,8 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
     open = -1;
   };
   let base = 0;
-  while (base >= 0) {
+  // Each rescan parses the rest again; the cap keeps many unclosed blocks from making this quadratic.
+  for (let pass = 0; base >= 0 && pass < MAX_UNTERMINATED_RESCANS; pass++) {
     const segment = text.slice(base);
     const nodes = (fromMarkdown(segment) as { children: MarkdownNode[] }).children;
     let next = -1;
@@ -1498,8 +1522,8 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
         break;
       }
       if (node.type !== "heading") {
-        const nested = firstSectionHeading(node);
-        if (nested) closeAt(lineStartOffset(text, base + (nested.position?.start.offset ?? 0)));
+        const nested = nestedSectionStart(node, text, base);
+        if (nested >= 0) closeAt(nested);
         continue;
       }
       if ((node.depth ?? 0) > 2) continue;
@@ -1526,11 +1550,12 @@ export function withAcceptanceCriteria(
   if (items.length === 0) return description;
   const section = [ACCEPTANCE_CRITERIA_HEADING, "", ...items.map((item) => `- ${item}`)].join("\n");
   const crlf = (description ?? "").includes("\r\n");
-  const text = (description ?? "").replace(/\r\n/g, "\n");
+  const text = (description ?? "").replace(/\r\n?/g, "\n");
   const ranges = findAcceptanceCriteriaRanges(text);
   let result: string;
   if (ranges.length === 0) {
-    const base = text.trim();
+    // Keep leading indent: trimming it would turn an indented code block into a heading.
+    const base = trimBlankLines(text);
     result = base ? `${base}\n\n${section}` : section;
   } else {
     const parts: string[] = [];
