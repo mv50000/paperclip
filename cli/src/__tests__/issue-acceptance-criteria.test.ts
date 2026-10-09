@@ -196,4 +196,21 @@ describe("withAcceptanceCriteria edge cases", () => {
     withAcceptanceCriteria(`${"<!-- x\n".repeat(3000)}\n## Acceptance Criteria\n\n- a`, AC);
     expect(Date.now() - started).toBeLessThan(10_000);
   });
+  it.each([
+    ["\uFEFF# Title\n\n## Acceptance Criteria\n- a\n## Notes\nkeep", "\uFEFF# Title\n\n## Acceptance Criteria\n\n- new\n\n## Notes\nkeep"],
+    ["\uFEFFIntro\n## Acceptance Criteria\n- a\n\n## Notes\nkeep", "\uFEFFIntro\n\n## Acceptance Criteria\n\n- new\n\n## Notes\nkeep"],
+  ])("handles a leading BOM: %j", (src, expected) => {
+    expect(withAcceptanceCriteria(src, AC)).toBe(expected);
+  });
+
+  it("replaces a heading nested deeper than 3 spaces with the old AC list, like before", () => {
+    const out = withAcceptanceCriteria("## Acceptance Criteria\n\n- a\n  - b\n    - c\n\n      ## Notes\n\nkeep", AC);
+    expect(out).toBe("## Acceptance Criteria\n\n- new");
+    expect(withAcceptanceCriteria(out, AC)).toBe(out);
+  });
+
+  it("does not take an AC heading indented 4 spaces in a list item, so later items stay", () => {
+    const src = "1.  step\n\n    ## Acceptance Criteria\n\n    - a\n\n2.  step 2";
+    expect(withAcceptanceCriteria(src, AC)).toBe(`${src}\n\n## Acceptance Criteria\n\n- new`);
+  });
 });

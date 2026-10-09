@@ -1492,11 +1492,12 @@ function isUnterminatedBlock(node: MarkdownNode, source: string): boolean {
 /**
  * Finds every AC section with a CommonMark parser. Offsets are line starts in `text`.
  *
- * - A level 1-2 heading (ATX or setext) is a section boundary when it starts its own line: only indent
- *   or `>` before it, so also one nested in a list item or blockquote. A heading on a list marker line
- *   (`- # x`) is not, or the old AC items after it would join the new list.
- * - An AC heading is such a level 2 heading "Acceptance Criteria" (optionally "(...)") with only indent
- *   before it. Its section ends at the next boundary or the end.
+ * - A level 1-2 heading (ATX or setext) is a section boundary when it starts its own line with at
+ *   most 3 spaces and `>` markers before it, so also one nested in a list item or blockquote. A heading
+ *   on a list marker line (`- # x`) or indented deeper is not: kept after the new `- ...` list, it
+ *   would join that list or become code.
+ * - An AC heading is such a level 2 heading "Acceptance Criteria" (optionally "(...)") with at most
+ *   3 spaces before it. Its section ends at the next boundary or the end.
  * - A top-level `<!--`, `<pre>`, `<?`, ... or code fence that never closes hides the rest of the
  *   document. An AC section ends where it starts, so the hidden text is kept. Only when no AC section
  *   is found before it, the lines after its first line are scanned again (at most 50 times, to bound
@@ -1513,19 +1514,21 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
   for (let pass = 0; base >= 0 && pass < MAX_UNTERMINATED_RESCANS; pass++) {
     const segment = text.slice(base);
     const nodes = (fromMarkdown(segment) as { children: MarkdownNode[] }).children;
+    // The parser drops a leading BOM and counts offsets after it.
+    const origin = base + (segment.startsWith("\uFEFF") ? 1 : 0);
     const last = nodes[nodes.length - 1];
-    const lastStart = last ? lineStartOffset(text, base + (last.position?.start.offset ?? 0)) : -1;
+    const lastStart = last ? lineStartOffset(text, origin + (last.position?.start.offset ?? 0)) : -1;
     const unterminated =
       last !== undefined &&
-      isUnterminatedBlock(last, text.slice(lastStart, base + (last.position?.end.offset ?? segment.length)));
+      isUnterminatedBlock(last, text.slice(lastStart, origin + (last.position?.end.offset ?? segment.length)));
     for (const node of walkMarkdown(unterminated ? nodes.slice(0, -1) : nodes)) {
       if (node.type !== "heading" || (node.depth ?? 0) > 2) continue;
-      const offset = base + (node.position?.start.offset ?? 0);
+      const offset = origin + (node.position?.start.offset ?? 0);
       const lineStart = lineStartOffset(text, offset);
-      const prefix = text.slice(lineStart, offset);
-      if (!/^[ \t>]*$/.test(prefix)) continue;
+      const prefix = text.slice(lineStart, offset).replace(/^\uFEFF/, "");
+      if (!/^ {0,3}(?:>[ \t>]*)?$/.test(prefix)) continue;
       closeAt(lineStart);
-      const isAc = node.depth === 2 && /^[ \t]*$/.test(prefix) && ACCEPTANCE_CRITERIA_TITLE_PATTERN.test(headingText(node).trim());
+      const isAc = node.depth === 2 && /^ {0,3}$/.test(prefix) && ACCEPTANCE_CRITERIA_TITLE_PATTERN.test(headingText(node).trim());
       if (isAc) open = lineStart;
     }
     if (!unterminated) break;
