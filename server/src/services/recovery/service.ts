@@ -58,7 +58,7 @@ import {
   nativeRunnerOwnershipNotHeldCondition,
 } from "../native-runtime/native-runner-ownership.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
-import { forbidden, notFound } from "../../errors.js";
+import { forbidden, isSystemPausedConflict, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import {
   isPidAlive,
@@ -4302,8 +4302,13 @@ export function recoveryService(
           }
         }
         if (!(await instanceSettingsService(db).getExperimental()).enableAgentChat) { result.skipped += 1; continue; }
-        {
+        try {
           await deliverConversationComments(db, issue, deps.enqueueWakeup);
+        } catch (err) {
+          // A system pause skips the wake; undeliveredConversationComments ignores system.paused skips, so the next sweep after resume redelivers it.
+          if (!isSystemPausedConflict(err)) throw err;
+          result.skipped += 1;
+          continue;
         }
       }
       if (isWaitingConversation(issue)) { result.skipped += 1; continue; }

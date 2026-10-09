@@ -44,3 +44,8 @@ export function unprocessable(message: string, details?: unknown) {
 export function tooManyRequests(message = "Too many requests", details?: unknown) {
   return new HttpError(429, message, details);
 }
+
+/** True for the conflict `heartbeat.wakeup` throws for a non-timer wake while the system is paused. */
+export function isSystemPausedConflict(err: unknown): boolean {
+  return err instanceof HttpError && err.status === 409 && err.message.startsWith("System paused");
+}
