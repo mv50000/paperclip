@@ -1489,6 +1489,34 @@ function isUnterminatedBlock(node: MarkdownNode, source: string): boolean {
   return lines.length < 2 || !closing.test(lines[lines.length - 1]);
 }
 
+const ACCEPTANCE_CRITERIA_LINE_PATTERN = /^ {0,3}##[ \t]+acceptance criteria(?:[ \t]*\([^)]*\))?[ \t]*#*[ \t]*$/i;
+
+/**
+ * `#`/`##` lines inside an HTML block that ends at a blank line (`<div>`, `</details>`, ...).
+ * CommonMark keeps `</details>\n## Notes` in the HTML block, but the writer meant a heading, so it
+ * still ends (or, for "## Acceptance Criteria", starts) an AC section. Comments and other blocks with
+ * an end marker are not split.
+ */
+function htmlBlockHeadingLines(
+  node: MarkdownNode,
+  text: string,
+  origin: number,
+): Array<{ lineStart: number; isAc: boolean }> {
+  const start = lineStartOffset(text, origin + (node.position?.start.offset ?? 0));
+  const end = origin + (node.position?.end.offset ?? 0);
+  const source = text.slice(start, end);
+  if (HTML_BLOCKS_WITH_END_MARKER.some((block) => block.start.test(source.split("\n", 1)[0]))) return [];
+  const headings: Array<{ lineStart: number; isAc: boolean }> = [];
+  let offset = start;
+  for (const [index, line] of source.split("\n").entries()) {
+    if (index > 0 && /^ {0,3}#{1,2}(?:[ \t]|$)/.test(line)) {
+      headings.push({ lineStart: offset, isAc: ACCEPTANCE_CRITERIA_LINE_PATTERN.test(line) });
+    }
+    offset += line.length + 1;
+  }
+  return headings;
+}
+
 /**
  * Finds every AC section with a CommonMark parser. Offsets are line starts in `text`.
  *
@@ -1517,11 +1545,18 @@ function findAcceptanceCriteriaRanges(text: string): Array<{ start: number; end:
     // The parser drops a leading BOM and counts offsets after it.
     const origin = base + (segment.startsWith("\uFEFF") ? 1 : 0);
     const last = nodes[nodes.length - 1];
-    const lastStart = last ? lineStartOffset(text, origin + (last.position?.start.offset ?? 0)) : -1;
+    const lastStart = last ? Math.max(origin, lineStartOffset(text, origin + (last.position?.start.offset ?? 0))) : -1;
     const unterminated =
       last !== undefined &&
       isUnterminatedBlock(last, text.slice(lastStart, origin + (last.position?.end.offset ?? segment.length)));
     for (const node of walkMarkdown(unterminated ? nodes.slice(0, -1) : nodes)) {
+      if (node.type === "html") {
+        for (const heading of htmlBlockHeadingLines(node, text, origin)) {
+          closeAt(heading.lineStart);
+          if (heading.isAc) open = heading.lineStart;
+        }
+        continue;
+      }
       if (node.type !== "heading" || (node.depth ?? 0) > 2) continue;
       const offset = origin + (node.position?.start.offset ?? 0);
       const lineStart = lineStartOffset(text, offset);
@@ -1555,8 +1590,9 @@ export function withAcceptanceCriteria(
   if (items.length === 0) return description;
   const section = [ACCEPTANCE_CRITERIA_HEADING, "", ...items.map((item) => `- ${item}`)].join("\n");
   const source = description ?? "";
+  const bom = source.startsWith("\uFEFF") ? "\uFEFF" : "";
   const eol = source.includes("\r\n") ? "\r\n" : source.includes("\r") && !source.includes("\n") ? "\r" : "\n";
-  const text = source.replace(/\r\n?/g, "\n");
+  const text = source.slice(bom.length).replace(/\r\n?/g, "\n");
   const ranges = findAcceptanceCriteriaRanges(text);
   let result: string;
   if (ranges.length === 0) {
@@ -1574,7 +1610,7 @@ export function withAcceptanceCriteria(
     parts.push(trimBlankLines(text.slice(cursor)));
     result = parts.filter(Boolean).join("\n\n");
   }
-  return eol === "\n" ? result : result.replace(/\n/g, eol);
+  return bom + (eol === "\n" ? result : result.replace(/\n/g, eol));
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

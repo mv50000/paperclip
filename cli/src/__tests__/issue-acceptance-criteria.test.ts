@@ -213,4 +213,30 @@ describe("withAcceptanceCriteria edge cases", () => {
     const src = "1.  step\n\n    ## Acceptance Criteria\n\n    - a\n\n2.  step 2";
     expect(withAcceptanceCriteria(src, AC)).toBe(`${src}\n\n## Acceptance Criteria\n\n- new`);
   });
+  it.each([
+    ["\uFEFF<!-- x\n\n## Acceptance Criteria\n\n- a", "\uFEFF<!-- x\n\n## Acceptance Criteria\n\n- new"],
+    ["\uFEFF## Acceptance Criteria\n\n- old\n\n## Notes\nkeep", "\uFEFF## Acceptance Criteria\n\n- new\n\n## Notes\nkeep"],
+  ])("keeps a leading BOM before an unclosed block or AC heading: %j", (src, expected) => {
+    const out = withAcceptanceCriteria(src, AC);
+    expect(out).toBe(expected);
+    expect(withAcceptanceCriteria(out, AC)).toBe(out);
+  });
+
+  it("is idempotent with a leading BOM and an unclosed fence", () => {
+    const once = withAcceptanceCriteria("\uFEFF```\ncode", AC);
+    expect(withAcceptanceCriteria(once, AC)).toBe(once);
+  });
+
+  it.each(["</details>", '<img src="x.png">', "<div>"])(
+    "keeps a heading right after an HTML block line: %s",
+    (html) => {
+      const out = withAcceptanceCriteria(`## Acceptance Criteria\n- a\n\n${html}\n## Notes\nkeep`, AC);
+      expect(out).toBe("## Acceptance Criteria\n\n- new\n\n## Notes\nkeep");
+    },
+  );
+  it("replaces an AC heading right after an HTML block line", () => {
+    const out = withAcceptanceCriteria("<details>\n\nx\n\n</details>\n## Acceptance Criteria\n- a\n\n## Notes\nkeep", AC);
+    expect(out).toBe("<details>\n\nx\n\n</details>\n\n## Acceptance Criteria\n\n- new\n\n## Notes\nkeep");
+    expect(withAcceptanceCriteria(out, AC)).toBe(out);
+  });
 });
