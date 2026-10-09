@@ -164,4 +164,43 @@ describe.skipIf(process.platform !== "linux")("process session wrapper orphan de
       ]);
     });
   }
+
+  // RK9-362: the production teardown sends no signal (I3). It writes a
+  // shutdown message and removes the session directory. A grandchild that holds
+  // the output pipes must not keep the wrapper alive after that.
+  for (const outputToStdout of [false, true]) {
+    it(`exits after a shutdown message while a grandchild holds the output pipes (stream=${outputToStdout})`, async () => {
+      const handle = await launch(outputToStdout, {
+        command: "/bin/sh",
+        args: ["-c", "sleep 25 & echo started > started; exit 0"],
+      });
+      const wrapperPid = handle.wrapper.pid!;
+      const started = path.join(handle.cwd, "started");
+      const exited = new Promise<void>((resolve) => handle.wrapper.once("exit", () => resolve()));
+      expect(await waitUntil(() => existsSync(started), 10_000)).toBe(true);
+      expect(
+        await waitUntil(
+          () => spawnSync("pgrep", ["-P", String(wrapperPid)], { encoding: "utf8" }).stdout.trim() === "",
+          10_000,
+        ),
+      ).toBe(true);
+      const sentAt = Date.now();
+      await writeFile(
+        path.join(handle.sessionDir, "stdin", "000000000001.json"),
+        `${JSON.stringify({ type: "shutdown" })}\n`,
+        "utf8",
+      );
+      // The host removes the session directory after the shutdown message. In
+      // stream mode the events arrive on stdout, so remove it at once. In
+      // event-file mode the events live in that directory, so keep it to count
+      // them: the identity tests above already cover the removal itself.
+      if (outputToStdout) await rm(handle.sessionDir, { recursive: true, force: true });
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+      expect(alive(wrapperPid)).toBe(false);
+      expect(Date.now() - sentAt).toBeLessThan(3_000);
+      const events = await terminalEvents(handle, outputToStdout);
+      // Exactly one exit event, with the child's own code: "close" never fired.
+      expect(events).toEqual([expect.objectContaining({ type: "exit", code: 0, signal: null })]);
+    });
+  }
 });

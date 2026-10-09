@@ -2642,6 +2642,12 @@ async function terminate() {
   setTimeout(() => {
     if (child.exitCode === null && child.signalCode === null) process.exit(1);
   }, terminateGraceMs + 2000).unref?.();
+  // The backstop above only covers a live child. A child that exits while its
+  // own subprocess still holds the stdout or stderr pipe never fires "close",
+  // so arm the bounded held-pipe exit for every terminate() caller: a shutdown
+  // message, a lost session identity and a dead poll loop, not only a signal
+  // (RK9-362).
+  armHeldPipeExit();
   // This event is an untrusted latency hint, not proof. Any process that can
   // reach this session's event directory can write the same event type. It
   // can only shorten the host's shutdown wait and suppress the host's
@@ -3034,44 +3040,63 @@ process.on("exit", () => {
     child.kill("SIGKILL");
   } catch {}
 });
-// A termination signal always ends this wrapper, as the default signal action
-// did before these handlers existed (RK9-361). terminate() alone is not enough:
-// it returns at once when it already ran, and its backstop only fires while the
+// Every terminate() call ends this wrapper, and a termination signal does so as
+// the default signal action did before these handlers existed (RK9-361,
+// RK9-362). terminate() alone is not enough: its backstop only fires while the
 // child runs. A child that exited while its own subprocess still holds the
 // stdout or stderr pipe never fires "close", so without this the wrapper would
-// live as long as that subprocess. Once the child has exited, give "close" a
-// bounded window: a "close" means the pipes drained, and the normal path then
-// writes the exit event and ends the wrapper with the child's own code. Only a
-// wrapper whose pipes stay held exits here, with the conventional 128 + signal
-// code. It first writes the exit event with the child's own code and signal,
-// since "close" never will: without it the host sees no terminal event and
-// reports a lost run. In event-file mode the exit waits for that write. The
-// timer is unref'd, so it never keeps a draining wrapper alive.
+// live as long as that subprocess, also after a shutdown message. Once the
+// child has exited, give "close" a bounded window: a "close" means the pipes
+// drained, and the normal path then writes the exit event and ends the wrapper
+// with the child's own code. Only a wrapper whose pipes stay held exits here:
+// with the conventional 128 + signal code after a signal, otherwise with 1.
+// It first writes the exit event with the child's own code and signal, since
+// "close" never will: without it the host sees no terminal event and reports a
+// lost run. In event-file mode the exit waits for that write. The timer is
+// unref'd, so it never keeps a draining wrapper alive.
 let childClosed = false;
 let heldPipeExitStarted = false;
+let heldPipeExitArmed = false;
+let heldPipeExitCode = 1;
 child.once("close", () => {
   childClosed = true;
 });
 const signalExitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
 const heldPipeExitDelayMs = 1000;
-async function exitWithHeldPipes(exitCode) {
+async function exitWithHeldPipes() {
   if (childClosed || heldPipeExitStarted) return;
+  // Set before anything else: the "close" handler checks this flag, so a
+  // "close" that races this exit never writes a second exit event.
   heldPipeExitStarted = true;
+  // Stop reading the held pipes before the exit event. Data that arrived later
+  // would carry a sequence number after the exit event, and the host stops
+  // reading at the exit event, so it would be lost without a trace. Closing
+  // the wrapper's read ends also gives a subprocess that still writes an EPIPE.
+  child.stdout.destroy();
+  child.stderr.destroy();
   try {
     await writeEvent({ type: "exit", code: child.exitCode, signal: child.signalCode });
   } catch {}
-  process.exit(exitCode);
+  process.exit(heldPipeExitCode);
+}
+function armHeldPipeExit() {
+  if (heldPipeExitArmed) return;
+  heldPipeExitArmed = true;
+  const exitIfPipesHeld = () => {
+    if (childClosed) return;
+    const timer = setTimeout(() => void exitWithHeldPipes(), heldPipeExitDelayMs);
+    timer.unref?.();
+  };
+  if (child.exitCode !== null || child.signalCode !== null) exitIfPipesHeld();
+  else child.once("exit", exitIfPipesHeld);
 }
 for (const [signal, exitCode] of Object.entries(signalExitCodes)) {
   process.on(signal, () => {
+    // A signal names the exit code even when a shutdown message armed the
+    // held-pipe exit first and its timer has not fired yet.
+    heldPipeExitCode = exitCode;
     void terminate();
-    const exitIfPipesHeld = () => {
-      if (childClosed) return;
-      const timer = setTimeout(() => void exitWithHeldPipes(exitCode), heldPipeExitDelayMs);
-      timer.unref?.();
-    };
-    if (child.exitCode !== null || child.signalCode !== null) exitIfPipesHeld();
-    else child.once("exit", exitIfPipesHeld);
+    armHeldPipeExit();
   });
 }
 const watchIntervalMs = (() => {
@@ -3187,6 +3212,8 @@ child.on("error", (error) => writeEvent({ type: "error", message: error.message 
 // neither does the poll loop's own error writes, so those fire while the
 // wrapper and its child are still fully alive.
 child.on("close", (code, signal) => {
+  // A forced exit with held pipes already wrote the exit event (RK9-362).
+  if (heldPipeExitStarted) return;
   writeEvent({ type: "exit", code, signal });
   process.exitCode = typeof code === "number" ? code : 1;
   void terminate();
@@ -3279,6 +3306,8 @@ child.on("error", (error) => void writeEvent({ type: "error", message: error.mes
 // the poll loop's own error writes, so those fire while the wrapper and its
 // child are still fully alive.
 child.on("close", (code, signal) => {
+  // A forced exit with held pipes already wrote the exit event (RK9-362).
+  if (heldPipeExitStarted) return;
   void writeEvent({ type: "exit", code, signal });
   process.exitCode = typeof code === "number" ? code : 1;
   void terminate();
