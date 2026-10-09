@@ -374,15 +374,32 @@ async function probeQuery(
 
 /** Picks the text of one ACTIVE document with a lex-only query (lex needs no embedding model).
  *  Returns null when no seed query matches. */
+/** Turns a lex hit into vec query text. A qmd snippet starts with a hunk header
+ *  (`@@ -6,4 @@ (5 before, 40 after)`) and prefixes each line with its number (`7: `). qmd's
+ *  `validateSemanticQuery` rejects a vec query with a token that starts with `-` as negation and
+ *  returns `isError` (RK9-467), so the header and line numbers are dropped and any leading `-` of a
+ *  token is removed. */
+export function probeSeedFromRow(row: { title?: unknown; snippet?: unknown } | undefined): string {
+  const snippet =
+    typeof row?.snippet === "string"
+      ? row.snippet
+          .split("\n")
+          .map((line) => line.replace(/^\d+: ?/, ""))
+          .filter((line) => !/^@@ .* @@/.test(line))
+          .join(" ")
+      : "";
+  return [typeof row?.title === "string" ? row.title : "", snippet]
+    .join(" ")
+    .replace(/(^|\s)-+(?=\S)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, PROBE_SEED_MAX_CHARS);
+}
+
 async function probeSeedText(fetchImpl: typeof fetch): Promise<string | null> {
   for (const term of PROBE_SEED_TERMS) {
     const [row] = await probeQuery([{ type: "lex", query: term }], fetchImpl);
-    const text = [row?.title, row?.snippet]
-      .filter((part): part is string => typeof part === "string" && part.trim() !== "")
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, PROBE_SEED_MAX_CHARS);
+    const text = probeSeedFromRow(row);
     if (text) return text;
   }
   return null;

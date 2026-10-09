@@ -16,6 +16,11 @@ The `qmd-mcp` daemon on CT 364 (`192.168.1.64:8181`) serves recall. When it is d
   the title and snippet of an active `rk9` document, then vec-searches that text. The document's own vector is a
   near-exact match, so zero rows still means the embedding path is broken. Without a lex hit it falls back to "health".
   Nothing alerts on the orphan share itself; clean orphan vectors with qmd cleanup when the share grows.
+- The seed is cleaned before the vec query (RK9-467). A qmd snippet starts with a hunk header (`@@ -6,4 @@ (5 before,
+  40 after)`) and numbers its lines (`7: `). qmd's `validateSemanticQuery` rejects a vec query with a `-term` token as
+  negation and returns `isError`, so the raw snippet failed every probe against the real daemon. `probeSeedFromRow`
+  drops the header and line numbers and removes the leading `-` of every token. The test fake applies the same
+  negation check, so a raw snippet fails the tests too.
 - After `PAPERCLIP_QMD_ALERT_THRESHOLD` (default 3) consecutive failures the server logs
   `qmd-mcp daemon DOWN` at ERROR, then again on every 10th failure.
 - `GET /api/knowledge/qmd-status` (instance admin) returns 200 when healthy and 503 when not.
