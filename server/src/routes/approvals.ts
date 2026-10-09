@@ -21,6 +21,12 @@ import {
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { forbidden } from "../errors.js";
 import { HUMAN_PROXY_ADAPTER_TYPE } from "../services/human-proxy.js";
+import { redactEventPayload } from "../redaction.js";
+import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import { createEmailService } from "../services/email/index.js";
+import type { EmailSendApprovalPayload } from "./rk9-email.js";
+import { issueService } from "../services/issues.js";
+import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
 
 // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
 // human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
@@ -37,12 +43,6 @@ function assertAgentHireApprovalNotHumanProxy(req: Request, type: string, payloa
   });
 }
 // --- end RK9 Custom ---
-import { redactEventPayload } from "../redaction.js";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
-import { createEmailService } from "../services/email/index.js";
-import type { EmailSendApprovalPayload } from "./rk9-email.js";
-import { issueService } from "../services/issues.js";
-import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
