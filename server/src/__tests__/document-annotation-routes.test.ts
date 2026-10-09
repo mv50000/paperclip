@@ -9,6 +9,8 @@ const otherCompanyId = "33333333-3333-4333-8333-333333333333";
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  // --- RK9 Custom (RK9-78) ---
+  assertKnownActorRunId: vi.fn(async () => undefined),
   listReviewAttention: vi.fn(),
 }));
 const mockDocumentService = vi.hoisted(() => ({
@@ -201,6 +203,7 @@ describe("document annotation routes", () => {
       assigneeAgentId: null,
     });
     mockIssueService.assertCheckoutOwner.mockResolvedValue({});
+    mockIssueService.assertKnownActorRunId.mockResolvedValue(undefined);
     mockIssueService.listReviewAttention.mockResolvedValue(new Map());
     mockDocumentService.getIssueDocumentByKey.mockResolvedValue(documentPayload);
     mockDocumentService.upsertIssueDocument.mockResolvedValue({

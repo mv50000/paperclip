@@ -99,3 +99,5 @@ packages/adapter-utils/src/acpx-engine/execute.test.ts
 packages/adapter-utils/src/agent-cgroup.test.ts
 # RK9-454: opt-in additionalMcpConfigPaths yhdistää agentin MCP-konfiguraation strict-runtime-konfiguraatioon.
 packages/adapters/claude-local/src/server/execute.additional-mcp.test.ts
+# RK9-78: issue document PUT palauttaa 422 tuntemattomalle run id:lle ennen document_revisions-kirjoitusta.
+server/src/__tests__/issue-document-run-id-routes.test.ts
