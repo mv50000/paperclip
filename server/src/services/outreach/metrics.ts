@@ -7,7 +7,7 @@
 // change on a feature branch — same reasoning `outreach-sender.md` gives for
 // hand-rolling the SMTP client instead of pulling in nodemailer) — the text
 // format is a handful of lines, so it's built by hand below.
-import { and, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { activityLog, rk9EmailMessages, outreachEvents, outreachMessages, outreachSequences } from "@paperclipai/db";
 import { effectiveDailyCap, zonedDayRange } from "./scheduler-logic.js";
@@ -338,9 +338,16 @@ function formatDnsblDigestLine(dnsbl: OutreachDnsblState): string | null {
  * message is unreachable when it has no sequence (`sequence_id IS NULL`, e.g. the
  * sequence was deleted) or its sequence was merely deactivated. Needs a left join
  * on `outreachSequences` in the caller.
+ *
+ * RK9-370: a sequence that was never activated (`activated_at IS NULL`) is the
+ * normal setup stage (create, draft, approve, then activate), so it does not
+ * count. A sequence that was activated and later deactivated does count.
  */
 function orphanedSequenceCondition() {
-  return or(isNull(outreachMessages.sequenceId), eq(outreachSequences.active, false));
+  return or(
+    isNull(outreachMessages.sequenceId),
+    and(eq(outreachSequences.active, false), isNotNull(outreachSequences.activatedAt)),
+  );
 }
 
 /** RK9-224/RK9-230: total `approved` messages with no sequence or an inactive one, across all companies — see `outreach_approved_without_sequence`. */
