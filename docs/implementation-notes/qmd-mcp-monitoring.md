@@ -10,6 +10,12 @@ The `qmd-mcp` daemon on CT 364 (`192.168.1.64:8181`) serves recall. When it is d
   load and embed errors (`embedBatch` returns null embeddings) and `structuredSearch` skips the vec search without
   an error, so the tool returns a lex-only result without `isError`. A vec-only query has no lex fallback and returns
   zero rows when the model is broken. Zero hits, a tool-level `isError` result and a vec timeout all count as failures.
+- The vec query is seeded with the text of an active document (RK9-465). qmd's `searchVec` takes the 60 nearest vectors
+  of the whole index and drops inactive documents afterwards, so orphan vectors can crowd out a generic query such as
+  "health" and return zero rows for a healthy model. The probe first runs a lex-only query (no model needed) to get
+  the title and snippet of an active `rk9` document, then vec-searches that text. The document's own vector is a
+  near-exact match, so zero rows still means the embedding path is broken. Without a lex hit it falls back to "health".
+  Nothing alerts on the orphan share itself; clean orphan vectors with qmd cleanup when the share grows.
 - After `PAPERCLIP_QMD_ALERT_THRESHOLD` (default 3) consecutive failures the server logs
   `qmd-mcp daemon DOWN` at ERROR, then again on every 10th failure.
 - `GET /api/knowledge/qmd-status` (instance admin) returns 200 when healthy and 503 when not.
