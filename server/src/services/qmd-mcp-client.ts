@@ -247,10 +247,14 @@ async function qmdCall(name: string, args: unknown, signal: AbortSignal, fetchIm
     } catch (error) {
       lastErr = error;
       if (signal.aborted) throw error; // caller went away / our deadline fired — not a session problem
-      session = null; // protocol-level failure; the (possibly stale) session may be the cause — retry fresh
-      // Release the discarded session on the daemon too (RK9-371); otherwise each failing call
-      // leaves up to two sessions open server-side.
-      if (sid) void releaseSession(sid, fetchImpl);
+      // Protocol-level failure; the (possibly stale) session may be the cause — retry fresh. Only
+      // touch the cache when it still holds OUR session: a concurrent caller may already have
+      // replaced it, and discarding that one would re-open the leak. Release the discarded
+      // session on the daemon too (RK9-371); otherwise each failing call leaves sessions open.
+      if (sid && session === sid) {
+        session = null;
+        void releaseSession(sid, fetchImpl);
+      }
     }
   }
   throw lastErr;
@@ -380,7 +384,14 @@ export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
 export function startQmdHealthProbe(opts: { intervalMs?: number; deps?: QmdMcpDeps } = {}): QmdKeepwarmHandle {
   const intervalMs = opts.intervalMs ?? qmdHealthProbeIntervalMs();
   if (intervalMs <= 0 || !process.env.QMD_MCP_URL) return { stop: () => {} };
-  const interval = setInterval(() => void probeQmdDaemon(opts.deps), intervalMs);
+  let running = false; // a slow probe (timeouts + retry) must not overlap the next tick
+  const interval = setInterval(() => {
+    if (running) return;
+    running = true;
+    void probeQmdDaemon(opts.deps).finally(() => {
+      running = false;
+    });
+  }, intervalMs);
   if (typeof interval.unref === "function") interval.unref();
   logger.info({ intervalMs }, "qmd-mcp health probe started");
   return { stop: () => clearInterval(interval) };
