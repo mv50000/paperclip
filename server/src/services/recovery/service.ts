@@ -4327,7 +4327,7 @@ export function recoveryService(
         try {
           await deliverConversationComments(db, issue, deps.enqueueWakeup);
         } catch (err) {
-          // A system pause skips the wake; the next sweep after resume redelivers it.
+          // A system pause skips the wake; undeliveredConversationComments ignores system.paused skips, so the next sweep after resume redelivers it.
           if (!isSystemPausedConflict(err)) throw err;
         }
       }

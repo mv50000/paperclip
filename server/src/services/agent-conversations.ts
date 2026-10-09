@@ -420,7 +420,8 @@ export async function undeliveredConversationComments(
         isNull(issueComments.deletedAt),
         sql`${issueComments.clientRequestId} is not null`,
         sql`not exists (select 1 from ${agentWakeupRequests} where ${agentWakeupRequests.companyId} = ${companyId}
-      and ${agentWakeupRequests.idempotencyKey} = 'conversation-comment:' || ${issueComments.id}::text)`,
+      and ${agentWakeupRequests.idempotencyKey} = 'conversation-comment:' || ${issueComments.id}::text
+      and not (${agentWakeupRequests.status} = 'skipped' and ${agentWakeupRequests.reason} = 'system.paused'))`,
       ),
     )
     .orderBy(issueComments.createdAt, issueComments.id)

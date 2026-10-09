@@ -7,6 +7,8 @@ import {
   companies,
   createDb,
   heartbeatRuns,
+  issueComments,
+  issues,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -15,6 +17,7 @@ import {
 import { heartbeatService } from "../services/heartbeat.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 import { isSystemPausedConflict } from "../errors.js";
+import { undeliveredConversationComments } from "../services/agent-conversations.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -89,5 +92,36 @@ describeEmbeddedPostgres("heartbeatService system pause fallback (no systemPause
       .where(eq(agentWakeupRequests.agentId, agentId));
     expect(skipped.length).toBeGreaterThan(0);
     expect(skipped.every((row) => row.status === "skipped")).toBe(true);
+  });
+  it("keeps a conversation comment undelivered when its wake was skipped by a system pause", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "ChatAgent", role: "engineer", status: "idle",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Chat", status: "todo", priority: "medium", assigneeAgentId: agentId,
+    });
+    const [paused, other] = [randomUUID(), randomUUID()];
+    await db.insert(issueComments).values([
+      { id: paused, companyId, issueId, body: "a", clientRequestId: randomUUID(), authorUserId: "u" },
+      { id: other, companyId, issueId, body: "b", clientRequestId: randomUUID(), authorUserId: "u" },
+    ]);
+    const wake = (commentId: string, reason: string) => ({
+      companyId, agentId, source: "on_demand", triggerDetail: "manual", reason, status: "skipped",
+      idempotencyKey: `conversation-comment:${commentId}`,
+    });
+    await db.insert(agentWakeupRequests).values([wake(paused, "system.paused"), wake(other, "heartbeat.idle")]);
+
+    const undelivered = await undeliveredConversationComments(db, companyId, issueId);
+    expect(undelivered.map((c) => c.id)).toEqual([paused]);
   });
 });
