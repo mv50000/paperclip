@@ -76,7 +76,7 @@ export function qmdAlertThreshold(): number {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 3;
 }
 
-/** Health probe interval; 0 disables it. The probe is a cheap lex-only query (no model load), so
+/** Health probe interval; 0 disables it. The probe is a lex+vec query, so
  *  a daemon outage is noticed even when nobody is calling recall. */
 export function qmdHealthProbeIntervalMs(): number {
   const n = Number(process.env.PAPERCLIP_QMD_HEALTH_INTERVAL_MS);
@@ -209,6 +209,19 @@ async function getSession(signal: AbortSignal, fetchImpl: typeof fetch): Promise
   return initPromise;
 }
 
+/** Best-effort DELETE of a session we no longer use. Never throws. */
+async function releaseSession(sid: string, fetchImpl: typeof fetch): Promise<void> {
+  try {
+    await fetchImpl(qmdMcpUrl(), {
+      method: "DELETE",
+      headers: { "mcp-session-id": sid },
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    // harmless — the daemon expires idle sessions
+  }
+}
+
 /** `tools/call` wrapper. Retries once, re-initializing the session, on a genuine protocol
  *  failure (stale/expired session, a non-2xx/malformed response, a JSON-RPC `error`) — matches
  *  vault-mcp's handling of a stale/expired session, since the daemon doesn't distinguish that
@@ -219,8 +232,9 @@ async function getSession(signal: AbortSignal, fetchImpl: typeof fetch): Promise
 async function qmdCall(name: string, args: unknown, signal: AbortSignal, fetchImpl: typeof fetch): Promise<any> {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
+    let sid: string | null = null;
     try {
-      const sid = await getSession(signal, fetchImpl);
+      sid = await getSession(signal, fetchImpl);
       const r = await qmdFetch(
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } },
         sid,
@@ -233,7 +247,14 @@ async function qmdCall(name: string, args: unknown, signal: AbortSignal, fetchIm
     } catch (error) {
       lastErr = error;
       if (signal.aborted) throw error; // caller went away / our deadline fired — not a session problem
-      session = null; // protocol-level failure; the (possibly stale) session may be the cause — retry fresh
+      // Protocol-level failure; the (possibly stale) session may be the cause — retry fresh. Only
+      // touch the cache when it still holds OUR session: a concurrent caller may already have
+      // replaced it, and discarding that one would re-open the leak. Release the discarded
+      // session on the daemon too (RK9-371); otherwise each failing call leaves sessions open.
+      if (sid && session === sid) {
+        session = null;
+        void releaseSession(sid, fetchImpl);
+      }
     }
   }
   throw lastErr;
@@ -327,27 +348,50 @@ export async function keepwarmPing(deps: QmdMcpDeps = {}): Promise<void> {
   }
 }
 
-/** One cheap lex-only query against the daemon; feeds the health state. Never throws. */
+/** One query against the daemon, shaped like a real recall (lex + vec), so a broken embedding
+ *  model or a vec-search timeout shows up as a failure instead of hiding behind a lex-only success
+ *  (RK9-371). A tool-level `isError` result counts as a failure. Feeds the health state; never
+ *  throws. */
 export async function probeQmdDaemon(deps: QmdMcpDeps = {}): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   try {
-    await qmdCall(
+    const result = await qmdCall(
       "query",
-      { searches: [{ type: "lex", query: "health" }], rerank: false, collections: [KEEPWARM_COLLECTION], limit: 1 },
+      {
+        searches: [
+          { type: "lex", query: "health" },
+          { type: "vec", query: "health" },
+        ],
+        rerank: false,
+        collections: [KEEPWARM_COLLECTION],
+        limit: 1,
+      },
       AbortSignal.timeout(qmdMcpTimeoutMs()),
       fetchImpl,
     );
+    if (result?.isError) {
+      throw new Error(`qmd-mcp daemon: tool error: ${JSON.stringify(result?.content ?? result)}`);
+    }
     recordDaemonSuccess();
   } catch (error) {
     recordDaemonFailure(error);
   }
 }
 
-/** Starts the periodic health probe (default 60s; PAPERCLIP_QMD_HEALTH_INTERVAL_MS=0 disables). */
+/** Starts the periodic health probe (default 60s; PAPERCLIP_QMD_HEALTH_INTERVAL_MS=0 disables).
+ *  Does nothing unless QMD_MCP_URL is set: instances without a daemon (dev, CI) would otherwise
+ *  log a DOWN error forever. */
 export function startQmdHealthProbe(opts: { intervalMs?: number; deps?: QmdMcpDeps } = {}): QmdKeepwarmHandle {
   const intervalMs = opts.intervalMs ?? qmdHealthProbeIntervalMs();
-  if (intervalMs <= 0) return { stop: () => {} };
-  const interval = setInterval(() => void probeQmdDaemon(opts.deps), intervalMs);
+  if (intervalMs <= 0 || !process.env.QMD_MCP_URL) return { stop: () => {} };
+  let running = false; // a slow probe (timeouts + retry) must not overlap the next tick
+  const interval = setInterval(() => {
+    if (running) return;
+    running = true;
+    void probeQmdDaemon(opts.deps).finally(() => {
+      running = false;
+    });
+  }, intervalMs);
   if (typeof interval.unref === "function") interval.unref();
   logger.info({ intervalMs }, "qmd-mcp health probe started");
   return { stop: () => clearInterval(interval) };

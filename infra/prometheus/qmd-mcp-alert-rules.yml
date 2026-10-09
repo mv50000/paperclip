@@ -1,0 +1,17 @@
+groups:
+  - name: qmd-mcp-daemon
+    rules:
+      # RK9-371 (RK9-369 part 2): qmd-mcp on CT 364 (192.168.1.64:8181) serves recall for the whole
+      # Paperclip server and every agent heartbeat. When it is down, recall silently falls back to a
+      # cold qmd CLI start (~93 s instead of <1 s), which slows every agent run without a visible
+      # cause. Source: blackbox TCP probe from skynet (job blackbox-qmd). The admin route
+      # /api/knowledge/qmd-status is not used here because it needs an instance-admin credential.
+      - alert: QmdMcpDaemonDown
+        expr: probe_success{job="blackbox-qmd"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          host: qmd-mcp
+        annotations:
+          summary: "qmd-mcp (CT 364 {{ $labels.instance }}) ei vastaa TCP-yhteyteen yli 5 min"
+          description: "Recall putoaa hitaaseen qmd CLI -varapolkuun (~93 s vs <1 s), mikä hidastaa jokaista agenttiajoa. rk9claude: tee vain diagnoosi (pct status 364, pct exec 364 -- systemctl status qmd-mcp, journalctl -u qmd-mcp). ÄLÄ käynnistä qmd-mcp:tä tai CT 364:ää uudelleen; operaattori päättää korjauksesta. TCP-probe ei havaitse vec-hakujen vikoja: ne näkyvät Paperclip-palvelimen lokissa (\"qmd-mcp daemon DOWN\") ja reitillä /api/knowledge/qmd-status."

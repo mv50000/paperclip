@@ -1,0 +1,6 @@
+# Add under modules in skynet /opt/prometheus/blackbox.yml (RK9-371).
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: "ip4"

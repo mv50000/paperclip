@@ -1,0 +1,18 @@
+# Add under scrape_configs in skynet /opt/prometheus/prometheus.yml (RK9-371).
+# Requires the tcp_connect module in /opt/prometheus/blackbox.yml (see qmd-mcp-blackbox-module.yml).
+  - job_name: "blackbox-qmd"
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    scrape_interval: 60s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["192.168.1.64:8181"]
+        labels: { host: "qmd-mcp", provider: "lan", category: "KRIITTINEN" }
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
