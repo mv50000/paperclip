@@ -7,7 +7,8 @@
 #   The runner TypeScript output (dist) is rebuilt whenever server is checked (else only when missing).
 # - A changed root file (tsconfig.base.json, lockfile, package.json, patches/, scripts/) checks every package.
 # - Optional offload: when `pcp-remote-verify.sh` is on PATH (RK9 hosts), the typecheck runs on the
-#   remote worker. Its exit 3/90/91 (install failed, worker down, worker busy) falls back to a local run.
+#   remote worker. Its exit 3/90/91 (install failed, worker down, worker busy) and 137 (worker OOM: the
+#   server typecheck does not fit in worker-01's 6 GB, RK9-473) fall back to a local run.
 #   PREPUSH_TYPECHECK_REMOTE=0 disables the offload.
 set -euo pipefail
 
@@ -65,6 +66,7 @@ else
     set -e
     case "$rc" in
       3|90|91) echo "pre-push: remote worker unavailable (exit $rc); typechecking locally." ;;
+      137) echo "pre-push: remote worker ran out of memory (exit 137, RK9-473); typechecking locally." ;;
       *) exit "$rc" ;;
     esac
   fi

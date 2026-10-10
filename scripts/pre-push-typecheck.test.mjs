@@ -130,8 +130,8 @@ test("remote type errors fail the hook without a local rerun", () => {
   assert.doesNotMatch(res.calls, /^-r .* typecheck$/m);
 });
 
-test("worker down, busy or failed install falls back to the local typecheck", () => {
-  for (const rc of [3, 90, 91]) {
+test("worker down, busy, out of memory or failed install falls back to the local typecheck", () => {
+  for (const rc of [3, 90, 91, 137]) {
     const res = run({ diff: "cli/src/a.ts\n", pkgs: "paperclipai\n", remote: rc });
     assert.equal(res.status, 0, `${rc}: ${res.stderr}`);
     assert.match(res.stdout, /typechecking locally/, String(rc));
