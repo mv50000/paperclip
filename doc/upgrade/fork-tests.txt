@@ -104,3 +104,9 @@ server/src/__tests__/issue-document-run-id-routes.test.ts
 # RK9-475: lähetysjono kieltäytyy viestistä, jonka hyväksytty sisältö tai vastaanottaja muuttui (tiiviste, migraatio 9013).
 server/src/__tests__/outreach-approved-content.test.ts
 server/src/__tests__/outreach-approved-content-db.test.ts
+# RK9-319: tainted-ajo (epäluotettava sisältö) pysäköi ulospäin näkyvät toimet hyväksyntään. Ks. doc/upgrade/run-taint.md
+server/src/__tests__/rk9-run-taint-e2e.test.ts
+server/src/__tests__/rk9-run-taint-tool-gate.test.ts
+server/src/__tests__/github-operation-credentials.test.ts
+server/src/__tests__/approval-telegram-listener-taint.test.ts
+ui/src/components/RunTaintNotice.test.tsx

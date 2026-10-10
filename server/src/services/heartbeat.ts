@@ -164,6 +164,9 @@ import {
 import { createHostDuplexObservabilityRecorder } from "./duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "./tool-runtime-metrics.js";
 import { logger } from "../middleware/logger.js";
+// --- RK9 Custom (RK9-319): server-side run taint ---
+import { markRunIfTaintingContext } from "./rk9-run-taint.js";
+// --- /RK9 Custom ---
 import {
   createGitRemoteAuthProvider,
   resolveManagedGitHubIdentitySelection,
@@ -17692,6 +17695,12 @@ export function heartbeatService(
       },
     });
     publishRunLifecyclePluginEvent(claimed);
+
+    // --- RK9 Custom (RK9-319): mark the run tainted before the adapter starts
+    // when the server delivered untrusted content to it (inbound email wake,
+    // an issue with inbound mail, a wake from a tainted run). Never throws. ---
+    await markRunIfTaintingContext(db, claimed);
+    // --- /RK9 Custom ---
 
     await setWakeupStatus(claimed.wakeupRequestId, "claimed", { claimedAt });
 

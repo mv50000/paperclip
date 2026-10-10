@@ -119,13 +119,33 @@ function renderApproval(companyName, approval) {
   const to = Array.isArray(p.to) ? p.to.join(", ") : "?";
   let body = typeof p.bodyMarkdown === "string" ? p.bodyMarkdown : "(ei runkoa)";
   if (body.length > 3000) body = body.slice(0, 2997) + "…";
-  return [
+  const lines = [
     `📧 Hyväksyntä — ${companyName}`,
     `Vastaanottaja: ${to}`,
     `Aihe: ${p.subject ?? "?"}`,
-    "──────────",
-    body,
-  ].join("\n");
+  ];
+  // RK9-319: the requesting run received untrusted content (e.g. the inbound
+  // email this answers). Read the draft for injected instructions.
+  const taintLine = renderTaintLine(p.taint);
+  if (taintLine) lines.push(taintLine);
+  lines.push("──────────", body);
+  return lines.join("\n");
+}
+
+const TAINT_KIND_LABELS = {
+  email_inbound_wake: "saapuva sähköposti",
+  email_issue_context: "sähköpostitiketti",
+  email_body_read: "luettu sähköpostin runko",
+  propagated_wake: "tainted-ajon herätys",
+  resumed_session: "tainted-sessio",
+};
+
+function renderTaintLine(taint) {
+  if (!taint || typeof taint !== "object") return null;
+  const kinds = Array.isArray(taint.sources)
+    ? [...new Set(taint.sources.map((s) => TAINT_KIND_LABELS[s?.kind] ?? String(s?.kind ?? "?")))]
+    : [];
+  return `⚠️ Ajo luki epäluotettavaa sisältöä (lähde: ${kinds.length > 0 ? kinds.join(", ") : "tuntematon"})`;
 }
 
 const buildMarkup = (approvalId) => ({

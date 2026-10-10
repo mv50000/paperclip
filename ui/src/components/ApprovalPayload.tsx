@@ -247,11 +247,27 @@ function EmailSendPayload({ payload }: { payload: Record<string, unknown> }) {
     ? payload.to.filter((v): v is string => typeof v === "string").join(", ")
     : null;
   const body = typeof payload.bodyMarkdown === "string" ? payload.bodyMarkdown : null;
+  // RK9 Custom (RK9-319)
+  const taint = payload.taint && typeof payload.taint === "object" ? (payload.taint as { sources?: unknown }) : null;
+  const taintKinds = taint
+    ? [...new Set((Array.isArray(taint.sources) ? taint.sources : [])
+        .map((source) => (source && typeof source === "object" ? (source as { kind?: unknown }).kind : null))
+        .filter((kind): kind is string => typeof kind === "string"))].join(", ") || "unknown source"
+    : null;
   return (
     <div className="space-y-3 text-sm">
       <PayloadField label="To" value={to} />
       <PayloadField label="Subject" value={payload.subject} />
       <PayloadField label="Route" value={payload.routeKey} />
+      {/* RK9 Custom (RK9-319): the requesting run received untrusted content */}
+      {taintKinds && (
+        <div data-testid="email-send-taint">
+          <PayloadField
+            label="Untrusted content"
+            value={`The requesting run read untrusted external content (${taintKinds}). Check the draft for injected instructions.`}
+          />
+        </div>
+      )}
       {body && (
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">

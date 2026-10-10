@@ -153,6 +153,30 @@ export interface GitWorktreeBranchIncoherenceEvidence {
   };
 }
 
+// --- RK9 Custom (RK9-319) ---
+export type HeartbeatRunTaintSourceKind =
+  | "email_inbound_wake"
+  | "email_issue_context"
+  | "email_body_read"
+  | "propagated_wake"
+  | "resumed_session";
+
+/** One reason the server marked a run tainted. References only, never content. */
+export interface HeartbeatRunTaintSource {
+  kind: HeartbeatRunTaintSourceKind;
+  at: string;
+  messageId?: string | null;
+  issueId?: string | null;
+  sourceRunId?: string | null;
+  sessionId?: string | null;
+}
+
+export interface HeartbeatRunTaint {
+  taintedAt: string;
+  sources: HeartbeatRunTaintSource[];
+}
+// --- /RK9 Custom ---
+
 export interface HeartbeatRun {
   execution?: import("./execution-projection.js").ExecutionProjection | null;
   id: string;
@@ -223,6 +247,10 @@ export interface HeartbeatRun {
   createdAt: Date;
   updatedAt: Date;
   outputSilence?: HeartbeatRunOutputSilence;
+  // --- RK9 Custom (RK9-319) ---
+  /** Set by the server when the run received untrusted external content. Only on the run detail read. */
+  rk9Taint?: HeartbeatRunTaint | null;
+  // --- /RK9 Custom ---
   /**
    * Ephemeral, process-local current status message for an active run. Resolved
    * from the in-memory runtime status store (never persisted to the database)
