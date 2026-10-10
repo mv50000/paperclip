@@ -1,10 +1,12 @@
 import { Router } from "express";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { isUuidLike } from "@paperclipai/shared";
 import {
   rk9EmailMessages,
   emailOutboundAudit,
   emailRoutes as emailRoutesTable,
+  heartbeatRuns,
 } from "@paperclipai/db";
 import { createEmailService } from "../services/email/index.js";
 import { DEFAULT_CEO_EMAIL } from "../services/email/escalation.js";
@@ -15,7 +17,7 @@ import {
 } from "../services/email/suppression.js";
 import { wrapUntrusted } from "../services/email/sanitize.js";
 import { approvalService, issueApprovalService, logActivity } from "../services/index.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unprocessable } from "../errors.js";
 // --- RK9 Custom (RK9-319): tainted-run gate ---
 import {
@@ -25,6 +27,19 @@ import {
   type Rk9RunTaintSource,
 } from "../services/rk9-run-taint.js";
 // --- /RK9 Custom ---
+
+// RK9 Custom (RK9-488): activity_log.run_id references heartbeat_runs, and an agent key's run id
+// comes from a header that is only format-checked. A stale or foreign run id would make the
+// activity insert fail after the suppression change has committed, so log it without the run.
+async function knownRunIdOrNull(db: Db, runId: string | null, companyId: string): Promise<string | null> {
+  if (!runId || !isUuidLike(runId)) return null;
+  const [run] = await db
+    .select({ companyId: heartbeatRuns.companyId })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .limit(1);
+  return run && run.companyId === companyId ? runId : null;
+}
 
 /** Payload stored on an `email_send` approval; the server sends from this on
  * approve — the agent cannot alter the content after submission. */
@@ -530,17 +545,46 @@ export function rk9EmailRoutes(db: Db) {
       address: body.address,
       reason,
     });
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: await knownRunIdOrNull(db, actor.runId, companyId),
+      agentApiKeyId: actor.agentApiKeyId,
+      action: "email.suppression.added",
+      entityType: "email_suppression",
+      entityId: entry.id,
+      details: { reason },
+    });
     res.status(201).json(entry);
   });
 
+  // RK9 Custom: removing a suppression reopens sending to a blocked address, so only the
+  // board may do it. An agent could otherwise lift a block and then send (RK9-319 side finding).
   router.delete("/companies/:companyId/email/suppression/:id", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const removed = await removeSuppression(db, companyId, req.params.id as string);
+    assertBoard(req);
+    const id = req.params.id as string;
+    const removed = await removeSuppression(db, companyId, id);
     if (!removed) {
       res.status(404).json({ error: "not_found" });
       return;
     }
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: await knownRunIdOrNull(db, actor.runId, companyId),
+      agentApiKeyId: actor.agentApiKeyId,
+      action: "email.suppression.removed",
+      entityType: "email_suppression",
+      entityId: id,
+    });
     res.status(204).end();
   });
 
