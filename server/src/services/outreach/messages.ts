@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, inArray } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { outreachMessages, outreachSequences } from "@paperclipai/db";
 import type {
@@ -8,6 +8,7 @@ import type {
   UpdateOutreachMessage,
 } from "@paperclipai/shared";
 import { canApproveMessage, canTransitionMessage } from "./logic.js";
+import { computeApprovedContentHash } from "./approved-content.js";
 import { getProspect } from "./prospects.js";
 import { getSequence } from "./sequences.js";
 import { findOutreachSuppressed } from "./suppressions.js";
@@ -186,15 +187,39 @@ export async function approveMessage(
     return { ok: false, reason: "prospect_not_contactable", status: message.status as OutreachMessageStatus };
   }
   const now = new Date();
+  // --- RK9 Custom (RK9-475) --- fingerprint what the reviewer approved; the
+  // send queue refuses the message if any of it changes later.
+  const approvedContentHash = computeApprovedContentHash({
+    subject: message.subject,
+    bodyText: message.bodyText,
+    bodyHtml: message.bodyHtml,
+    inReplyTo: message.inReplyTo,
+    recipientEmail: prospect?.email ?? null,
+  });
+  // --- /RK9 Custom ---
   const [updated] = await db
     .update(outreachMessages)
-    .set({ status: "approved", approvedBy: actorId, approvedAt: now, rejectReason: null, updatedAt: now })
+    .set({
+      status: "approved",
+      approvedBy: actorId,
+      approvedAt: now,
+      approvedContentHash,
+      rejectReason: null,
+      updatedAt: now,
+    })
     // Re-check status in the WHERE so two concurrent reviewers cannot both win.
+    // RK9-475: also re-check the hashed fields, so an edit that lands between
+    // the read above and this write fails the approve instead of storing a
+    // hash of text nobody approved.
     .where(
       and(
         eq(outreachMessages.companyId, companyId),
         eq(outreachMessages.id, id),
         eq(outreachMessages.status, message.status),
+        eq(outreachMessages.subject, message.subject),
+        eq(outreachMessages.bodyText, message.bodyText),
+        sql`${outreachMessages.bodyHtml} IS NOT DISTINCT FROM ${message.bodyHtml}`,
+        sql`${outreachMessages.inReplyTo} IS NOT DISTINCT FROM ${message.inReplyTo}`,
       ),
     )
     .returning();

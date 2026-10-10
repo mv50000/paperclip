@@ -119,6 +119,15 @@ export const outreachMessages = pgTable(
     /** Actor id (user or agent) that approved/rejected. */
     approvedBy: text("approved_by"),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
+    // --- RK9 Custom (RK9-475) ---
+    /**
+     * `sha256-v1:<hex>` of the approved subject, bodies, In-Reply-To and
+     * recipient (server/src/services/outreach/approved-content.ts). The send
+     * queue refuses a message whose content no longer matches. NULL = approved
+     * before RK9-475, sent without the check.
+     */
+    approvedContentHash: text("approved_content_hash"),
+    // --- /RK9 Custom ---
     rejectedBy: text("rejected_by"),
     rejectedAt: timestamp("rejected_at", { withTimezone: true }),
     // Reserved for RK9-196 review flow.

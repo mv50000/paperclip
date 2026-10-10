@@ -26,9 +26,11 @@ Custom-migraatiot käyttävät **9000-sarjaa** (`9NNN_rk9_<feature>.sql`):
 | 9000   | `email_messages`-jako, tuore kanta: upstreamin AgentMail-taulu parkkiin ennen 9002:ta (RK9-317) |
 | 9011   | `email_messages`-jako, tuore kanta: forkin taulu → `rk9_email_messages`, upstreamin taulu takaisin (RK9-317) |
 | 0126 (slot) | `email_messages`-jako, päivityspolku: forkin taulu → `rk9_email_messages` ennen upstreamin 0272:ta (RK9-317) |
+| 9012   | Outreach: lähettäjien vastausreittien backfill |
+| 9013   | Outreach: hyväksytyn sisällön tiiviste `approved_content_hash` (RK9-475) |
 
-Seuraava vapaa numero: **9012** (tarkistettu 2026-09-27: `packages/db/src/migrations/`
-ei sisällä 9012+-tiedostoja).
+Seuraava vapaa numero: **9014** (tarkistettu 2026-10-10: `packages/db/src/migrations/`
+ei sisällä 9014+-tiedostoja).
 
 ### `email_messages`-törmäys (RK9-317, porras 916.1)
 

@@ -12,6 +12,8 @@ import { getProspect } from "./prospects.js";
 import { findOutreachSuppressed } from "./suppressions.js";
 import { recordEvent } from "./events.js";
 import { listActivePauses } from "./sender-pauses.js";
+import { logActivity } from "../activity-log.js";
+import { verifyApprovedContent } from "./approved-content.js";
 import {
   checkRecipientDomain,
   recipientDomain,
@@ -87,10 +89,13 @@ async function rejectQueuedMessage(
   db: Db,
   id: string,
   fromStatus: "approved" | "queued",
-  reason: "prospect_no_longer_contactable" | "recipient_domain_unresolvable" = "prospect_no_longer_contactable",
-) {
+  reason:
+    | "prospect_no_longer_contactable"
+    | "recipient_domain_unresolvable"
+    | "approved_content_changed" = "prospect_no_longer_contactable",
+): Promise<boolean> {
   const now = new Date();
-  await db
+  const updated = await db
     .update(outreachMessages)
     .set({
       status: "rejected",
@@ -99,7 +104,9 @@ async function rejectQueuedMessage(
       rejectReason: reason,
       updatedAt: now,
     })
-    .where(and(eq(outreachMessages.id, id), eq(outreachMessages.status, fromStatus)));
+    .where(and(eq(outreachMessages.id, id), eq(outreachMessages.status, fromStatus)))
+    .returning({ id: outreachMessages.id });
+  return updated.length > 0;
 }
 
 export interface QueueDueMessagesResult {
@@ -310,6 +317,43 @@ export async function listSendQueue(
 
   const items: SendQueueItem[] = [];
   for (const row of rows) {
+    // --- RK9 Custom (RK9-475) --- the content must still be what was approved.
+    // `rejected` is terminal, so the message can never be sent; `failed` would
+    // not do, because `failed → queued` is a retry path.
+    const contentVerdict = verifyApprovedContent(row.message.approvedContentHash, {
+      subject: row.message.subject,
+      bodyText: row.message.bodyText,
+      bodyHtml: row.message.bodyHtml,
+      inReplyTo: row.message.inReplyTo,
+      recipientEmail: row.prospectEmail,
+    });
+    if (!contentVerdict.ok) {
+      logger.warn(
+        { messageId: row.message.id, companyId: row.message.companyId },
+        "outreach send-queue: approved content changed after approval, refusing to send",
+      );
+      if (await rejectQueuedMessage(db, row.message.id, "queued", "approved_content_changed")) {
+        await logActivity(db, {
+          companyId: row.message.companyId,
+          actorType: "system",
+          actorId: "outreach-scheduler",
+          action: "outreach.message.send_blocked",
+          entityType: "outreach_message",
+          entityId: row.message.id,
+          details: {
+            reason: "approved_content_changed",
+            fromStatus: "queued",
+            toStatus: "rejected",
+            approvedBy: row.message.approvedBy,
+            approvedAt: row.message.approvedAt?.toISOString() ?? null,
+            expectedHash: contentVerdict.expected,
+            actualHash: contentVerdict.actual,
+          },
+        });
+      }
+      continue;
+    }
+    // --- /RK9 Custom ---
     const suppressed =
       !!row.prospectEmail && (await findOutreachSuppressed(db, [row.prospectEmail])).size > 0;
     if (!row.prospectEmail || !isProspectContactable(row.prospectStatus as OutreachProspectStatus) || suppressed) {
