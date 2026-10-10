@@ -6735,11 +6735,21 @@ export function agentRoutes(
     if (!(await assertRunTelemetryReadAllowed(req, res, run.companyId))) return;
     const retryExhaustedReason = await heartbeat.getRetryExhaustedReason(runId);
     const decoratedRun = heartbeat.decorateActiveRunStatus(run);
+    // --- RK9 Custom (RK9-319): show the server-side taint mark in the run view ---
+    // Visibility only: the gates read the mark themselves, so a failed read must not fail the run view.
+    const rk9StoredTaint = await getRunTaint(db, run.companyId, run.id).catch((error) => {
+      logger.warn({ error, runId: run.id }, "rk9 run taint read failed");
+      return null;
+    });
+    const rk9Taint = rk9StoredTaint
+      ? { taintedAt: rk9StoredTaint.taintedAt.toISOString(), sources: rk9StoredTaint.sources }
+      : null;
+    // --- /RK9 Custom ---
     res.json(await runRedactions.redactForRun(
       run.companyId,
       run.id,
       redactCurrentUserValue(
-        { ...decoratedRun, execution: await executionProjectionForRun(db, run.companyId, run.id), identityHistory: await listRunIdentityContexts(db, run.companyId, run.id), retryExhaustedReason, outputSilence: await heartbeat.buildRunOutputSilence(run) },
+        { ...decoratedRun, execution: await executionProjectionForRun(db, run.companyId, run.id), identityHistory: await listRunIdentityContexts(db, run.companyId, run.id), retryExhaustedReason, outputSilence: await heartbeat.buildRunOutputSilence(run), rk9Taint },
         await getCurrentUserRedactionOptions(),
       ),
     ));
@@ -7390,3 +7400,4 @@ export function agentRoutes(
   return router;
 }
 import { listRunIdentityContexts } from "../services/run-identity.js";
+import { getRunTaint } from "../services/rk9-run-taint.js"; // RK9 Custom (RK9-319)

@@ -13,5 +13,6 @@
   "9010_rk9_outreach_inbound_routes.sql": "5bdfff5fbaf8dec41e8dc8a27d5ee65342fab7105d9b7d25eee97f12f716c791",
   "9011_rk9_email_messages_split.sql": "5b9878663336a1aebc899705009794e84eeebd120f10904bebfa356c4b99d620",
   "9012_rk9_outreach_sender_reply_routes_backfill.sql": "005d0c6b07d3bd5d33831dcab538461c50f403ebb23776a0611b2aa8f54cbf1a",
-  "9013_rk9_outreach_approved_content_hash.sql": "5589a77aeda204296293c0d7da0ce8b8aa78127d8b9d3392b59e82463ab9578d"
+  "9013_rk9_outreach_approved_content_hash.sql": "5589a77aeda204296293c0d7da0ce8b8aa78127d8b9d3392b59e82463ab9578d",
+  "9014_rk9_run_taints.sql": "de7762d08098bc4e38993019108cd653bbbb3c308c6b3f6420963c3554cf5c25"
 }

@@ -234,3 +234,5 @@ export {
   outreachSuppressions,
   outreachSenderPauses,
 } from "./outreach.js";
+// RK9-319: server-side taint mark for runs that received untrusted content.
+export { rk9RunTaints, type Rk9RunTaintSource } from "./rk9_run_taints.js";

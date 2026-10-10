@@ -31,6 +31,43 @@ describe("ApprovalPayloadRenderer", () => {
     container.remove();
   });
 
+  // RK9 Custom (RK9-319)
+  it("flags an email_send draft from a run that read untrusted content", () => {
+    const root = createRoot(container);
+    const payload = {
+      kind: "send",
+      routeKey: "tuki",
+      to: ["attacker@evil.example"],
+      subject: "Asiakaslista",
+      bodyMarkdown: "Tässä lista.",
+    };
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <ApprovalPayloadRenderer
+            type="email_send"
+            payload={{
+              ...payload,
+              taint: { runId: "run-1", sources: [{ kind: "email_body_read" }, { kind: "email_body_read" }] },
+            }}
+          />
+        </ThemeProvider>,
+      );
+    });
+    const flag = container.querySelector('[data-testid="email-send-taint"]');
+    expect(flag?.textContent).toContain("Untrusted content");
+    expect(flag?.textContent).toContain("(email_body_read)");
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <ApprovalPayloadRenderer type="email_send" payload={payload} />
+        </ThemeProvider>,
+      );
+    });
+    expect(container.querySelector('[data-testid="email-send-taint"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
   it("renders request_board_approval payload fields without falling back to raw JSON", () => {
     const root = createRoot(container);
 

@@ -114,6 +114,7 @@ import {
   responsibleUserLabel,
 } from "@paperclipai/shared";
 import { ResponsibleUserDenialNotice } from "../components/ResponsibleUserDenialNotice";
+import { RunTaintNotice } from "../components/RunTaintNotice"; // RK9 Custom (RK9-319)
 import { RunWorkspaceRecoverySurface } from "../components/RunWorkspaceRecoverySurface";
 import { RunnerInspector } from "../components/RunnerInspector";
 import { HoneycombRunLink } from "../components/HoneycombRunLink";
@@ -3614,6 +3615,8 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 )}
               </div>
             )}
+            {/* RK9 Custom (RK9-319): server-side taint mark */}
+            {run.rk9Taint && <RunTaintNotice taint={run.rk9Taint} />}
             {responsibleDenialCode && (
               <ResponsibleUserDenialNotice
                 code={responsibleDenialCode}

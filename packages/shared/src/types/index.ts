@@ -892,6 +892,10 @@ export type {
   GitWorktreeBranchIncoherenceEvidence,
   GitWorktreeInProgressOperation,
   HeartbeatRun,
+  // RK9 Custom (RK9-319)
+  HeartbeatRunTaint,
+  HeartbeatRunTaintSource,
+  HeartbeatRunTaintSourceKind,
   HeartbeatRunEvent,
   HeartbeatRunStatusPhase,
   ProviderTraceDebugRequest,

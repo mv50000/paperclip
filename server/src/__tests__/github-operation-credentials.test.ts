@@ -34,6 +34,7 @@ import {
   acceptSteeredIdentity,
 } from "../services/run-identity.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
+import { markRunTainted } from "../services/rk9-run-taint.js";
 import {
   filterResolvedGitHubConnectionsForRun,
   resolveManagedGitHubIdentitySelection,
@@ -768,6 +769,28 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(vault.resolveSecretValue).not.toHaveBeenCalled();
       expect(vault.resolveUserSecretValue).not.toHaveBeenCalled();
     });
+
+    // --- RK9 Custom (RK9-319) ---
+    it("denies a raw GitHub token to a run that received untrusted content", async () => {
+      const input = await seed();
+      await grant(input, "A");
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available",
+      });
+      await markRunTainted(db, {
+        companyId: input.companyId,
+        agentId: input.agentId,
+        runId: input.runId,
+        source: { kind: "email_body_read", messageId: null },
+      });
+      vault.resolveUserSecretValue.mockClear();
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable",
+        env: {},
+      });
+      expect(vault.resolveUserSecretValue).not.toHaveBeenCalled();
+    });
+    // --- /RK9 Custom ---
 
     it("fails closed for missing or malformed bound task/project references", async () => {
       const input = await seed();

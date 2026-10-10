@@ -48,6 +48,9 @@ import {
   profileIdsInBindingOrder,
 } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure } from "./tool-runtime-metrics.js";
+// --- RK9 Custom (RK9-319): tainted-run gate ---
+import { rk9TaintedRunToolGate } from "./rk9-run-taint-tool-gate.js";
+// --- /RK9 Custom ---
 
 type ToolAccessContext = {
   companyId: string;
@@ -1177,9 +1180,22 @@ export function toolAccessPolicyService(db: Db) {
     });
   }
 
+  // --- RK9 Custom (RK9-319): a run that received untrusted content needs
+  // approval for every allowed tool call above read/low risk. The upstream
+  // decision runs unchanged in decideLoaded; the gate can only tighten it. ---
+  const taintGate = rk9TaintedRunToolGate(db);
   async function decide(input: ToolAccessDecisionInput): Promise<ToolAccessDecision> {
     const loaded = await loadContext(input);
     if (!loaded.ok) return loaded.decision;
+    const upstream = await decideLoaded(input, loaded);
+    return taintGate.apply(loaded.ctx, upstream);
+  }
+  // --- /RK9 Custom ---
+
+  async function decideLoaded(
+    input: ToolAccessDecisionInput,
+    loaded: { ok: true; ctx: ToolAccessContext; redaction: RedactionResult },
+  ): Promise<ToolAccessDecision> {
     const { ctx, redaction } = loaded;
     const profileState = await effectiveProfiles(ctx);
     const effectiveProfileIds = profileState.profiles.map((profile) => profile.id);

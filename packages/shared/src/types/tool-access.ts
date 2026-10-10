@@ -1396,6 +1396,8 @@ export type ToolAccessReasonCode =
   | "allow_policy"
   | "requires_review_changed_tool"
   | "requires_approval_policy"
+  // RK9 Custom (RK9-319): the run received untrusted external content.
+  | "requires_approval_tainted_run"
   | "deny_default"
   | "deny_company_boundary"
   | "deny_disabled_connection"

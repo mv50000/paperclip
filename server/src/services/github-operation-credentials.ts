@@ -17,6 +17,9 @@ import {
 import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
+// --- RK9 Custom (RK9-319): tainted runs never get a raw GitHub token ---
+import { resolveRunTaint } from "./rk9-run-taint.js";
+// --- /RK9 Custom ---
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
@@ -43,6 +46,10 @@ async function allowsGitHubCredentialExport(
     (typeof issueId !== "string" || !isUuidLike(issueId))
   )
     return false;
+  // --- RK9 Custom (RK9-319): a run that received untrusted content could push
+  // or comment on GitHub as the operator; deny like a low-trust run. ---
+  if ((await resolveRunTaint(db, run)).tainted) return false;
+  // --- /RK9 Custom ---
   const [agent] = await db
     .select({ companyId: agents.companyId, permissions: agents.permissions })
     .from(agents)

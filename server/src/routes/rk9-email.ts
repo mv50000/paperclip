@@ -17,6 +17,14 @@ import { wrapUntrusted } from "../services/email/sanitize.js";
 import { approvalService, issueApprovalService, logActivity } from "../services/index.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unprocessable } from "../errors.js";
+// --- RK9 Custom (RK9-319): tainted-run gate ---
+import {
+  markActorRunsTainted,
+  resolveActorTaint,
+  type RunTaintState,
+  type Rk9RunTaintSource,
+} from "../services/rk9-run-taint.js";
+// --- /RK9 Custom ---
 
 /** Payload stored on an `email_send` approval; the server sends from this on
  * approve — the agent cannot alter the content after submission. */
@@ -31,6 +39,18 @@ export interface EmailSendApprovalPayload {
   inReplyToMessageId?: string | null;
   templateKey?: string | null;
   agentId: string | null;
+  /** RK9-319: set when the requesting run had received untrusted content. */
+  taint?: { runId: string | null; sources: Rk9RunTaintSource[] } | null;
+}
+
+/** RK9-319: which gate parked an agent send. */
+export type EmailSendGate = "route" | "taint" | "route+taint";
+
+function sendGate(routeApprovalRequired: boolean, taint: RunTaintState): EmailSendGate | null {
+  if (routeApprovalRequired && taint.tainted) return "route+taint";
+  if (routeApprovalRequired) return "route";
+  if (taint.tainted) return "taint";
+  return null;
 }
 
 function sendFailureStatus(reason: string): number {
@@ -73,11 +93,17 @@ export function rk9EmailRoutes(db: Db) {
     routeDomain: string;
     payload: EmailSendApprovalPayload;
     issueId?: string | null;
+    gate: EmailSendGate;
+    taint: RunTaintState;
   }) {
+    const taint = args.taint.tainted
+      ? { runId: args.taint.runId, sources: args.taint.sources }
+      : null;
     const approval = await approvalsSvc.create(args.companyId, {
       type: "email_send",
       payload: {
         ...args.payload,
+        ...(taint ? { taint } : {}),
         title: `Sähköpostivastaus: ${args.payload.subject}`,
       },
       requestedByAgentId: args.agentId,
@@ -112,7 +138,13 @@ export function rk9EmailRoutes(db: Db) {
       action: "email.send_pending_approval",
       entityType: "approval",
       entityId: approval.id,
-      details: { routeKey: args.payload.routeKey, kind: args.payload.kind },
+      details: {
+        routeKey: args.payload.routeKey,
+        kind: args.payload.kind,
+        gate: args.gate,
+        runTainted: args.taint.tainted,
+        taintedRunId: taint?.runId ?? null,
+      },
     });
     return { status: "pending_approval" as const, approvalId: approval.id };
   }
@@ -130,14 +162,19 @@ export function rk9EmailRoutes(db: Db) {
 
     // Trust ramp: agent-initiated sends on a gated route are parked behind an
     // approval. System/board sends (auto-reply, escalation cron, operator) pass.
+    // RK9-319: a run that received untrusted content is parked on every route.
     if (actor.actorType === "agent") {
       const route = await findRouteByKey(companyId, body.routeKey);
-      if (route?.approvalRequired) {
+      const taint = await resolveActorTaint(db, companyId, actor);
+      const gate = route ? sendGate(route.approvalRequired, taint) : null;
+      if (route && gate) {
         const parked = await createSendApproval({
           companyId,
           agentId: actor.agentId,
           runId: actor.runId,
           routeDomain: route.domain,
+          gate,
+          taint,
           payload: {
             kind: "send",
             routeKey: body.routeKey,
@@ -302,14 +339,21 @@ export function rk9EmailRoutes(db: Db) {
         res.status(409).json({ ok: false, reason: "parent_not_inbound" });
         return;
       }
-      const route = parent.routeKey ? await findRouteByKey(companyId, parent.routeKey) : null;
-      if (route?.approvalRequired) {
+      // RK9-319: resolve the same route the service sends from (`replyToMessage`
+      // falls back to "support"), so an unrouted parent cannot skip the gate.
+      const route = await findRouteByKey(companyId, parent.routeKey ?? "support");
+      // RK9-319: a run that received untrusted content is parked on every route.
+      const taint = await resolveActorTaint(db, companyId, actor);
+      const gate = route ? sendGate(route.approvalRequired, taint) : null;
+      if (route && gate) {
         const subject = parent.subject ?? "(ei aihetta)";
         const parked = await createSendApproval({
           companyId,
           agentId: actor.agentId,
           runId: actor.runId,
           routeDomain: route.domain,
+          gate,
+          taint,
           payload: {
             kind: "reply",
             routeKey: route.routeKey,
@@ -417,6 +461,14 @@ export function rk9EmailRoutes(db: Db) {
       if (row.assignedAgentId !== actor.agentId) {
         throw forbidden("Email body access restricted to the assigned agent");
       }
+      // --- RK9 Custom (RK9-319): the body is untrusted content. Mark the
+      // reading run(s) before the body leaves the server. ---
+      await markActorRunsTainted(db, companyId, actor, {
+        kind: "email_body_read",
+        messageId: row.id,
+        issueId: row.issueId ?? null,
+      });
+      // --- /RK9 Custom ---
     }
 
     const wrapped = wrapUntrusted(row.bodyText ?? "", {

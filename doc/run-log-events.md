@@ -146,6 +146,18 @@ The payload never carries a command, an argument, a path, an environment value,
 or a raw identifier. The event rides the `ctx.onEvent` run-event bridge and is
 run-log-only. It needs no OTLP endpoint.
 
+## Tainted Run Event (RK9 Custom, RK9-319)
+
+The server writes `rk9.run.tainted` (level `warn`, stream `system`) the first
+time it marks a run as having received untrusted external content, such as an
+inbound email. The payload is `{ "source": { kind, at, messageId?, issueId?,
+sourceRunId?, sessionId? } }`. It holds references only, never the email body,
+subject or addresses. Later sources for the same run are appended to the
+`rk9_run_taints` row and do not write another event. The same first mark also
+writes the `heartbeat_run.tainted` activity row. This is a run-log event; it is
+not exported to Paperclip Telemetry or OpenTelemetry. See
+`doc/upgrade/run-taint.md`.
+
 ## Related instrumentation
 
 The sandbox duplex transport also writes one run-log event as one of its three
