@@ -243,6 +243,30 @@ describe("voice_action approve executes the stored payload", () => {
     expect(approvalComment()).toContain("✅");
   });
 
+  it("refuses a comment on a conversation issue", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, conversationAgentId: "agent-9" });
+    approve(commentPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("conversation issues cannot change by voice");
+  });
+
+  it("still records the outcome when the issue activity write fails", async () => {
+    mockLogActivity.mockRejectedValueOnce(new Error("activity insert failed"));
+    approve(commentPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(approvalComment()).toContain("✅");
+    expect(activityActions()).toContain("voice_action.executed");
+  });
+
   it("refuses blocked when the issue has no unresolved blocker", async () => {
     approve({ ...statusPayload, status: "blocked" });
     const app = await createApp();
@@ -267,11 +291,15 @@ describe("voice_action approve executes the stored payload", () => {
   });
 
   it.each([
-    ["an agent run holds the issue", { executionRunId: "run-1" }],
-    ["the issue has an execution policy", { executionPolicy: { stages: [] } }],
-  ])("refuses done when %s", async (reason, extra) => {
+    ["an agent run holds the issue", "done", { executionRunId: "run-1" }],
+    ["an agent run holds the issue", "cancelled", { checkoutRunId: "run-1" }],
+    ["the issue has an execution policy", "done", { executionPolicy: { stages: [] } }],
+    ["the issue has an execution policy", "todo", { executionState: { status: "pending" } }],
+    ["the issue is in review", "done", { status: "in_review" }],
+    ["conversation issues cannot change by voice", "backlog", { conversationAgentId: "agent-9" }],
+  ])("refuses the status change when %s (%s)", async (reason, status, extra) => {
     mockIssuesSvc.getById.mockResolvedValue({ ...issue, ...extra });
-    approve(statusPayload);
+    approve({ ...statusPayload, status });
     const app = await createApp();
 
     const res = await request(app).post("/api/approvals/approval-1/approve").send({});
@@ -315,15 +343,17 @@ describe("voice_action payload is validated on create and resubmit", () => {
     mockIssuesSvc.getById.mockResolvedValue(issue);
   });
 
-  it("stores a valid proposal", async () => {
+  it("stores the parsed proposal without extra keys", async () => {
     const app = await createApp();
 
     const res = await request(app)
       .post("/api/companies/company-1/approvals")
-      .send({ type: "voice_action", payload: commentPayload });
+      .send({ type: "voice_action", payload: { ...statusPayload, summary: "Add a note to RK9-469" } });
 
     expect(res.status).toBe(201);
     expect(mockApprovalSvc.create).toHaveBeenCalledTimes(1);
+    const stored = (mockApprovalSvc.create.mock.calls[0] as unknown as [string, { payload: Record<string, unknown> }])[1].payload;
+    expect(stored).toEqual(statusPayload);
   });
 
   it.each([

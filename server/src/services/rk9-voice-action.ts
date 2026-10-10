@@ -56,27 +56,27 @@ export async function resolveVoiceAction(
 }
 
 /** Status changes that `PATCH /issues/:id` would refuse or handle with extra
- * route-only steps (execution-policy stages, outcome gates, run cancellation).
- * A voice proposal does not attempt them; the operator does it in the UI. */
+ * route-only steps (execution-policy stages, review verdict rules, outcome
+ * gates, run cancellation). A voice proposal does not attempt them; the
+ * operator does it in the UI. */
 async function statusChangeRefusal(
   issuesSvc: Pick<IssueService, "getDependencyReadiness">,
   issue: ResolvedIssue,
   status: NonNullable<VoiceActionApprovalPayload["status"]>,
 ): Promise<string | null> {
-  if (issue.conversationAgentId) return "conversation issues cannot change status by voice";
+  if (issue.conversationAgentId) return "conversation issues cannot change by voice";
+  if (issue.executionPolicy || issue.executionState) {
+    return `the issue has an execution policy; set ${status} in Paperclip`;
+  }
+  if (issue.status === "in_review") return `the issue is in review; set ${status} in Paperclip`;
   if (status === "blocked" && issue.status !== "blocked") {
     const readiness = await issuesSvc.getDependencyReadiness(issue.id);
     if (readiness.unresolvedBlockerCount === 0) {
       return "blocked requires an unresolved blocker; set it in Paperclip with a blocker or unblock owner";
     }
   }
-  if (status === "done" || status === "cancelled") {
-    if (issue.executionPolicy || issue.executionState) {
-      return `the issue has an execution policy; set ${status} in Paperclip`;
-    }
-    if (issue.executionRunId || issue.checkoutRunId) {
-      return `an agent run holds the issue; set ${status} in Paperclip`;
-    }
+  if ((status === "done" || status === "cancelled") && (issue.executionRunId || issue.checkoutRunId)) {
+    return `an agent run holds the issue; set ${status} in Paperclip`;
   }
   return null;
 }
@@ -104,6 +104,9 @@ export async function executeVoiceAction(
     const resolved = await resolveVoiceAction(issuesSvc, approval.companyId, approval.payload);
     if (!resolved.ok) {
       outcome = resolved;
+    } else if (resolved.payload.action === "issue_comment" && resolved.issue.conversationAgentId) {
+      // Only the conversation owner may post into an agent chat transcript.
+      outcome = { ok: false, reason: "conversation issues cannot change by voice" };
     } else if (resolved.payload.action === "issue_comment") {
       const { payload, issue } = resolved;
       const comment = await issuesSvc.addComment(issue.id, payload.body!, { userId: decidedByUserId });
@@ -178,9 +181,15 @@ export async function executeVoiceAction(
   }
 
   // The issue write is done or refused at this point; recording it must not
-  // change the reported outcome.
+  // change the reported outcome, and one failed record must not skip the rest.
+  if (issueActivity) {
+    try {
+      await logActivity(db, issueActivity);
+    } catch (err) {
+      logger.error({ err, approvalId: approval.id }, "failed to log voice_action issue activity");
+    }
+  }
   try {
-    if (issueActivity) await logActivity(db, issueActivity);
     await approvalSvc.addComment(
       approval.id,
       outcome.ok

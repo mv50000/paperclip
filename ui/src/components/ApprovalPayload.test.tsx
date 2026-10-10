@@ -271,6 +271,14 @@ describe("ApprovalPayloadRenderer", () => {
     expect(container.textContent).toContain("RK9-469");
     expect(container.textContent).toContain("Testattu autossa");
     expect(approvalLabel("voice_action", {})).toBe("Voice Action");
+    expect(
+      approvalLabel("voice_action", {
+        action: "issue_status",
+        identifier: "RK9-469",
+        status: "cancelled",
+        title: "Add a note",
+      }),
+    ).toBe("Voice Action: RK9-469 → cancelled");
 
     act(() => {
       root.unmount();

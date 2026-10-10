@@ -29,10 +29,23 @@ export function approvalSubject(payload?: Record<string, unknown> | null): strin
   );
 }
 
+/** A voice_action label names the exact change (RK9-479), never a free-text
+ * title, so an inbox row cannot describe a different action. */
+function voiceActionSubject(payload?: Record<string, unknown> | null): string | null {
+  const identifier = firstNonEmptyString(payload?.identifier);
+  if (!identifier) return null;
+  if (payload?.action === "issue_status") {
+    const status = firstNonEmptyString(payload.status);
+    return status ? `${identifier} → ${status}` : identifier;
+  }
+  const body = firstNonEmptyString(payload?.body);
+  return body ? `${identifier}: ${body.slice(0, 80)}` : identifier;
+}
+
 /** Build a contextual label for an approval, e.g. "Hire Agent: Designer" */
 export function approvalLabel(type: string, payload?: Record<string, unknown> | null): string {
   const base = typeLabel[type] ?? type;
-  const subject = approvalSubject(payload);
+  const subject = type === "voice_action" ? voiceActionSubject(payload) : approvalSubject(payload);
   if (subject) {
     return `${base}: ${subject}`;
   }

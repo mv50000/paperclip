@@ -15,7 +15,7 @@ Grok-connectorin vaihe 2, taso B. Ääniavustaja ehdottaa sisäistä tikettitoim
 
 ## Tarkistukset
 
-- Luonti ja resubmit: vain board-actor (connector käyttää board-tokenia). Agentti saa 403:n. Palvelin validoi payloadin ja tarkistaa, että tiketti kuuluu hyväksynnän yritykselle. Virhe palauttaa 422.
+- Luonti ja resubmit: vain board-actor (connector käyttää board-tokenia). Agentti saa 403:n. Palvelin validoi payloadin ja tarkistaa, että tiketti kuuluu hyväksynnän yritykselle. Virhe palauttaa 422. Palvelin tallentaa parsitun payloadin, joten esim. `title` ei voi saada inbox-riviä kuvaamaan eri toimea. Inbox- ja attention-rivi näyttävät tiketin ja uuden tilan tai tekstin alun.
 - Hyväksyntä: palvelin tarkistaa saman uudelleen, koska tiketti voi muuttua välissä. Tilamuutos ajetaan `companyGuard`illa.
 - Puuttuva ja toisen yrityksen tiketti antavat saman viestin ("issue not found in this company"), jotta ehdotuksella ei voi kartoittaa muiden yritysten tikettejä.
 
@@ -28,9 +28,10 @@ Grok-connectorin vaihe 2, taso B. Ääniavustaja ehdottaa sisäistä tikettitoim
 
 Palvelin ei yritä tilamuutosta, jonka `PATCH /issues/:id` hylkäisi tai joka vaatisi reitin omia vaiheita. Syy kirjataan hyväksynnän kommenttiin:
 
+- Tilaa ei muuteta, kun tiketillä on execution policy tai -state tai kun tiketti on `in_review`-tilassa (review-säännöt elävät PATCH-reitissä).
 - `blocked` vaatii avoimen blokkerin.
-- `done` ja `cancelled` hylätään, kun tiketillä on execution policy tai -state tai kun agentin ajo pitää tikettiä (`executionRunId`, `checkoutRunId`).
-- Conversation-tikettien tilaa ei muuteta.
+- `done` ja `cancelled` hylätään, kun agentin ajo pitää tikettiä (`executionRunId`, `checkoutRunId`).
+- Conversation-tikettiin ei kommentoida eikä sen tilaa muuteta: vain keskustelun omistaja kirjoittaa agentti-chattiin.
 
 ## Toteutus
 

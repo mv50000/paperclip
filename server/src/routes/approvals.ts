@@ -224,17 +224,25 @@ export function approvalRoutes(
 
   // RK9-479: only a board actor (the voice connector uses a board token) may
   // store a voice_action, and its payload must name an issue in the approval's
-  // own company. Approve checks the payload again.
-  async function assertVoiceActionPayloadAllowed(req: Request, res: any, companyId: string, type: string, payload: unknown) {
-    if (type !== VOICE_ACTION_APPROVAL_TYPE) return true;
+  // own company. The parsed payload is stored, so extra keys such as `title`
+  // cannot make an inbox row describe a different action. Approve checks the
+  // payload again. Returns null after sending the refusal.
+  async function voiceActionPayloadToStore(
+    req: Request,
+    res: any,
+    companyId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | null> {
+    if (type !== VOICE_ACTION_APPROVAL_TYPE) return payload;
     if (req.actor.type !== "board") {
       res.status(403).json({ error: "Only a board user can create or resubmit a voice_action approval" });
-      return false;
+      return null;
     }
     const resolved = await resolveVoiceAction(issuesSvc, companyId, payload);
-    if (resolved.ok) return true;
+    if (resolved.ok) return resolved.payload;
     res.status(422).json({ error: `Invalid voice_action: ${resolved.reason}` });
-    return false;
+    return null;
   }
 
   async function assertApprovalAccessAllowed(req: Request, res: any, companyId: string) {
@@ -307,7 +315,8 @@ export function approvalRoutes(
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     assertAgentHireApprovalNotHumanProxy(req, approvalInput.type, approvalInput.payload);
-    if (!(await assertVoiceActionPayloadAllowed(req, res, companyId, approvalInput.type, approvalInput.payload))) return;
+    const inputPayload = await voiceActionPayloadToStore(req, res, companyId, approvalInput.type, approvalInput.payload);
+    if (!inputPayload) return;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -315,7 +324,7 @@ export function approvalRoutes(
             approvalInput.payload,
             { strictMode: strictSecretsMode },
           )
-        : approvalInput.payload;
+        : inputPayload;
 
     const actor = getActorInfo(req);
     const approval = await svc.create(companyId, {
@@ -618,21 +627,19 @@ export function approvalRoutes(
       return;
     }
     assertAgentHireApprovalNotHumanProxy(req, existing.type, req.body.payload);
-    if (
-      req.body.payload &&
-      !(await assertVoiceActionPayloadAllowed(req, res, existing.companyId, existing.type, req.body.payload))
-    ) {
-      return;
-    }
+    const inputPayload = req.body.payload
+      ? await voiceActionPayloadToStore(req, res, existing.companyId, existing.type, req.body.payload)
+      : undefined;
+    if (inputPayload === null) return;
 
-    const normalizedPayload = req.body.payload
+    const normalizedPayload = inputPayload
       ? existing.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
             existing.companyId,
-            req.body.payload,
+            inputPayload,
             { strictMode: strictSecretsMode },
           )
-        : req.body.payload
+        : inputPayload
       : undefined;
     const approval = await svc.resubmit(id, normalizedPayload);
     const actor = getActorInfo(req);
