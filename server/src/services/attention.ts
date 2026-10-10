@@ -650,6 +650,15 @@ function betterDuplicate(left: AttentionItem, right: AttentionItem) {
 }
 
 function approvalTitle(type: string, payload: Record<string, unknown>) {
+  // RK9-479: a voice_action row names the exact change, not a free-text title.
+  if (type === "voice_action") {
+    const identifier = typeof payload.identifier === "string" ? payload.identifier : "issue";
+    if (payload.action === "issue_status" && typeof payload.status === "string") {
+      return `Voice: ${identifier} → ${payload.status}`;
+    }
+    const body = typeof payload.body === "string" ? payload.body.trim() : "";
+    return `Voice comment on ${identifier}: ${body.slice(0, 80)}`;
+  }
   const title = typeof payload.title === "string" ? payload.title.trim() : "";
   if (title) return title;
   const summary = typeof payload.summary === "string" ? payload.summary.trim() : "";

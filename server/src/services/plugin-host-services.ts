@@ -66,6 +66,7 @@ import {
 } from "./plugin-local-folders.js";
 import { createPluginSecretsHandler } from "./plugin-secrets-handler.js";
 import { logActivity } from "./activity-log.js";
+import { VOICE_ACTION_APPROVAL_TYPE, VOICE_ACTION_APPROVE_ELSEWHERE } from "./rk9-voice-action.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -2668,6 +2669,10 @@ export function buildHostServices(
           throw new Error("actorUserId is required to decide an approval on behalf of a board user");
         }
         await requireActiveHumanMember(companyId, params.actorUserId);
+        // RK9-479: only the HTTP approve route executes a voice_action.
+        if (params.action === "approve" && existing.type === VOICE_ACTION_APPROVAL_TYPE) {
+          throw new Error(VOICE_ACTION_APPROVE_ELSEWHERE);
+        }
 
         const { approval, applied } = params.action === "approve"
           ? await approvalSvc.approve(params.approvalId, params.actorUserId, params.decisionNote ?? null)

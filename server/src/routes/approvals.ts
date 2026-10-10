@@ -27,6 +27,7 @@ import { createEmailService } from "../services/email/index.js";
 import type { EmailSendApprovalPayload } from "./rk9-email.js";
 import { issueService } from "../services/issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
+import { executeVoiceAction, resolveVoiceAction, VOICE_ACTION_APPROVAL_TYPE } from "../services/rk9-voice-action.js";
 
 // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
 // human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
@@ -221,6 +222,29 @@ export function approvalRoutes(
     }
   }
 
+  // RK9-479: only a board actor (the voice connector uses a board token) may
+  // store a voice_action, and its payload must name an issue in the approval's
+  // own company. The parsed payload is stored, so extra keys such as `title`
+  // cannot make an inbox row describe a different action. Approve checks the
+  // payload again. Returns null after sending the refusal.
+  async function voiceActionPayloadToStore(
+    req: Request,
+    res: any,
+    companyId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | null> {
+    if (type !== VOICE_ACTION_APPROVAL_TYPE) return payload;
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Only a board user can create or resubmit a voice_action approval" });
+      return null;
+    }
+    const resolved = await resolveVoiceAction(issuesSvc, companyId, payload);
+    if (resolved.ok) return resolved.payload;
+    res.status(422).json({ error: `Invalid voice_action: ${resolved.reason}` });
+    return null;
+  }
+
   async function assertApprovalAccessAllowed(req: Request, res: any, companyId: string) {
     const decision = await access.decide({
       actor: req.actor,
@@ -291,6 +315,8 @@ export function approvalRoutes(
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     assertAgentHireApprovalNotHumanProxy(req, approvalInput.type, approvalInput.payload);
+    const inputPayload = await voiceActionPayloadToStore(req, res, companyId, approvalInput.type, approvalInput.payload);
+    if (!inputPayload) return;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -298,7 +324,7 @@ export function approvalRoutes(
             approvalInput.payload,
             { strictMode: strictSecretsMode },
           )
-        : approvalInput.payload;
+        : inputPayload;
 
     const actor = getActorInfo(req);
     const approval = await svc.create(companyId, {
@@ -420,6 +446,13 @@ export function approvalRoutes(
             { userId: decidedByUserId },
           );
         }
+      }
+
+      // voice_action: the server executes the approved issue action from the
+      // stored payload in the approver's name (RK9-479). A failure never undoes
+      // the approval; the outcome lands as an approval comment.
+      if (approval.type === VOICE_ACTION_APPROVAL_TYPE) {
+        await executeVoiceAction(db, { issuesSvc, approvalSvc: svc, logActivity }, approval, decidedByUserId);
       }
 
       await logActivity(db, {
@@ -594,15 +627,19 @@ export function approvalRoutes(
       return;
     }
     assertAgentHireApprovalNotHumanProxy(req, existing.type, req.body.payload);
+    const inputPayload = req.body.payload
+      ? await voiceActionPayloadToStore(req, res, existing.companyId, existing.type, req.body.payload)
+      : undefined;
+    if (inputPayload === null) return;
 
-    const normalizedPayload = req.body.payload
+    const normalizedPayload = inputPayload
       ? existing.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
             existing.companyId,
-            req.body.payload,
+            inputPayload,
             { strictMode: strictSecretsMode },
           )
-        : req.body.payload
+        : inputPayload
       : undefined;
     const approval = await svc.resubmit(id, normalizedPayload);
     const actor = getActorInfo(req);

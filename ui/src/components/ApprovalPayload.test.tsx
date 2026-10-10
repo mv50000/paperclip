@@ -246,4 +246,71 @@ describe("ApprovalPayloadRenderer", () => {
       root.unmount();
     });
   });
+
+  it("renders a voice_action comment with the exact text and the target issue", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <ApprovalPayloadRenderer
+            type="voice_action"
+            payload={{
+              action: "issue_comment",
+              issueId: "11111111-1111-4111-8111-111111111111",
+              identifier: "RK9-469",
+              body: "Testattu autossa",
+              source: "grok",
+            }}
+          />
+        </ThemeProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain("Comment on issue");
+    expect(container.textContent).toContain("RK9-469");
+    expect(container.textContent).toContain("Testattu autossa");
+    expect(approvalLabel("voice_action", {})).toBe("Voice Action");
+    expect(
+      approvalLabel("voice_action", {
+        action: "issue_status",
+        identifier: "RK9-469",
+        status: "cancelled",
+        title: "Add a note",
+      }),
+    ).toBe("Voice Action: RK9-469 → cancelled");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("renders a voice_action status change with the new status", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <ApprovalPayloadRenderer
+            type="voice_action"
+            payload={{
+              action: "issue_status",
+              issueId: "11111111-1111-4111-8111-111111111111",
+              identifier: "RK9-469",
+              status: "done",
+              source: "grok",
+            }}
+          />
+        </ThemeProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain("Change issue status");
+    expect(container.textContent).toContain("New status");
+    expect(container.textContent).toContain("done");
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });
