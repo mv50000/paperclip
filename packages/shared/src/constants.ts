@@ -697,6 +697,10 @@ export const APPROVAL_TYPES = [
   // Agent-drafted outbound email parked for operator approval; the server
   // sends from the stored payload on approve (RK9-82).
   "email_send",
+  // Voice-proposed internal issue action (comment or status change) parked for
+  // operator approval; the server executes the stored payload on approve
+  // (RK9-479).
+  "voice_action",
 ] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 

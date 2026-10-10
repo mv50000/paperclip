@@ -1,4 +1,4 @@
-import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, Mail } from "lucide-react";
+import { UserPlus, Lightbulb, ShieldAlert, ShieldCheck, Mail, Mic } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { formatCents } from "../lib/utils";
 
@@ -8,6 +8,7 @@ export const typeLabel: Record<string, string> = {
   budget_override_required: "Budget Override",
   request_board_approval: "Board Approval",
   email_send: "Email Reply",
+  voice_action: "Voice Action",
 };
 
 function firstNonEmptyString(...values: unknown[]): string | null {
@@ -44,6 +45,7 @@ export const typeIcon: Record<string, typeof UserPlus> = {
   budget_override_required: ShieldAlert,
   request_board_approval: ShieldCheck,
   email_send: Mail,
+  voice_action: Mic,
 };
 
 export const defaultTypeIcon = ShieldCheck;
@@ -270,8 +272,44 @@ function EmailSendPayload({ payload }: { payload: Record<string, unknown> }) {
       )}
       {body && (
         <div className="space-y-1.5">
-          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+          <p className="text-(length:--text-micro) font-medium uppercase tracking-(--tracking-label) text-muted-foreground">
             Draft to be sent
+          </p>
+          <pre className="max-h-72 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-foreground whitespace-pre-wrap">
+            {body}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const voiceActionLabel: Record<string, string> = {
+  issue_comment: "Comment on issue",
+  issue_status: "Change issue status",
+};
+
+/** Voice-proposed issue action awaiting operator approval (RK9-479). The
+ * operator must see the exact text or status the server will apply. */
+function VoiceActionPayload({ payload }: { payload: Record<string, unknown> }) {
+  const action = typeof payload.action === "string" ? payload.action : null;
+  const identifier = firstNonEmptyString(payload.identifier);
+  const body = typeof payload.body === "string" ? payload.body : null;
+  return (
+    <div className="space-y-3 text-sm">
+      <PayloadField label="Action" value={action ? (voiceActionLabel[action] ?? action) : null} />
+      {identifier && (
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground w-20 sm:w-24 shrink-0 text-xs">Issue</span>
+          <span className="font-mono text-xs">{identifier}</span>
+        </div>
+      )}
+      {action === "issue_status" && <PayloadField label="New status" value={payload.status} />}
+      <PayloadField label="Source" value={payload.source} />
+      {action === "issue_comment" && body && (
+        <div className="space-y-1.5">
+          <p className="text-(length:--text-micro) font-medium uppercase tracking-(--tracking-label) text-muted-foreground">
+            Comment to be posted
           </p>
           <pre className="max-h-72 overflow-auto rounded-lg border border-border/60 bg-muted/50 px-3.5 py-3 font-mono text-xs leading-5 text-foreground whitespace-pre-wrap">
             {body}
@@ -297,5 +335,6 @@ export function ApprovalPayloadRenderer({
     return <BoardApprovalPayload payload={payload} hideTitle={hidePrimaryTitle} />;
   }
   if (type === "email_send") return <EmailSendPayload payload={payload} />;
+  if (type === "voice_action") return <VoiceActionPayload payload={payload} />;
   return <CeoStrategyPayload payload={payload} />;
 }

@@ -34,3 +34,30 @@ export const addApprovalCommentSchema = z.object({
 });
 
 export type AddApprovalComment = z.infer<typeof addApprovalCommentSchema>;
+
+// RK9-479: voice-proposed issue action. The server executes it on approve, so
+// the payload is validated on create, resubmit and again on approve.
+export const VOICE_ACTION_KINDS = ["issue_comment", "issue_status"] as const;
+export const VOICE_ACTION_STATUSES = ["todo", "backlog", "blocked", "done", "cancelled"] as const;
+export const VOICE_ACTION_BODY_MAX_LENGTH = 1000;
+
+export const voiceActionApprovalPayloadSchema = z
+  .object({
+    action: z.enum(VOICE_ACTION_KINDS),
+    issueId: z.string().guid(),
+    identifier: z.string().trim().min(1).max(64),
+    body: z.string().trim().min(1).max(VOICE_ACTION_BODY_MAX_LENGTH).optional(),
+    status: z.enum(VOICE_ACTION_STATUSES).optional(),
+    source: z.literal("grok"),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.action === "issue_comment" && value.body === undefined) {
+      ctx.addIssue({ code: "custom", path: ["body"], message: "issue_comment requires body" });
+    }
+    if (value.action === "issue_status" && value.status === undefined) {
+      ctx.addIssue({ code: "custom", path: ["status"], message: "issue_status requires status" });
+    }
+  });
+
+export type VoiceActionApprovalPayload = z.infer<typeof voiceActionApprovalPayloadSchema>;

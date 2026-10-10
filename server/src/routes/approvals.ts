@@ -27,6 +27,7 @@ import { createEmailService } from "../services/email/index.js";
 import type { EmailSendApprovalPayload } from "./rk9-email.js";
 import { issueService } from "../services/issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
+import { executeVoiceAction, resolveVoiceAction } from "./rk9-voice-action.js";
 
 // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
 // human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
@@ -221,6 +222,16 @@ export function approvalRoutes(
     }
   }
 
+  // RK9-479: a voice_action payload must name an issue in the approval's own
+  // company before it can be stored. Approve checks it again.
+  async function assertVoiceActionPayloadAllowed(res: any, companyId: string, type: string, payload: unknown) {
+    if (type !== "voice_action") return true;
+    const resolved = await resolveVoiceAction(issuesSvc, companyId, payload);
+    if (resolved.ok) return true;
+    res.status(422).json({ error: `Invalid voice_action: ${resolved.reason}` });
+    return false;
+  }
+
   async function assertApprovalAccessAllowed(req: Request, res: any, companyId: string) {
     const decision = await access.decide({
       actor: req.actor,
@@ -291,6 +302,7 @@ export function approvalRoutes(
     const uniqueIssueIds = Array.from(new Set(issueIds));
     const { issueIds: _issueIds, ...approvalInput } = req.body;
     assertAgentHireApprovalNotHumanProxy(req, approvalInput.type, approvalInput.payload);
+    if (!(await assertVoiceActionPayloadAllowed(res, companyId, approvalInput.type, approvalInput.payload))) return;
     const normalizedPayload =
       approvalInput.type === "hire_agent"
         ? await secretsSvc.normalizeHireApprovalPayloadForPersistence(
@@ -420,6 +432,13 @@ export function approvalRoutes(
             { userId: decidedByUserId },
           );
         }
+      }
+
+      // voice_action: the server executes the approved issue action from the
+      // stored payload in the approver's name (RK9-479). A failure never undoes
+      // the approval; the outcome lands as an approval comment.
+      if (approval.type === "voice_action") {
+        await executeVoiceAction(db, issuesSvc, svc, approval, decidedByUserId);
       }
 
       await logActivity(db, {
@@ -594,6 +613,12 @@ export function approvalRoutes(
       return;
     }
     assertAgentHireApprovalNotHumanProxy(req, existing.type, req.body.payload);
+    if (
+      req.body.payload &&
+      !(await assertVoiceActionPayloadAllowed(res, existing.companyId, existing.type, req.body.payload))
+    ) {
+      return;
+    }
 
     const normalizedPayload = req.body.payload
       ? existing.type === "hire_agent"
