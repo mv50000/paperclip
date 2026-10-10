@@ -112,7 +112,7 @@ Add an address to the suppression list.
 
 ## DELETE /email/suppression/:id
 
-Remove an entry (rare; use sparingly — the address probably hard-bounced for a reason).
+Remove an entry. Board only: an agent gets `403` (RK9-488). Ask the operator if a block looks wrong; the address probably hard-bounced or complained for a reason.
 
 ## POST /email/escalate
 

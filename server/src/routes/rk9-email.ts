@@ -15,7 +15,7 @@ import {
 } from "../services/email/suppression.js";
 import { wrapUntrusted } from "../services/email/sanitize.js";
 import { approvalService, issueApprovalService, logActivity } from "../services/index.js";
-import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unprocessable } from "../errors.js";
 // --- RK9 Custom (RK9-319): tainted-run gate ---
 import {
@@ -530,17 +530,44 @@ export function rk9EmailRoutes(db: Db) {
       address: body.address,
       reason,
     });
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "email.suppression.added",
+      entityType: "email_suppression",
+      entityId: entry.id,
+      details: { reason },
+    });
     res.status(201).json(entry);
   });
 
+  // RK9 Custom: removing a suppression reopens sending to a blocked address, so only the
+  // board may do it. An agent could otherwise lift a block and then send (RK9-319 side finding).
   router.delete("/companies/:companyId/email/suppression/:id", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const removed = await removeSuppression(db, companyId, req.params.id as string);
+    assertBoard(req);
+    const id = req.params.id as string;
+    const removed = await removeSuppression(db, companyId, id);
     if (!removed) {
       res.status(404).json({ error: "not_found" });
       return;
     }
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "email.suppression.removed",
+      entityType: "email_suppression",
+      entityId: id,
+    });
     res.status(204).end();
   });
 
