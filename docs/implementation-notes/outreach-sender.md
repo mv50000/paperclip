@@ -213,3 +213,41 @@ inject a resolver (`server/src/__tests__/helpers/recipient-domain-resolver.ts`);
 no test makes a real DNS query, and any test calling `queueDueMessages` must
 pass one. Coverage: `outreach-recipient-domain.test.ts` (pure verdicts) and
 `outreach-recipient-domain-db.test.ts` (scheduler + drafting, embedded PG).
+
+## RK9-475 addendum: the send queue checks the approved content
+
+The edit route only accepts a `draft` (RK9-453), so the API keeps an approved
+message fixed. A direct DB change, or a future route, could still change the
+text after approval, and the sender daemon would send it. `approveMessage` now
+stores a fingerprint of what the reviewer approved in
+`outreach_messages.approved_content_hash` (migration 9013).
+`listSendQueue` recomputes it for every row, right before it composes the raw
+message for the daemon.
+
+Canonical form (`server/src/services/outreach/approved-content.ts`):
+`sha256-v1:` + hex SHA-256 of the JSON array
+`["sha256-v1", subject, bodyText, bodyHtml | null, inReplyTo | null, recipient | null]`.
+The recipient is the prospect's address, trimmed and lower-cased. A JSON array
+is used instead of `subject + "\n" + bodyText`, because a newline in the
+subject would make that concatenation ambiguous. The hash leaves out two
+things on purpose. The sender identity is sequence configuration, not message
+content. The compliance footer is added at compose time.
+
+`approveMessage` re-checks the hashed fields in its `UPDATE ... WHERE`, so an
+edit that lands between its read and its write fails the approve (409
+`invalid_transition`). It does not store a hash of text nobody approved.
+
+On a mismatch, `listSendQueue` leaves the message out of the batch. It moves
+the message `queued -> rejected` with `reject_reason = approved_content_changed`
+and `rejected_by = system:scheduler`. It also writes one `activity_log` row:
+`action = outreach.message.send_blocked`, `actor = system/outreach-scheduler`,
+with both hashes in `details`. `rejected` is terminal. `failed` would not do,
+because `failed -> queued` is the retry path. Fix the content in a new draft
+and approve that. No `outreach_events` row is written, so the auto-pause rate
+does not move. A changed recipient address blocks the message too.
+
+A message approved before RK9-475 has `approved_content_hash = NULL` and sends
+as before; there is no retroactive block. A hash in an unknown format fails
+the check. Coverage: `outreach-approved-content.test.ts` (canonical form) and
+`outreach-approved-content-db.test.ts` (approve, tamper, legacy, normal path;
+embedded PG).

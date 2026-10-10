@@ -93,6 +93,7 @@ eivät muuta ajonaikaista käytöstä.
 | 9008 | `9008_rk9_outreach_sender.sql` | `e9f2ff5f3` | outreach |
 | 9009 | `9009_rk9_outreach_metrics.sql` | `ec28513d9` | outreach |
 | 9010 | `9010_rk9_outreach_inbound_routes.sql` | `ba63697af` | outreach, email |
+| 9013 | `9013_rk9_outreach_approved_content_hash.sql` | _RK9-475 (PR)_ | outreach |
 
 Tarkistus: `scripts/upgrade-smoke.sh --offline` (järjestys, `idx`, tiedostot, ei upstream-rivejä 9xxx:n jälkeen).
 
@@ -296,6 +297,7 @@ tarkistus.
 | 190 | `ddaf75727` | test(upgrade): retry run cleanup in the branch-containment test on late activity rows (RK9-314) | heartbeat (testi) | `server/src/__tests__/heartbeat-workspace-branch-containment.test.ts` | `npx vitest run server/src/__tests__/heartbeat-workspace-branch-containment.test.ts` |
 | 191 | _RK9-454 (PR)_ | feat(claude-local): opt-in additionalMcpConfigPaths merges agent MCP config into the strict runtime config (RK9-454) | claude-local | `packages/adapters/claude-local/src/server/claude-config.ts`, `packages/adapters/claude-local/src/server/execute.ts`, `packages/adapters/claude-local/src/server/execute.additional-mcp.test.ts`, `packages/adapters/claude-local/src/index.ts` (+2) | `npx vitest run packages/adapters/claude-local/src/server/execute.additional-mcp.test.ts`; _manuaalinen:_ Salkunhoitajan heartbeat käyttää Quantimodon MCP-työkaluja ilman `extraArgs`-kiertotietä |
 | 192 | _(RK9-78-PR:n merge-SHA)_ | fix(api): issue document PUT validates the actor run id before the revision write (RK9-78) | core api | `server/src/routes/issues.ts`, `server/src/__tests__/issue-document-run-id-routes.test.ts`, `server/src/__tests__/document-annotation-routes.test.ts`, `server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts` | `npx vitest run server/src/__tests__/issue-document-run-id-routes.test.ts server/src/__tests__/document-annotation-routes.test.ts` |
+| 193 | _RK9-475 (PR)_ | fix(outreach): the send queue refuses a message whose approved content changed (RK9-475) | outreach (+ migraatio 9013) | `server/src/services/outreach/approved-content.ts`, `server/src/services/outreach/messages.ts`, `server/src/services/outreach/scheduler.ts`, `packages/db/src/migrations/9013_rk9_outreach_approved_content_hash.sql` (+7) | `npx vitest run server/src/__tests__/outreach-approved-content.test.ts server/src/__tests__/outreach-approved-content-db.test.ts` |
 
 ## Konfliktitiedostot (koemerge `origin/master` + `v2026.916.1`, 93 tiedostoa)
 
