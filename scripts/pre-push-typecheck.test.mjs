@@ -139,6 +139,21 @@ test("worker down, busy, out of memory or failed install falls back to the local
   }
 });
 
+test("a change that includes server skips the remote worker and typechecks locally", () => {
+  const res = run({ diff: "server/src/a.ts\n", pkgs: "@paperclipai/server\n", remote: 0 });
+  assert.equal(res.status, 0, res.stderr);
+  assert.doesNotMatch(res.calls, /REMOTE/);
+  assert.match(res.stdout, /server changed; typechecking locally/);
+  assert.match(res.calls, /--filter @paperclipai\/server exec tsc --noEmit/);
+});
+
+test("PREPUSH_TYPECHECK_REMOTE_SERVER=1 still offloads a server change", () => {
+  const res = run({ diff: "server/src/a.ts\n", pkgs: "@paperclipai/server\n", remote: 0, env: { PREPUSH_TYPECHECK_REMOTE_SERVER: "1" } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.calls, /^REMOTE /m);
+  assert.doesNotMatch(res.calls, /exec tsc --noEmit/);
+});
+
 test("nothing changed skips the remote call", () => {
   const res = run({ diff: "doc/a.md\n", pkgs: "No projects matched the filters in \"/x\"\n", remote: 0 });
   assert.equal(res.status, 0);

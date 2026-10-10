@@ -9,7 +9,8 @@
 # - Optional offload: when `pcp-remote-verify.sh` is on PATH (RK9 hosts), the typecheck runs on the
 #   remote worker. Its exit 3/90/91 (install failed, worker down, worker busy) and 137 (worker OOM: the
 #   server typecheck does not fit in worker-01's 6 GB, RK9-473) fall back to a local run.
-#   PREPUSH_TYPECHECK_REMOTE=0 disables the offload.
+#   PREPUSH_TYPECHECK_REMOTE=0 disables the offload. A change that includes server always runs locally,
+#   because offloading it only causes an OOM on the worker; PREPUSH_TYPECHECK_REMOTE_SERVER=1 forces it.
 set -euo pipefail
 
 RUNNER=@paperclipai/paperclip-runner
@@ -55,7 +56,14 @@ if [ -n "${PREPUSH_TYPECHECK_PKGS:-}" ]; then
 else
   select_changed_packages
 
-  if [ "${PREPUSH_TYPECHECK_REMOTE:-1}" != 0 ] && command -v pcp-remote-verify.sh >/dev/null 2>&1; then
+  # The server typecheck does not fit in worker-01's 6 GB: offloading it only causes a global OOM on
+  # the worker (other jobs die too) before the local fallback. Run it locally unless forced (RK9-473).
+  remote_ok=1
+  if grep -qx "$SERVER" <<<"$changed_pkgs" && [ "${PREPUSH_TYPECHECK_REMOTE_SERVER:-0}" != 1 ]; then
+    echo "pre-push: server changed; typechecking locally (it does not fit on the remote worker, RK9-473)."
+    remote_ok=0
+  fi
+  if [ "$remote_ok" = 1 ] && [ "${PREPUSH_TYPECHECK_REMOTE:-1}" != 0 ] && command -v pcp-remote-verify.sh >/dev/null 2>&1; then
     echo "pre-push: typechecking on the remote worker (pcp-remote-verify.sh)..."
     set +e
     # A short lock wait: a busy worker must not hold the push for the default 30 min.
