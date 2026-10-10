@@ -5371,6 +5371,9 @@ export function recoveryService(
       candidateLimitSkipped: 0,
       deferredOrFailed: 0,
       enqueueFailed: 0,
+      // --- RK9 Custom: skip agents enqueueWakeup would reject (RK9-477) ---
+      agentNotInvokableSkipped: 0,
+      // --- /RK9 Custom ---
       issueIds: [] as string[],
     };
 
@@ -5476,6 +5479,9 @@ export function recoveryService(
       );
     }
 
+    // --- RK9 Custom: per-pass invokability cache (RK9-477) ---
+    const agentInvokableThisPass = new Map<string, boolean>();
+    // --- /RK9 Custom ---
     const candidatesByCompany = new Map<string, typeof candidates>();
     for (const candidate of candidates) {
       const companyCandidates =
@@ -5555,6 +5561,22 @@ export function recoveryService(
           result.pauseHoldSkipped += 1;
           continue;
         }
+
+        // --- RK9 Custom: skip agents enqueueWakeup would reject (RK9-477) ---
+        // A paused or otherwise non-invokable assignee makes enqueueWakeup throw
+        // 409 on every pass. The backstop runs every 30 s, so one blocked issue
+        // of a paused agent logged ~120 warnings an hour. Same check as
+        // enqueueWakeup; the next pass wakes the agent once it is invokable again.
+        let invokable = agentInvokableThisPass.get(agentId);
+        if (invokable === undefined) {
+          invokable = (await evaluateAgentInvokabilityFromDb(db, await getAgent(agentId))).invokable;
+          agentInvokableThisPass.set(agentId, invokable);
+        }
+        if (!invokable) {
+          result.agentNotInvokableSkipped += 1;
+          continue;
+        }
+        // --- /RK9 Custom ---
 
         try {
           const wake = await deps.enqueueWakeup(agentId, {

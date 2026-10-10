@@ -999,4 +999,32 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     });
   });
 
+  // RK9-477: a paused assignee made enqueueWakeup throw 409 on every 30 s pass,
+  // which logged ~120 warnings an hour for one blocked issue.
+  it("skips a paused assignee without an enqueue attempt, then wakes it once resumed", async () => {
+    const { companyId, agentId, blockedIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+
+    const paused = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(paused.healed).toBe(0);
+    expect(paused.agentNotInvokableSkipped).toBe(1);
+    expect(paused.enqueueFailed).toBe(0);
+    expect(paused.deferredOrFailed).toBe(0);
+    const wakeRows = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId)));
+    expect(wakeRows).toHaveLength(0);
+
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+
+    const resumed = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(resumed.agentNotInvokableSkipped).toBe(0);
+    expect(resumed.healed).toBe(1);
+    expect(resumed.issueIds).toEqual([blockedIssueId]);
+  });
+
 });
