@@ -1,10 +1,12 @@
 import { Router } from "express";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { isUuidLike } from "@paperclipai/shared";
 import {
   rk9EmailMessages,
   emailOutboundAudit,
   emailRoutes as emailRoutesTable,
+  heartbeatRuns,
 } from "@paperclipai/db";
 import { createEmailService } from "../services/email/index.js";
 import { DEFAULT_CEO_EMAIL } from "../services/email/escalation.js";
@@ -25,6 +27,19 @@ import {
   type Rk9RunTaintSource,
 } from "../services/rk9-run-taint.js";
 // --- /RK9 Custom ---
+
+// RK9 Custom (RK9-488): activity_log.run_id references heartbeat_runs, and an agent key's run id
+// comes from a header that is only format-checked. A stale or foreign run id would make the
+// activity insert fail after the suppression change has committed, so log it without the run.
+async function knownRunIdOrNull(db: Db, runId: string | null, companyId: string): Promise<string | null> {
+  if (!runId || !isUuidLike(runId)) return null;
+  const [run] = await db
+    .select({ companyId: heartbeatRuns.companyId })
+    .from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, runId))
+    .limit(1);
+  return run && run.companyId === companyId ? runId : null;
+}
 
 /** Payload stored on an `email_send` approval; the server sends from this on
  * approve — the agent cannot alter the content after submission. */
@@ -536,7 +551,8 @@ export function rk9EmailRoutes(db: Db) {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
-      runId: actor.runId,
+      runId: await knownRunIdOrNull(db, actor.runId, companyId),
+      agentApiKeyId: actor.agentApiKeyId,
       action: "email.suppression.added",
       entityType: "email_suppression",
       entityId: entry.id,
@@ -563,7 +579,8 @@ export function rk9EmailRoutes(db: Db) {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
-      runId: actor.runId,
+      runId: await knownRunIdOrNull(db, actor.runId, companyId),
+      agentApiKeyId: actor.agentApiKeyId,
       action: "email.suppression.removed",
       entityType: "email_suppression",
       entityId: id,
