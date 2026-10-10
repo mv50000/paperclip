@@ -363,6 +363,11 @@ describe("voice_action payload is validated on create and resubmit", () => {
     ["a body over 1000 characters", { ...commentPayload, body: "x".repeat(1001) }],
     ["an unknown source", { ...commentPayload, source: "siri" }],
     ["a non-uuid issue id", { ...commentPayload, issueId: "RK9-469" }],
+    [
+      "a body the approval view would redact",
+      // Built from parts so secret scanners do not flag a literal token.
+      { ...commentPayload, body: `token ${["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJ0ZXN0In0", "dGVzdC1zaWduYXR1cmUtdmFsdWU"].join(".")}` },
+    ],
   ])("rejects %s", async (_name, payload) => {
     const app = await createApp();
 

@@ -12,6 +12,7 @@ Grok-connectorin vaihe 2, taso B. Ääniavustaja ehdottaa sisäistä tikettitoim
 - Skeema: `voiceActionApprovalPayloadSchema` (`packages/shared/src/validators/approval.ts`). Tuntematon kenttä pudotetaan pois, koska Slack-forwarder kirjoittaa payloadiin `slackMessageRef`in luonnin jälkeen.
 - `body` on 1–1000 merkkiä. `status` on `todo`, `backlog`, `blocked`, `done` tai `cancelled`.
 - `identifier` näkyy hyväksyntäkortissa, joten sen täytyy nimetä sama tiketti kuin `issueId`.
+- `body` hylätään, jos `redactEventPayload` muuttaisi sitä (esim. JWT tai credential-tyyppinen teksti). Hyväksyntänäkymä näyttää payloadin redaktoituna, joten operaattori ei muuten näkisi tarkkaa tekstiä.
 
 ## Tarkistukset
 

@@ -11,6 +11,7 @@ import type { Db } from "@paperclipai/db";
 import { voiceActionApprovalPayloadSchema, type VoiceActionApprovalPayload } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { redactEventPayload } from "../redaction.js";
 import type { logActivity as logActivityFn } from "./activity-log.js";
 import type { issueService } from "./issues.js";
 
@@ -46,6 +47,11 @@ export async function resolveVoiceAction(
     return { ok: false, reason: `invalid payload (${detail})` };
   }
   const payload = parsed.data;
+  // The approval view reads the payload through redactEventPayload. A body it
+  // would mask cannot be shown to the operator exactly, so it is refused.
+  if (payload.body !== undefined && redactEventPayload({ body: payload.body })?.body !== payload.body) {
+    return { ok: false, reason: "body contains credential-like text that the approval view would hide" };
+  }
   const issue = await issuesSvc.getById(payload.issueId);
   // The identifier is what the approval card shows the operator, so it must
   // name the same issue the action targets.
