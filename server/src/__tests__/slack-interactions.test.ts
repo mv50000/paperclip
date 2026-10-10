@@ -165,6 +165,14 @@ describe("slack interactions", () => {
     expect(fakeApprovals.approve).toHaveBeenCalled();
   });
 
+  it("refuses to approve a voice_action from the Slack card (RK9-479)", async () => {
+    const approval = makeApproval({ type: "voice_action" });
+    const { svc, fakeApprovals } = buildService({ approval, user: makeUser() });
+    const result = await svc.handle(makeBlockActions("approval_approve", APPROVAL_BLOCK_ID));
+    expect(result.body).toMatchObject({ response_type: "ephemeral" });
+    expect(fakeApprovals.approve).not.toHaveBeenCalled();
+  });
+
   it("approve on already-decided approval returns ephemeral", async () => {
     const approval = makeApproval({ status: "approved" });
     const { svc, fakeApprovals } = buildService({ approval, user: makeUser() });

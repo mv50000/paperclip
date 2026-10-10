@@ -4,6 +4,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { unprocessable } from "../errors.js";
 
 vi.mock("../services/email/index.js", () => ({
   createEmailService: vi.fn(() => ({ sendEmail: vi.fn(), replyToMessage: vi.fn() })),
@@ -52,6 +53,7 @@ const mockIssuesSvc = vi.hoisted(() => ({
   getById: vi.fn(),
   addComment: vi.fn(),
   update: vi.fn(),
+  getDependencyReadiness: vi.fn(),
   listReviewAttention: vi.fn(async () => new Map()),
 }));
 vi.mock("../services/issues.js", () => ({
@@ -132,6 +134,7 @@ describe("voice_action approve executes the stored payload", () => {
     mockIssuesSvc.getById.mockResolvedValue(issue);
     mockIssuesSvc.addComment.mockResolvedValue({ id: "issue-comment-1", body: "Testattu autossa" });
     mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "done" });
+    mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 0 });
   });
 
   it("posts the comment on the issue in the approver's name", async () => {
@@ -205,8 +208,8 @@ describe("voice_action approve executes the stored payload", () => {
     expect(activityActions()).toContain("voice_action.failed");
   });
 
-  it("keeps the approval and comments the error when the issue service throws", async () => {
-    mockIssuesSvc.update.mockRejectedValue(new Error("Invalid status transition"));
+  it("keeps the approval and comments a rule error from the issue service", async () => {
+    mockIssuesSvc.update.mockRejectedValue(unprocessable("Invalid status transition"));
     approve(statusPayload);
     const app = await createApp();
 
@@ -215,6 +218,67 @@ describe("voice_action approve executes the stored payload", () => {
     expect(res.status).toBe(200);
     expect(approvalComment()).toContain("Invalid status transition");
     expect(activityActions()).toEqual(expect.arrayContaining(["voice_action.failed", "approval.approved"]));
+  });
+
+  it("keeps internal error text out of the approval comment", async () => {
+    mockIssuesSvc.update.mockRejectedValue(new Error("relation \"issues\" deadlock detected"));
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(approvalComment()).not.toContain("deadlock");
+    expect(approvalComment()).toContain("see server log");
+  });
+
+  it("executes a payload that the Slack forwarder extended with slackMessageRef", async () => {
+    approve({ ...commentPayload, slackMessageRef: { channel: "C1", ts: "1.2" } });
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.addComment).toHaveBeenCalledWith(ISSUE_ID, "Testattu autossa", { userId: "board-user" });
+    expect(approvalComment()).toContain("✅");
+  });
+
+  it("refuses blocked when the issue has no unresolved blocker", async () => {
+    approve({ ...statusPayload, status: "blocked" });
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("blocked requires an unresolved blocker");
+  });
+
+  it("sets blocked when the issue has an unresolved blocker", async () => {
+    mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+    mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "blocked" });
+    approve({ ...statusPayload, status: "blocked" });
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "blocked" }));
+  });
+
+  it.each([
+    ["an agent run holds the issue", { executionRunId: "run-1" }],
+    ["the issue has an execution policy", { executionPolicy: { stages: [] } }],
+  ])("refuses done when %s", async (reason, extra) => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, ...extra });
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain(reason);
   });
 
   it("does nothing to the issue on reject", async () => {
@@ -268,7 +332,7 @@ describe("voice_action payload is validated on create and resubmit", () => {
     ["a status outside the allowlist", { ...statusPayload, status: "in_progress" }],
     ["a body over 1000 characters", { ...commentPayload, body: "x".repeat(1001) }],
     ["an unknown source", { ...commentPayload, source: "siri" }],
-    ["an unknown field", { ...commentPayload, assigneeAgentId: "agent-1" }],
+    ["a non-uuid issue id", { ...commentPayload, issueId: "RK9-469" }],
   ])("rejects %s", async (_name, payload) => {
     const app = await createApp();
 
@@ -277,6 +341,17 @@ describe("voice_action payload is validated on create and resubmit", () => {
       .send({ type: "voice_action", payload });
 
     expect(res.status).toBe(422);
+    expect(mockApprovalSvc.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a voice_action proposal from an agent", async () => {
+    const app = await createApp({ type: "agent", companyId: "company-1", agentId: "agent-1" });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/approvals")
+      .send({ type: "voice_action", payload: commentPayload });
+
+    expect(res.status).toBe(403);
     expect(mockApprovalSvc.create).not.toHaveBeenCalled();
   });
 

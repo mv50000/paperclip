@@ -5,6 +5,7 @@ import { logger } from "../../middleware/logger.js";
 import { approvalService } from "../approvals.js";
 import { createSlackClientService, type SlackClientService } from "./client.js";
 import { formatApprovalDecided } from "./formatters.js";
+import { VOICE_ACTION_APPROVAL_TYPE, VOICE_ACTION_APPROVE_ELSEWHERE } from "../rk9-voice-action.js";
 import type { LiveEvent } from "@paperclipai/shared";
 
 export type ApprovalServiceLike = ReturnType<typeof approvalService>;
@@ -312,6 +313,11 @@ export function createSlackInteractionsService(
     if (approval.status !== "pending" && approval.status !== "revision_requested") {
       await postApprovalDecidedUpdate(approval.companyId, approvalId);
       return ephemeral(`Tämä approval on jo käsitelty (${approval.status}).`);
+    }
+    // RK9-479: the Slack card does not show the voice_action text, and only the
+    // HTTP approve route executes it.
+    if (approval.type === VOICE_ACTION_APPROVAL_TYPE) {
+      return ephemeral(VOICE_ACTION_APPROVE_ELSEWHERE);
     }
     try {
       await approvals.approve(approvalId, slackUser.paperclipUserId, null);
