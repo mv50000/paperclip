@@ -42,10 +42,15 @@ Operaattorin päätös 11.10.2026: hyväksytty `voice_action` toimii kuin sama t
 
 - Kommentti: tauotetun puun tarkistus (`assertBoardCommentNotPaused`-logiikka), viittausten synkronointi, aktiivisen goalin ohjaus, korvattujen vahvistusten vanhentaminen sekä assigneen ja @-mainittujen herätys.
 - `done`/`cancelled`: assigneen runner goal pysäytetään ennen kirjoitusta, ja goalin ajo perutaan. `cancelled` peruu lisäksi tiketin aktiivisen ajon.
-- Kirjoituksen jälkeen: unblock-omistajan herätys, routine-synkronointi, assigneen herätys backlog/blocked/suljettu → todo -siirrossa, riippuvien tikettien ja parentin herätys sekä terminaalisiivous.
+- Kirjoituksen jälkeen: unblock-omistajan herätys, routine-synkronointi, handoff-kirjaus, assigneen herätys backlog/blocked/suljettu → todo -siirrossa, riippuvien tikettien ja parentin herätys sekä terminaalisiivous.
 - Logiikka on `issueRoutes`in sulkeumissa, joita `PATCH /issues/:id` ja `POST /issues/:id/comments` kutsuvat. `issueRoutes` antaa ne `VoiceActionIssueEffectsSlot`in kautta approve-reitille (`app.ts`). Jos slotti on tyhjä, toimi hylätään.
-- Goalin pysäytyksen 409 hylkää toimen ennen kirjoitusta. Kirjoituksen jälkeinen sivuvaikutusvirhe ei muuta tulosta: kommenttiin lisätään "sivuvaikutukset epäonnistuivat" ja virhe jää palvelinlokiin.
-- Ei mukana: kommentilla tehtävä uudelleenavaus suljettuun tikettiin (staleness-tarkistus ja `shouldWakeAssigneeForIssueComment` hoitavat suljetun tiketin), suljetun isolated workspacen uudelleenavaus (PATCH tekee sen vain agentille tai kommentilla) ja blocked-tilan `issue.blockers_restored`-herätys (voice-`blocked` vaatii avoimen blokkerin).
+- Goalin pysäytyksen 409 hylkää toimen ennen kirjoitusta. Kirjoituksen jälkeiset vaiheet ajetaan toisistaan riippumatta. Sivuvaikutusvirhe ei muuta tulosta: kommenttiin lisätään "sivuvaikutukset epäonnistuivat" ja virhe jää palvelinlokiin.
+- Hylätään eikä toteuteta reitin erityispolkua:
+  - Kommentti, jonka UI:n kommenttireitti avaisi uudelleen todo-tilaan: suljettu tai blocked tiketti ilman avointa blokkeria, kun assignee on agentti, tai in_progress-tiketti, jolla on ajastettu uusinta. Ehto on `humanCommentMovesIssueToTodo`, joka käyttää reitin omia predikaatteja.
+  - Skill test -tiketin tilamuutos (reitti päättää testiajon).
+  - `blocked`/`cancelled` tiketille, jonka parent saa stop-raportin (`directParentReportDisabledForIssue`).
+- Goalin pysäytys voi odottaa 30 s. Siksi palvelin lukee tiketin uudelleen ja toistaa staleness- ja tilatarkistukset ennen kirjoitusta. Jos tarkistus hylkää, jo pysäytetty ajo mainitaan kommentissa.
+- Ei mukana: blocked-tilan `issue.blockers_restored`-herätys, koska voice-`blocked` vaatii avoimen blokkerin.
 
 ## Toteutus
 

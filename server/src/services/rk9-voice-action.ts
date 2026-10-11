@@ -29,8 +29,15 @@ export type VoiceActionActor = ReturnType<typeof getActorInfo>;
 /** Side effects of `PATCH /issues/:id` and `POST /issues/:id/comments`. The
  * issue routes implement them with the same functions the routes call. */
 export type VoiceActionIssueEffects = {
-  /** Refusal text when a board comment may not enter the issue (paused tree). */
-  commentPauseRefusal(issue: ResolvedIssue): Promise<string | null>;
+  /** Refusal text when the comment route would refuse a board comment
+   * (paused tree) or would also reopen the issue. */
+  commentRefusal(issue: ResolvedIssue, actor: VoiceActionActor): Promise<string | null>;
+  /** Refusal text for a status change that needs a route-only step (skill
+   * test run completion, stop report to the parent). */
+  statusChangeRefusal(
+    issue: ResolvedIssue,
+    status: NonNullable<VoiceActionApprovalPayload["status"]>,
+  ): Promise<string | null>;
   /** Reference sync, goal steering, superseded confirmations, assignee and
    * @-mention wakes. */
   afterComment(input: { issue: ResolvedIssue; comment: IssueComment; actor: VoiceActionActor }): Promise<void>;
@@ -42,14 +49,15 @@ export type VoiceActionIssueEffects = {
     status: NonNullable<VoiceActionApprovalPayload["status"]>,
   ): Promise<{ interruptedRunId: string | null; runToCancel: { id: string } | null }>;
   /** After the status write: unblock-owner wake, run cancellation, routine
-   * sync, status/dependent/parent wakes and terminal clean-up. */
+   * sync, handoff record, status/dependent/parent wakes and terminal
+   * clean-up. A failed step is logged and named in `failedSteps`. */
   afterStatusChange(input: {
     existing: ResolvedIssue;
     updated: UpdatedIssue;
     actor: VoiceActionActor;
     interruptedRunId: string | null;
     runToCancel: { id: string } | null;
-  }): Promise<{ cancelledStatusRunId: string | null }>;
+  }): Promise<{ cancelledStatusRunId: string | null; failedSteps: string[] }>;
 };
 
 /** Filled by `issueRoutes`, read by the approve route at approval time. */
@@ -191,9 +199,9 @@ export async function executeVoiceAction(
       outcome = { ok: false, reason: refusal ?? ISSUE_NOT_IN_COMPANY };
     } else if (resolved.payload.action === "issue_comment") {
       const { payload, issue } = resolved;
-      const pauseRefusal = await issueEffects.commentPauseRefusal(issue);
-      if (pauseRefusal) {
-        outcome = { ok: false, reason: pauseRefusal };
+      const commentRefusal = await issueEffects.commentRefusal(issue, actor);
+      if (commentRefusal) {
+        outcome = { ok: false, reason: commentRefusal };
       } else {
         const comment = await issuesSvc.addComment(issue.id, payload.body!, { userId: decidedByUserId });
         let sideEffectsFailed = false;
@@ -230,11 +238,33 @@ export async function executeVoiceAction(
     } else {
       const { payload, issue } = resolved;
       const status = payload.status!;
-      const statusRefusal = await statusChangeRefusal(issuesSvc, issue, status);
-      if (statusRefusal) {
-        outcome = { ok: false, reason: statusRefusal };
+      const statusRefusal =
+        (await statusChangeRefusal(issuesSvc, issue, status)) ??
+        (await issueEffects.statusChangeRefusal(issue, status));
+      // Stopping the runner goal can wait up to 30 s, and the issue can change
+      // meanwhile. Read it again and repeat the checks before the write.
+      const prepared = statusRefusal
+        ? null
+        : await (async () => {
+            const stop = await issueEffects.beforeStatusChange(issue, status);
+            const recheck = await resolveVoiceAction(issuesSvc, approval.companyId, approval.payload);
+            const reason = !recheck.ok
+              ? recheck.reason
+              : stalenessRefusal(recheck.payload, recheck.issue) ??
+                (await statusChangeRefusal(issuesSvc, recheck.issue, status));
+            return {
+              ...stop,
+              reason:
+                reason && stop.interruptedRunId
+                  ? `${reason} (the agent run ${stop.interruptedRunId} was already stopped)`
+                  : reason,
+            };
+          })();
+      const refusalReason = statusRefusal ?? prepared?.reason ?? null;
+      if (refusalReason || !prepared) {
+        outcome = { ok: false, reason: refusalReason ?? ISSUE_NOT_IN_COMPANY };
       } else {
-        const { interruptedRunId, runToCancel } = await issueEffects.beforeStatusChange(issue, status);
+        const { interruptedRunId, runToCancel } = prepared;
         const updated = await issuesSvc.update(issue.id, {
           status,
           actorUserId: decidedByUserId,
@@ -246,13 +276,15 @@ export async function executeVoiceAction(
           let cancelledStatusRunId: string | null = null;
           let sideEffectsFailed = false;
           try {
-            ({ cancelledStatusRunId } = await issueEffects.afterStatusChange({
+            const after = await issueEffects.afterStatusChange({
               existing: issue,
               updated,
               actor,
               interruptedRunId,
               runToCancel,
-            }));
+            });
+            cancelledStatusRunId = after.cancelledStatusRunId;
+            sideEffectsFailed = after.failedSteps.length > 0;
           } catch (err) {
             logger.error({ err, approvalId: approval.id }, "voice_action status side effects failed");
             sideEffectsFailed = true;

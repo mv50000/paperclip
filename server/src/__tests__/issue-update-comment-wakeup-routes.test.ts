@@ -978,15 +978,38 @@ describe("voice_action issue effects from issueRoutes", () => {
     mockIssueService.listReviewAttention.mockResolvedValue(new Map());
     mockRunnerGoalService.projection.mockResolvedValue(null);
     mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
+    mockIssueService.getCurrentScheduledRetry.mockResolvedValue(null);
+    mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 0 });
   });
 
   it("refuses a comment under a pause hold like the comment route", async () => {
     const effects = await createEffects();
     mockPauseGate.mockResolvedValue({ holdId: "hold-1", rootIssueId: "parent-1" });
 
-    await expect(effects.commentPauseRefusal(makeIssue() as never)).resolves.toBe(
+    await expect(effects.commentRefusal(makeIssue() as never, boardActor)).resolves.toBe(
       "Task is paused. Resume it before sending a message.",
     );
+  });
+
+  it("refuses a comment that the comment route would use to reopen the issue", async () => {
+    const effects = await createEffects();
+    const done = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "done" });
+    const inProgress = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "in_progress" });
+    const blockedWithBlocker = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "blocked" });
+    mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+
+    await expect(effects.commentRefusal(done as never, boardActor)).resolves.toContain("would reopen the done issue");
+    await expect(effects.commentRefusal(inProgress as never, boardActor)).resolves.toBeNull();
+    await expect(effects.commentRefusal(blockedWithBlocker as never, boardActor)).resolves.toBeNull();
+  });
+
+  it("refuses a status change on a skill test issue", async () => {
+    const effects = await createEffects();
+
+    await expect(
+      effects.statusChangeRefusal(makeIssue({ harnessKind: "skill_test" }) as never, "done"),
+    ).resolves.toContain("skill test issues");
+    await expect(effects.statusChangeRefusal(makeIssue() as never, "done")).resolves.toBeNull();
   });
 
   it("wakes the assignee and mentioned agents for the comment", async () => {
@@ -1086,7 +1109,7 @@ describe("voice_action issue effects from issueRoutes", () => {
     });
 
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("run-2");
-    expect(after).toEqual({ cancelledStatusRunId: "run-2" });
+    expect(after).toEqual({ cancelledStatusRunId: "run-2", failedSteps: [] });
   });
 
   it("wakes dependents and the parent after done", async () => {

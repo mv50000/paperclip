@@ -7664,6 +7664,96 @@ export function issueRoutes(
       });
     }
   }
+
+  /** Whether a plain human comment would move the issue to todo in the
+   * comment route: a closed or blocked (without open blockers) issue with an
+   * agent assignee, or an in_progress issue with a scheduled retry. */
+  async function humanCommentMovesIssueToTodo(
+    issue: {
+      id: string;
+      status: string;
+      assigneeAgentId: string | null;
+      checkoutRunId?: string | null;
+      executionRunId?: string | null;
+    },
+    actor: IssueRouteActor,
+  ): Promise<boolean> {
+    const scheduledRetryForHumanComment =
+      shouldHumanCommentResumeInProgressScheduledRetry({
+        hasComment: true,
+        issueStatus: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        actorType: actor.actorType,
+      })
+        ? await svc.getCurrentScheduledRetry(issue.id)
+        : null;
+    if (
+      scheduledRetryForHumanComment &&
+      scheduledRetryForHumanComment.agentId === issue.assigneeAgentId
+    ) {
+      return true;
+    }
+    const implicitMove = shouldImplicitlyMoveCommentedIssueToTodo({
+      issueStatus: issue.status,
+      assigneeAgentId: issue.assigneeAgentId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      actorRunId: actor.runId,
+      checkoutRunId: issue.checkoutRunId,
+      executionRunId: issue.executionRunId,
+    });
+    if (!implicitMove) return false;
+    if (issue.status !== "blocked") return true;
+    // A blocked issue with open blockers stays blocked in the comment route.
+    return (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount === 0;
+  }
+
+  /** After a status change out of in_progress: records that a required
+   * successful-run handoff was resolved by the new status. */
+  async function logSuccessfulRunHandoffResolution(input: {
+    existing: { status: string };
+    issue: { id: string; companyId: string; status: string; identifier?: string | null };
+    actor: IssueRouteActor;
+  }) {
+    const { existing, issue, actor } = input;
+    if (
+      existing.status !== "in_progress" ||
+      issue.status === existing.status ||
+      issue.status === "in_progress"
+    ) {
+      return;
+    }
+    await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id], {
+      hydrateLiveness: false,
+    })
+      .then(async (handoffStates) => {
+        const handoff = handoffStates.get(issue.id);
+        if (handoff?.state !== "required") return;
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action: "issue.successful_run_handoff_resolved",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            sourceRunId: handoff.sourceRunId,
+            correctiveRunId: handoff.correctiveRunId,
+            resolvedByStatus: issue.status,
+          },
+        });
+      })
+      .catch((err) => {
+        logger.warn(
+          { err, issueId: issue.id },
+          "failed to log successful run handoff resolution",
+        );
+      });
+  }
   // --- end RK9 Custom ---
 
   type IssueQueueDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -14654,42 +14744,7 @@ export function issueRoutes(
           },
         });
 
-      if (
-        existing.status === "in_progress" &&
-        issue.status !== existing.status &&
-        issue.status !== "in_progress"
-      ) {
-        await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id], {
-          hydrateLiveness: false,
-        })
-          .then(async (handoffStates) => {
-            const handoff = handoffStates.get(issue.id);
-            if (handoff?.state !== "required") return;
-            await logActivity(db, {
-              companyId: issue.companyId,
-              actorType: actor.actorType,
-              actorId: actor.actorId,
-              agentId: actor.agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "issue.successful_run_handoff_resolved",
-              entityType: "issue",
-              entityId: issue.id,
-              details: {
-                identifier: issue.identifier,
-                sourceRunId: handoff.sourceRunId,
-                correctiveRunId: handoff.correctiveRunId,
-                resolvedByStatus: issue.status,
-              },
-            });
-          })
-          .catch((err) => {
-            logger.warn(
-              { err, issueId: issue.id },
-              "failed to log successful run handoff resolution",
-            );
-          });
-      }
+      await logSuccessfulRunHandoffResolution({ existing, issue, actor });
 
       if (Array.isArray(req.body.blockedByIssueIds)) {
         const previousBlockedByIds = new Set(
@@ -18825,8 +18880,34 @@ export function issueRoutes(
   // POST /issues/:id/comments by a board user. ---
   if (opts.voiceActionIssueEffects) {
     opts.voiceActionIssueEffects.current = {
-      commentPauseRefusal: async (issue) =>
-        (await getBoardCommentPauseHold(issue)) ? BOARD_COMMENT_PAUSED_ERROR : null,
+      commentRefusal: async (issue, actor) => {
+        if (await getBoardCommentPauseHold(issue)) return BOARD_COMMENT_PAUSED_ERROR;
+        // The comment route would also reopen the issue (and its workspace);
+        // a voice comment does not take that path.
+        if (await humanCommentMovesIssueToTodo(issue, actor)) {
+          return `a comment would reopen the ${issue.status} issue; reopen it in Paperclip`;
+        }
+        return null;
+      },
+      statusChangeRefusal: async (issue, status) => {
+        if (issue.harnessKind === "skill_test") {
+          return `skill test issues complete their test run; set ${status} in Paperclip`;
+        }
+        const relaysStopToParent =
+          Boolean(issue.parentId) &&
+          (status === "blocked" || status === "cancelled") &&
+          (await directParentReportDisabledForIssue({
+            companyId: issue.companyId,
+            projectId: issue.projectId,
+            executionPolicy: issue.executionPolicy,
+            assigneeAgentId: issue.assigneeAgentId,
+            checkoutRunId: issue.checkoutRunId,
+            executionRunId: issue.executionRunId,
+          }));
+        return relaysStopToParent
+          ? `the parent issue gets a stop report; set ${status} in Paperclip`
+          : null;
+      },
       afterComment: async ({ issue, comment, actor }) => {
         await issueReferencesSvc.syncComment(comment.id);
         await externalObjectsSvc.syncCommentSafely(comment.id);
@@ -18873,16 +18954,26 @@ export function issueRoutes(
         return { interruptedRunId, runToCancel };
       },
       afterStatusChange: async ({ existing, updated, actor, interruptedRunId, runToCancel }) => {
+        // The write is committed: one failed step must not skip the others.
+        const failedSteps: string[] = [];
+        const attempt = async <T,>(step: string, fallback: T, run: () => Promise<T>): Promise<T> => {
+          try {
+            return await run();
+          } catch (err) {
+            logger.warn({ err, issueId: existing.id, step }, "voice_action status side effect failed");
+            failedSteps.push(step);
+            return fallback;
+          }
+        };
         const issue =
           existing.status !== "blocked" && updated.status === "blocked"
-            ? await notifyUnblockOwnerAfterEnteringBlocked(updated)
+            ? await attempt("unblock_owner_wake", updated, () => notifyUnblockOwnerAfterEnteringBlocked(updated))
             : updated;
-        const cancelledStatusRunId = await cancelRunForCancelledStatus(runToCancel, {
-          existing,
-          interruptedRunId,
-          actor,
-        });
-        await routinesSvc.syncRunStatusForIssue(issue.id);
+        const cancelledStatusRunId = await attempt("cancel_run", null, () =>
+          cancelRunForCancelledStatus(runToCancel, { existing, interruptedRunId, actor }),
+        );
+        await attempt("routine_sync", undefined, () => routinesSvc.syncRunStatusForIssue(issue.id));
+        await logSuccessfulRunHandoffResolution({ existing, issue, actor });
         void (async () => {
           const wakeBatch = createIssueWakeBatch({
             issue,
@@ -18925,7 +19016,7 @@ export function issueRoutes(
           logger.warn({ err, issueId: issue.id }, "failed to wake agents for voice_action status change"),
         );
         await queueTaskWatchdogEvaluation(issue, actor.runId);
-        return { cancelledStatusRunId };
+        return { cancelledStatusRunId, failedSteps };
       },
     };
   }

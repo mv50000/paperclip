@@ -62,7 +62,8 @@ vi.mock("../services/issues.js", () => ({
 }));
 
 const mockIssueEffects = vi.hoisted(() => ({
-  commentPauseRefusal: vi.fn(),
+  commentRefusal: vi.fn(),
+  statusChangeRefusal: vi.fn(),
   afterComment: vi.fn(),
   beforeStatusChange: vi.fn(),
   afterStatusChange: vi.fn(),
@@ -150,10 +151,11 @@ describe("voice_action approve executes the stored payload", () => {
     mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "done" });
     mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 0 });
     effectsSlot.current = mockIssueEffects;
-    mockIssueEffects.commentPauseRefusal.mockResolvedValue(null);
+    mockIssueEffects.commentRefusal.mockResolvedValue(null);
+    mockIssueEffects.statusChangeRefusal.mockResolvedValue(null);
     mockIssueEffects.afterComment.mockResolvedValue(undefined);
     mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: null, runToCancel: null });
-    mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null });
+    mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null, failedSteps: [] });
   });
 
   it("posts the comment on the issue in the approver's name", async () => {
@@ -253,8 +255,51 @@ describe("voice_action approve executes the stored payload", () => {
     expect(approvalComment()).not.toContain("routine sync failed");
   });
 
+  it("names failed side effect steps after the write", async () => {
+    mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null, failedSteps: ["routine_sync"] });
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(approvalComment()).toContain("✅");
+    expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
+  });
+
+  it("refuses the write when the issue changed while the runner goal stopped", async () => {
+    mockIssuesSvc.getById
+      .mockResolvedValueOnce(issue)
+      .mockResolvedValueOnce({ ...issue, status: "in_review" });
+    mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: "run-1", runToCancel: null });
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueEffects.beforeStatusChange).toHaveBeenCalled();
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(mockIssueEffects.afterStatusChange).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("status changed after the proposal (in_progress → in_review)");
+    expect(approvalComment()).toContain("run-1 was already stopped");
+  });
+
+  it("refuses a status change that needs a route-only step", async () => {
+    mockIssueEffects.statusChangeRefusal.mockResolvedValue("skill test issues complete their test run; set done in Paperclip");
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueEffects.beforeStatusChange).not.toHaveBeenCalled();
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("skill test issues");
+  });
+
   it("refuses a comment while the issue tree is paused", async () => {
-    mockIssueEffects.commentPauseRefusal.mockResolvedValue("Task is paused. Resume it before sending a message.");
+    mockIssueEffects.commentRefusal.mockResolvedValue("Task is paused. Resume it before sending a message.");
     approve(commentPayload);
     const app = await createApp();
 
@@ -511,7 +556,7 @@ describe("voice_action payload is validated on create and resubmit", () => {
       .post("/api/companies/company-1/approvals")
       .send({
         type: "voice_action",
-        payload: { ...commentPayload, issueStatusAtProposal: "done", assigneeAgentIdAtProposal: null },
+        payload: { ...commentPayload, issueStatusAtProposal: "done", assigneeAgentIdAtProposal: "not-a-uuid" },
       });
 
     expect(res.status).toBe(201);

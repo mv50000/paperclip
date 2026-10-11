@@ -249,7 +249,9 @@ export function approvalRoutes(
       res.status(403).json({ error: "Only a board user can create or resubmit a voice_action approval" });
       return null;
     }
-    const resolved = await resolveVoiceAction(issuesSvc, companyId, payload);
+    // The issue snapshot is the server's to write; a proposer's value is ignored.
+    const { issueStatusAtProposal: _status, assigneeAgentIdAtProposal: _assignee, ...proposal } = payload;
+    const resolved = await resolveVoiceAction(issuesSvc, companyId, proposal);
     if (resolved.ok) return voiceActionPayloadToPersist(resolved);
     res.status(422).json({ error: `Invalid voice_action: ${resolved.reason}` });
     return null;
