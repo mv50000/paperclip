@@ -6953,8 +6953,8 @@ export function issueRoutes(
   type IssueWakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
 
   /** Stops the assignee's runner goal before done/cancelled, and cancels the
-   * active run when a goal was stopped. Returns the cancelled run id. Throws a
-   * 409 when the goal or run cannot be stopped. */
+   * active run when a goal was stopped. Returns the goal action and the
+   * cancelled run id. Throws a 409 when the goal or run cannot be stopped. */
   async function stopAssigneeWorkBeforeTerminalization(
     existing: {
       id: string;
@@ -6964,12 +6964,14 @@ export function issueRoutes(
       executionRunId?: string | null;
     },
     nextStatus: unknown,
-  ): Promise<string | null> {
+  ): Promise<{ goalStopAction: "pause" | "clear" | null; interruptedRunId: string | null }> {
     const terminalizingIssue =
       typeof nextStatus === "string" &&
       nextStatus !== existing.status &&
       isClosedIssueStatus(nextStatus);
-    if (!terminalizingIssue || !existing.assigneeAgentId) return null;
+    if (!terminalizingIssue || !existing.assigneeAgentId) {
+      return { goalStopAction: null, interruptedRunId: null };
+    }
     const goalStopAction = await stopRunnerGoalForOwnershipChange({
       companyId: existing.companyId,
       issueId: existing.id,
@@ -6978,7 +6980,9 @@ export function issueRoutes(
     const runToStopForTerminalization = goalStopAction
       ? await resolveActiveIssueRun(existing)
       : null;
-    if (!goalStopAction || !runToStopForTerminalization) return null;
+    if (!goalStopAction || !runToStopForTerminalization) {
+      return { goalStopAction, interruptedRunId: null };
+    }
     const cancelled = await heartbeat.cancelRun(
       runToStopForTerminalization.id,
       "Cancelled before issue terminalization",
@@ -7001,7 +7005,7 @@ export function issueRoutes(
         },
       );
     }
-    return cancelled.id;
+    return { goalStopAction, interruptedRunId: cancelled.id };
   }
 
   /** After a status change to cancelled: cancels the run that was active on the
@@ -7016,9 +7020,11 @@ export function issueRoutes(
   ): Promise<string | null> {
     const { existing, actor } = input;
     if (!runToCancel || runToCancel.id === input.interruptedRunId) return null;
+    let cancelledStatusRunId: string | null = null;
     try {
       const cancelled = await heartbeat.cancelRun(runToCancel.id);
       if (!cancelled) return null;
+      cancelledStatusRunId = cancelled.id;
       await logActivity(db, {
         companyId: cancelled.companyId,
         actorType: actor.actorType,
@@ -7036,7 +7042,6 @@ export function issueRoutes(
           issueId: existing.id,
         },
       });
-      return cancelled.id;
     } catch (err) {
       logger.warn(
         {
@@ -7059,8 +7064,8 @@ export function issueRoutes(
         issueId: existing.id,
         details: { source: "issue_status_cancelled", issueId: existing.id },
       });
-      return null;
     }
+    return cancelledStatusRunId;
   }
 
   /** After entering blocked: wakes the unblock owner agent once. */
@@ -7706,6 +7711,25 @@ export function issueRoutes(
     if (issue.status !== "blocked") return true;
     // A blocked issue with open blockers stays blocked in the comment route.
     return (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount === 0;
+  }
+
+  /** Whether a comment is the pending review participant's approval, which the
+   * comment route applies as a review decision. */
+  function commentApprovesPendingReview(
+    issue: { status: string; executionState?: unknown },
+    actor: IssueRouteActor,
+    body: string,
+  ) {
+    const executionState = parseIssueExecutionState(issue.executionState);
+    return (
+      issue.status === "in_review" &&
+      executionState?.status === "pending" &&
+      actorMatchesExecutionParticipant(
+        actor,
+        executionState.currentParticipant ?? null,
+      ) &&
+      isApprovalReviewComment(body)
+    );
   }
 
   /** After a status change out of in_progress: records that a required
@@ -14266,13 +14290,13 @@ export function issueRoutes(
       }
 
       if (!assigneeWillChange) {
-        const terminalizationStoppedRunId =
+        const terminalizationStop =
           await stopAssigneeWorkBeforeTerminalization(
             existing,
             updateFields.status,
           );
-        if (terminalizationStoppedRunId) {
-          interruptedRunId = terminalizationStoppedRunId;
+        if (terminalizationStop.interruptedRunId) {
+          interruptedRunId = terminalizationStop.interruptedRunId;
         }
       }
 
@@ -18086,14 +18110,11 @@ export function issueRoutes(
       const currentExecutionPolicy = normalizeIssueExecutionPolicy(
         currentIssue.executionPolicy ?? null,
       );
-      const shouldAutoApproveReviewComment =
-        currentIssue.status === "in_review" &&
-        currentExecutionState?.status === "pending" &&
-        actorMatchesExecutionParticipant(
-          actor,
-          currentExecutionState.currentParticipant ?? null,
-        ) &&
-        isApprovalReviewComment(req.body.body);
+      const shouldAutoApproveReviewComment = commentApprovesPendingReview(
+        currentIssue,
+        actor,
+        req.body.body,
+      );
 
       // Persist the comment and the auto-approval state transition atomically when both apply.
       // Without a single transaction, a 422 (or any error) thrown by the status update after the
@@ -18880,10 +18901,15 @@ export function issueRoutes(
   // POST /issues/:id/comments by a board user. ---
   if (opts.voiceActionIssueEffects) {
     opts.voiceActionIssueEffects.current = {
-      commentRefusal: async (issue, actor) => {
+      commentRefusal: async (issue, actor, body) => {
         if (await getBoardCommentPauseHold(issue)) return BOARD_COMMENT_PAUSED_ERROR;
-        // The comment route would also reopen the issue (and its workspace);
-        // a voice comment does not take that path.
+        // Paths of the comment route that a voice comment does not take.
+        if (await getClosedIssueExecutionWorkspace(issue)) {
+          return "a comment would reopen the issue's closed workspace; comment in Paperclip";
+        }
+        if (commentApprovesPendingReview(issue, actor, body)) {
+          return "the comment would approve the pending review; approve it in Paperclip";
+        }
         if (await humanCommentMovesIssueToTodo(issue, actor)) {
           return `a comment would reopen the ${issue.status} issue; reopen it in Paperclip`;
         }
@@ -18895,6 +18921,7 @@ export function issueRoutes(
         }
         const relaysStopToParent =
           Boolean(issue.parentId) &&
+          issue.status !== status &&
           (status === "blocked" || status === "cancelled") &&
           (await directParentReportDisabledForIssue({
             companyId: issue.companyId,
@@ -18913,6 +18940,15 @@ export function issueRoutes(
         await externalObjectsSvc.syncCommentSafely(comment.id);
         const goalCommentSteered = await steerActiveGoalWithComment(issue, comment, actor);
         const lostReviewPathRef = await expireConfirmationsSupersededByComment(issue, comment, actor);
+        await revalidateActiveSourceRecoveryAfterCommittedWrite({
+          issue,
+          trigger: "comment",
+          actor,
+          statusChanged: false,
+          resumeRequested: false,
+          reopened: false,
+          blockedToTodoRecovery: false,
+        });
         void (async () => {
           const wakeBatch = createIssueWakeBatch({
             issue,
@@ -18945,15 +18981,25 @@ export function issueRoutes(
         await queueTaskWatchdogEvaluation(issue, actor.runId);
       },
       beforeStatusChange: async (issue, status) => {
-        // Same order as PATCH: find the run to cancel before the goal stop.
+        // Same order as PATCH: the recovery action and the run to cancel are
+        // read before the goal stop.
+        const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
+          issue.companyId,
+          issue.id,
+        );
         const runToCancel =
           issue.status !== "cancelled" && status === "cancelled"
             ? await resolveActiveIssueRun(issue)
             : null;
-        const interruptedRunId = await stopAssigneeWorkBeforeTerminalization(issue, status);
-        return { interruptedRunId, runToCancel };
+        const stop = await stopAssigneeWorkBeforeTerminalization(issue, status);
+        return {
+          interruptedRunId: stop.interruptedRunId,
+          goalStopped: stop.goalStopAction !== null,
+          runToCancel,
+          activeRecoveryAction,
+        };
       },
-      afterStatusChange: async ({ existing, updated, actor, interruptedRunId, runToCancel }) => {
+      afterStatusChange: async ({ existing, updated, actor, interruptedRunId, runToCancel, activeRecoveryAction }) => {
         // The write is committed: one failed step must not skip the others.
         const failedSteps: string[] = [];
         const attempt = async <T,>(step: string, fallback: T, run: () => Promise<T>): Promise<T> => {
@@ -18973,6 +19019,22 @@ export function issueRoutes(
           cancelRunForCancelledStatus(runToCancel, { existing, interruptedRunId, actor }),
         );
         await attempt("routine_sync", undefined, () => routinesSvc.syncRunStatusForIssue(issue.id));
+        await revalidateActiveSourceRecoveryAfterCommittedWrite({
+          issue,
+          trigger: "issue_update",
+          actor,
+          activeRecoveryAction:
+            (activeRecoveryAction as Awaited<ReturnType<typeof recoveryActionsSvc.getActiveForIssue>>) ??
+            undefined,
+          statusChanged: existing.status !== issue.status,
+          assigneeChanged: false,
+          blockersChanged: false,
+          executionPolicyChanged: false,
+          monitorChanged: false,
+          resumeRequested: false,
+          reopened: false,
+          blockedToTodoRecovery: existing.status === "blocked" && issue.status === "todo",
+        });
         await logSuccessfulRunHandoffResolution({ existing, issue, actor });
         void (async () => {
           const wakeBatch = createIssueWakeBatch({

@@ -154,7 +154,12 @@ describe("voice_action approve executes the stored payload", () => {
     mockIssueEffects.commentRefusal.mockResolvedValue(null);
     mockIssueEffects.statusChangeRefusal.mockResolvedValue(null);
     mockIssueEffects.afterComment.mockResolvedValue(undefined);
-    mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: null, runToCancel: null });
+    mockIssueEffects.beforeStatusChange.mockResolvedValue({
+      interruptedRunId: null,
+      goalStopped: false,
+      runToCancel: null,
+      activeRecoveryAction: null,
+    });
     mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null, failedSteps: [] });
   });
 
@@ -167,6 +172,11 @@ describe("voice_action approve executes the stored payload", () => {
     expect(res.status).toBe(200);
     expect(mockIssuesSvc.addComment).toHaveBeenCalledWith(ISSUE_ID, "Testattu autossa", { userId: "board-user" });
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(mockIssueEffects.commentRefusal).toHaveBeenCalledWith(
+      issue,
+      expect.objectContaining({ actorType: "user" }),
+      "Testattu autossa",
+    );
     // The comment wakes the assignee as a board comment would.
     expect(mockIssueEffects.afterComment).toHaveBeenCalledWith({
       issue,
@@ -199,6 +209,7 @@ describe("voice_action approve executes the stored payload", () => {
       actor: expect.objectContaining({ actorType: "user", actorId: "board-user" }),
       interruptedRunId: null,
       runToCancel: null,
+      activeRecoveryAction: null,
     });
     expect(mockIssueEffects.beforeStatusChange.mock.invocationCallOrder[0]).toBeLessThan(
       mockIssuesSvc.update.mock.invocationCallOrder[0]!,
@@ -210,7 +221,12 @@ describe("voice_action approve executes the stored payload", () => {
   it("stops the assignee's run like PATCH /issues/:id and records the stopped runs", async () => {
     mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "in_progress", executionRunId: "run-1" });
     mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "cancelled" });
-    mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: "run-1", runToCancel: { id: "run-1" } });
+    mockIssueEffects.beforeStatusChange.mockResolvedValue({
+      interruptedRunId: "run-1",
+      goalStopped: true,
+      runToCancel: { id: "run-1" },
+      activeRecoveryAction: { id: "recovery-1" },
+    });
     approve({ ...statusPayload, status: "cancelled" });
     const app = await createApp();
 
@@ -219,7 +235,12 @@ describe("voice_action approve executes the stored payload", () => {
     expect(res.status).toBe(200);
     expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "cancelled" }));
     expect(mockIssueEffects.afterStatusChange).toHaveBeenCalledWith(
-      expect.objectContaining({ interruptedRunId: "run-1", runToCancel: { id: "run-1" } }),
+      expect.objectContaining({
+        interruptedRunId: "run-1",
+        runToCancel: { id: "run-1" },
+        // The recovery action read before the write is revalidated after it.
+        activeRecoveryAction: { id: "recovery-1" },
+      }),
     );
     const updatedActivity = mockLogActivity.mock.calls
       .map((call) => (call as unknown as [unknown, { action: string; details: Record<string, unknown> }])[1])
@@ -271,7 +292,12 @@ describe("voice_action approve executes the stored payload", () => {
     mockIssuesSvc.getById
       .mockResolvedValueOnce(issue)
       .mockResolvedValueOnce({ ...issue, status: "in_review" });
-    mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: "run-1", runToCancel: null });
+    mockIssueEffects.beforeStatusChange.mockResolvedValue({
+      interruptedRunId: "run-1",
+      goalStopped: true,
+      runToCancel: null,
+      activeRecoveryAction: null,
+    });
     approve(statusPayload);
     const app = await createApp();
 
@@ -282,7 +308,7 @@ describe("voice_action approve executes the stored payload", () => {
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
     expect(mockIssueEffects.afterStatusChange).not.toHaveBeenCalled();
     expect(approvalComment()).toContain("status changed after the proposal (in_progress → in_review)");
-    expect(approvalComment()).toContain("run-1 was already stopped");
+    expect(approvalComment()).toContain("goal was paused and run run-1 cancelled");
   });
 
   it("refuses a status change that needs a route-only step", async () => {

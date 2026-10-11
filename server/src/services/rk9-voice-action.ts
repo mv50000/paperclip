@@ -30,8 +30,9 @@ export type VoiceActionActor = ReturnType<typeof getActorInfo>;
  * issue routes implement them with the same functions the routes call. */
 export type VoiceActionIssueEffects = {
   /** Refusal text when the comment route would refuse a board comment
-   * (paused tree) or would also reopen the issue. */
-  commentRefusal(issue: ResolvedIssue, actor: VoiceActionActor): Promise<string | null>;
+   * (paused tree) or take a path a voice comment does not: reopen the issue
+   * or its closed workspace, or approve a pending review. */
+  commentRefusal(issue: ResolvedIssue, actor: VoiceActionActor, body: string): Promise<string | null>;
   /** Refusal text for a status change that needs a route-only step (skill
    * test run completion, stop report to the parent). */
   statusChangeRefusal(
@@ -47,7 +48,7 @@ export type VoiceActionIssueEffects = {
   beforeStatusChange(
     issue: ResolvedIssue,
     status: NonNullable<VoiceActionApprovalPayload["status"]>,
-  ): Promise<{ interruptedRunId: string | null; runToCancel: { id: string } | null }>;
+  ): Promise<VoiceActionStatusChangePrep>;
   /** After the status write: unblock-owner wake, run cancellation, routine
    * sync, handoff record, status/dependent/parent wakes and terminal
    * clean-up. A failed step is logged and named in `failedSteps`. */
@@ -55,9 +56,15 @@ export type VoiceActionIssueEffects = {
     existing: ResolvedIssue;
     updated: UpdatedIssue;
     actor: VoiceActionActor;
-    interruptedRunId: string | null;
-    runToCancel: { id: string } | null;
-  }): Promise<{ cancelledStatusRunId: string | null; failedSteps: string[] }>;
+  } & Omit<VoiceActionStatusChangePrep, "goalStopped">): Promise<{ cancelledStatusRunId: string | null; failedSteps: string[] }>;
+};
+
+export type VoiceActionStatusChangePrep = {
+  interruptedRunId: string | null;
+  goalStopped: boolean;
+  runToCancel: { id: string } | null;
+  /** The issue's active recovery action before the write, revalidated after it. */
+  activeRecoveryAction: unknown;
 };
 
 /** Filled by `issueRoutes`, read by the approve route at approval time. */
@@ -199,7 +206,7 @@ export async function executeVoiceAction(
       outcome = { ok: false, reason: refusal ?? ISSUE_NOT_IN_COMPANY };
     } else if (resolved.payload.action === "issue_comment") {
       const { payload, issue } = resolved;
-      const commentRefusal = await issueEffects.commentRefusal(issue, actor);
+      const commentRefusal = await issueEffects.commentRefusal(issue, actor, payload.body!);
       if (commentRefusal) {
         outcome = { ok: false, reason: commentRefusal };
       } else {
@@ -251,20 +258,20 @@ export async function executeVoiceAction(
             const reason = !recheck.ok
               ? recheck.reason
               : stalenessRefusal(recheck.payload, recheck.issue) ??
-                (await statusChangeRefusal(issuesSvc, recheck.issue, status));
-            return {
-              ...stop,
-              reason:
-                reason && stop.interruptedRunId
-                  ? `${reason} (the agent run ${stop.interruptedRunId} was already stopped)`
-                  : reason,
-            };
+                (await statusChangeRefusal(issuesSvc, recheck.issue, status)) ??
+                (await issueEffects.statusChangeRefusal(recheck.issue, status));
+            const stopped = stop.interruptedRunId
+              ? ` (the assignee's goal was paused and run ${stop.interruptedRunId} cancelled)`
+              : stop.goalStopped
+                ? " (the assignee's goal was paused)"
+                : "";
+            return { ...stop, reason: reason ? `${reason}${stopped}` : null };
           })();
       const refusalReason = statusRefusal ?? prepared?.reason ?? null;
       if (refusalReason || !prepared) {
         outcome = { ok: false, reason: refusalReason ?? ISSUE_NOT_IN_COMPANY };
       } else {
-        const { interruptedRunId, runToCancel } = prepared;
+        const { interruptedRunId, runToCancel, activeRecoveryAction } = prepared;
         const updated = await issuesSvc.update(issue.id, {
           status,
           actorUserId: decidedByUserId,
@@ -282,6 +289,7 @@ export async function executeVoiceAction(
               actor,
               interruptedRunId,
               runToCancel,
+              activeRecoveryAction,
             });
             cancelledStatusRunId = after.cancelledStatusRunId;
             sideEffectsFailed = after.failedSteps.length > 0;

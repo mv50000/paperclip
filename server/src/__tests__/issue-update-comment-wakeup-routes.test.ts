@@ -986,7 +986,7 @@ describe("voice_action issue effects from issueRoutes", () => {
     const effects = await createEffects();
     mockPauseGate.mockResolvedValue({ holdId: "hold-1", rootIssueId: "parent-1" });
 
-    await expect(effects.commentRefusal(makeIssue() as never, boardActor)).resolves.toBe(
+    await expect(effects.commentRefusal(makeIssue() as never, boardActor, "go")).resolves.toBe(
       "Task is paused. Resume it before sending a message.",
     );
   });
@@ -998,9 +998,32 @@ describe("voice_action issue effects from issueRoutes", () => {
     const blockedWithBlocker = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "blocked" });
     mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
 
-    await expect(effects.commentRefusal(done as never, boardActor)).resolves.toContain("would reopen the done issue");
-    await expect(effects.commentRefusal(inProgress as never, boardActor)).resolves.toBeNull();
-    await expect(effects.commentRefusal(blockedWithBlocker as never, boardActor)).resolves.toBeNull();
+    await expect(effects.commentRefusal(done as never, boardActor, "go")).resolves.toContain("would reopen the done issue");
+    await expect(effects.commentRefusal(inProgress as never, boardActor, "go")).resolves.toBeNull();
+    await expect(effects.commentRefusal(blockedWithBlocker as never, boardActor, "go")).resolves.toBeNull();
+  });
+
+  it("refuses a comment that the comment route would apply as a review approval", async () => {
+    const effects = await createEffects();
+    const inReview = makeIssue({
+      status: "in_review",
+      executionState: {
+        status: "pending",
+        currentStageId: "33333333-3333-4333-8333-333333333333",
+        currentStageIndex: 0,
+        currentStageType: "review",
+        currentParticipant: { type: "user", userId: "local-board" },
+        returnAssignee: { type: "agent", agentId: ASSIGNEE_AGENT_ID },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+      },
+    });
+
+    await expect(effects.commentRefusal(inReview as never, boardActor, "## Review: APPROVED")).resolves.toContain(
+      "approve the pending review",
+    );
+    await expect(effects.commentRefusal(inReview as never, boardActor, "katso testit")).resolves.toBeNull();
   });
 
   it("refuses a status change on a skill test issue", async () => {
@@ -1072,7 +1095,12 @@ describe("voice_action issue effects from issueRoutes", () => {
       "Cancelled before issue terminalization",
       expect.objectContaining({ errorCode: "issue_terminalized" }),
     );
-    expect(result).toEqual({ interruptedRunId: "run-1", runToCancel: null });
+    expect(result).toEqual({
+      interruptedRunId: "run-1",
+      goalStopped: true,
+      runToCancel: null,
+      activeRecoveryAction: null,
+    });
   });
 
   it("refuses done when the runner goal has a control action in progress", async () => {
@@ -1137,6 +1165,7 @@ describe("voice_action issue effects from issueRoutes", () => {
       actor: boardActor,
       interruptedRunId: null,
       runToCancel: null,
+      activeRecoveryAction: null,
     });
 
     await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2));
@@ -1164,6 +1193,7 @@ describe("voice_action issue effects from issueRoutes", () => {
       actor: boardActor,
       interruptedRunId: null,
       runToCancel: null,
+      activeRecoveryAction: null,
     });
 
     await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
