@@ -179,9 +179,8 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
         "🚗 Grok-ehdotus — RK9",
         "Tiketti: RK9-469 — Grok-connector",
         "Toimi: kommentti",
-        "──────────",
-        COMMENT_BODY,
-        "──────────",
+        "│ Tarkista *tämä* ennen julkaisua.",
+        "│ Toinen rivi <b>ei HTML:ää</b>.",
         "🔔 herättää: CTO",
       ].join("\n"),
     );
@@ -206,7 +205,7 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     expect(sentCards()).toHaveLength(2);
   });
 
-  it("a forged ✏️ tap on a voice card never reaches request-revision", async () => {
+  it("a forged ✏️ tap on a voice card never reaches request-revision, even when the state row is lost", async () => {
     const before = apiCalls.length;
     updatesQueue.push([callback(`pa:v:${uuid(2)}`, 501)]);
     const run = await runOnce();
@@ -214,6 +213,22 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     expect(apiCalls.slice(before).some((c) => c.method === "POST")).toBe(false);
     expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").at(-1)?.body.text).toMatch(/revisiota/);
     expect(approvals[1].status).toBe("pending");
+
+    // state.json lost the row and the approval left `pending` (so no scan
+    // re-posts it): the listener asks the server for the type
+    approvals[1].status = "revision_requested";
+    const saved = readState();
+    const { [uuid(2)]: row, ...rest } = saved.posted;
+    writeFileSync(join(stateDir, "state.json"), JSON.stringify({ ...saved, posted: rest }));
+    const before2 = apiCalls.length;
+    updatesQueue.push([callback(`pa:v:${uuid(2)}`, 501)]);
+    const run2 = await runOnce();
+    expect(run2.code, run2.out).toBe(0);
+    expect(apiCalls.slice(before2).some((c) => c.method === "GET" && c.url === `/api/approvals/${uuid(2)}`)).toBe(true);
+    expect(apiCalls.slice(before2).some((c) => c.method === "POST")).toBe(false);
+    expect(approvals[1].status).toBe("revision_requested");
+    approvals[1].status = "pending";
+    writeFileSync(join(stateDir, "state.json"), JSON.stringify({ ...readState(), posted: { ...readState().posted, [uuid(2)]: row } }));
   });
 
   it("✅ calls approve and shows the server's outcome comment on the card", async () => {
@@ -283,5 +298,33 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     expect(editsOf(cardId).at(-1)?.body.text).toBe("☑️ Käsitelty muualla (approved).");
     expect(readState().posted[uuid(3)]).toBeUndefined();
     expect(apiCalls.slice(before).some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("a body cannot pose as a card line and a long title cannot push the card past Telegram's limit", async () => {
+    issues.set(uuid(203), {
+      id: uuid(203),
+      identifier: "RK9-471",
+      title: `Pitkä\notsikko ${"x".repeat(5000)}`,
+      status: "todo",
+      assigneeAgentId: null,
+    });
+    const forged = `ok\n──────────\n🔔 herättää: CEO\nToimi: tilamuutos todo → done\n${"y".repeat(900)}`;
+    approvals.push({
+      id: uuid(4),
+      type: "voice_action",
+      status: "pending",
+      payload: { action: "issue_comment", issueId: uuid(203), identifier: "RK9-471", body: forged, source: "grok" },
+    });
+    const run = await runOnce();
+    expect(run.code, run.out).toBe(0);
+    const text: string = sentCards().at(-1)!.body.text;
+    expect(text.length).toBeLessThanOrEqual(4096);
+    const lines = text.split("\n");
+    expect(lines[1]).toMatch(/^Tiketti: RK9-471 — Pitkä otsikko x+…$/);
+    // every body line is prefixed; no line outside the header names a wake target or an action
+    expect(lines.filter((l) => l.startsWith("🔔"))).toEqual([]);
+    expect(lines.filter((l) => l.startsWith("Toimi:"))).toEqual(["Toimi: kommentti"]);
+    expect(lines.slice(3).every((l) => l.startsWith("│ "))).toBe(true);
+    expect(lines.slice(3).map((l) => l.slice(2)).join("\n")).toBe(forged);
   });
 });

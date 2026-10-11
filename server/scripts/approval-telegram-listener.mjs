@@ -170,22 +170,32 @@ const buildMarkup = (approvalId, type) => ({
   ],
 });
 
+// One line, at most `max` chars: titles and names must not break the card layout.
+const oneLine = (value, max) => {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max - 1) + "…" : text;
+};
+
 // RK9-481: one voice_action card. The issue and its assignee are read live so
-// the card shows the issue as it is now; a failed lookup still renders the
-// card from the payload, and says that the wake target is unknown.
+// the card shows the issue as it is now; a lookup that answers with an error
+// still renders the card from the payload, and says that the wake target is
+// unknown. A lookup that throws skips the card until the next scan.
 async function renderVoiceAction(companyName, approval) {
   const p = approval.payload ?? {};
   const issueRes = UUID_RE.test(p.issueId ?? "") ? await pcp("GET", `/issues/${p.issueId}`) : null;
   const issue = issueRes?.ok ? issueRes.json : null;
   const lines = [`🚗 Grok-ehdotus — ${companyName}`];
   if (issue) {
-    lines.push(`Tiketti: ${issue.identifier ?? p.identifier ?? "?"} — ${issue.title ?? ""}`.trimEnd());
+    lines.push(`Tiketti: ${issue.identifier ?? p.identifier ?? "?"} — ${oneLine(issue.title, 200)}`.trimEnd());
   } else {
     lines.push(`Tiketti: ${p.identifier ?? "?"} (tikettiä ei voitu lukea)`);
   }
   if (p.action === "issue_comment") {
-    // Never truncated: the operator approves this exact text (≤ 1000 chars by schema).
-    lines.push("Toimi: kommentti", "──────────", typeof p.body === "string" ? p.body : "(ei tekstiä)", "──────────");
+    // Never truncated: the operator approves this exact text (≤ 1000 chars by
+    // schema). Every line carries a "│ " prefix, so the text cannot pose as a
+    // card line (a forged "🔔 herättää" or "Toimi:").
+    const body = typeof p.body === "string" ? p.body : "(ei tekstiä)";
+    lines.push("Toimi: kommentti", ...body.split("\n").map((line) => `│ ${line}`));
   } else if (p.action === "issue_status") {
     lines.push(`Toimi: tilamuutos ${issue?.status ?? "?"} → ${p.status ?? "?"}`);
   } else {
@@ -201,7 +211,7 @@ async function renderWakeLine(issue) {
   if (!UUID_RE.test(issue.assigneeAgentId ?? "")) return null;
   const agentRes = await pcp("GET", `/agents/${issue.assigneeAgentId}`);
   const name = agentRes.ok && typeof agentRes.json?.name === "string" ? agentRes.json.name : null;
-  return `🔔 herättää: ${name ?? "tiketin assignee-agentti"}`;
+  return `🔔 herättää: ${name ? oneLine(name, 100) : "tiketin assignee-agentti"}`;
 }
 
 // RK9-222: one outreach draft card. `prospect` may be null when the lookup
@@ -262,10 +272,16 @@ async function scan() {
       if (approval.type !== "email_send" && approval.type !== VOICE_ACTION) continue;
       pendingIds.add(approval.id);
       if (state.posted[approval.id]) continue;
-      const text =
-        approval.type === VOICE_ACTION
-          ? await renderVoiceAction(company.name, approval)
-          : renderApproval(company.name, approval);
+      let text;
+      try {
+        text =
+          approval.type === VOICE_ACTION
+            ? await renderVoiceAction(company.name, approval)
+            : renderApproval(company.name, approval);
+      } catch (e) {
+        console.error(`render approval ${approval.id}:`, e.message);
+        continue; // retried next scan; the other cards and the cleanup still run
+      }
       const msg = await tg("sendMessage", {
         chat_id: TG_CHAT,
         text,
@@ -471,6 +487,17 @@ async function doDecline(action, approvalId, entry, note) {
 }
 
 // ── update handling ───────────────────────────────────────────────────────────
+// A tap on a card whose state row is gone: the type picks the texts and
+// whether ✏️ is allowed. null when the lookup fails.
+async function approvalType(approvalId) {
+  try {
+    const res = await pcp("GET", `/approvals/${approvalId}`);
+    return res.ok && typeof res.json?.type === "string" ? res.json.type : null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleCallback(cq) {
   const chatId = String(cq.message?.chat?.id ?? "");
   if (chatId !== TG_CHAT) {
@@ -488,12 +515,19 @@ async function handleCallback(cq) {
     return;
   }
   const [, action, approvalId] = m;
-  const entry = state.posted[approvalId] ?? { messageId: cq.message.message_id };
+  const entry = state.posted[approvalId] ?? {
+    messageId: cq.message.message_id,
+    type: await approvalType(approvalId),
+  };
   const isVoice = entry.type === VOICE_ACTION;
 
-  // The voice card has no ✏️ button; a forged `pa:v` must not reach request-revision.
-  if (action === "v" && isVoice) {
-    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Grok-ehdotukselle ei pyydetä revisiota." });
+  // The voice card has no ✏️ button; a forged `pa:v` must not reach
+  // request-revision. An unknown type (state lost, lookup failed) is refused too.
+  if (action === "v" && (isVoice || !entry.type)) {
+    await tg("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: isVoice ? "Grok-ehdotukselle ei pyydetä revisiota." : "Hyväksynnän tyyppi ei selvinnyt — käsittele Paperclip-UI:ssa.",
+    });
     return;
   }
 
