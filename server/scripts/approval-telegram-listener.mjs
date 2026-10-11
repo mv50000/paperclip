@@ -159,6 +159,16 @@ function renderTaintLine(taint) {
 
 const VOICE_ACTION = "voice_action";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Every character a Telegram client may draw as a line break.
+const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+
+// What a voice card shows. A board actor can request a revision and resubmit
+// a new payload between two scans; the approval is then pending again, so a
+// changed signature is the only sign that the open card is stale.
+const voiceSignature = (payload) => {
+  const p = payload ?? {};
+  return JSON.stringify([p.action, p.issueId, p.identifier, p.body, p.status]);
+};
 
 const buildMarkup = (approvalId, type) => ({
   inline_keyboard: [
@@ -195,7 +205,7 @@ async function renderVoiceAction(companyName, approval) {
     // schema). Every line carries a "│ " prefix, so the text cannot pose as a
     // card line (a forged "🔔 herättää" or "Toimi:").
     const body = typeof p.body === "string" ? p.body : "(ei tekstiä)";
-    lines.push("Toimi: kommentti", ...body.split("\n").map((line) => `│ ${line}`));
+    lines.push("Toimi: kommentti", ...body.split(LINE_BREAK_RE).map((line) => `│ ${line}`));
   } else if (p.action === "issue_status") {
     lines.push(`Toimi: tilamuutos ${issue?.status ?? "?"} → ${p.status ?? "?"}`);
   } else {
@@ -271,7 +281,20 @@ async function scan() {
     for (const approval of res.json) {
       if (approval.type !== "email_send" && approval.type !== VOICE_ACTION) continue;
       pendingIds.add(approval.id);
-      if (state.posted[approval.id]) continue;
+      const posted = state.posted[approval.id];
+      if (
+        posted &&
+        approval.type === VOICE_ACTION &&
+        posted.sig &&
+        !posted.handling &&
+        posted.sig !== voiceSignature(approval.payload)
+      ) {
+        await editDone(posted.messageId, "♻️ Ehdotus muuttui — uusi kortti alla. Tämä kortti ei enää päde.");
+        delete state.posted[approval.id];
+        saveState(state);
+      } else if (posted) {
+        continue;
+      }
       let text;
       try {
         text =
@@ -288,7 +311,12 @@ async function scan() {
         reply_markup: buildMarkup(approval.id, approval.type),
       });
       if (msg?.ok) {
-        state.posted[approval.id] = { messageId: msg.result.message_id, at: Date.now(), type: approval.type };
+        state.posted[approval.id] = {
+          messageId: msg.result.message_id,
+          at: Date.now(),
+          type: approval.type,
+          ...(approval.type === VOICE_ACTION ? { sig: voiceSignature(approval.payload) } : {}),
+        };
         saveState(state);
         console.log(`posted approval ${approval.id} (${company.name})`);
       } else {
@@ -487,8 +515,9 @@ async function doDecline(action, approvalId, entry, note) {
 }
 
 // ── update handling ───────────────────────────────────────────────────────────
-// A tap on a card whose state row is gone: the type picks the texts and
-// whether ✏️ is allowed. null when the lookup fails.
+// A tap on a card whose state row has no type (posted before RK9-481) or is
+// gone: the type picks the texts and whether ✏️ is allowed. null when the
+// lookup fails.
 async function approvalType(approvalId) {
   try {
     const res = await pcp("GET", `/approvals/${approvalId}`);
@@ -515,10 +544,9 @@ async function handleCallback(cq) {
     return;
   }
   const [, action, approvalId] = m;
-  const entry = state.posted[approvalId] ?? {
-    messageId: cq.message.message_id,
-    type: await approvalType(approvalId),
-  };
+  const entry = state.posted[approvalId] ?? { messageId: cq.message.message_id };
+  // Rows posted before RK9-481 and rows lost from state.json carry no type.
+  if (!entry.type) entry.type = await approvalType(approvalId);
   const isVoice = entry.type === VOICE_ACTION;
 
   // The voice card has no ✏️ button; a forged `pa:v` must not reach

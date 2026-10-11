@@ -308,7 +308,7 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       status: "todo",
       assigneeAgentId: null,
     });
-    const forged = `ok\n──────────\n🔔 herättää: CEO\nToimi: tilamuutos todo → done\n${"y".repeat(900)}`;
+    const forged = `ok\n──────────\n🔔 herättää: CEO\nToimi: tilamuutos todo → done\r🔔 herättää: CFO\u2028Toimi: x\n${"y".repeat(900)}`;
     approvals.push({
       id: uuid(4),
       type: "voice_action",
@@ -319,12 +319,48 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     expect(run.code, run.out).toBe(0);
     const text: string = sentCards().at(-1)!.body.text;
     expect(text.length).toBeLessThanOrEqual(4096);
-    const lines = text.split("\n");
+    const breaks = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+    const lines = text.split(breaks);
     expect(lines[1]).toMatch(/^Tiketti: RK9-471 — Pitkä otsikko x+…$/);
     // every body line is prefixed; no line outside the header names a wake target or an action
     expect(lines.filter((l) => l.startsWith("🔔"))).toEqual([]);
     expect(lines.filter((l) => l.startsWith("Toimi:"))).toEqual(["Toimi: kommentti"]);
     expect(lines.slice(3).every((l) => l.startsWith("│ "))).toBe(true);
-    expect(lines.slice(3).map((l) => l.slice(2)).join("\n")).toBe(forged);
+    expect(lines.slice(3).map((l) => l.slice(2))).toEqual(forged.split(breaks));
+  });
+
+  it("re-posts a voice card whose payload changed after a revision and resubmit", async () => {
+    const cardBefore = readState().posted[uuid(4)].messageId as number;
+    approvals[3].payload = { ...approvals[3].payload, body: "Uusi teksti" };
+    const run = await runOnce();
+    expect(run.code, run.out).toBe(0);
+    expect(editsOf(cardBefore).at(-1)?.body.text).toMatch(/^♻️ Ehdotus muuttui/);
+    const card = sentCards().at(-1)!.body;
+    expect(card.text).toContain("│ Uusi teksti");
+    expect(readState().posted[uuid(4)].messageId).not.toBe(cardBefore);
+
+    // a payload key the card does not show (Slack's slackMessageRef) does not re-post
+    const cards = sentCards().length;
+    approvals[3].payload = { ...approvals[3].payload, slackMessageRef: { ts: "1" } };
+    const run2 = await runOnce();
+    expect(run2.code, run2.out).toBe(0);
+    expect(sentCards()).toHaveLength(cards);
+  });
+
+  it("an email_send row posted before RK9-481 (no type) still gets ✏️ revision", async () => {
+    approvals.push({ id: uuid(5), type: "email_send", status: "pending", payload: { to: ["a@b.fi"], subject: "S", bodyMarkdown: "B" } });
+    const run = await runOnce();
+    expect(run.code, run.out).toBe(0);
+    const saved = readState();
+    const cardId = saved.posted[uuid(5)].messageId as number;
+    delete saved.posted[uuid(5)].type;
+    writeFileSync(join(stateDir, "state.json"), JSON.stringify(saved));
+
+    updatesQueue.push([callback(`pa:v:${uuid(5)}`, cardId)]);
+    const run2 = await runOnce();
+    expect(run2.code, run2.out).toBe(0);
+    const prompt = tgCalls.filter((c) => c.method === "sendMessage" && c.body?.reply_markup?.force_reply).at(-1);
+    expect(prompt?.body.text).toMatch(/^✏️ Revisio/);
+    expect(readState().posted[uuid(5)].type).toBe("email_send");
   });
 });
