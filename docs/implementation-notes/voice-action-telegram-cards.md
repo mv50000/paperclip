@@ -30,6 +30,8 @@ Toimi: kommentti
 - `✏️ Revisiota` ei ole. Kuuntelija ohittaa `pa:v`-napautuksen `voice_action`-kortilla, jotta muokattu callback ei pääse `request-revision`-reitille. Palvelin sallii revision `voice_action`ille, joten tämä tarkistus on kuuntelijassa.
 - Muualla päätetty kortti suljetaan seuraavassa skannauksessa (`☑️ Käsitelty muualla`), kuten `email_send`issä.
 - Board voi pyytää revisiota ja lähettää uuden payloadin kahden skannauksen välissä. Hyväksyntä on silloin taas `pending`. Kortin rivi tallentaa siksi näytettyjen kenttien allekirjoituksen (`sig`). Kun allekirjoitus muuttuu, vanha kortti suljetaan (`♻️ Ehdotus muuttui`) ja uusi postataan. Payloadin muut kentät (esim. `slackMessageRef`) eivät postaa korttia uudelleen.
+- ✅ hyväksyy vain uusimmasta kortista: napautuksen viestin id:n täytyy olla sama kuin tilan `messageId`. Vanhan kortin ✅ ei hyväksy.
+- Raja: jos revisio ja uusi payload tulevat saman 20 s skannausvälin sisällä, vanhan kortin ✅ ehtii hyväksyä uuden payloadin ennen kuin kuuntelija huomaa muutoksen. Täysi korjaus vaatisi palvelimelle approve-ehdon (odotettu payload-hash tai `updatedAt`). Molemmat toimet vaativat board-oikeuden.
 
 ## Tila
 

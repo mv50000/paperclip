@@ -559,6 +559,15 @@ async function handleCallback(cq) {
     return;
   }
 
+  // A ✅ must come from the card the listener last posted for this approval: an
+  // older card (re-posted after a payload change, or an edit that failed)
+  // may show text that no longer applies.
+  if (action === "a" && state.posted[approvalId] && cq.message?.message_id !== entry.messageId) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Kortti on vanhentunut — käytä uusinta korttia." });
+    await editDone(cq.message.message_id, "⚠️ Kortti on vanhentunut. Käytä uusinta korttia.");
+    return;
+  }
+
   if (action === "a") {
     entry.handling = true;
     await tg("answerCallbackQuery", {

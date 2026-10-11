@@ -339,6 +339,15 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     expect(card.text).toContain("│ Uusi teksti");
     expect(readState().posted[uuid(4)].messageId).not.toBe(cardBefore);
 
+    // ✅ on the old card does not approve the new payload
+    const before = apiCalls.length;
+    updatesQueue.push([callback(`pa:a:${uuid(4)}`, cardBefore)]);
+    const runOld = await runOnce();
+    expect(runOld.code, runOld.out).toBe(0);
+    expect(postsTo(before, `/api/approvals/${uuid(4)}/approve`)).toHaveLength(0);
+    expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").at(-1)?.body.text).toMatch(/vanhentunut/);
+    expect(approvals[3].status).toBe("pending");
+
     // a payload key the card does not show (Slack's slackMessageRef) does not re-post
     const cards = sentCards().length;
     approvals[3].payload = { ...approvals[3].payload, slackMessageRef: { ts: "1" } };
