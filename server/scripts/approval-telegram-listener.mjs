@@ -1,5 +1,6 @@
 // approval-telegram-listener.mjs — Telegram approval gate for Paperclip
-// email_send approvals (RK9-85) and outreach drafts (RK9-222). Mirrors the
+// email_send approvals (RK9-85), outreach drafts (RK9-222) and voice_action
+// approvals (RK9-481). Mirrors the
 // sunspot-ig-listen pattern: pending items are posted to the operator's
 // Telegram chat with inline buttons, and a tap approves/rejects within ~1s
 // via a getUpdates long-poll.
@@ -18,6 +19,14 @@
 //   At most OUTREACH_TG_MAX_OPEN (default 5) draft cards are open at a time so a
 //   20-draft batch does not flood the chat; the next card is posted once one is
 //   decided. Set OUTREACH_TG_ENABLED=0 to turn the outreach source off.
+//
+// voice_action approvals (RK9-481, same `pa:` prefix and endpoints as email_send):
+//   A Grok proposal for one issue: a comment with its exact text, or a new status.
+//   ✅ Hyväksy   → POST /api/approvals/:id/approve; the server applies the action
+//   ❌ Hylkää    → ForceReply prompt; the reply text becomes decisionNote
+//   (no ✏️ — a voice proposal is not revised, Grok makes a new one)
+//   When the issue has an assignee agent, the card names it ("🔔 herättää"),
+//   because an approved action wakes that agent (operator decision, RK9-490).
 //
 // Deliberately a standalone .mjs with ZERO repo imports (plain `node` — the
 // tsx/import path under /opt is known to hang, see vault
@@ -148,15 +157,72 @@ function renderTaintLine(taint) {
   return `⚠️ Ajo luki epäluotettavaa sisältöä (lähde: ${kinds.length > 0 ? kinds.join(", ") : "tuntematon"})`;
 }
 
-const buildMarkup = (approvalId) => ({
+const VOICE_ACTION = "voice_action";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Every character a Telegram client may draw as a line break.
+const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+
+// What a voice card shows. A board actor can request a revision and resubmit
+// a new payload between two scans; the approval is then pending again, so a
+// changed signature is the only sign that the open card is stale.
+const voiceSignature = (payload) => {
+  const p = payload ?? {};
+  return JSON.stringify([p.action, p.issueId, p.identifier, p.body, p.status]);
+};
+
+const buildMarkup = (approvalId, type) => ({
   inline_keyboard: [
     [
       { text: "✅ Hyväksy", callback_data: `pa:a:${approvalId}` },
       { text: "❌ Hylkää", callback_data: `pa:r:${approvalId}` },
-      { text: "✏️ Revisio", callback_data: `pa:v:${approvalId}` },
+      ...(type === VOICE_ACTION ? [] : [{ text: "✏️ Revisio", callback_data: `pa:v:${approvalId}` }]),
     ],
   ],
 });
+
+// One line, at most `max` chars: titles and names must not break the card layout.
+const oneLine = (value, max) => {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max - 1) + "…" : text;
+};
+
+// RK9-481: one voice_action card. The issue and its assignee are read live so
+// the card shows the issue as it is now; a lookup that answers with an error
+// still renders the card from the payload, and says that the wake target is
+// unknown. A lookup that throws skips the card until the next scan.
+async function renderVoiceAction(companyName, approval) {
+  const p = approval.payload ?? {};
+  const issueRes = UUID_RE.test(p.issueId ?? "") ? await pcp("GET", `/issues/${p.issueId}`) : null;
+  const issue = issueRes?.ok ? issueRes.json : null;
+  const lines = [`🚗 Grok-ehdotus — ${companyName}`];
+  if (issue) {
+    lines.push(`Tiketti: ${issue.identifier ?? p.identifier ?? "?"} — ${oneLine(issue.title, 200)}`.trimEnd());
+  } else {
+    lines.push(`Tiketti: ${p.identifier ?? "?"} (tikettiä ei voitu lukea)`);
+  }
+  if (p.action === "issue_comment") {
+    // Never truncated: the operator approves this exact text (≤ 1000 chars by
+    // schema). Every line carries a "│ " prefix, so the text cannot pose as a
+    // card line (a forged "🔔 herättää" or "Toimi:").
+    const body = typeof p.body === "string" ? p.body : "(ei tekstiä)";
+    lines.push("Toimi: kommentti", ...body.split(LINE_BREAK_RE).map((line) => `│ ${line}`));
+  } else if (p.action === "issue_status") {
+    lines.push(`Toimi: tilamuutos ${issue?.status ?? "?"} → ${p.status ?? "?"}`);
+  } else {
+    lines.push(`Toimi: tuntematon (${String(p.action ?? "?")})`);
+  }
+  const wake = await renderWakeLine(issue);
+  if (wake) lines.push(wake);
+  return lines.join("\n");
+}
+
+async function renderWakeLine(issue) {
+  if (!issue) return "🔔 herättää: ei tiedossa (tikettiä ei voitu lukea)";
+  if (!UUID_RE.test(issue.assigneeAgentId ?? "")) return null;
+  const agentRes = await pcp("GET", `/agents/${issue.assigneeAgentId}`);
+  const name = agentRes.ok && typeof agentRes.json?.name === "string" ? agentRes.json.name : null;
+  return `🔔 herättää: ${name ? oneLine(name, 100) : "tiketin assignee-agentti"}`;
+}
 
 // RK9-222: one outreach draft card. `prospect` may be null when the lookup
 // failed — the card still renders so the operator can act on the message.
@@ -194,7 +260,7 @@ async function editDone(messageId, text) {
   }).catch(() => {});
 }
 
-// ── scan: post new pending email_send approvals, clean up decided ones ────────
+// ── scan: post new pending email_send / voice_action approvals, clean up decided ones
 let companiesCache = { at: 0, list: [] };
 async function listCompanies() {
   if (Date.now() - companiesCache.at < 10 * 60_000) return companiesCache.list;
@@ -213,16 +279,44 @@ async function scan() {
     const res = await pcp("GET", `/companies/${company.id}/approvals?status=pending`);
     if (!res.ok || !Array.isArray(res.json)) continue;
     for (const approval of res.json) {
-      if (approval.type !== "email_send") continue;
+      if (approval.type !== "email_send" && approval.type !== VOICE_ACTION) continue;
       pendingIds.add(approval.id);
-      if (state.posted[approval.id]) continue;
+      const posted = state.posted[approval.id];
+      if (
+        posted &&
+        approval.type === VOICE_ACTION &&
+        posted.sig &&
+        !posted.handling &&
+        posted.sig !== voiceSignature(approval.payload)
+      ) {
+        await editDone(posted.messageId, "♻️ Ehdotus muuttui — uusi kortti alla. Tämä kortti ei enää päde.");
+        delete state.posted[approval.id];
+        saveState(state);
+      } else if (posted) {
+        continue;
+      }
+      let text;
+      try {
+        text =
+          approval.type === VOICE_ACTION
+            ? await renderVoiceAction(company.name, approval)
+            : renderApproval(company.name, approval);
+      } catch (e) {
+        console.error(`render approval ${approval.id}:`, e.message);
+        continue; // retried next scan; the other cards and the cleanup still run
+      }
       const msg = await tg("sendMessage", {
         chat_id: TG_CHAT,
-        text: renderApproval(company.name, approval),
-        reply_markup: buildMarkup(approval.id),
+        text,
+        reply_markup: buildMarkup(approval.id, approval.type),
       });
       if (msg?.ok) {
-        state.posted[approval.id] = { messageId: msg.result.message_id, at: Date.now() };
+        state.posted[approval.id] = {
+          messageId: msg.result.message_id,
+          at: Date.now(),
+          type: approval.type,
+          ...(approval.type === VOICE_ACTION ? { sig: voiceSignature(approval.payload) } : {}),
+        };
         saveState(state);
         console.log(`posted approval ${approval.id} (${company.name})`);
       } else {
@@ -403,6 +497,9 @@ async function doDecline(action, approvalId, entry, note) {
   if (!res.ok) {
     await editDone(entry.messageId, `⚠️ ${path} epäonnistui (HTTP ${res.status}). Käsittele Paperclip-UI:ssa.`);
     delete state.posted[approvalId];
+  } else if (action === "r" && entry.type === VOICE_ACTION) {
+    await editDone(entry.messageId, `❌ Hylätty. Tikettiin ei tehty muutosta.\n${note}`);
+    delete state.posted[approvalId];
   } else if (action === "r") {
     await editDone(entry.messageId, `❌ Hylätty. Perustelu välitetty agentille:\n${note}`);
     delete state.posted[approvalId];
@@ -418,6 +515,18 @@ async function doDecline(action, approvalId, entry, note) {
 }
 
 // ── update handling ───────────────────────────────────────────────────────────
+// A tap on a card whose state row has no type (posted before RK9-481) or is
+// gone: the type picks the texts and whether ✏️ is allowed. null when the
+// lookup fails.
+async function approvalType(approvalId) {
+  try {
+    const res = await pcp("GET", `/approvals/${approvalId}`);
+    return res.ok && typeof res.json?.type === "string" ? res.json.type : null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleCallback(cq) {
   const chatId = String(cq.message?.chat?.id ?? "");
   if (chatId !== TG_CHAT) {
@@ -436,11 +545,36 @@ async function handleCallback(cq) {
   }
   const [, action, approvalId] = m;
   const entry = state.posted[approvalId] ?? { messageId: cq.message.message_id };
+  // Rows posted before RK9-481 and rows lost from state.json carry no type.
+  if (!entry.type) entry.type = await approvalType(approvalId);
+  const isVoice = entry.type === VOICE_ACTION;
+
+  // The voice card has no ✏️ button; a forged `pa:v` must not reach
+  // request-revision. An unknown type (state lost, lookup failed) is refused too.
+  if (action === "v" && (isVoice || !entry.type)) {
+    await tg("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: isVoice ? "Grok-ehdotukselle ei pyydetä revisiota." : "Hyväksynnän tyyppi ei selvinnyt — käsittele Paperclip-UI:ssa.",
+    });
+    return;
+  }
+
+  // A ✅ must come from the card the listener last posted for this approval: an
+  // older card (re-posted after a payload change, or an edit that failed)
+  // may show text that no longer applies.
+  if (action === "a" && state.posted[approvalId] && cq.message?.message_id !== entry.messageId) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Kortti on vanhentunut — käytä uusinta korttia." });
+    await editDone(cq.message.message_id, "⚠️ Kortti on vanhentunut. Käytä uusinta korttia.");
+    return;
+  }
 
   if (action === "a") {
     entry.handling = true;
-    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Hyväksytään ja lähetetään…" });
-    await editDone(entry.messageId, "⏳ Hyväksytään — palvelin lähettää…");
+    await tg("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: isVoice ? "Hyväksytään…" : "Hyväksytään ja lähetetään…",
+    });
+    await editDone(entry.messageId, isVoice ? "⏳ Hyväksytään — palvelin toteuttaa…" : "⏳ Hyväksytään — palvelin lähettää…");
     await doApprove(approvalId, entry);
     return;
   }
@@ -450,9 +584,11 @@ async function handleCallback(cq) {
   const prompt = await tg("sendMessage", {
     chat_id: TG_CHAT,
     text:
-      action === "r"
-        ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (menee agentille decisionNotena).`
-        : `✏️ Revisio — vastaa TÄHÄN viestiin ohjeella agentille.`,
+      action === "r" && isVoice
+        ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (tallentuu decisionNoteksi, tikettiin ei tehdä muutosta).`
+        : action === "r"
+          ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (menee agentille decisionNotena).`
+          : `✏️ Revisio — vastaa TÄHÄN viestiin ohjeella agentille.`,
     reply_markup: { force_reply: true },
   });
   if (prompt?.ok) {
@@ -460,6 +596,7 @@ async function handleCallback(cq) {
       action,
       approvalId,
       origMessageId: state.posted[approvalId]?.messageId ?? cq.message.message_id,
+      approvalType: entry.type,
       at: Date.now(),
     };
     if (state.posted[approvalId]) state.posted[approvalId].handling = true;
@@ -527,7 +664,7 @@ async function handleMessage(msg) {
     );
     return;
   }
-  const entry = state.posted[prompt.approvalId] ?? { messageId: prompt.origMessageId };
+  const entry = state.posted[prompt.approvalId] ?? { messageId: prompt.origMessageId, type: prompt.approvalType };
   await doDecline(prompt.action, prompt.approvalId, entry, note);
 }
 
