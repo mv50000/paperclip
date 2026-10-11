@@ -279,7 +279,7 @@ describe("github webhook routes", () => {
       assigneeAgentId: null,
     });
 
-    async function postMergedPr(issueRows: unknown[]) {
+    async function postMergedPr(issueRows: unknown[], workProductRows: unknown[] = []) {
       const app = await createApp();
       const selectChain = {
         from: vi.fn(() => selectChain),
@@ -287,7 +287,7 @@ describe("github webhook routes", () => {
         innerJoin: vi.fn(() => selectChain),
       };
       // First select returns the identifier matches, second the work-product matches.
-      selectChain.where.mockResolvedValueOnce(issueRows).mockResolvedValueOnce([]);
+      selectChain.where.mockResolvedValueOnce(issueRows).mockResolvedValueOnce(workProductRows);
       mockDbSelect.mockReturnValue(selectChain as any);
       const body = JSON.stringify(makePrPayload({ title: "feat: FOO-123", body: null }));
       return request(app)
@@ -320,8 +320,42 @@ describe("github webhook routes", () => {
           actorType: "system",
           action: "issue.auto_close_skipped_repo_mismatch",
           entityId: "issue-company-2",
-          details: expect.objectContaining({ reason: "repo_owned_by_other_company", repoFullName: "org/repo" }),
+          details: expect.objectContaining({ reason: "repo_owned_by_other_company", prNumber: 42 }),
         }),
+      );
+    });
+
+    it("does not write another company's repo name or PR URL into the skipped issue's activity", async () => {
+      await postMergedPr([inReviewIssue("company-2")]);
+      const [, entry] = mockLogActivity.mock.calls[0] as unknown as [unknown, { details: Record<string, unknown> }];
+      expect(entry.details).not.toHaveProperty("repoFullName");
+      expect(entry.details).not.toHaveProperty("prUrl");
+    });
+
+    it("fails closed on the identifier path when the ownership lookup throws, but keeps work product closes", async () => {
+      mockCompaniesOwningRepo.mockRejectedValue(new Error("db down"));
+      const res = await postMergedPr(
+        [inReviewIssue("company-1")],
+        [{ issueId: "wp-issue", id: "wp-issue", identifier: "BAR-1", status: "in_review", companyId: "company-3" }],
+      );
+      expect(res.body.closedIssueIds).toEqual(["wp-issue"]);
+      expect(res.body.skippedIssueIds).toEqual(["issue-company-1"]);
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ details: expect.objectContaining({ reason: "ownership_lookup_failed" }) }),
+      );
+    });
+
+    it("lets an exact PR URL work product close an issue the identifier path would skip, without reporting a skip", async () => {
+      const res = await postMergedPr(
+        [inReviewIssue("company-2")],
+        [{ issueId: "issue-company-2", id: "issue-company-2", identifier: "FOO-123", status: "in_review", companyId: "company-2" }],
+      );
+      expect(res.body.closedIssueIds).toEqual(["issue-company-2"]);
+      expect(res.body.skippedIssueIds).toEqual([]);
+      expect(mockLogActivity).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "issue.auto_close_skipped_repo_mismatch" }),
       );
     });
 
