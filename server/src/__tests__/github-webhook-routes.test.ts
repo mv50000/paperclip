@@ -10,6 +10,8 @@ const mockIssueService = vi.hoisted(() => ({
 
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 
+const mockCompaniesOwningRepo = vi.hoisted(() => vi.fn(async (_repo: string) => new Set<string>()));
+
 const mockDbSelect = vi.hoisted(() => {
   const chain = {
     from: vi.fn(() => chain),
@@ -36,6 +38,10 @@ function registerModuleMocks() {
 
   vi.doMock("../services/activity-log.js", () => ({
     logActivity: mockLogActivity,
+  }));
+
+  vi.doMock("../services/github-repo-ownership.js", () => ({
+    createGithubRepoOwnership: () => ({ companiesOwningRepo: mockCompaniesOwningRepo }),
   }));
 }
 
@@ -82,6 +88,7 @@ describe("github webhook routes", () => {
     vi.resetModules();
     vi.resetAllMocks();
     registerModuleMocks();
+    mockCompaniesOwningRepo.mockResolvedValue(new Set(["company-1"]));
     process.env.GITHUB_WEBHOOK_SECRET = WEBHOOK_SECRET;
   });
 
@@ -260,6 +267,88 @@ describe("github webhook routes", () => {
         });
 
       expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("repo ownership (RK9-486)", () => {
+    const inReviewIssue = (companyId: string) => ({
+      id: `issue-${companyId}`,
+      identifier: "FOO-123",
+      status: "in_review",
+      companyId,
+      assigneeAgentId: null,
+    });
+
+    async function postMergedPr(issueRows: unknown[]) {
+      const app = await createApp();
+      const selectChain = {
+        from: vi.fn(() => selectChain),
+        where: vi.fn(),
+        innerJoin: vi.fn(() => selectChain),
+      };
+      // First select returns the identifier matches, second the work-product matches.
+      selectChain.where.mockResolvedValueOnce(issueRows).mockResolvedValueOnce([]);
+      mockDbSelect.mockReturnValue(selectChain as any);
+      const body = JSON.stringify(makePrPayload({ title: "feat: FOO-123", body: null }));
+      return request(app)
+        .post("/api/github/webhooks")
+        .set("x-hub-signature-256", sign(body))
+        .set("x-github-event", "pull_request")
+        .set("content-type", "application/json")
+        .send(body)
+        .expect(200);
+    }
+
+    it("closes an issue whose company owns the repo", async () => {
+      const res = await postMergedPr([inReviewIssue("company-1")]);
+      expect(mockCompaniesOwningRepo).toHaveBeenCalledWith("org/repo");
+      expect(res.body.closedIssueCount).toBe(1);
+      expect(res.body.skippedIssueIds).toEqual([]);
+      expect(mockIssueService.update).toHaveBeenCalledWith("issue-company-1", { status: "done" });
+    });
+
+    it("does not close an issue of another company and logs activity on that issue", async () => {
+      const res = await postMergedPr([inReviewIssue("company-2")]);
+      expect(res.body.closedIssueCount).toBe(0);
+      expect(res.body.skippedIssueIds).toEqual(["issue-company-2"]);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          companyId: "company-2",
+          actorType: "system",
+          action: "issue.auto_close_skipped_repo_mismatch",
+          entityId: "issue-company-2",
+          details: expect.objectContaining({ reason: "repo_owned_by_other_company", repoFullName: "org/repo" }),
+        }),
+      );
+    });
+
+    it("does not close anything when the repo maps to no company", async () => {
+      mockCompaniesOwningRepo.mockResolvedValue(new Set());
+      const res = await postMergedPr([inReviewIssue("company-1")]);
+      expect(res.body.closedIssueCount).toBe(0);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          action: "issue.auto_close_skipped_repo_mismatch",
+          details: expect.objectContaining({ reason: "repo_unmapped" }),
+        }),
+      );
+    });
+
+    it("closes only the matching company when identifiers span companies", async () => {
+      const res = await postMergedPr([inReviewIssue("company-1"), inReviewIssue("company-2")]);
+      expect(res.body.closedIssueIds).toEqual(["issue-company-1"]);
+      expect(res.body.skippedIssueIds).toEqual(["issue-company-2"]);
+      expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips the ownership lookup when no issue matches", async () => {
+      await postMergedPr([]);
+      expect(mockCompaniesOwningRepo).not.toHaveBeenCalled();
     });
   });
 });

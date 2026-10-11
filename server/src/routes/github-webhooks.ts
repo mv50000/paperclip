@@ -6,6 +6,7 @@ import { issues, issueWorkProducts } from "@paperclipai/db";
 import { issueService, logActivity } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
 import { createGithubRouter } from "../services/slack/github-router.js";
+import { createGithubRepoOwnership } from "../services/github-repo-ownership.js";
 
 const ISSUE_IDENTIFIER_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
 
@@ -37,6 +38,7 @@ interface PullRequestPayload {
 export function githubWebhookRoutes(db: Db) {
   const router = Router();
   const githubRouter = createGithubRouter(db);
+  const repoOwnership = createGithubRepoOwnership(db);
 
   router.post("/github/webhooks", async (req: Request, res: Response) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
@@ -97,6 +99,7 @@ export function githubWebhookRoutes(db: Db) {
     const identifiers = extractIssueIdentifiers(textToSearch);
 
     const closedIssueIds: string[] = [];
+    const skippedIssueIds: string[] = [];
     const svc = issueService(db);
 
     if (identifiers.length > 0) {
@@ -116,7 +119,35 @@ export function githubWebhookRoutes(db: Db) {
           ),
         );
 
+      // RK9-486: the identifier regex matches issues of every company, so only close
+      // issues of a company that owns the repo the PR merged in.
+      const owners = matchedIssues.length > 0 ? await repoOwnership.companiesOwningRepo(repoFullName) : new Set<string>();
+
       for (const issue of matchedIssues) {
+        if (!owners.has(issue.companyId)) {
+          const reason = owners.size === 0 ? "repo_unmapped" : "repo_owned_by_other_company";
+          logger.warn(
+            { issueId: issue.id, identifier: issue.identifier, prUrl, repoFullName, reason },
+            "Skipped auto-close: PR repo does not belong to the issue company",
+          );
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "system",
+            action: "issue.auto_close_skipped_repo_mismatch",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              identifier: issue.identifier,
+              prUrl,
+              prNumber,
+              repoFullName,
+              reason,
+            },
+          });
+          skippedIssueIds.push(issue.id);
+          continue;
+        }
         await svc.update(issue.id, {
           status: "done",
         });
@@ -195,6 +226,7 @@ export function githubWebhookRoutes(db: Db) {
       processed: true,
       closedIssueCount: closedIssueIds.length,
       closedIssueIds,
+      skippedIssueIds,
       slackDispatched: routerResult.dispatched,
       companyId: routerResult.companyId,
     });
