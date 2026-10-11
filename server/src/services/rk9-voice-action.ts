@@ -13,7 +13,9 @@
 // not share code with routes/issues.ts, which upstream changes all the time.
 // Where the UI action takes a route-only step (stop a runner goal, reopen the
 // issue, resolve a recovery action), the voice action is refused instead. ---
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { activityLog } from "@paperclipai/db";
 import {
   isClosedIsolatedExecutionWorkspace,
   voiceActionApprovalPayloadSchema,
@@ -23,7 +25,7 @@ import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { redactEventPayload } from "../redaction.js";
 import { isApprovalReviewComment, shouldImplicitlyMoveCommentedIssueToTodo } from "../routes/issues.js";
-import type { logActivity as logActivityFn } from "./activity-log.js";
+import { publishActivity, type ActivityPublication, type logActivity as logActivityFn } from "./activity-log.js";
 import type { environmentRuntimeService } from "./environment-runtime.js";
 import type { executionWorkspaceService } from "./execution-workspaces.js";
 import type { heartbeatService } from "./heartbeat.js";
@@ -34,10 +36,11 @@ import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
 } from "./issue-dependency-wakeups.js";
 import type { issueRecoveryActionService, issueThreadInteractionService, issueTreeControlService } from "./index.js";
-import type { issueService } from "./issues.js";
+import { executeIssuePostCommitActions, type IssuePostCommitAction, type issueService } from "./issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "./recovery/review-path-recovery.js";
 import { deliverAgentUnblockNotification } from "./routable-blocked.js";
 import type { runnerGoalService } from "./runner-goals.js";
+import type { taskWatchdogService } from "./task-watchdogs.js";
 
 type IssueService = ReturnType<typeof issueService>;
 type ResolvedIssue = NonNullable<Awaited<ReturnType<IssueService["getById"]>>>;
@@ -57,6 +60,7 @@ export type VoiceActionDeps = {
   issuesSvc: Pick<
     IssueService,
     | "getById"
+    | "getByIdForUpdate"
     | "addComment"
     | "update"
     | "getDependencyReadiness"
@@ -80,6 +84,7 @@ export type VoiceActionDeps = {
   issueReferences: { syncComment: (commentId: string) => Promise<unknown> };
   externalObjects: { syncCommentSafely: (commentId: string) => Promise<unknown> };
   routines: { syncRunStatusForIssue: (issueId: string) => Promise<unknown> };
+  taskWatchdogs: Pick<ReturnType<typeof taskWatchdogService>, "reconcileForIssueAndAncestors">;
   environmentRuntime: Pick<ReturnType<typeof environmentRuntimeService>, "destroyReusableSandboxLeases">;
   markBlockedOwnerNotified: (issue: { id: string; companyId: string }, notifiedAt: Date) => Promise<unknown>;
 };
@@ -139,7 +144,10 @@ export function voiceActionPayloadToPersist(
 /** The action applies only to the issue state the proposal was made for: a
  * later approval must not close an issue that was reopened, or wake an agent
  * that took the issue over, in between. */
-function stalenessRefusal(payload: VoiceActionApprovalPayload, issue: ResolvedIssue): string | null {
+function stalenessRefusal(
+  payload: VoiceActionApprovalPayload,
+  issue: Pick<ResolvedIssue, "status" | "assigneeAgentId">,
+): string | null {
   if (payload.issueStatusAtProposal === undefined || payload.assigneeAgentIdAtProposal === undefined) {
     return "the proposal has no issue snapshot; propose it again";
   }
@@ -161,15 +169,8 @@ async function statusChangeRefusal(
   status: NonNullable<VoiceActionApprovalPayload["status"]>,
 ): Promise<string | null> {
   const { issuesSvc, heartbeat, runnerGoals, recoveryActions } = deps;
-  if (issue.executionPolicy || issue.executionState) {
-    return `the issue has an execution policy; set ${status} in Paperclip`;
-  }
-  if (issue.status === "in_review") return `the issue is in review; set ${status} in Paperclip`;
-  if (issue.harnessKind === "skill_test") return `skill test issues complete their test run; set ${status} in Paperclip`;
-  // PATCH may post a stop report to the parent for these.
-  if (issue.parentId && issue.status !== status && (status === "blocked" || status === "cancelled")) {
-    return `the parent issue may get a stop report; set ${status} in Paperclip`;
-  }
+  const stateRefusal = issueStateRefusal(issue, status);
+  if (stateRefusal) return stateRefusal;
   if (status === "blocked" && issue.status !== "blocked") {
     const readiness = await issuesSvc.getDependencyReadiness(issue.id);
     if (readiness.unresolvedBlockerCount === 0) {
@@ -180,15 +181,40 @@ async function statusChangeRefusal(
   if (await recoveryActions.getActiveForIssue(issue.companyId, issue.id)) {
     return `the issue has an active recovery action; set ${status} in Paperclip`;
   }
-  if ((status === "done" || status === "cancelled") && issue.status !== status && issue.assigneeAgentId) {
-    // PATCH stops the assignee's goal and run first. A voice action does not.
-    const goal = await runnerGoals.projection(issue.companyId, issue.id, issue.assigneeAgentId);
-    if (goal?.pendingAction || (goal?.goal && goal.goal.status !== "complete")) {
-      return `the assignee has an active goal on the issue; set ${status} in Paperclip`;
+  if ((status === "done" || status === "cancelled") && issue.status !== status) {
+    // PATCH stops the assignee's goal and cancels the run first. A voice
+    // action does not.
+    if (issue.assigneeAgentId) {
+      const goal = await runnerGoals.projection(issue.companyId, issue.id, issue.assigneeAgentId);
+      if (goal?.pendingAction || (goal?.goal && goal.goal.status !== "complete")) {
+        return `the assignee has an active goal on the issue; set ${status} in Paperclip`;
+      }
     }
     if (await activeIssueRun(heartbeat, issue)) {
       return `an agent run is active on the issue; set ${status} in Paperclip`;
     }
+  }
+  return null;
+}
+
+/** The refusals that read only the issue row. They run again on the locked
+ * row right before the write. */
+function issueStateRefusal(
+  issue: Pick<
+    ResolvedIssue,
+    "conversationAgentId" | "executionPolicy" | "executionState" | "status" | "harnessKind" | "parentId"
+  >,
+  status: NonNullable<VoiceActionApprovalPayload["status"]>,
+): string | null {
+  if (issue.conversationAgentId) return "conversation issues cannot change by voice";
+  if (issue.executionPolicy || issue.executionState) {
+    return `the issue has an execution policy; set ${status} in Paperclip`;
+  }
+  if (issue.status === "in_review") return `the issue is in review; set ${status} in Paperclip`;
+  if (issue.harnessKind === "skill_test") return `skill test issues complete their test run; set ${status} in Paperclip`;
+  // PATCH may post a stop report to the parent for these.
+  if (issue.parentId && issue.status !== status && (status === "blocked" || status === "cancelled")) {
+    return `the parent issue may get a stop report; set ${status} in Paperclip`;
   }
   return null;
 }
@@ -210,9 +236,13 @@ async function activeIssueRun(
 /** Comments that `POST /issues/:id/comments` would turn into more than a
  * comment. A voice proposal does not attempt them. */
 async function commentRefusal(deps: VoiceActionDeps, issue: ResolvedIssue, actor: VoiceActor, body: string) {
-  const { issuesSvc, treeControl, executionWorkspaces } = deps;
+  const { issuesSvc, treeControl, executionWorkspaces, runnerGoals, recoveryActions } = deps;
   if (await treeControl.getActivePauseHoldGate(issue.companyId, issue.id)) {
     return "Task is paused. Resume it before sending a message";
+  }
+  // The comment route re-evaluates an active recovery action after the comment.
+  if (await recoveryActions.getActiveForIssue(issue.companyId, issue.id)) {
+    return "the issue has an active recovery action; comment in Paperclip";
   }
   if (issue.executionWorkspaceId) {
     const workspace = await executionWorkspaces.getById(issue.executionWorkspaceId);
@@ -239,6 +269,13 @@ async function commentRefusal(deps: VoiceActionDeps, issue: ResolvedIssue, actor
   ) {
     return `a comment would reopen the ${issue.status} issue; reopen it in Paperclip`;
   }
+  // The comment route steers a goal that is working now into its live turn.
+  if (issue.assigneeAgentId) {
+    const goal = await runnerGoals.projection(issue.companyId, issue.id, issue.assigneeAgentId);
+    if (goal?.goal?.status === "active" && goal.workingNow) {
+      return "the comment would steer the assignee's live goal session; comment in Paperclip";
+    }
+  }
   // The comment route resumes a scheduled retry of the assignee.
   if (issue.status === "in_progress" && issue.assigneeAgentId) {
     const retry = await issuesSvc.getCurrentScheduledRetry(issue.id);
@@ -249,14 +286,20 @@ async function commentRefusal(deps: VoiceActionDeps, issue: ResolvedIssue, actor
   return null;
 }
 
-/** Collects wakes and enqueues one per agent and issue (first one wins). */
-function createWakeBatch(deps: VoiceActionDeps, issue: { id: string; companyId: string }, actor: VoiceActor) {
+/** Collects wakes and enqueues one per agent and issue. The comment route
+ * keeps the first wake for a key; PATCH keeps the last one. */
+function createWakeBatch(
+  deps: VoiceActionDeps,
+  issue: { id: string; companyId: string },
+  actor: VoiceActor,
+  merge: "first_wins" | "last_wins",
+) {
   const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
   const add = (agentId: string, wakeup: WakeupRequest) => {
     const wakeIssueId =
       wakeup.payload && typeof wakeup.payload.issueId === "string" ? wakeup.payload.issueId : issue.id;
     const key = `${agentId}:${wakeIssueId}`;
-    if (!wakeups.has(key)) wakeups.set(key, { agentId, wakeup });
+    if (merge === "last_wins" || !wakeups.has(key)) wakeups.set(key, { agentId, wakeup });
   };
   const addDependencyResolved = async (dependent: {
     id: string;
@@ -305,9 +348,31 @@ function createWakeBatch(deps: VoiceActionDeps, issue: { id: string; companyId: 
   };
   const dispatch = async () => {
     for (const { agentId, wakeup } of wakeups.values()) {
-      await deps.heartbeat.wakeup(agentId, wakeup).catch((err) => {
+      try {
+        const wakeRun = await deps.heartbeat.wakeup(agentId, wakeup);
+        if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) continue;
+        // The rewake throttle reads this entry as new input for the dependent.
+        const payload = wakeup.payload ?? {};
+        await deps.logActivity(deps.db, {
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "issue_update",
+          agentId,
+          action: "issue.blockers_resolved_wake_emitted",
+          entityType: "issue",
+          entityId: typeof payload.issueId === "string" ? payload.issueId : issue.id,
+          details: {
+            source: wakeup.contextSnapshot?.source ?? "issue.update",
+            wakeupRunId: wakeRun?.id ?? null,
+            idempotencyKey: wakeup.idempotencyKey ?? null,
+            resolvedBlockerIssueId:
+              typeof payload.resolvedBlockerIssueId === "string" ? payload.resolvedBlockerIssueId : null,
+            blockerIssueIds: Array.isArray(payload.blockerIssueIds) ? payload.blockerIssueIds : [],
+          },
+        });
+      } catch (err) {
         logger.warn({ err, issueId: issue.id, agentId }, "voice_action: failed to wake agent");
-      });
+      }
     }
   };
   return { add, addDependencyResolved, dispatch };
@@ -346,8 +411,13 @@ async function afterComment(
     const ids = expired.map((interaction) => interaction.id).sort();
     lostReviewPathRef = ids.length === 1 ? ids[0]! : `interactions:${ids.join(",")}`;
   });
+  // A failed mention lookup must not drop the assignee wake.
+  let mentionedIds: string[] = [];
+  await attempt("mention_lookup", async () => {
+    mentionedIds = await issuesSvc.findMentionedAgents(issue.companyId, comment.body);
+  });
   await attempt("wakes", async () => {
-    const batch = createWakeBatch(deps, issue, actor);
+    const batch = createWakeBatch(deps, issue, actor, "first_wins");
     // The assignee may have changed while the comment was written.
     const current = (await issuesSvc.getById(issue.id)) ?? issue;
     const assigneeId = current.assigneeAgentId;
@@ -385,7 +455,7 @@ async function afterComment(
         },
       });
     }
-    for (const mentionedId of await issuesSvc.findMentionedAgents(issue.companyId, comment.body)) {
+    for (const mentionedId of mentionedIds) {
       batch.add(mentionedId, {
         source: "automation",
         triggerDetail: "system",
@@ -405,6 +475,9 @@ async function afterComment(
     }
     await batch.dispatch();
   });
+  await attempt("task_watchdog", () =>
+    deps.taskWatchdogs.reconcileForIssueAndAncestors(issue.companyId, issue.id, { runId: null }),
+  );
   return failedSteps;
 }
 
@@ -427,6 +500,9 @@ async function afterStatusChange(
     }
   };
   const issue = updated;
+  if (existing.status === "in_progress" && issue.status !== "in_progress") {
+    await attempt("run_handoff_resolution", () => resolveRunHandoff(deps, issue, actor));
+  }
   if (existing.status !== "blocked" && issue.status === "blocked") {
     await attempt("unblock_owner_wake", () =>
       deliverAgentUnblockNotification({
@@ -437,7 +513,7 @@ async function afterStatusChange(
     );
   }
   await attempt("routine_sync", () => deps.routines.syncRunStatusForIssue(issue.id));
-  const batch = createWakeBatch(deps, issue, actor);
+  const batch = createWakeBatch(deps, issue, actor, "last_wins");
   const becameTerminal =
     !["done", "cancelled"].includes(existing.status) && ["done", "cancelled"].includes(issue.status);
   await attempt("status_wakes", async () => {
@@ -508,7 +584,54 @@ async function afterStatusChange(
     }
   }
   await attempt("dispatch_wakes", () => batch.dispatch());
+  await attempt("task_watchdog", () =>
+    deps.taskWatchdogs.reconcileForIssueAndAncestors(issue.companyId, issue.id, { runId: null }),
+  );
   return failedSteps;
+}
+
+/** PATCH marks a required successful-run handoff resolved when the issue
+ * leaves in_progress. */
+async function resolveRunHandoff(
+  deps: VoiceActionDeps,
+  issue: { id: string; companyId: string; identifier?: string | null; status: string },
+  actor: VoiceActor,
+) {
+  const latest = await deps.db
+    .select({ action: activityLog.action, runId: activityLog.runId, details: activityLog.details })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.companyId, issue.companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, issue.id),
+        inArray(activityLog.action, [
+          "issue.successful_run_handoff_required",
+          "issue.successful_run_handoff_resolved",
+          "issue.successful_run_handoff_escalated",
+        ]),
+      ),
+    )
+    .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (latest?.action !== "issue.successful_run_handoff_required") return;
+  const details = (latest.details ?? {}) as Record<string, unknown>;
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
+  await deps.logActivity(deps.db, {
+    companyId: issue.companyId,
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    action: "issue.successful_run_handoff_resolved",
+    entityType: "issue",
+    entityId: issue.id,
+    details: {
+      identifier: issue.identifier ?? null,
+      sourceRunId: text(details.sourceRunId) ?? text(details.source_run_id) ?? text(details.resumeFromRunId) ?? latest.runId,
+      correctiveRunId: text(details.correctiveRunId) ?? text(details.corrective_run_id) ?? null,
+      resolvedByStatus: issue.status,
+    },
+  });
 }
 
 /** The same activity entry the issue routes write for an expired interaction. */
@@ -599,15 +722,37 @@ export async function executeVoiceAction(
     } else {
       const { payload, issue } = resolved;
       const status = payload.status!;
-      const updated = await issuesSvc.update(issue.id, {
-        status,
-        actorUserId: decidedByUserId,
-        companyGuard: approval.companyId,
+      // The checks above read the issue before several lookups. Like PATCH,
+      // the write re-reads the row under a lock and repeats the row checks.
+      const publications: ActivityPublication[] = [];
+      const postCommitActions: IssuePostCommitAction[] = [];
+      const write = await db.transaction(async (tx) => {
+        const locked = await issuesSvc.getByIdForUpdate(issue.id, tx);
+        if (!locked || locked.companyId !== approval.companyId) return { refusal: ISSUE_NOT_IN_COMPANY };
+        const lockedRefusal = stalenessRefusal(payload, locked) ?? issueStateRefusal(locked, status);
+        if (lockedRefusal) return { refusal: lockedRefusal };
+        const row = await issuesSvc.update(
+          issue.id,
+          { status, actorUserId: decidedByUserId, companyGuard: approval.companyId },
+          tx,
+          publications,
+          postCommitActions,
+        );
+        return row ? { updated: row } : { refusal: ISSUE_NOT_IN_COMPANY };
       });
+      const updated = "updated" in write ? write.updated : null;
       if (!updated) {
-        outcome = { ok: false, reason: ISSUE_NOT_IN_COMPANY };
+        outcome = { ok: false, reason: ("refusal" in write && write.refusal) || ISSUE_NOT_IN_COMPANY };
       } else {
-        const failedSteps = await afterStatusChange(deps, issue, updated, actor);
+        for (const publication of publications) publishActivity(publication);
+        const failedSteps: string[] = [];
+        try {
+          await executeIssuePostCommitActions(db, postCommitActions);
+        } catch (err) {
+          logger.warn({ err, issueId: issue.id }, "voice_action post-commit actions failed");
+          failedSteps.push("post_commit_actions");
+        }
+        failedSteps.push(...(await afterStatusChange(deps, issue, updated, actor)));
         issueActivity = {
           companyId: issue.companyId,
           actorType: "user",

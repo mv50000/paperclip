@@ -54,6 +54,7 @@ vi.mock("../services/index.js", () => ({
 
 const mockIssuesSvc = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByIdForUpdate: vi.fn(),
   addComment: vi.fn(),
   update: vi.fn(),
   getDependencyReadiness: vi.fn(),
@@ -65,6 +66,7 @@ const mockIssuesSvc = vi.hoisted(() => ({
 }));
 vi.mock("../services/issues.js", () => ({
   issueService: vi.fn(() => mockIssuesSvc),
+  executeIssuePostCommitActions: vi.fn(async () => undefined),
 }));
 
 // The real helpers live in routes/issues.ts, which this route test does not
@@ -75,8 +77,21 @@ const mockIssueRouteHelpers = vi.hoisted(() => ({
 }));
 vi.mock("../routes/issues.js", () => mockIssueRouteHelpers);
 
-const mockDeps = vi.hoisted(() => ({
-  db: {},
+// Rows the status path reads from the activity log (the run handoff state).
+const mockActivityRows = vi.hoisted(() => ({ rows: [] as unknown[] }));
+const mockDeps = vi.hoisted(() => {
+  const query = {
+    from: () => query,
+    where: () => query,
+    orderBy: () => query,
+    limit: () => query,
+    then: (resolve: (rows: unknown[]) => unknown) => resolve(mockActivityRows.rows),
+  };
+  return {
+  db: {
+    select: () => query,
+    transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
+  },
   heartbeat: {
     wakeup: vi.fn(async () => ({ id: "run-9" })),
     getRun: vi.fn(),
@@ -94,8 +109,10 @@ const mockDeps = vi.hoisted(() => ({
   externalObjects: { syncCommentSafely: vi.fn() },
   routines: { syncRunStatusForIssue: vi.fn() },
   environmentRuntime: { destroyReusableSandboxLeases: vi.fn() },
+  taskWatchdogs: { reconcileForIssueAndAncestors: vi.fn() },
   markBlockedOwnerNotified: vi.fn(),
-}));
+  };
+});
 vi.mock("../services/rk9-voice-action-deps.js", () => ({
   createVoiceActionDeps: vi.fn(() => ({ ...mockDeps, issuesSvc: mockIssuesSvc })),
 }));
@@ -201,6 +218,9 @@ describe("voice_action approve executes the stored payload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssuesSvc.getById.mockResolvedValue(issue);
+    // The locked re-read sees the same row as the first read unless a case says otherwise.
+    mockIssuesSvc.getByIdForUpdate.mockImplementation(async () => mockIssuesSvc.getById());
+    mockActivityRows.rows = [];
     mockIssuesSvc.addComment.mockResolvedValue({ id: "issue-comment-1", body: "Testattu autossa", createdByRunId: null });
     mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "done" });
     mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 0 });
@@ -223,6 +243,7 @@ describe("voice_action approve executes the stored payload", () => {
     mockDeps.externalObjects.syncCommentSafely.mockResolvedValue(undefined);
     mockDeps.routines.syncRunStatusForIssue.mockResolvedValue(undefined);
     mockDeps.environmentRuntime.destroyReusableSandboxLeases.mockResolvedValue(undefined);
+    mockDeps.taskWatchdogs.reconcileForIssueAndAncestors.mockResolvedValue(undefined);
   });
 
   it("posts the comment on the issue in the approver's name", async () => {
@@ -257,11 +278,13 @@ describe("voice_action approve executes the stored payload", () => {
   it("changes the issue status under a company guard", async () => {
     await approveAndRun(statusPayload);
 
-    expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, {
-      status: "done",
-      actorUserId: "board-user",
-      companyGuard: "company-1",
-    });
+    expect(mockIssuesSvc.update).toHaveBeenCalledWith(
+      ISSUE_ID,
+      { status: "done", actorUserId: "board-user", companyGuard: "company-1" },
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
     expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
     expect(mockDeps.routines.syncRunStatusForIssue).toHaveBeenCalledWith(ISSUE_ID);
     expect(mockDeps.interactions.expirePendingInteractionsForTerminalIssue).toHaveBeenCalled();
@@ -425,6 +448,129 @@ describe("voice_action approve executes the stored payload", () => {
     expect(approvalComment()).toContain("✅");
   });
 
+  it("refuses a comment that would steer the assignee's live goal session", async () => {
+    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+    mockDeps.runnerGoals.projection.mockResolvedValue({ goal: { status: "active" }, workingNow: true, pendingAction: null });
+    await approveAndRun({ ...commentPayload, ...assignedSnapshot });
+
+    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("live goal session");
+  });
+
+  it("comments and wakes when the assignee's goal is not working now", async () => {
+    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+    mockDeps.runnerGoals.projection.mockResolvedValue({ goal: { status: "active" }, workingNow: false, pendingAction: null });
+    await approveAndRun({ ...commentPayload, ...assignedSnapshot });
+
+    expect(mockIssuesSvc.addComment).toHaveBeenCalled();
+    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`]);
+  });
+
+  it("refuses a comment while the issue has an active recovery action", async () => {
+    mockDeps.recoveryActions.getActiveForIssue.mockResolvedValue({ id: "recovery-1" });
+    await approveAndRun(commentPayload);
+
+    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("active recovery action");
+  });
+
+  it("still wakes the assignee when the mention lookup fails", async () => {
+    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+    mockIssuesSvc.findMentionedAgents.mockRejectedValue(new Error("mention lookup failed"));
+    await approveAndRun({ ...commentPayload, ...assignedSnapshot });
+
+    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`]);
+    expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
+  });
+
+  it("refuses cancelled while the issue's execution run is running, also without an assignee", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, executionRunId: "run-1" });
+    mockDeps.heartbeat.getRun.mockResolvedValue({ id: "run-1", status: "running" });
+    await approveAndRun({ ...statusPayload, status: "cancelled" });
+
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("an agent run is active");
+  });
+
+  it.each([
+    ["the issue moved to review", { status: "in_review" }, "status changed after the proposal (in_progress → in_review)"],
+    ["an execution policy was set", { executionPolicy: { stages: [] } }, "execution policy"],
+    ["the issue moved to another company", { companyId: "company-2" }, "issue not found in this company"],
+  ])("re-checks the locked row before the write: %s", async (_name, change, reason) => {
+    mockIssuesSvc.getByIdForUpdate.mockResolvedValue({ ...issue, ...change });
+    await approveAndRun(statusPayload);
+
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(mockDeps.routines.syncRunStatusForIssue).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain(reason);
+  });
+
+  it("writes the status inside the locking transaction", async () => {
+    await approveAndRun(statusPayload);
+
+    expect(mockIssuesSvc.update).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.objectContaining({ status: "done" }),
+      {},
+      [],
+      [],
+    );
+    expect(mockDeps.taskWatchdogs.reconcileForIssueAndAncestors).toHaveBeenCalledWith("company-1", ISSUE_ID, {
+      runId: null,
+    });
+  });
+
+  it("lets the parent wake win when the parent is also the dependent, as PATCH does", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, parentId: "parent-1" });
+    mockIssuesSvc.update.mockResolvedValue({ ...issue, parentId: "parent-1", status: "done" });
+    mockIssuesSvc.listWakeableBlockedDependents.mockResolvedValue([
+      { id: "parent-1", assigneeAgentId: "agent-3", blockerIssueIds: [ISSUE_ID], blockedTransitionAt: null },
+    ]);
+    mockIssuesSvc.getWakeableParentAfterChildCompletion.mockResolvedValue({
+      id: "parent-1",
+      assigneeAgentId: "agent-3",
+      childIssueIds: [ISSUE_ID],
+      childIssueSummaries: [],
+      childIssueSummaryTruncated: false,
+    });
+    await approveAndRun(statusPayload);
+
+    expect(wakeReasons()).toEqual(["agent-3:issue_children_completed"]);
+  });
+
+  it("logs the dependency wake for the rewake throttle", async () => {
+    mockIssuesSvc.listWakeableBlockedDependents.mockResolvedValue([
+      { id: "dependent-1", assigneeAgentId: "agent-2", blockerIssueIds: [ISSUE_ID], blockedTransitionAt: null },
+    ]);
+    await approveAndRun(statusPayload);
+
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.blockers_resolved_wake_emitted",
+        actorType: "system",
+        actorId: "issue_update",
+        entityId: "dependent-1",
+        details: expect.objectContaining({ wakeupRunId: "run-9", resolvedBlockerIssueId: ISSUE_ID }),
+      }),
+    );
+  });
+
+  it("resolves a required run handoff when the issue leaves in_progress", async () => {
+    mockActivityRows.rows = [
+      { action: "issue.successful_run_handoff_required", runId: "run-1", details: { sourceRunId: "run-1" } },
+    ];
+    await approveAndRun(statusPayload);
+
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.successful_run_handoff_resolved",
+        details: expect.objectContaining({ sourceRunId: "run-1", resolvedByStatus: "done" }),
+      }),
+    );
+  });
+
   it.each([
     ["the status changed", { status: "todo" }, "status changed after the proposal (in_progress → todo)"],
     ["the assignee changed", { assigneeAgentId: AGENT_ID }, "assignee changed after the proposal"],
@@ -570,7 +716,13 @@ describe("voice_action approve executes the stored payload", () => {
     const res = await request(app).post("/api/approvals/approval-1/approve").send({});
 
     expect(res.status).toBe(200);
-    expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "blocked" }));
+    expect(mockIssuesSvc.update).toHaveBeenCalledWith(
+      ISSUE_ID,
+      expect.objectContaining({ status: "blocked" }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it.each([

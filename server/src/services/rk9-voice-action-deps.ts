@@ -16,6 +16,7 @@ import {
   issueThreadInteractionService,
   issueTreeControlService,
   routineService,
+  taskWatchdogService,
 } from "./index.js";
 import { issueService } from "./issues.js";
 import { runnerGoalService } from "./runner-goals.js";
@@ -26,10 +27,11 @@ export function createVoiceActionDeps(
   options: { pluginWorkerManager?: PluginWorkerManager } = {},
 ): Omit<VoiceActionDeps, "approvalSvc" | "logActivity"> {
   const instanceSettings = instanceSettingsService(db);
+  const heartbeat = heartbeatService(db, { pluginWorkerManager: options.pluginWorkerManager });
   return {
     db,
     issuesSvc: issueService(db),
-    heartbeat: heartbeatService(db, { pluginWorkerManager: options.pluginWorkerManager }),
+    heartbeat,
     runnerGoals: runnerGoalService(db),
     recoveryActions: issueRecoveryActionService(db),
     treeControl: issueTreeControlService(db),
@@ -42,6 +44,7 @@ export function createVoiceActionDeps(
     }),
     routines: routineService(db, { pluginWorkerManager: options.pluginWorkerManager }),
     environmentRuntime: environmentRuntimeService(db, { pluginWorkerManager: options.pluginWorkerManager }),
+    taskWatchdogs: taskWatchdogService(db, { enqueueWakeup: heartbeat.wakeup }),
     markBlockedOwnerNotified: async (issue, notifiedAt) => {
       await db
         .update(issueRows)

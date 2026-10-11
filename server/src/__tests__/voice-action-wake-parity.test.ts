@@ -146,6 +146,7 @@ function createRouteDb() {
   const query: Record<string, unknown> = {};
   query.innerJoin = vi.fn(() => query);
   query.where = vi.fn(() => whereResult);
+  (whereResult as Record<string, unknown>).orderBy = vi.fn(() => whereResult);
   return {
     select: vi.fn(() => ({ from: vi.fn(() => query) })),
     transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
@@ -192,9 +193,12 @@ async function runVoiceAction(payload: Record<string, unknown>) {
     externalObjects: { syncCommentSafely: async () => undefined },
     routines: { syncRunStatusForIssue: vi.fn(async () => undefined) },
     environmentRuntime: { destroyReusableSandboxLeases: vi.fn(async () => undefined) },
+    taskWatchdogs: { reconcileForIssueAndAncestors: vi.fn(async () => undefined) },
     markBlockedOwnerNotified: vi.fn(async () => undefined),
   } as unknown as VoiceActionDeps;
   await executeVoiceAction(deps, { id: "approval-1", companyId: "company-1", payload }, "local-board");
+  // The parity cases expect every side effect step to succeed.
+  expect(String(approvalSvc.addComment.mock.calls[0]?.[1] ?? "")).not.toContain("sivuvaikutukset");
   return String(approvalSvc.addComment.mock.calls[0]?.[1] ?? "");
 }
 
@@ -351,6 +355,42 @@ describe("voice_action wakes match the issue routes", () => {
     expect(outcome).toContain("✅");
     expect(wakeCalls()).toEqual(routeWakes);
     expect(routeWakes.map((call) => call.wakeup.reason)).toEqual(["issue_blockers_resolved", "issue_children_completed"]);
+  });
+
+  it("keeps the last wake like PATCH when the parent is also the dependent", async () => {
+    const existing = makeIssue({ parentId: PARENT_ID });
+    const arrange = () => {
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.update.mockResolvedValue({ ...existing, status: "done" });
+      mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+        { id: PARENT_ID, assigneeAgentId: PARENT_AGENT_ID, blockerIssueIds: [ISSUE_ID], blockedTransitionAt: null },
+      ]);
+      mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue({
+        id: PARENT_ID,
+        assigneeAgentId: PARENT_AGENT_ID,
+        childIssueIds: [ISSUE_ID],
+        childIssueSummaries: [],
+        childIssueSummaryTruncated: false,
+      });
+    };
+
+    arrange();
+    const res = await request(await createApp()).patch(`/api/issues/${ISSUE_ID}`).send({ status: "done" });
+    expect(res.status).toBe(200);
+    const routeWakes = await settledWakeCalls(1);
+
+    resetMocks();
+    arrange();
+    const outcome = await runVoiceAction({
+      action: "issue_status",
+      issueId: ISSUE_ID,
+      identifier: "PAP-999",
+      status: "done",
+      source: "grok",
+      ...snapshotOf(existing),
+    });
+    expect(outcome).toContain("✅");
+    expect(wakeCalls()).toEqual(routeWakes);
   });
 
   it.each(["blocked", "backlog"])("wakes the assignee like a board PATCH from %s to todo", async (fromStatus) => {

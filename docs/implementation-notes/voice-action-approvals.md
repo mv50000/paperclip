@@ -51,6 +51,9 @@ Operaattorin päätös 11.10.2026: hyväksytty `voice_action` toimii kuin sama t
   - riippuvien tikettien herätys (`issue_blockers_resolved`), kun tila on `done`
   - terminaalisiivous: odottavien interaktioiden vanhennus ja sandbox-leasejen purku
   - parentin herätys (`issue_children_completed`)
+- Lisäksi kirjoitetaan samat activity-merkinnät kuin reitillä: `issue.blockers_resolved_wake_emitted` (rewake-throttle lukee sen) ja `issue.successful_run_handoff_resolved`, kun tiketti lähtee in_progress-tilasta vaaditun handoffin aikana. Task watchdog arvioidaan kommentin ja tilamuutoksen jälkeen.
+- Tilamuutos kirjoitetaan transaktiossa, joka lukitsee rivin (`getByIdForUpdate`). Palvelin toistaa lukitulle riville staleness-tarkistuksen ja rivin omat hylkäyssäännöt, kuten PATCH tekee review-säännöille.
+- Herätteet yhdistetään kuten reitillä: kommentissa ensimmäinen heräte per agentti ja tiketti jää voimaan, tilamuutoksessa viimeinen.
 - Kirjoituksen jälkeiset vaiheet ajetaan toisistaan riippumatta. Sivuvaikutusvirhe ei muuta tulosta. Kommenttiin lisätään "sivuvaikutukset epäonnistuivat", ja virhe jää palvelinlokiin.
 - Herätteiden muoto (reason, payload, contextSnapshot) on sama kuin reiteillä. `voice-action-wake-parity.test.ts` ajaa reitin ja voice-polun samoja mockeja vasten ja vertaa herätekutsuja.
 
@@ -59,7 +62,7 @@ Operaattorin päätös 11.10.2026: hyväksytty `voice_action` toimii kuin sama t
 UI:n `PATCH /issues/:id` pysäyttää `done`/`cancelled`-siirrossa assigneen runner goalin ja aktiivisen ajon sekä ratkaisee recovery actionin. Voice-polku ei tee näitä. Se hylkää toimen selkeällä syyllä, ja operaattori tekee muutoksen Paperclipissa:
 
 - `done`/`cancelled`, kun assigneella on tällä tiketillä aktiivinen tai odottava runner goal
-- `done`/`cancelled`, kun tiketillä on käynnissä oleva ajo
+- `done`/`cancelled`, kun tiketillä on käynnissä oleva ajo (myös ilman assigneeta)
 - mikä tahansa tilamuutos, kun tiketillä on aktiivinen recovery action
 - `blocked`/`cancelled` tiketille, jolla on parent, koska PATCH voi lähettää parentille stop-raportin
 - skill test -tiketin tilamuutos, koska reitti päättää testiajon
@@ -68,6 +71,8 @@ UI:n `PATCH /issues/:id` pysäyttää `done`/`cancelled`-siirrossa assigneen run
   - ajastetun uusinnan jatko
   - suljetun isolated workspacen avaus
   - reviewn hyväksyntä (`isApprovalReviewComment`)
+  - kommentin ohjaus assigneen käynnissä olevaan goal-sessioon (`turn.steer`, kun goal on aktiivinen ja `workingNow`)
+  - kommentti, kun tiketillä on aktiivinen recovery action (kommenttireitti arvioi sen uudelleen)
 
 Syy on forkin hygienia. Upstream muuttaa `server/src/routes/issues.ts`:ää jatkuvasti, ja reitin sulkeumien jakaminen olisi tehnyt jokaisesta upstream-mergestä konfliktin. Siksi `issues.ts`:ään lisätään vain kaksi `export`-sanaa (`isApprovalReviewComment`, `shouldImplicitlyMoveCommentedIssueToTodo`). `rk9-voice-action.ts` kutsuu palveluja suoraan (`rk9-voice-action-deps.ts`). Hylkäys korvaa myös goalin pysäytyksen 30 s odotuksen, joten approve-pyyntö ei enää veny yli Telegram-kuuntelijan aikakatkaisun (RK9-502).
 
