@@ -14,9 +14,14 @@
 #    declaring recovery (hysteresis). util + aqu are kept in the message text as
 #    context, NOT as triggers (util~100% on NVMe is normal throughput, not latency).
 #
+#  - RK9-158: logging every healthy sample grew $LOG to ~57 MB (a line per 15 s).
+#    Now only samples that carry a flag (pressure, WARN, recovery) and Slack events
+#    are logged, plus one `[heartbeat]` line per HEARTBEAT seconds while all is well
+#    (proves the loop is alive). Alerting does not read $LOG.
+#
 # Run by the paperclip-io-watch.service systemd unit (User=paperclip), which supplies
-# DATABASE_URL + PAPERCLIP_SECRETS_MASTER_KEY_FILE for the Slack helper. Every sample
-# is logged to $LOG; only confirmed edge events hit Slack.
+# DATABASE_URL + PAPERCLIP_SECRETS_MASTER_KEY_FILE for the Slack helper. Confirmed edge
+# events hit Slack. Rotation: server/scripts/paperclip-io-watch.logrotate.
 set -u
 DEV=nvme0n1
 LOG=${IO_WATCH_LOG:-/var/lib/paperclip/io-watch.log}
@@ -26,6 +31,8 @@ SAMPLE=${IO_WATCH_SAMPLE:-15}            # s between samples
 WARN_CONSEC=${IO_WATCH_WARN_CONSEC:-4}   # consecutive pressure samples before alerting (~60s)
 OK_CONSEC=${IO_WATCH_OK_CONSEC:-3}       # consecutive OK samples before recovery (~45s)
 REMIND=${IO_WATCH_REMIND:-1800}          # s between reminders while sustained WARN
+HEARTBEAT=${IO_WATCH_HEARTBEAT:-3600}    # s between log lines while nothing is flagged
+MAX_SAMPLES=${IO_WATCH_MAX_SAMPLES:-0}   # 0 = run forever; tests set a finite count
 HOST=$(hostname -s 2>/dev/null || echo paperclip-01)
 
 post_slack() {  # $1 = message text — fire-and-forget so sampling never blocks
@@ -33,18 +40,27 @@ post_slack() {  # $1 = message text — fire-and-forget so sampling never blocks
       >>"$LOG.slack" 2>&1 ) &
 }
 
-echo "# io-watch alkoi $(date -Is) — kynnys await>${WARN_AWAIT}ms, vahvistus ${WARN_CONSEC} näytettä, recovery ${OK_CONSEC} näytettä, näyte ${SAMPLE}s (PID $$)" >>"$LOG"
+echo "# io-watch alkoi $(date -Is) — kynnys await>${WARN_AWAIT}ms, vahvistus ${WARN_CONSEC} näytettä, recovery ${OK_CONSEC} näytettä, näyte ${SAMPLE}s, sydämenlyönti ${HEARTBEAT}s (PID $$)" >>"$LOG"
 
 state=OK
 last_alert=0
 warn_streak=0
 ok_streak=0
-while true; do
+last_log=$(date +%s)
+no_data=0
+samples=0
+while [ "$MAX_SAMPLES" -le 0 ] || [ "$samples" -lt "$MAX_SAMPLES" ]; do
+  samples=$((samples+1))
   # iostat -x SAMPLE 2 -> second row is the live SAMPLE-second average
   line=$(iostat -x "$SAMPLE" 2 "$DEV" 2>/dev/null | awk -v d="$DEV" '$1==d{l=$0} END{print l}')
   if [ -z "$line" ]; then
-    echo "$(date '+%F %T')  (ei iostat-dataa)" >>"$LOG"; sleep "$SAMPLE"; continue
+    # Log the outage once, not once per sample.
+    if [ "$no_data" = 0 ]; then
+      echo "$(date '+%F %T')  (ei iostat-dataa)" >>"$LOG"; last_log=$(date +%s)
+    fi
+    no_data=1; sleep "$SAMPLE"; continue
   fi
+  no_data=0
   r_await=$(echo "$line" | awk '{print $6}')
   w_await=$(echo "$line" | awk '{print $12}')
   aqu=$(echo "$line" | awk '{print $(NF-1)}')
@@ -72,6 +88,7 @@ while true; do
   else  # state=WARN
     if [ "$pressure" = 0 ] && [ "$ok_streak" -ge "$OK_CONSEC" ]; then
       state=OK; warn_streak=0
+      flag="  <<< OK (palautui)"
       post_slack "🟢 $HOST levy-IO palautui normaaliksi: $DEV w_await=${w_await}ms r_await=${r_await}ms util=${util}%"
       echo "$(date '+%F %T')  -> SLACK (palautui, ${ok_streak} OK-näytettä)" >>"$LOG"
     elif [ "$pressure" = 1 ] && [ $((now - last_alert)) -ge "$REMIND" ]; then
@@ -85,6 +102,14 @@ while true; do
     fi
   fi
 
-  printf '%s  r_await=%sms w_await=%sms aqu=%s util=%s%%%s\n' \
-    "$(date '+%F %T')" "$r_await" "$w_await" "$aqu" "$util" "$flag" >>"$LOG"
+  # Healthy samples are silent except for one heartbeat per HEARTBEAT seconds.
+  if [ -z "$flag" ] && [ $((now - last_log)) -ge "$HEARTBEAT" ]; then
+    flag="  [heartbeat]"
+  fi
+  if [ -n "$flag" ]; then
+    printf '%s  r_await=%sms w_await=%sms aqu=%s util=%s%%%s\n' \
+      "$(date '+%F %T')" "$r_await" "$w_await" "$aqu" "$util" "$flag" >>"$LOG"
+    last_log=$now
+  fi
 done
+wait   # let in-flight Slack posts finish when MAX_SAMPLES ends the loop

@@ -1,0 +1,19 @@
+# Rotation for the io-watch logs (RK9-158). Install:
+#   sudo cp server/scripts/paperclip-io-watch.logrotate /etc/logrotate.d/paperclip-io-watch
+# io-watch.sh opens the log by path for every write (`>>`), so the plain
+# rename-and-create scheme is safe: no copytruncate, no service restart needed.
+# `su` is required because /var/lib/paperclip is owned by paperclip, not root.
+# Weekly, or earlier when a file passes 20M, so one pressure episode cannot fill
+# the disk. The first run also compresses the ~57 MB legacy log.
+# Check without rotating: sudo logrotate -d /etc/logrotate.d/paperclip-io-watch
+/var/lib/paperclip/io-watch.log /var/lib/paperclip/io-watch.log.slack {
+    su paperclip paperclip
+    weekly
+    maxsize 20M
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 paperclip paperclip
+}
