@@ -2059,7 +2059,7 @@ function actorMatchesExecutionParticipant(
 const APPROVAL_NEGATION_REGEX =
   /\b(?:NOT|REJECT(?:ED|ING|S)?|DENY|DENIED|DENYING|BLOCK(?:ED|ING|S)?|CHANGES?\s+REQUESTED)\b/i;
 
-function isApprovalReviewComment(body: string) {
+export function isApprovalReviewComment(body: string) {
   const normalized = body.replace(/\r\n?/g, "\n");
   const headingMatch = normalized.match(/(?:^|\n)##\s*Review:\s*([^\n]*)/i);
   if (headingMatch) {
@@ -2285,7 +2285,7 @@ function isClosedIssueStatus(
   return status === "done" || status === "cancelled";
 }
 
-function shouldImplicitlyMoveCommentedIssueToTodo(input: {
+export function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   issueStatus: string | null | undefined;
   assigneeAgentId: string | null | undefined;
   actorType: "agent" | "user";

@@ -27,7 +27,13 @@ import { createEmailService } from "../services/email/index.js";
 import type { EmailSendApprovalPayload } from "./rk9-email.js";
 import { issueService } from "../services/issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
-import { executeVoiceAction, resolveVoiceAction, VOICE_ACTION_APPROVAL_TYPE } from "../services/rk9-voice-action.js";
+import {
+  executeVoiceAction,
+  resolveVoiceAction,
+  VOICE_ACTION_APPROVAL_TYPE,
+  voiceActionPayloadToPersist,
+} from "../services/rk9-voice-action.js";
+import { createVoiceActionDeps } from "../services/rk9-voice-action-deps.js";
 
 // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
 // human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
@@ -67,6 +73,10 @@ export function approvalRoutes(
 ) {
   const router = Router();
   const svc = approvalService(db);
+  // RK9-490: built on first use; most approvals are not voice actions.
+  let voiceActionDepsCache: ReturnType<typeof createVoiceActionDeps> | null = null;
+  const voiceActionDeps = () =>
+    (voiceActionDepsCache ??= createVoiceActionDeps(db, { pluginWorkerManager: options.pluginWorkerManager }));
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
@@ -239,8 +249,10 @@ export function approvalRoutes(
       res.status(403).json({ error: "Only a board user can create or resubmit a voice_action approval" });
       return null;
     }
-    const resolved = await resolveVoiceAction(issuesSvc, companyId, payload);
-    if (resolved.ok) return resolved.payload;
+    // The issue snapshot is the server's to write; a proposer's value is ignored.
+    const { issueStatusAtProposal: _status, assigneeAgentIdAtProposal: _assignee, ...proposal } = payload;
+    const resolved = await resolveVoiceAction(issuesSvc, companyId, proposal);
+    if (resolved.ok) return voiceActionPayloadToPersist(resolved);
     res.status(422).json({ error: `Invalid voice_action: ${resolved.reason}` });
     return null;
   }
@@ -452,7 +464,11 @@ export function approvalRoutes(
       // stored payload in the approver's name (RK9-479). A failure never undoes
       // the approval; the outcome lands as an approval comment.
       if (approval.type === VOICE_ACTION_APPROVAL_TYPE) {
-        await executeVoiceAction(db, { issuesSvc, approvalSvc: svc, logActivity }, approval, decidedByUserId);
+        await executeVoiceAction(
+          { ...voiceActionDeps(), approvalSvc: svc, logActivity },
+          approval,
+          decidedByUserId,
+        );
       }
 
       await logActivity(db, {
