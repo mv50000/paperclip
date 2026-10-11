@@ -1,10 +1,11 @@
 // RK9-479: a `voice_action` approval carries a voice-proposed issue action; the
 // server executes the stored payload on approve in the approver's name.
+// RK9-490: it runs the issue routes' side effects and refuses a stale proposal.
 
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { unprocessable } from "../errors.js";
+import { conflict, unprocessable } from "../errors.js";
 
 vi.mock("../services/email/index.js", () => ({
   createEmailService: vi.fn(() => ({ sendEmail: vi.fn(), replyToMessage: vi.fn() })),
@@ -60,7 +61,16 @@ vi.mock("../services/issues.js", () => ({
   issueService: vi.fn(() => mockIssuesSvc),
 }));
 
+const mockIssueEffects = vi.hoisted(() => ({
+  commentPauseRefusal: vi.fn(),
+  afterComment: vi.fn(),
+  beforeStatusChange: vi.fn(),
+  afterStatusChange: vi.fn(),
+}));
+const effectsSlot = vi.hoisted(() => ({ current: null as unknown }));
+
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
+const AGENT_ID = "22222222-2222-4222-8222-222222222222";
 const issue = {
   id: ISSUE_ID,
   companyId: "company-1",
@@ -75,6 +85,8 @@ const commentPayload = {
   identifier: "RK9-469",
   body: "Testattu autossa",
   source: "grok",
+  issueStatusAtProposal: "in_progress",
+  assigneeAgentIdAtProposal: null,
 };
 const statusPayload = {
   action: "issue_status",
@@ -82,6 +94,8 @@ const statusPayload = {
   identifier: "RK9-469",
   status: "done",
   source: "grok",
+  issueStatusAtProposal: "in_progress",
+  assigneeAgentIdAtProposal: null,
 };
 
 function voiceApproval(payload: Record<string, unknown>, status = "approved") {
@@ -107,7 +121,7 @@ async function createApp(actor: Record<string, unknown> = boardActor) {
     req.actor = actor as never;
     next();
   });
-  app.use("/api", approvalRoutes({} as never));
+  app.use("/api", approvalRoutes({} as never, { voiceActionIssueEffects: effectsSlot as never }));
   app.use((err: { status?: number; message?: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(err.status ?? 500).json({ error: err.message ?? "error" });
   });
@@ -135,6 +149,11 @@ describe("voice_action approve executes the stored payload", () => {
     mockIssuesSvc.addComment.mockResolvedValue({ id: "issue-comment-1", body: "Testattu autossa" });
     mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "done" });
     mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 0 });
+    effectsSlot.current = mockIssueEffects;
+    mockIssueEffects.commentPauseRefusal.mockResolvedValue(null);
+    mockIssueEffects.afterComment.mockResolvedValue(undefined);
+    mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: null, runToCancel: null });
+    mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null });
   });
 
   it("posts the comment on the issue in the approver's name", async () => {
@@ -146,6 +165,12 @@ describe("voice_action approve executes the stored payload", () => {
     expect(res.status).toBe(200);
     expect(mockIssuesSvc.addComment).toHaveBeenCalledWith(ISSUE_ID, "Testattu autossa", { userId: "board-user" });
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    // The comment wakes the assignee as a board comment would.
+    expect(mockIssueEffects.afterComment).toHaveBeenCalledWith({
+      issue,
+      comment: expect.objectContaining({ id: "issue-comment-1" }),
+      actor: expect.objectContaining({ actorType: "user", actorId: "board-user" }),
+    });
     expect(approvalComment()).toContain("✅");
     expect(activityActions()).toEqual(
       expect.arrayContaining(["issue.comment_added", "voice_action.executed", "approval.approved"]),
@@ -165,8 +190,132 @@ describe("voice_action approve executes the stored payload", () => {
       companyGuard: "company-1",
     });
     expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(mockIssueEffects.beforeStatusChange).toHaveBeenCalledWith(issue, "done");
+    expect(mockIssueEffects.afterStatusChange).toHaveBeenCalledWith({
+      existing: issue,
+      updated: { ...issue, status: "done" },
+      actor: expect.objectContaining({ actorType: "user", actorId: "board-user" }),
+      interruptedRunId: null,
+      runToCancel: null,
+    });
+    expect(mockIssueEffects.beforeStatusChange.mock.invocationCallOrder[0]).toBeLessThan(
+      mockIssuesSvc.update.mock.invocationCallOrder[0]!,
+    );
     expect(approvalComment()).toContain("in_progress → done");
     expect(activityActions()).toEqual(expect.arrayContaining(["issue.updated", "voice_action.executed"]));
+  });
+
+  it("stops the assignee's run like PATCH /issues/:id and records the stopped runs", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "in_progress", executionRunId: "run-1" });
+    mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "cancelled" });
+    mockIssueEffects.beforeStatusChange.mockResolvedValue({ interruptedRunId: "run-1", runToCancel: { id: "run-1" } });
+    approve({ ...statusPayload, status: "cancelled" });
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "cancelled" }));
+    expect(mockIssueEffects.afterStatusChange).toHaveBeenCalledWith(
+      expect.objectContaining({ interruptedRunId: "run-1", runToCancel: { id: "run-1" } }),
+    );
+    const updatedActivity = mockLogActivity.mock.calls
+      .map((call) => (call as unknown as [unknown, { action: string; details: Record<string, unknown> }])[1])
+      .find((entry) => entry.action === "issue.updated");
+    expect(updatedActivity?.details).toEqual(expect.objectContaining({ interruptedRunId: "run-1" }));
+  });
+
+  it("does not change the status when the runner goal cannot be stopped", async () => {
+    mockIssueEffects.beforeStatusChange.mockRejectedValue(
+      conflict("The current agent goal has a control action still in progress"),
+    );
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("control action still in progress");
+    expect(activityActions()).toContain("voice_action.failed");
+  });
+
+  it("reports the status change done when a side effect fails after the write", async () => {
+    mockIssueEffects.afterStatusChange.mockRejectedValue(new Error("routine sync failed"));
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(approvalComment()).toContain("✅");
+    expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
+    expect(approvalComment()).not.toContain("routine sync failed");
+  });
+
+  it("refuses a comment while the issue tree is paused", async () => {
+    mockIssueEffects.commentPauseRefusal.mockResolvedValue("Task is paused. Resume it before sending a message.");
+    approve(commentPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(mockIssueEffects.afterComment).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("Task is paused");
+  });
+
+  it.each([
+    ["the status changed", { status: "todo" }, "status changed after the proposal (in_progress → todo)"],
+    ["the assignee changed", { assigneeAgentId: AGENT_ID }, "assignee changed after the proposal"],
+  ])("refuses a stale proposal when %s", async (_name, change, reason) => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, ...change });
+    approve(statusPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssueEffects.beforeStatusChange).not.toHaveBeenCalled();
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain(reason);
+  });
+
+  it("refuses a stale comment proposal too", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "done" });
+    approve(commentPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("status changed after the proposal");
+  });
+
+  it("refuses a proposal stored before the issue snapshot existed", async () => {
+    const { issueStatusAtProposal: _status, assigneeAgentIdAtProposal: _assignee, ...legacy } = statusPayload;
+    approve(legacy);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("no issue snapshot");
+  });
+
+  it("refuses the action when the issue side effects are not wired", async () => {
+    effectsSlot.current = null;
+    approve(commentPayload);
+    const app = await createApp();
+
+    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
+
+    expect(res.status).toBe(200);
+    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain("issue side effects are not available");
   });
 
   it("refuses an issue that belongs to another company", async () => {
@@ -291,15 +440,13 @@ describe("voice_action approve executes the stored payload", () => {
   });
 
   it.each([
-    ["an agent run holds the issue", "done", { executionRunId: "run-1" }],
-    ["an agent run holds the issue", "cancelled", { checkoutRunId: "run-1" }],
     ["the issue has an execution policy", "done", { executionPolicy: { stages: [] } }],
     ["the issue has an execution policy", "todo", { executionState: { status: "pending" } }],
-    ["the issue is in review", "done", { status: "in_review" }],
+    ["the issue is in review", "done", { status: "in_review" }, { issueStatusAtProposal: "in_review" }],
     ["conversation issues cannot change by voice", "backlog", { conversationAgentId: "agent-9" }],
-  ])("refuses the status change when %s (%s)", async (reason, status, extra) => {
+  ])("refuses the status change when %s (%s)", async (reason, status, extra, snapshot = {}) => {
     mockIssuesSvc.getById.mockResolvedValue({ ...issue, ...extra });
-    approve({ ...statusPayload, status });
+    approve({ ...statusPayload, status, ...snapshot });
     const app = await createApp();
 
     const res = await request(app).post("/api/approvals/approval-1/approve").send({});
@@ -354,6 +501,24 @@ describe("voice_action payload is validated on create and resubmit", () => {
     expect(mockApprovalSvc.create).toHaveBeenCalledTimes(1);
     const stored = (mockApprovalSvc.create.mock.calls[0] as unknown as [string, { payload: Record<string, unknown> }])[1].payload;
     expect(stored).toEqual(statusPayload);
+  });
+
+  it("stores the issue state from the server, not from the proposal", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "todo", assigneeAgentId: AGENT_ID });
+    const app = await createApp();
+
+    const res = await request(app)
+      .post("/api/companies/company-1/approvals")
+      .send({
+        type: "voice_action",
+        payload: { ...commentPayload, issueStatusAtProposal: "done", assigneeAgentIdAtProposal: null },
+      });
+
+    expect(res.status).toBe(201);
+    const stored = (mockApprovalSvc.create.mock.calls[0] as unknown as [string, { payload: Record<string, unknown> }])[1].payload;
+    expect(stored).toEqual(
+      expect.objectContaining({ issueStatusAtProposal: "todo", assigneeAgentIdAtProposal: AGENT_ID }),
+    );
   });
 
   it.each([

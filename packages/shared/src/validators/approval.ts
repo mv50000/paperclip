@@ -51,6 +51,10 @@ export const voiceActionApprovalPayloadSchema = z
     body: z.string().trim().min(1).max(VOICE_ACTION_BODY_MAX_LENGTH).optional(),
     status: z.enum(VOICE_ACTION_STATUSES).optional(),
     source: z.literal("grok"),
+    // Written by the server on create and resubmit (RK9-490): the issue state
+    // the operator sees. Approve refuses the action when it has changed.
+    issueStatusAtProposal: z.string().trim().min(1).max(32).optional(),
+    assigneeAgentIdAtProposal: z.string().guid().nullable().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.action === "issue_comment" && value.body === undefined) {

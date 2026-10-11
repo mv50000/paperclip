@@ -27,7 +27,13 @@ import { createEmailService } from "../services/email/index.js";
 import type { EmailSendApprovalPayload } from "./rk9-email.js";
 import { issueService } from "../services/issues.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
-import { executeVoiceAction, resolveVoiceAction, VOICE_ACTION_APPROVAL_TYPE } from "../services/rk9-voice-action.js";
+import {
+  executeVoiceAction,
+  resolveVoiceAction,
+  VOICE_ACTION_APPROVAL_TYPE,
+  voiceActionPayloadToPersist,
+  type VoiceActionIssueEffectsSlot,
+} from "../services/rk9-voice-action.js";
 
 // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
 // human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
@@ -63,7 +69,11 @@ function isStatusOnlyRecoveryContext(contextSnapshot: unknown) {
 
 export function approvalRoutes(
   db: Db,
-  options: { pluginWorkerManager?: PluginWorkerManager } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    /** RK9-490: filled by issueRoutes with the issue side effects. */
+    voiceActionIssueEffects?: VoiceActionIssueEffectsSlot;
+  } = {},
 ) {
   const router = Router();
   const svc = approvalService(db);
@@ -240,7 +250,7 @@ export function approvalRoutes(
       return null;
     }
     const resolved = await resolveVoiceAction(issuesSvc, companyId, payload);
-    if (resolved.ok) return resolved.payload;
+    if (resolved.ok) return voiceActionPayloadToPersist(resolved);
     res.status(422).json({ error: `Invalid voice_action: ${resolved.reason}` });
     return null;
   }
@@ -452,7 +462,18 @@ export function approvalRoutes(
       // stored payload in the approver's name (RK9-479). A failure never undoes
       // the approval; the outcome lands as an approval comment.
       if (approval.type === VOICE_ACTION_APPROVAL_TYPE) {
-        await executeVoiceAction(db, { issuesSvc, approvalSvc: svc, logActivity }, approval, decidedByUserId);
+        await executeVoiceAction(
+          db,
+          {
+            issuesSvc,
+            approvalSvc: svc,
+            logActivity,
+            issueEffects: options.voiceActionIssueEffects?.current ?? null,
+          },
+          approval,
+          decidedByUserId,
+          getActorInfo(req),
+        );
       }
 
       await logActivity(db, {

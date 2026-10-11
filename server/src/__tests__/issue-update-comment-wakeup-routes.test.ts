@@ -939,3 +939,214 @@ describe("issue update comment wakeups", () => {
     );
   });
 });
+
+// RK9-490: an approved voice_action runs these same route side effects through
+// the slot that issueRoutes fills.
+describe("voice_action issue effects from issueRoutes", () => {
+  const PARENT_AGENT_ID = "66666666-6666-4666-8666-666666666666";
+  const DEPENDENT_AGENT_ID = "77777777-7777-4777-8777-777777777777";
+  const boardActor = {
+    actorType: "user" as const,
+    actorId: "local-board",
+    sessionId: null,
+    agentId: null,
+    runId: null,
+    agentApiKeyId: null,
+    actorSource: "local_implicit" as const,
+  };
+
+  async function createEffects() {
+    const { issueRoutes } = await vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js");
+    const slot = { current: null } as import("../services/rk9-voice-action.js").VoiceActionIssueEffectsSlot;
+    issueRoutes({
+      transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
+    } as any, {} as any, { voiceActionIssueEffects: slot });
+    expect(slot.current).not.toBeNull();
+    return slot.current!;
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../routes/issues.js");
+    vi.doUnmock("../routes/authz.js");
+    registerModuleMocks();
+    vi.clearAllMocks();
+    mockPauseGate.mockResolvedValue(null);
+    mockIssueService.findMentionedAgents.mockResolvedValue([]);
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
+    mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
+    mockIssueService.listReviewAttention.mockResolvedValue(new Map());
+    mockRunnerGoalService.projection.mockResolvedValue(null);
+    mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
+  });
+
+  it("refuses a comment under a pause hold like the comment route", async () => {
+    const effects = await createEffects();
+    mockPauseGate.mockResolvedValue({ holdId: "hold-1", rootIssueId: "parent-1" });
+
+    await expect(effects.commentPauseRefusal(makeIssue() as never)).resolves.toBe(
+      "Task is paused. Resume it before sending a message.",
+    );
+  });
+
+  it("wakes the assignee and mentioned agents for the comment", async () => {
+    const effects = await createEffects();
+    const issue = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "in_progress" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.findMentionedAgents.mockResolvedValue([MENTIONED_AGENT_ID]);
+
+    await effects.afterComment({
+      issue: issue as never,
+      comment: { id: "comment-1", body: "@agent katso tämä", createdByRunId: null } as never,
+      actor: boardActor,
+    });
+
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_commented",
+        payload: expect.objectContaining({ issueId: issue.id, commentId: "comment-1" }),
+        requestedByActorType: "user",
+        requestedByActorId: "local-board",
+      }),
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      MENTIONED_AGENT_ID,
+      expect.objectContaining({ reason: "issue_comment_mentioned" }),
+    );
+    expect(mockIssueThreadInteractionService.expireRequestConfirmationsSupersededByComment).toHaveBeenCalled();
+  });
+
+  it("stops the assignee's runner goal and cancels its run before done", async () => {
+    const effects = await createEffects();
+    const issue = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "in_progress" });
+    mockRunnerGoalService.projection
+      .mockResolvedValueOnce({
+        goal: { status: "active" },
+        pendingAction: null,
+        revision: 3,
+        capability: { actions: ["pause", "clear"] },
+      } as never)
+      .mockResolvedValueOnce({ goal: { status: "paused" }, pendingAction: null } as never);
+    mockRunnerGoalService.act.mockResolvedValue(undefined);
+    mockHeartbeatService.getActiveRunForAgent.mockResolvedValue({
+      id: "run-1",
+      status: "running",
+      contextSnapshot: { issueId: issue.id },
+    } as never);
+    mockHeartbeatService.cancelRun.mockResolvedValue({ id: "run-1", status: "cancelled" } as never);
+
+    const result = await effects.beforeStatusChange(issue as never, "done");
+
+    expect(mockRunnerGoalService.act).toHaveBeenCalledWith(
+      issue.companyId,
+      issue.id,
+      expect.objectContaining({ agentId: ASSIGNEE_AGENT_ID, action: "pause", expectedRevision: 3 }),
+    );
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "run-1",
+      "Cancelled before issue terminalization",
+      expect.objectContaining({ errorCode: "issue_terminalized" }),
+    );
+    expect(result).toEqual({ interruptedRunId: "run-1", runToCancel: null });
+  });
+
+  it("refuses done when the runner goal has a control action in progress", async () => {
+    const effects = await createEffects();
+    const issue = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "in_progress" });
+    mockRunnerGoalService.projection.mockResolvedValue({ goal: { status: "active" }, pendingAction: { id: "x" } } as never);
+
+    await expect(effects.beforeStatusChange(issue as never, "done")).rejects.toMatchObject({ status: 409 });
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("finds the active run for cancelled and cancels it after the write", async () => {
+    const effects = await createEffects();
+    const existing = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "in_progress" });
+    mockHeartbeatService.getActiveRunForAgent.mockResolvedValue({
+      id: "run-2",
+      status: "running",
+      contextSnapshot: { issueId: existing.id },
+    } as never);
+    mockHeartbeatService.cancelRun.mockResolvedValue({
+      id: "run-2",
+      companyId: existing.companyId,
+      agentId: ASSIGNEE_AGENT_ID,
+      status: "cancelled",
+    } as never);
+
+    const before = await effects.beforeStatusChange(existing as never, "cancelled");
+    expect(before.runToCancel).toEqual(expect.objectContaining({ id: "run-2" }));
+    const after = await effects.afterStatusChange({
+      existing: existing as never,
+      updated: { ...existing, status: "cancelled" } as never,
+      actor: boardActor,
+      ...before,
+    });
+
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("run-2");
+    expect(after).toEqual({ cancelledStatusRunId: "run-2" });
+  });
+
+  it("wakes dependents and the parent after done", async () => {
+    const effects = await createEffects();
+    const existing = makeIssue({ status: "in_progress", parentId: "parent-1" });
+    mockIssueService.listWakeableBlockedDependents.mockResolvedValue([
+      {
+        id: "dependent-1",
+        assigneeAgentId: DEPENDENT_AGENT_ID,
+        blockerIssueIds: [existing.id],
+        blockedTransitionAt: null,
+      },
+    ]);
+    mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue({
+      id: "parent-1",
+      assigneeAgentId: PARENT_AGENT_ID,
+      childIssueIds: [existing.id],
+      childIssueSummaries: [],
+      childIssueSummaryTruncated: false,
+    });
+
+    await effects.afterStatusChange({
+      existing: existing as never,
+      updated: { ...existing, status: "done" } as never,
+      actor: boardActor,
+      interruptedRunId: null,
+      runToCancel: null,
+    });
+
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      DEPENDENT_AGENT_ID,
+      expect.objectContaining({
+        reason: "issue_blockers_resolved",
+        payload: expect.objectContaining({ issueId: "dependent-1", mutation: "blocker_done" }),
+      }),
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      PARENT_AGENT_ID,
+      expect.objectContaining({ reason: "issue_children_completed" }),
+    );
+    expect(mockIssueThreadInteractionService.expirePendingInteractionsForTerminalIssue).toHaveBeenCalled();
+  });
+
+  it("wakes the assignee when the status moves from blocked to todo", async () => {
+    const effects = await createEffects();
+    const existing = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "blocked" });
+
+    await effects.afterStatusChange({
+      existing: existing as never,
+      updated: { ...existing, status: "todo" } as never,
+      actor: boardActor,
+      interruptedRunId: null,
+      runToCancel: null,
+    });
+
+    await vi.waitFor(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1));
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      ASSIGNEE_AGENT_ID,
+      expect.objectContaining({ reason: "issue_status_changed" }),
+    );
+  });
+});

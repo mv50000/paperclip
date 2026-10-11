@@ -6,17 +6,58 @@
 //
 // Only the HTTP approve route (web UI, Telegram listener) executes it. The Slack
 // card and the plugin chat bridge refuse to approve a voice_action, because
-// they do not show the operator the exact text that would be applied. ---
+// they do not show the operator the exact text that would be applied.
+//
+// RK9-490: the action has the same side effects as the same action in the UI.
+// The issue routes own that logic and hand it over as `VoiceActionIssueEffects`;
+// this module only orders the calls. ---
 import type { Db } from "@paperclipai/db";
 import { voiceActionApprovalPayloadSchema, type VoiceActionApprovalPayload } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { redactEventPayload } from "../redaction.js";
 import type { logActivity as logActivityFn } from "./activity-log.js";
+import type { getActorInfo } from "../routes/authz.js";
 import type { issueService } from "./issues.js";
 
 type IssueService = ReturnType<typeof issueService>;
 type ResolvedIssue = NonNullable<Awaited<ReturnType<IssueService["getById"]>>>;
+type UpdatedIssue = NonNullable<Awaited<ReturnType<IssueService["update"]>>>;
+type IssueComment = Awaited<ReturnType<IssueService["addComment"]>>;
+export type VoiceActionActor = ReturnType<typeof getActorInfo>;
+
+/** Side effects of `PATCH /issues/:id` and `POST /issues/:id/comments`. The
+ * issue routes implement them with the same functions the routes call. */
+export type VoiceActionIssueEffects = {
+  /** Refusal text when a board comment may not enter the issue (paused tree). */
+  commentPauseRefusal(issue: ResolvedIssue): Promise<string | null>;
+  /** Reference sync, goal steering, superseded confirmations, assignee and
+   * @-mention wakes. */
+  afterComment(input: { issue: ResolvedIssue; comment: IssueComment; actor: VoiceActionActor }): Promise<void>;
+  /** Before the status write: stops the assignee's runner goal (and its run)
+   * for done/cancelled and finds the run that cancelled must stop. Throws a
+   * 409 when the goal cannot be stopped. */
+  beforeStatusChange(
+    issue: ResolvedIssue,
+    status: NonNullable<VoiceActionApprovalPayload["status"]>,
+  ): Promise<{ interruptedRunId: string | null; runToCancel: { id: string } | null }>;
+  /** After the status write: unblock-owner wake, run cancellation, routine
+   * sync, status/dependent/parent wakes and terminal clean-up. */
+  afterStatusChange(input: {
+    existing: ResolvedIssue;
+    updated: UpdatedIssue;
+    actor: VoiceActionActor;
+    interruptedRunId: string | null;
+    runToCancel: { id: string } | null;
+  }): Promise<{ cancelledStatusRunId: string | null }>;
+};
+
+/** Filled by `issueRoutes`, read by the approve route at approval time. */
+export type VoiceActionIssueEffectsSlot = { current: VoiceActionIssueEffects | null };
+
+export function createVoiceActionIssueEffectsSlot(): VoiceActionIssueEffectsSlot {
+  return { current: null };
+}
 
 export const VOICE_ACTION_APPROVAL_TYPE = "voice_action";
 
@@ -61,10 +102,38 @@ export async function resolveVoiceAction(
   return { ok: true, payload, issue };
 }
 
+/** The payload to store on create and resubmit: the parsed proposal plus the
+ * issue state the operator sees, which approve compares against. */
+export function voiceActionPayloadToPersist(
+  resolved: Extract<ResolvedVoiceAction, { ok: true }>,
+): VoiceActionApprovalPayload {
+  return {
+    ...resolved.payload,
+    issueStatusAtProposal: resolved.issue.status,
+    assigneeAgentIdAtProposal: resolved.issue.assigneeAgentId ?? null,
+  };
+}
+
+/** The action applies only to the issue state the proposal was made for: a
+ * later approval must not close an issue that was reopened, or wake an agent
+ * that took the issue over, in between. */
+function stalenessRefusal(payload: VoiceActionApprovalPayload, issue: ResolvedIssue): string | null {
+  if (payload.issueStatusAtProposal === undefined || payload.assigneeAgentIdAtProposal === undefined) {
+    return "the proposal has no issue snapshot; propose it again";
+  }
+  if (issue.status !== payload.issueStatusAtProposal) {
+    return `the issue status changed after the proposal (${payload.issueStatusAtProposal} → ${issue.status}); propose it again`;
+  }
+  if ((issue.assigneeAgentId ?? null) !== payload.assigneeAgentIdAtProposal) {
+    return "the issue assignee changed after the proposal; propose it again";
+  }
+  return null;
+}
+
 /** Status changes that `PATCH /issues/:id` would refuse or handle with extra
  * route-only steps (execution-policy stages, review verdict rules, outcome
- * gates, run cancellation). A voice proposal does not attempt them; the
- * operator does it in the UI. */
+ * gates). A voice proposal does not attempt them; the operator does it in the
+ * UI. A run that holds the issue is stopped as the route does it (RK9-490). */
 async function statusChangeRefusal(
   issuesSvc: Pick<IssueService, "getDependencyReadiness">,
   issue: ResolvedIssue,
@@ -81,15 +150,14 @@ async function statusChangeRefusal(
       return "blocked requires an unresolved blocker; set it in Paperclip with a blocker or unblock owner";
     }
   }
-  if ((status === "done" || status === "cancelled") && (issue.executionRunId || issue.checkoutRunId)) {
-    return `an agent run holds the issue; set ${status} in Paperclip`;
-  }
   return null;
 }
 
 type Outcome =
   | { ok: true; summary: string; details: Record<string, unknown> }
   | { ok: false; reason: string };
+
+const SIDE_EFFECTS_FAILED = "sivuvaikutukset epäonnistuivat, ks. palvelinloki";
 
 /** Executes an approved `voice_action`. Never throws: the outcome lands as an
  * approval comment and an activity entry, and the approval stays approved. */
@@ -99,78 +167,129 @@ export async function executeVoiceAction(
     issuesSvc: Pick<IssueService, "getById" | "addComment" | "update" | "getDependencyReadiness">;
     approvalSvc: { addComment: (approvalId: string, body: string, actor: { userId?: string }) => Promise<unknown> };
     logActivity: typeof logActivityFn;
+    /** Null when the issue routes are not mounted; the action is then refused
+     * rather than applied without the UI side effects. */
+    issueEffects: VoiceActionIssueEffects | null;
   },
   approval: { id: string; companyId: string; payload: unknown },
   decidedByUserId: string,
+  actor: VoiceActionActor,
 ): Promise<void> {
-  const { issuesSvc, approvalSvc, logActivity } = deps;
+  const { issuesSvc, approvalSvc, logActivity, issueEffects } = deps;
   let outcome: Outcome;
   let issueActivity: Parameters<typeof logActivityFn>[1] | null = null;
   try {
     const resolved = await resolveVoiceAction(issuesSvc, approval.companyId, approval.payload);
-    if (!resolved.ok) {
-      outcome = resolved;
-    } else if (resolved.payload.action === "issue_comment" && resolved.issue.conversationAgentId) {
-      // Only the conversation owner may post into an agent chat transcript.
-      outcome = { ok: false, reason: "conversation issues cannot change by voice" };
+    const refusal = !resolved.ok
+      ? resolved.reason
+      : resolved.issue.conversationAgentId
+        ? // Only the conversation owner may post into an agent chat transcript.
+          "conversation issues cannot change by voice"
+        : stalenessRefusal(resolved.payload, resolved.issue) ??
+          (issueEffects ? null : "issue side effects are not available on this server");
+    if (refusal || !resolved.ok || !issueEffects) {
+      outcome = { ok: false, reason: refusal ?? ISSUE_NOT_IN_COMPANY };
     } else if (resolved.payload.action === "issue_comment") {
       const { payload, issue } = resolved;
-      const comment = await issuesSvc.addComment(issue.id, payload.body!, { userId: decidedByUserId });
-      issueActivity = {
-        companyId: issue.companyId,
-        actorType: "user",
-        actorId: decidedByUserId,
-        action: "issue.comment_added",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          commentId: comment.id,
-          bodySnippet: comment.body.slice(0, 120),
-          identifier: issue.identifier,
-          issueTitle: issue.title,
-          source: "voice_action",
-          approvalId: approval.id,
-        },
-      };
-      outcome = {
-        ok: true,
-        summary: `kommentti lisätty tikettiin ${issue.identifier}`,
-        details: { action: payload.action, issueId: issue.id, commentId: comment.id },
-      };
-    } else {
-      const { payload, issue } = resolved;
-      const status = payload.status!;
-      const refusal = await statusChangeRefusal(issuesSvc, issue, status);
-      const updated = refusal
-        ? null
-        : await issuesSvc.update(issue.id, {
-            status,
-            actorUserId: decidedByUserId,
-            companyGuard: approval.companyId,
-          });
-      if (refusal || !updated) {
-        outcome = { ok: false, reason: refusal ?? ISSUE_NOT_IN_COMPANY };
+      const pauseRefusal = await issueEffects.commentPauseRefusal(issue);
+      if (pauseRefusal) {
+        outcome = { ok: false, reason: pauseRefusal };
       } else {
+        const comment = await issuesSvc.addComment(issue.id, payload.body!, { userId: decidedByUserId });
+        let sideEffectsFailed = false;
+        try {
+          await issueEffects.afterComment({ issue, comment, actor });
+        } catch (err) {
+          // The comment is committed; a failed wake must not report it as not added.
+          logger.error({ err, approvalId: approval.id }, "voice_action comment side effects failed");
+          sideEffectsFailed = true;
+        }
         issueActivity = {
           companyId: issue.companyId,
           actorType: "user",
           actorId: decidedByUserId,
-          action: "issue.updated",
+          action: "issue.comment_added",
           entityType: "issue",
           entityId: issue.id,
           details: {
-            status: updated.status,
+            commentId: comment.id,
+            bodySnippet: comment.body.slice(0, 120),
             identifier: issue.identifier,
-            _previous: { status: issue.status },
+            issueTitle: issue.title,
             source: "voice_action",
             approvalId: approval.id,
           },
         };
         outcome = {
           ok: true,
-          summary: `tiketin ${issue.identifier} tila: ${issue.status} → ${updated.status}`,
-          details: { action: payload.action, issueId: issue.id, status: updated.status, previousStatus: issue.status },
+          summary:
+            `kommentti lisätty tikettiin ${issue.identifier}` + (sideEffectsFailed ? ` (${SIDE_EFFECTS_FAILED})` : ""),
+          details: { action: payload.action, issueId: issue.id, commentId: comment.id, sideEffectsFailed },
         };
+      }
+    } else {
+      const { payload, issue } = resolved;
+      const status = payload.status!;
+      const statusRefusal = await statusChangeRefusal(issuesSvc, issue, status);
+      if (statusRefusal) {
+        outcome = { ok: false, reason: statusRefusal };
+      } else {
+        const { interruptedRunId, runToCancel } = await issueEffects.beforeStatusChange(issue, status);
+        const updated = await issuesSvc.update(issue.id, {
+          status,
+          actorUserId: decidedByUserId,
+          companyGuard: approval.companyId,
+        });
+        if (!updated) {
+          outcome = { ok: false, reason: ISSUE_NOT_IN_COMPANY };
+        } else {
+          let cancelledStatusRunId: string | null = null;
+          let sideEffectsFailed = false;
+          try {
+            ({ cancelledStatusRunId } = await issueEffects.afterStatusChange({
+              existing: issue,
+              updated,
+              actor,
+              interruptedRunId,
+              runToCancel,
+            }));
+          } catch (err) {
+            logger.error({ err, approvalId: approval.id }, "voice_action status side effects failed");
+            sideEffectsFailed = true;
+          }
+          issueActivity = {
+            companyId: issue.companyId,
+            actorType: "user",
+            actorId: decidedByUserId,
+            action: "issue.updated",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              status: updated.status,
+              identifier: issue.identifier,
+              _previous: { status: issue.status },
+              ...(interruptedRunId ? { interruptedRunId } : {}),
+              ...(cancelledStatusRunId ? { cancelledStatusRunId } : {}),
+              source: "voice_action",
+              approvalId: approval.id,
+            },
+          };
+          outcome = {
+            ok: true,
+            summary:
+              `tiketin ${issue.identifier} tila: ${issue.status} → ${updated.status}` +
+              (sideEffectsFailed ? ` (${SIDE_EFFECTS_FAILED})` : ""),
+            details: {
+              action: payload.action,
+              issueId: issue.id,
+              status: updated.status,
+              previousStatus: issue.status,
+              interruptedRunId,
+              cancelledStatusRunId,
+              sideEffectsFailed,
+            },
+          };
+        }
       }
     }
   } catch (err) {
