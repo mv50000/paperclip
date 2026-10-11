@@ -73,7 +73,6 @@ import { goalRoutes } from "./routes/goals.js";
 import { onboardingSeedRoutes } from "./routes/onboarding-seed.js";
 import { boardChatRoutes } from "./routes/board-chat.js";
 import { approvalRoutes } from "./routes/approvals.js";
-import { createVoiceActionIssueEffectsSlot } from "./services/rk9-voice-action.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { toolAccessRoutes } from "./routes/tool-access.js";
 import {
@@ -792,9 +791,7 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(onboardingSeedRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
-  // RK9-490: an approved voice_action runs the issue routes' side effects.
-  const voiceActionIssueEffects = createVoiceActionIssueEffectsSlot();
-  api.use(approvalRoutes(db, { pluginWorkerManager: workerManager, voiceActionIssueEffects }));
+  api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(secretRoutes(db));
   api.use(managedAgentProfileRoutes(db));
   api.use(remoteAgentProfileRoutes(db));
@@ -868,7 +865,6 @@ export async function createApp(
   // issue approval endpoints delegate to it. The intervening routers use distinct
   // route prefixes, so this dependency does not change issue-route precedence.
   api.use(issueRoutes(db, opts.storageService, {
-    voiceActionIssueEffects,
     chatRunRetries: chatChannels,
     feedbackExportService: opts.feedbackExportService,
     pluginWorkerManager: workerManager,

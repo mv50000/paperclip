@@ -8,77 +8,84 @@
 // card and the plugin chat bridge refuse to approve a voice_action, because
 // they do not show the operator the exact text that would be applied.
 //
-// RK9-490: the action has the same side effects as the same action in the UI.
-// The issue routes own that logic and hand it over as `VoiceActionIssueEffects`;
-// this module only orders the calls. ---
+// RK9-490: the action has the side effects of the same action in the UI
+// (wakes, terminal clean-up). This module calls the services directly and does
+// not share code with routes/issues.ts, which upstream changes all the time.
+// Where the UI action takes a route-only step (stop a runner goal, reopen the
+// issue, resolve a recovery action), the voice action is refused instead. ---
 import type { Db } from "@paperclipai/db";
-import { voiceActionApprovalPayloadSchema, type VoiceActionApprovalPayload } from "@paperclipai/shared";
+import {
+  isClosedIsolatedExecutionWorkspace,
+  voiceActionApprovalPayloadSchema,
+  type VoiceActionApprovalPayload,
+} from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { redactEventPayload } from "../redaction.js";
+import { isApprovalReviewComment, shouldImplicitlyMoveCommentedIssueToTodo } from "../routes/issues.js";
 import type { logActivity as logActivityFn } from "./activity-log.js";
-import type { getActorInfo } from "../routes/authz.js";
+import type { environmentRuntimeService } from "./environment-runtime.js";
+import type { executionWorkspaceService } from "./execution-workspaces.js";
+import type { heartbeatService } from "./heartbeat.js";
+import { shouldWakeAssigneeForIssueComment } from "./issue-comment-wakeup.js";
+import {
+  buildIssueBlockersResolvedWakeStateKey,
+  findExistingIssueBlockersResolvedWakeForReadyState,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+} from "./issue-dependency-wakeups.js";
+import type { issueRecoveryActionService, issueThreadInteractionService, issueTreeControlService } from "./index.js";
 import type { issueService } from "./issues.js";
+import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "./recovery/review-path-recovery.js";
+import { deliverAgentUnblockNotification } from "./routable-blocked.js";
+import type { runnerGoalService } from "./runner-goals.js";
 
 type IssueService = ReturnType<typeof issueService>;
 type ResolvedIssue = NonNullable<Awaited<ReturnType<IssueService["getById"]>>>;
-type UpdatedIssue = NonNullable<Awaited<ReturnType<IssueService["update"]>>>;
-type IssueComment = Awaited<ReturnType<IssueService["addComment"]>>;
-export type VoiceActionActor = ReturnType<typeof getActorInfo>;
-
-/** Side effects of `PATCH /issues/:id` and `POST /issues/:id/comments`. The
- * issue routes implement them with the same functions the routes call. */
-export type VoiceActionIssueEffects = {
-  /** Refusal text when the comment route would refuse a board comment
-   * (paused tree) or take a path a voice comment does not: reopen the issue
-   * or its closed workspace, or approve a pending review. */
-  commentRefusal(issue: ResolvedIssue, actor: VoiceActionActor, body: string): Promise<string | null>;
-  /** Refusal text for a status change that needs a route-only step (skill
-   * test run completion, stop report to the parent). */
-  statusChangeRefusal(
-    issue: ResolvedIssue,
-    status: NonNullable<VoiceActionApprovalPayload["status"]>,
-  ): Promise<string | null>;
-  /** Reference sync, goal steering, superseded confirmations, assignee and
-   * @-mention wakes. */
-  afterComment(input: { issue: ResolvedIssue; comment: IssueComment; actor: VoiceActionActor }): Promise<void>;
-  /** Before the status write: stops the assignee's runner goal (and its run)
-   * for done/cancelled and finds the run that cancelled must stop. Throws a
-   * 409 when the goal cannot be stopped. */
-  beforeStatusChange(
-    issue: ResolvedIssue,
-    status: NonNullable<VoiceActionApprovalPayload["status"]>,
-  ): Promise<VoiceActionStatusChangePrep>;
-  /** After the status write: unblock-owner wake, run cancellation, routine
-   * sync, handoff record, status/dependent/parent wakes and terminal
-   * clean-up. A failed step is logged and named in `failedSteps`. */
-  afterStatusChange(input: {
-    existing: ResolvedIssue;
-    updated: UpdatedIssue;
-    actor: VoiceActionActor;
-  } & Omit<VoiceActionStatusChangePrep, "goalStopped">): Promise<{ cancelledStatusRunId: string | null; failedSteps: string[] }>;
-};
-
-export type VoiceActionStatusChangePrep = {
-  interruptedRunId: string | null;
-  goalStopped: boolean;
-  runToCancel: { id: string } | null;
-  /** The issue's active recovery action before the write, revalidated after it. */
-  activeRecoveryAction: unknown;
-};
-
-/** Filled by `issueRoutes`, read by the approve route at approval time. */
-export type VoiceActionIssueEffectsSlot = { current: VoiceActionIssueEffects | null };
-
-export function createVoiceActionIssueEffectsSlot(): VoiceActionIssueEffectsSlot {
-  return { current: null };
-}
+type HeartbeatService = ReturnType<typeof heartbeatService>;
+type WakeupRequest = NonNullable<Parameters<HeartbeatService["wakeup"]>[1]>;
+type InteractionService = ReturnType<typeof issueThreadInteractionService>;
 
 export const VOICE_ACTION_APPROVAL_TYPE = "voice_action";
 
 /** Shown by approval surfaces that cannot display the payload. */
 export const VOICE_ACTION_APPROVE_ELSEWHERE =
   "Grok-ehdotus hyväksytään Paperclipissa tai Telegramissa, jossa näkyy tarkka teksti.";
+
+/** The services an approved voice_action calls (`createVoiceActionDeps`). */
+export type VoiceActionDeps = {
+  db: Db;
+  issuesSvc: Pick<
+    IssueService,
+    | "getById"
+    | "addComment"
+    | "update"
+    | "getDependencyReadiness"
+    | "findMentionedAgents"
+    | "listWakeableBlockedDependents"
+    | "getWakeableParentAfterChildCompletion"
+    | "getCurrentScheduledRetry"
+    | "listReviewAttention"
+  >;
+  approvalSvc: { addComment: (approvalId: string, body: string, actor: { userId?: string }) => Promise<unknown> };
+  logActivity: typeof logActivityFn;
+  heartbeat: Pick<HeartbeatService, "wakeup" | "getRun" | "getActiveRunForAgent">;
+  runnerGoals: Pick<ReturnType<typeof runnerGoalService>, "projection">;
+  recoveryActions: Pick<ReturnType<typeof issueRecoveryActionService>, "getActiveForIssue">;
+  treeControl: Pick<ReturnType<typeof issueTreeControlService>, "getActivePauseHoldGate">;
+  executionWorkspaces: Pick<ReturnType<typeof executionWorkspaceService>, "getById">;
+  interactions: Pick<
+    InteractionService,
+    "expireRequestConfirmationsSupersededByComment" | "expirePendingInteractionsForTerminalIssue"
+  >;
+  issueReferences: { syncComment: (commentId: string) => Promise<unknown> };
+  externalObjects: { syncCommentSafely: (commentId: string) => Promise<unknown> };
+  routines: { syncRunStatusForIssue: (issueId: string) => Promise<unknown> };
+  environmentRuntime: Pick<ReturnType<typeof environmentRuntimeService>, "destroyReusableSandboxLeases">;
+  markBlockedOwnerNotified: (issue: { id: string; companyId: string }, notifiedAt: Date) => Promise<unknown>;
+};
+
+/** The approver as the issue routes see a board user. */
+type VoiceActor = { actorType: "user"; actorId: string };
 
 type ResolvedVoiceAction =
   | { ok: true; payload: VoiceActionApprovalPayload; issue: ResolvedIssue }
@@ -145,27 +152,391 @@ function stalenessRefusal(payload: VoiceActionApprovalPayload, issue: ResolvedIs
   return null;
 }
 
-/** Status changes that `PATCH /issues/:id` would refuse or handle with extra
- * route-only steps (execution-policy stages, review verdict rules, outcome
- * gates). A voice proposal does not attempt them; the operator does it in the
- * UI. A run that holds the issue is stopped as the route does it (RK9-490). */
+/** Status changes that `PATCH /issues/:id` would refuse or handle with
+ * route-only steps. A voice proposal does not attempt them; the operator does
+ * it in the UI. */
 async function statusChangeRefusal(
-  issuesSvc: Pick<IssueService, "getDependencyReadiness">,
+  deps: VoiceActionDeps,
   issue: ResolvedIssue,
   status: NonNullable<VoiceActionApprovalPayload["status"]>,
 ): Promise<string | null> {
-  if (issue.conversationAgentId) return "conversation issues cannot change by voice";
+  const { issuesSvc, heartbeat, runnerGoals, recoveryActions } = deps;
   if (issue.executionPolicy || issue.executionState) {
     return `the issue has an execution policy; set ${status} in Paperclip`;
   }
   if (issue.status === "in_review") return `the issue is in review; set ${status} in Paperclip`;
+  if (issue.harnessKind === "skill_test") return `skill test issues complete their test run; set ${status} in Paperclip`;
+  // PATCH may post a stop report to the parent for these.
+  if (issue.parentId && issue.status !== status && (status === "blocked" || status === "cancelled")) {
+    return `the parent issue may get a stop report; set ${status} in Paperclip`;
+  }
   if (status === "blocked" && issue.status !== "blocked") {
     const readiness = await issuesSvc.getDependencyReadiness(issue.id);
     if (readiness.unresolvedBlockerCount === 0) {
       return "blocked requires an unresolved blocker; set it in Paperclip with a blocker or unblock owner";
     }
   }
+  // PATCH resolves or cancels an active recovery action on a status change.
+  if (await recoveryActions.getActiveForIssue(issue.companyId, issue.id)) {
+    return `the issue has an active recovery action; set ${status} in Paperclip`;
+  }
+  if ((status === "done" || status === "cancelled") && issue.status !== status && issue.assigneeAgentId) {
+    // PATCH stops the assignee's goal and run first. A voice action does not.
+    const goal = await runnerGoals.projection(issue.companyId, issue.id, issue.assigneeAgentId);
+    if (goal?.pendingAction || (goal?.goal && goal.goal.status !== "complete")) {
+      return `the assignee has an active goal on the issue; set ${status} in Paperclip`;
+    }
+    if (await activeIssueRun(heartbeat, issue)) {
+      return `an agent run is active on the issue; set ${status} in Paperclip`;
+    }
+  }
   return null;
+}
+
+/** The running run on the issue: its execution run, or the assignee's active
+ * run whose context names this issue. */
+async function activeIssueRun(
+  heartbeat: VoiceActionDeps["heartbeat"],
+  issue: { id: string; assigneeAgentId: string | null; executionRunId?: string | null },
+) {
+  const executionRun = issue.executionRunId ? await heartbeat.getRun(issue.executionRunId) : null;
+  if (executionRun?.status === "running") return executionRun;
+  if (!issue.assigneeAgentId) return null;
+  const activeRun = await heartbeat.getActiveRunForAgent(issue.assigneeAgentId);
+  const context = activeRun?.contextSnapshot as Record<string, unknown> | null | undefined;
+  return activeRun?.status === "running" && context?.issueId === issue.id ? activeRun : null;
+}
+
+/** Comments that `POST /issues/:id/comments` would turn into more than a
+ * comment. A voice proposal does not attempt them. */
+async function commentRefusal(deps: VoiceActionDeps, issue: ResolvedIssue, actor: VoiceActor, body: string) {
+  const { issuesSvc, treeControl, executionWorkspaces } = deps;
+  if (await treeControl.getActivePauseHoldGate(issue.companyId, issue.id)) {
+    return "Task is paused. Resume it before sending a message";
+  }
+  if (issue.executionWorkspaceId) {
+    const workspace = await executionWorkspaces.getById(issue.executionWorkspaceId);
+    if (workspace && isClosedIsolatedExecutionWorkspace(workspace)) {
+      return "a comment would reopen the issue's closed workspace; comment in Paperclip";
+    }
+  }
+  if (issue.status === "in_review" && isApprovalReviewComment(body)) {
+    return "the comment reads as a review approval; approve the review in Paperclip";
+  }
+  const movesToTodo = shouldImplicitlyMoveCommentedIssueToTodo({
+    issueStatus: issue.status,
+    assigneeAgentId: issue.assigneeAgentId,
+    actorType: actor.actorType,
+    actorId: actor.actorId,
+    actorRunId: null,
+    checkoutRunId: issue.checkoutRunId,
+    executionRunId: issue.executionRunId,
+  });
+  // A blocked issue with an open blocker stays blocked in the comment route.
+  if (
+    movesToTodo &&
+    (issue.status !== "blocked" || (await issuesSvc.getDependencyReadiness(issue.id)).unresolvedBlockerCount === 0)
+  ) {
+    return `a comment would reopen the ${issue.status} issue; reopen it in Paperclip`;
+  }
+  // The comment route resumes a scheduled retry of the assignee.
+  if (issue.status === "in_progress" && issue.assigneeAgentId) {
+    const retry = await issuesSvc.getCurrentScheduledRetry(issue.id);
+    if (retry && retry.agentId === issue.assigneeAgentId) {
+      return "a comment would resume the scheduled retry; comment in Paperclip";
+    }
+  }
+  return null;
+}
+
+/** Collects wakes and enqueues one per agent and issue (first one wins). */
+function createWakeBatch(deps: VoiceActionDeps, issue: { id: string; companyId: string }, actor: VoiceActor) {
+  const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
+  const add = (agentId: string, wakeup: WakeupRequest) => {
+    const wakeIssueId =
+      wakeup.payload && typeof wakeup.payload.issueId === "string" ? wakeup.payload.issueId : issue.id;
+    const key = `${agentId}:${wakeIssueId}`;
+    if (!wakeups.has(key)) wakeups.set(key, { agentId, wakeup });
+  };
+  const addDependencyResolved = async (dependent: {
+    id: string;
+    assigneeAgentId: string;
+    blockerIssueIds: string[];
+    blockedTransitionAt?: Date | string | null;
+  }) => {
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: dependent.id,
+      blockerIssueIds: dependent.blockerIssueIds,
+      blockedTransitionAt: dependent.blockedTransitionAt,
+    });
+    try {
+      const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(deps.db, {
+        companyId: issue.companyId,
+        dependentIssueId: dependent.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+        blockedTransitionAt: dependent.blockedTransitionAt,
+      });
+      if (existingWake) return;
+    } catch (err) {
+      logger.warn({ err, issueId: dependent.id, idempotencyKey }, "voice_action: failed to check existing dependency wake");
+    }
+    add(dependent.assigneeAgentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+      payload: {
+        issueId: dependent.id,
+        resolvedBlockerIssueId: issue.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+        mutation: "blocker_done",
+      },
+      idempotencyKey,
+      requestedByActorType: actor.actorType,
+      requestedByActorId: actor.actorId,
+      contextSnapshot: {
+        issueId: dependent.id,
+        taskId: dependent.id,
+        wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+        source: "issue.blockers_resolved",
+        resolvedBlockerIssueId: issue.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+      },
+    });
+  };
+  const dispatch = async () => {
+    for (const { agentId, wakeup } of wakeups.values()) {
+      await deps.heartbeat.wakeup(agentId, wakeup).catch((err) => {
+        logger.warn({ err, issueId: issue.id, agentId }, "voice_action: failed to wake agent");
+      });
+    }
+  };
+  return { add, addDependencyResolved, dispatch };
+}
+
+/** After the comment: what `POST /issues/:id/comments` does for a plain board
+ * comment. Returns the steps that failed. */
+async function afterComment(
+  deps: VoiceActionDeps,
+  issue: ResolvedIssue,
+  comment: Awaited<ReturnType<IssueService["addComment"]>>,
+  actor: VoiceActor,
+): Promise<string[]> {
+  const { issuesSvc } = deps;
+  const failedSteps: string[] = [];
+  const attempt = async (step: string, run: () => Promise<unknown>) => {
+    try {
+      await run();
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, step }, "voice_action comment side effect failed");
+      failedSteps.push(step);
+    }
+  };
+  await attempt("reference_sync", () => deps.issueReferences.syncComment(comment.id));
+  await attempt("external_object_sync", () => deps.externalObjects.syncCommentSafely(comment.id));
+  let lostReviewPathRef: string | null = null;
+  await attempt("superseded_confirmations", async () => {
+    const expired = await deps.interactions.expireRequestConfirmationsSupersededByComment(issue, comment, {
+      agentId: null,
+      userId: actor.actorId,
+    });
+    await logExpiredInteractions(deps, issue, expired, actor, "issue.comment");
+    if (issue.status !== "in_review" || expired.length === 0) return;
+    const attention = (await issuesSvc.listReviewAttention(issue.companyId, [issue])).get(issue.id);
+    if (attention?.state !== "stalled") return;
+    const ids = expired.map((interaction) => interaction.id).sort();
+    lostReviewPathRef = ids.length === 1 ? ids[0]! : `interactions:${ids.join(",")}`;
+  });
+  await attempt("wakes", async () => {
+    const batch = createWakeBatch(deps, issue, actor);
+    // The assignee may have changed while the comment was written.
+    const current = (await issuesSvc.getById(issue.id)) ?? issue;
+    const assigneeId = current.assigneeAgentId;
+    const wakeAssignee = shouldWakeAssigneeForIssueComment({
+      selfComment: false,
+      resumeRequested: false,
+      commentCreatedByRunId: comment.createdByRunId,
+      issueAtCommentStart: issue,
+      reopened: false,
+      currentStatus: current.status,
+    });
+    if (assigneeId && wakeAssignee) {
+      const reviewPath = lostReviewPathRef
+        ? {
+            reviewPathLost: true,
+            reviewPathConsumedRef: lostReviewPathRef,
+            reviewPathInstruction: REVIEW_PATH_RECOVERY_INSTRUCTION,
+          }
+        : {};
+      batch.add(assigneeId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_commented",
+        payload: { issueId: issue.id, commentId: comment.id, mutation: "comment", ...reviewPath },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: issue.id,
+          taskId: issue.id,
+          commentId: comment.id,
+          wakeCommentId: comment.id,
+          source: "issue.comment",
+          wakeReason: "issue_commented",
+          ...reviewPath,
+        },
+      });
+    }
+    for (const mentionedId of await issuesSvc.findMentionedAgents(issue.companyId, comment.body)) {
+      batch.add(mentionedId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_comment_mentioned",
+        payload: { issueId: issue.id, commentId: comment.id },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: {
+          issueId: issue.id,
+          taskId: issue.id,
+          commentId: comment.id,
+          wakeCommentId: comment.id,
+          wakeReason: "issue_comment_mentioned",
+          source: "comment.mention",
+        },
+      });
+    }
+    await batch.dispatch();
+  });
+  return failedSteps;
+}
+
+/** After the status write: what `PATCH /issues/:id` does for a board status
+ * change that passed `statusChangeRefusal`. Returns the steps that failed. */
+async function afterStatusChange(
+  deps: VoiceActionDeps,
+  existing: ResolvedIssue,
+  updated: NonNullable<Awaited<ReturnType<IssueService["update"]>>>,
+  actor: VoiceActor,
+): Promise<string[]> {
+  const { issuesSvc } = deps;
+  const failedSteps: string[] = [];
+  const attempt = async (step: string, run: () => Promise<unknown>) => {
+    try {
+      await run();
+    } catch (err) {
+      logger.warn({ err, issueId: existing.id, step }, "voice_action status side effect failed");
+      failedSteps.push(step);
+    }
+  };
+  const issue = updated;
+  if (existing.status !== "blocked" && issue.status === "blocked") {
+    await attempt("unblock_owner_wake", () =>
+      deliverAgentUnblockNotification({
+        issue,
+        wakeup: deps.heartbeat.wakeup,
+        markNotified: (notifiedAt) => deps.markBlockedOwnerNotified(issue, notifiedAt),
+      }),
+    );
+  }
+  await attempt("routine_sync", () => deps.routines.syncRunStatusForIssue(issue.id));
+  const batch = createWakeBatch(deps, issue, actor);
+  const becameTerminal =
+    !["done", "cancelled"].includes(existing.status) && ["done", "cancelled"].includes(issue.status);
+  await attempt("status_wakes", async () => {
+    const wakesAssignee =
+      (existing.status === "backlog" && issue.status !== "backlog") ||
+      (["blocked", "done", "cancelled"].includes(existing.status) && issue.status === "todo");
+    if (wakesAssignee && issue.assigneeAgentId) {
+      batch.add(issue.assigneeAgentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_status_changed",
+        payload: { issueId: issue.id, mutation: "update" },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: { issueId: issue.id, source: "issue.status_change" },
+      });
+    }
+    if (existing.status !== "done" && issue.status === "done") {
+      for (const dependent of await issuesSvc.listWakeableBlockedDependents(issue.id)) {
+        await batch.addDependencyResolved(dependent);
+      }
+    }
+  });
+  if (becameTerminal) {
+    await attempt("terminal_cleanup", async () => {
+      const expired = await deps.interactions.expirePendingInteractionsForTerminalIssue(issue, {
+        agentId: null,
+        userId: actor.actorId,
+      });
+      await logExpiredInteractions(deps, issue, expired, actor, "issue.status_transition.issue_closed");
+      await deps.environmentRuntime.destroyReusableSandboxLeases({
+        companyId: issue.companyId,
+        issueId: issue.id,
+        executionWorkspaceId: issue.executionWorkspaceId ?? null,
+        failureReason: `issue_terminal_${issue.status}`,
+      });
+    });
+    if (issue.parentId) {
+      const parentId = issue.parentId;
+      await attempt("parent_wake", async () => {
+        const parent = await issuesSvc.getWakeableParentAfterChildCompletion(parentId);
+        if (!parent) return;
+        batch.add(parent.assigneeAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_children_completed",
+          payload: {
+            issueId: parent.id,
+            completedChildIssueId: issue.id,
+            childIssueIds: parent.childIssueIds,
+            childIssueSummaries: parent.childIssueSummaries,
+            childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+          },
+          requestedByActorType: actor.actorType,
+          requestedByActorId: actor.actorId,
+          contextSnapshot: {
+            issueId: parent.id,
+            taskId: parent.id,
+            wakeReason: "issue_children_completed",
+            source: "issue.children_completed",
+            completedChildIssueId: issue.id,
+            childIssueIds: parent.childIssueIds,
+            childIssueSummaries: parent.childIssueSummaries,
+            childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+          },
+        });
+      });
+    }
+  }
+  await attempt("dispatch_wakes", () => batch.dispatch());
+  return failedSteps;
+}
+
+/** The same activity entry the issue routes write for an expired interaction. */
+async function logExpiredInteractions(
+  deps: VoiceActionDeps,
+  issue: { id: string; companyId: string; identifier?: string | null },
+  interactions: Array<{ id: string; kind: string; status: string; result?: unknown }>,
+  actor: VoiceActor,
+  source: string,
+) {
+  for (const interaction of interactions) {
+    await deps.logActivity(deps.db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      action: "issue.thread_interaction_expired",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier ?? null,
+        interactionId: interaction.id,
+        interactionKind: interaction.kind,
+        interactionStatus: interaction.status,
+        source,
+        result: interaction.result ?? null,
+      },
+    });
+  }
 }
 
 type Outcome =
@@ -177,20 +548,12 @@ const SIDE_EFFECTS_FAILED = "sivuvaikutukset epäonnistuivat, ks. palvelinloki";
 /** Executes an approved `voice_action`. Never throws: the outcome lands as an
  * approval comment and an activity entry, and the approval stays approved. */
 export async function executeVoiceAction(
-  db: Db,
-  deps: {
-    issuesSvc: Pick<IssueService, "getById" | "addComment" | "update" | "getDependencyReadiness">;
-    approvalSvc: { addComment: (approvalId: string, body: string, actor: { userId?: string }) => Promise<unknown> };
-    logActivity: typeof logActivityFn;
-    /** Null when the issue routes are not mounted; the action is then refused
-     * rather than applied without the UI side effects. */
-    issueEffects: VoiceActionIssueEffects | null;
-  },
+  deps: VoiceActionDeps,
   approval: { id: string; companyId: string; payload: unknown },
   decidedByUserId: string,
-  actor: VoiceActionActor,
 ): Promise<void> {
-  const { issuesSvc, approvalSvc, logActivity, issueEffects } = deps;
+  const { db, issuesSvc, approvalSvc, logActivity } = deps;
+  const actor: VoiceActor = { actorType: "user", actorId: decidedByUserId };
   let outcome: Outcome;
   let issueActivity: Parameters<typeof logActivityFn>[1] | null = null;
   try {
@@ -201,36 +564,61 @@ export async function executeVoiceAction(
         ? // Only the conversation owner may post into an agent chat transcript.
           "conversation issues cannot change by voice"
         : stalenessRefusal(resolved.payload, resolved.issue) ??
-          (issueEffects ? null : "issue side effects are not available on this server");
-    if (refusal || !resolved.ok || !issueEffects) {
+          (resolved.payload.action === "issue_comment"
+            ? await commentRefusal(deps, resolved.issue, actor, resolved.payload.body!)
+            : await statusChangeRefusal(deps, resolved.issue, resolved.payload.status!));
+    if (refusal || !resolved.ok) {
       outcome = { ok: false, reason: refusal ?? ISSUE_NOT_IN_COMPANY };
     } else if (resolved.payload.action === "issue_comment") {
       const { payload, issue } = resolved;
-      const commentRefusal = await issueEffects.commentRefusal(issue, actor, payload.body!);
-      if (commentRefusal) {
-        outcome = { ok: false, reason: commentRefusal };
+      const comment = await issuesSvc.addComment(issue.id, payload.body!, { userId: decidedByUserId });
+      // The comment is committed; a failed wake must not report it as not added.
+      const failedSteps = await afterComment(deps, issue, comment, actor);
+      issueActivity = {
+        companyId: issue.companyId,
+        actorType: "user",
+        actorId: decidedByUserId,
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          commentId: comment.id,
+          bodySnippet: comment.body.slice(0, 120),
+          identifier: issue.identifier,
+          issueTitle: issue.title,
+          source: "voice_action",
+          approvalId: approval.id,
+        },
+      };
+      outcome = {
+        ok: true,
+        summary:
+          `kommentti lisätty tikettiin ${issue.identifier}` + (failedSteps.length ? ` (${SIDE_EFFECTS_FAILED})` : ""),
+        details: { action: payload.action, issueId: issue.id, commentId: comment.id, failedSteps },
+      };
+    } else {
+      const { payload, issue } = resolved;
+      const status = payload.status!;
+      const updated = await issuesSvc.update(issue.id, {
+        status,
+        actorUserId: decidedByUserId,
+        companyGuard: approval.companyId,
+      });
+      if (!updated) {
+        outcome = { ok: false, reason: ISSUE_NOT_IN_COMPANY };
       } else {
-        const comment = await issuesSvc.addComment(issue.id, payload.body!, { userId: decidedByUserId });
-        let sideEffectsFailed = false;
-        try {
-          await issueEffects.afterComment({ issue, comment, actor });
-        } catch (err) {
-          // The comment is committed; a failed wake must not report it as not added.
-          logger.error({ err, approvalId: approval.id }, "voice_action comment side effects failed");
-          sideEffectsFailed = true;
-        }
+        const failedSteps = await afterStatusChange(deps, issue, updated, actor);
         issueActivity = {
           companyId: issue.companyId,
           actorType: "user",
           actorId: decidedByUserId,
-          action: "issue.comment_added",
+          action: "issue.updated",
           entityType: "issue",
           entityId: issue.id,
           details: {
-            commentId: comment.id,
-            bodySnippet: comment.body.slice(0, 120),
+            status: updated.status,
             identifier: issue.identifier,
-            issueTitle: issue.title,
+            _previous: { status: issue.status },
             source: "voice_action",
             approvalId: approval.id,
           },
@@ -238,98 +626,16 @@ export async function executeVoiceAction(
         outcome = {
           ok: true,
           summary:
-            `kommentti lisätty tikettiin ${issue.identifier}` + (sideEffectsFailed ? ` (${SIDE_EFFECTS_FAILED})` : ""),
-          details: { action: payload.action, issueId: issue.id, commentId: comment.id, sideEffectsFailed },
+            `tiketin ${issue.identifier} tila: ${issue.status} → ${updated.status}` +
+            (failedSteps.length ? ` (${SIDE_EFFECTS_FAILED})` : ""),
+          details: {
+            action: payload.action,
+            issueId: issue.id,
+            status: updated.status,
+            previousStatus: issue.status,
+            failedSteps,
+          },
         };
-      }
-    } else {
-      const { payload, issue } = resolved;
-      const status = payload.status!;
-      const statusRefusal =
-        (await statusChangeRefusal(issuesSvc, issue, status)) ??
-        (await issueEffects.statusChangeRefusal(issue, status));
-      // Stopping the runner goal can wait up to 30 s, and the issue can change
-      // meanwhile. Read it again and repeat the checks before the write.
-      const prepared = statusRefusal
-        ? null
-        : await (async () => {
-            const stop = await issueEffects.beforeStatusChange(issue, status);
-            const recheck = await resolveVoiceAction(issuesSvc, approval.companyId, approval.payload);
-            const reason = !recheck.ok
-              ? recheck.reason
-              : stalenessRefusal(recheck.payload, recheck.issue) ??
-                (await statusChangeRefusal(issuesSvc, recheck.issue, status)) ??
-                (await issueEffects.statusChangeRefusal(recheck.issue, status));
-            const stopped = stop.interruptedRunId
-              ? ` (the assignee's goal was paused and run ${stop.interruptedRunId} cancelled)`
-              : stop.goalStopped
-                ? " (the assignee's goal was paused)"
-                : "";
-            return { ...stop, reason: reason ? `${reason}${stopped}` : null };
-          })();
-      const refusalReason = statusRefusal ?? prepared?.reason ?? null;
-      if (refusalReason || !prepared) {
-        outcome = { ok: false, reason: refusalReason ?? ISSUE_NOT_IN_COMPANY };
-      } else {
-        const { interruptedRunId, runToCancel, activeRecoveryAction } = prepared;
-        const updated = await issuesSvc.update(issue.id, {
-          status,
-          actorUserId: decidedByUserId,
-          companyGuard: approval.companyId,
-        });
-        if (!updated) {
-          outcome = { ok: false, reason: ISSUE_NOT_IN_COMPANY };
-        } else {
-          let cancelledStatusRunId: string | null = null;
-          let sideEffectsFailed = false;
-          try {
-            const after = await issueEffects.afterStatusChange({
-              existing: issue,
-              updated,
-              actor,
-              interruptedRunId,
-              runToCancel,
-              activeRecoveryAction,
-            });
-            cancelledStatusRunId = after.cancelledStatusRunId;
-            sideEffectsFailed = after.failedSteps.length > 0;
-          } catch (err) {
-            logger.error({ err, approvalId: approval.id }, "voice_action status side effects failed");
-            sideEffectsFailed = true;
-          }
-          issueActivity = {
-            companyId: issue.companyId,
-            actorType: "user",
-            actorId: decidedByUserId,
-            action: "issue.updated",
-            entityType: "issue",
-            entityId: issue.id,
-            details: {
-              status: updated.status,
-              identifier: issue.identifier,
-              _previous: { status: issue.status },
-              ...(interruptedRunId ? { interruptedRunId } : {}),
-              ...(cancelledStatusRunId ? { cancelledStatusRunId } : {}),
-              source: "voice_action",
-              approvalId: approval.id,
-            },
-          };
-          outcome = {
-            ok: true,
-            summary:
-              `tiketin ${issue.identifier} tila: ${issue.status} → ${updated.status}` +
-              (sideEffectsFailed ? ` (${SIDE_EFFECTS_FAILED})` : ""),
-            details: {
-              action: payload.action,
-              issueId: issue.id,
-              status: updated.status,
-              previousStatus: issue.status,
-              interruptedRunId,
-              cancelledStatusRunId,
-              sideEffectsFailed,
-            },
-          };
-        }
       }
     }
   } catch (err) {

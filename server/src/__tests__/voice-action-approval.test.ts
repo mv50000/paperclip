@@ -1,11 +1,13 @@
 // RK9-479: a `voice_action` approval carries a voice-proposed issue action; the
 // server executes the stored payload on approve in the approver's name.
-// RK9-490: it runs the issue routes' side effects and refuses a stale proposal.
+// RK9-490: it has the side effects of the same action in the UI, refuses a
+// stale proposal, and refuses what the UI would do with a route-only step.
+// voice-action-wake-parity.test.ts compares the wakes with the issue routes.
 
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { conflict, unprocessable } from "../errors.js";
+import { unprocessable } from "../errors.js";
 
 vi.mock("../services/email/index.js", () => ({
   createEmailService: vi.fn(() => ({ sendEmail: vi.fn(), replyToMessage: vi.fn() })),
@@ -55,20 +57,54 @@ const mockIssuesSvc = vi.hoisted(() => ({
   addComment: vi.fn(),
   update: vi.fn(),
   getDependencyReadiness: vi.fn(),
-  listReviewAttention: vi.fn(async () => new Map()),
+  findMentionedAgents: vi.fn(),
+  listWakeableBlockedDependents: vi.fn(),
+  getWakeableParentAfterChildCompletion: vi.fn(),
+  getCurrentScheduledRetry: vi.fn(),
+  listReviewAttention: vi.fn(),
 }));
 vi.mock("../services/issues.js", () => ({
   issueService: vi.fn(() => mockIssuesSvc),
 }));
 
-const mockIssueEffects = vi.hoisted(() => ({
-  commentRefusal: vi.fn(),
-  statusChangeRefusal: vi.fn(),
-  afterComment: vi.fn(),
-  beforeStatusChange: vi.fn(),
-  afterStatusChange: vi.fn(),
+// The real helpers live in routes/issues.ts, which this route test does not
+// load; the parity test runs them for real.
+const mockIssueRouteHelpers = vi.hoisted(() => ({
+  isApprovalReviewComment: vi.fn(() => false),
+  shouldImplicitlyMoveCommentedIssueToTodo: vi.fn(() => false),
 }));
-const effectsSlot = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock("../routes/issues.js", () => mockIssueRouteHelpers);
+
+const mockDeps = vi.hoisted(() => ({
+  db: {},
+  heartbeat: {
+    wakeup: vi.fn(async () => ({ id: "run-9" })),
+    getRun: vi.fn(),
+    getActiveRunForAgent: vi.fn(),
+  },
+  runnerGoals: { projection: vi.fn() },
+  recoveryActions: { getActiveForIssue: vi.fn() },
+  treeControl: { getActivePauseHoldGate: vi.fn() },
+  executionWorkspaces: { getById: vi.fn() },
+  interactions: {
+    expireRequestConfirmationsSupersededByComment: vi.fn(),
+    expirePendingInteractionsForTerminalIssue: vi.fn(),
+  },
+  issueReferences: { syncComment: vi.fn() },
+  externalObjects: { syncCommentSafely: vi.fn() },
+  routines: { syncRunStatusForIssue: vi.fn() },
+  environmentRuntime: { destroyReusableSandboxLeases: vi.fn() },
+  markBlockedOwnerNotified: vi.fn(),
+}));
+vi.mock("../services/rk9-voice-action-deps.js", () => ({
+  createVoiceActionDeps: vi.fn(() => ({ ...mockDeps, issuesSvc: mockIssuesSvc })),
+}));
+vi.mock("../services/issue-dependency-wakeups.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/issue-dependency-wakeups.js")>(
+    "../services/issue-dependency-wakeups.js",
+  );
+  return { ...actual, findExistingIssueBlockersResolvedWakeForReadyState: vi.fn(async () => null) };
+});
 
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
 const AGENT_ID = "22222222-2222-4222-8222-222222222222";
@@ -78,6 +114,10 @@ const issue = {
   identifier: "RK9-469",
   title: "Grok connector",
   status: "in_progress",
+  assigneeAgentId: null as string | null,
+  parentId: null as string | null,
+  executionWorkspaceId: null as string | null,
+  executionRunId: null as string | null,
 };
 
 const commentPayload = {
@@ -98,6 +138,8 @@ const statusPayload = {
   issueStatusAtProposal: "in_progress",
   assigneeAgentIdAtProposal: null,
 };
+const assignedIssue = { ...issue, assigneeAgentId: AGENT_ID };
+const assignedSnapshot = { assigneeAgentIdAtProposal: AGENT_ID };
 
 function voiceApproval(payload: Record<string, unknown>, status = "approved") {
   return {
@@ -122,7 +164,7 @@ async function createApp(actor: Record<string, unknown> = boardActor) {
     req.actor = actor as never;
     next();
   });
-  app.use("/api", approvalRoutes({} as never, { voiceActionIssueEffects: effectsSlot as never }));
+  app.use("/api", approvalRoutes({} as never));
   app.use((err: { status?: number; message?: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(err.status ?? 500).json({ error: err.message ?? "error" });
   });
@@ -135,6 +177,12 @@ function approve(payload: Record<string, unknown>) {
   mockApprovalSvc.approve.mockResolvedValue({ approval, applied: true });
 }
 
+async function approveAndRun(payload: Record<string, unknown>) {
+  approve(payload);
+  const res = await request(await createApp()).post("/api/approvals/approval-1/approve").send({});
+  expect(res.status).toBe(200);
+}
+
 function approvalComment() {
   return String(mockApprovalSvc.addComment.mock.calls[0]?.[1] ?? "");
 }
@@ -143,198 +191,238 @@ function activityActions() {
   return mockLogActivity.mock.calls.map((call) => (call as unknown as [unknown, { action: string }])[1].action);
 }
 
+function wakeReasons() {
+  return (mockDeps.heartbeat.wakeup.mock.calls as unknown as Array<[string, { reason: string }]>).map(
+    ([agentId, wakeup]) => `${agentId}:${wakeup.reason}`,
+  );
+}
+
 describe("voice_action approve executes the stored payload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssuesSvc.getById.mockResolvedValue(issue);
-    mockIssuesSvc.addComment.mockResolvedValue({ id: "issue-comment-1", body: "Testattu autossa" });
+    mockIssuesSvc.addComment.mockResolvedValue({ id: "issue-comment-1", body: "Testattu autossa", createdByRunId: null });
     mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "done" });
     mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 0 });
-    effectsSlot.current = mockIssueEffects;
-    mockIssueEffects.commentRefusal.mockResolvedValue(null);
-    mockIssueEffects.statusChangeRefusal.mockResolvedValue(null);
-    mockIssueEffects.afterComment.mockResolvedValue(undefined);
-    mockIssueEffects.beforeStatusChange.mockResolvedValue({
-      interruptedRunId: null,
-      goalStopped: false,
-      runToCancel: null,
-      activeRecoveryAction: null,
-    });
-    mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null, failedSteps: [] });
+    mockIssuesSvc.findMentionedAgents.mockResolvedValue([]);
+    mockIssuesSvc.listWakeableBlockedDependents.mockResolvedValue([]);
+    mockIssuesSvc.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
+    mockIssuesSvc.getCurrentScheduledRetry.mockResolvedValue(null);
+    mockIssuesSvc.listReviewAttention.mockResolvedValue(new Map());
+    mockIssueRouteHelpers.isApprovalReviewComment.mockReturnValue(false);
+    mockIssueRouteHelpers.shouldImplicitlyMoveCommentedIssueToTodo.mockReturnValue(false);
+    mockDeps.heartbeat.getRun.mockResolvedValue(null);
+    mockDeps.heartbeat.getActiveRunForAgent.mockResolvedValue(null);
+    mockDeps.runnerGoals.projection.mockResolvedValue(null);
+    mockDeps.recoveryActions.getActiveForIssue.mockResolvedValue(null);
+    mockDeps.treeControl.getActivePauseHoldGate.mockResolvedValue(null);
+    mockDeps.executionWorkspaces.getById.mockResolvedValue(null);
+    mockDeps.interactions.expireRequestConfirmationsSupersededByComment.mockResolvedValue([]);
+    mockDeps.interactions.expirePendingInteractionsForTerminalIssue.mockResolvedValue([]);
+    mockDeps.issueReferences.syncComment.mockResolvedValue(undefined);
+    mockDeps.externalObjects.syncCommentSafely.mockResolvedValue(undefined);
+    mockDeps.routines.syncRunStatusForIssue.mockResolvedValue(undefined);
+    mockDeps.environmentRuntime.destroyReusableSandboxLeases.mockResolvedValue(undefined);
   });
 
   it("posts the comment on the issue in the approver's name", async () => {
-    approve(commentPayload);
-    const app = await createApp();
+    await approveAndRun(commentPayload);
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(mockIssuesSvc.addComment).toHaveBeenCalledWith(ISSUE_ID, "Testattu autossa", { userId: "board-user" });
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
-    expect(mockIssueEffects.commentRefusal).toHaveBeenCalledWith(
-      issue,
-      expect.objectContaining({ actorType: "user" }),
-      "Testattu autossa",
-    );
-    // The comment wakes the assignee as a board comment would.
-    expect(mockIssueEffects.afterComment).toHaveBeenCalledWith({
-      issue,
-      comment: expect.objectContaining({ id: "issue-comment-1" }),
-      actor: expect.objectContaining({ actorType: "user", actorId: "board-user" }),
-    });
+    expect(mockDeps.issueReferences.syncComment).toHaveBeenCalledWith("issue-comment-1");
     expect(approvalComment()).toContain("✅");
     expect(activityActions()).toEqual(
       expect.arrayContaining(["issue.comment_added", "voice_action.executed", "approval.approved"]),
     );
   });
 
+  it("wakes the assignee and the mentioned agents once each", async () => {
+    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+    mockIssuesSvc.findMentionedAgents.mockResolvedValue([AGENT_ID, "agent-9"]);
+    await approveAndRun({ ...commentPayload, ...assignedSnapshot });
+
+    // The assignee is also mentioned; the first wake (issue_commented) wins.
+    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`, "agent-9:issue_comment_mentioned"]);
+    expect(mockDeps.heartbeat.wakeup).toHaveBeenCalledWith(
+      AGENT_ID,
+      expect.objectContaining({
+        requestedByActorType: "user",
+        requestedByActorId: "board-user",
+        payload: expect.objectContaining({ issueId: ISSUE_ID, commentId: "issue-comment-1", mutation: "comment" }),
+      }),
+    );
+  });
+
   it("changes the issue status under a company guard", async () => {
-    approve(statusPayload);
-    const app = await createApp();
+    await approveAndRun(statusPayload);
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, {
       status: "done",
       actorUserId: "board-user",
       companyGuard: "company-1",
     });
     expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
-    expect(mockIssueEffects.beforeStatusChange).toHaveBeenCalledWith(issue, "done");
-    expect(mockIssueEffects.afterStatusChange).toHaveBeenCalledWith({
-      existing: issue,
-      updated: { ...issue, status: "done" },
-      actor: expect.objectContaining({ actorType: "user", actorId: "board-user" }),
-      interruptedRunId: null,
-      runToCancel: null,
-      activeRecoveryAction: null,
-    });
-    expect(mockIssueEffects.beforeStatusChange.mock.invocationCallOrder[0]).toBeLessThan(
-      mockIssuesSvc.update.mock.invocationCallOrder[0]!,
+    expect(mockDeps.routines.syncRunStatusForIssue).toHaveBeenCalledWith(ISSUE_ID);
+    expect(mockDeps.interactions.expirePendingInteractionsForTerminalIssue).toHaveBeenCalled();
+    expect(mockDeps.environmentRuntime.destroyReusableSandboxLeases).toHaveBeenCalledWith(
+      expect.objectContaining({ issueId: ISSUE_ID, failureReason: "issue_terminal_done" }),
     );
     expect(approvalComment()).toContain("in_progress → done");
     expect(activityActions()).toEqual(expect.arrayContaining(["issue.updated", "voice_action.executed"]));
   });
 
-  it("stops the assignee's run like PATCH /issues/:id and records the stopped runs", async () => {
-    mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "in_progress", executionRunId: "run-1" });
-    mockIssuesSvc.update.mockResolvedValue({ ...issue, status: "cancelled" });
-    mockIssueEffects.beforeStatusChange.mockResolvedValue({
-      interruptedRunId: "run-1",
-      goalStopped: true,
-      runToCancel: { id: "run-1" },
-      activeRecoveryAction: { id: "recovery-1" },
-    });
-    approve({ ...statusPayload, status: "cancelled" });
-    const app = await createApp();
+  it("wakes the assignee when a backlog issue moves to todo", async () => {
+    const backlog = { ...assignedIssue, status: "backlog" };
+    mockIssuesSvc.getById.mockResolvedValue(backlog);
+    mockIssuesSvc.update.mockResolvedValue({ ...backlog, status: "todo" });
+    await approveAndRun({ ...statusPayload, status: "todo", issueStatusAtProposal: "backlog", ...assignedSnapshot });
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
-    expect(mockIssuesSvc.update).toHaveBeenCalledWith(ISSUE_ID, expect.objectContaining({ status: "cancelled" }));
-    expect(mockIssueEffects.afterStatusChange).toHaveBeenCalledWith(
-      expect.objectContaining({
-        interruptedRunId: "run-1",
-        runToCancel: { id: "run-1" },
-        // The recovery action read before the write is revalidated after it.
-        activeRecoveryAction: { id: "recovery-1" },
-      }),
-    );
-    const updatedActivity = mockLogActivity.mock.calls
-      .map((call) => (call as unknown as [unknown, { action: string; details: Record<string, unknown> }])[1])
-      .find((entry) => entry.action === "issue.updated");
-    expect(updatedActivity?.details).toEqual(expect.objectContaining({ interruptedRunId: "run-1" }));
+    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_status_changed`]);
   });
 
-  it("does not change the status when the runner goal cannot be stopped", async () => {
-    mockIssueEffects.beforeStatusChange.mockRejectedValue(
-      conflict("The current agent goal has a control action still in progress"),
-    );
-    approve(statusPayload);
-    const app = await createApp();
+  it.each([
+    [
+      "the assignee has an active goal",
+      () => mockDeps.runnerGoals.projection.mockResolvedValue({ goal: { status: "active" }, pendingAction: null }),
+      "done",
+    ],
+    [
+      "the assignee has an active goal",
+      () => mockDeps.runnerGoals.projection.mockResolvedValue({ goal: null, pendingAction: { id: "action-1" } }),
+      "cancelled",
+    ],
+    [
+      "an agent run is active",
+      () =>
+        mockDeps.heartbeat.getActiveRunForAgent.mockResolvedValue({
+          id: "run-1",
+          status: "running",
+          contextSnapshot: { issueId: ISSUE_ID },
+        }),
+      "done",
+    ],
+    [
+      "active recovery action",
+      () => mockDeps.recoveryActions.getActiveForIssue.mockResolvedValue({ id: "recovery-1" }),
+      "todo",
+    ],
+  ])("refuses the status change when %s (%s)", async (reason, arrange, status) => {
+    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+    arrange();
+    await approveAndRun({ ...statusPayload, status, ...assignedSnapshot });
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
-    expect(approvalComment()).toContain("control action still in progress");
+    expect(mockDeps.heartbeat.wakeup).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain(reason);
     expect(activityActions()).toContain("voice_action.failed");
   });
 
+  it("closes the issue when the assignee's goal is complete and its run is on another issue", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...assignedIssue, executionRunId: "run-old" });
+    mockDeps.runnerGoals.projection.mockResolvedValue({ goal: { status: "complete" }, pendingAction: null });
+    mockDeps.heartbeat.getRun.mockResolvedValue({ id: "run-old", status: "succeeded" });
+    mockDeps.heartbeat.getActiveRunForAgent.mockResolvedValue({
+      id: "run-2",
+      status: "running",
+      contextSnapshot: { issueId: "other-issue" },
+    });
+    await approveAndRun({ ...statusPayload, ...assignedSnapshot });
+
+    expect(mockIssuesSvc.update).toHaveBeenCalled();
+    expect(approvalComment()).toContain("✅");
+  });
+
+  it.each([
+    ["the parent issue may get a stop report", "cancelled", { parentId: "parent-1" }],
+    ["skill test issues", "done", { harnessKind: "skill_test" }],
+  ])("refuses a status change that needs a route-only step: %s", async (reason, status, extra) => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, ...extra });
+    await approveAndRun({ ...statusPayload, status });
+
+    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain(reason);
+  });
+
+  it("wakes the dependents and the parent when the issue is done", async () => {
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, parentId: "parent-1" });
+    mockIssuesSvc.update.mockResolvedValue({ ...issue, parentId: "parent-1", status: "done" });
+    mockIssuesSvc.listWakeableBlockedDependents.mockResolvedValue([
+      { id: "dependent-1", assigneeAgentId: "agent-2", blockerIssueIds: [ISSUE_ID], blockedTransitionAt: null },
+    ]);
+    mockIssuesSvc.getWakeableParentAfterChildCompletion.mockResolvedValue({
+      id: "parent-1",
+      assigneeAgentId: "agent-3",
+      childIssueIds: [ISSUE_ID],
+      childIssueSummaries: [],
+      childIssueSummaryTruncated: false,
+    });
+    await approveAndRun(statusPayload);
+
+    expect(wakeReasons()).toEqual(["agent-2:issue_blockers_resolved", "agent-3:issue_children_completed"]);
+  });
+
   it("reports the status change done when a side effect fails after the write", async () => {
-    mockIssueEffects.afterStatusChange.mockRejectedValue(new Error("routine sync failed"));
-    approve(statusPayload);
-    const app = await createApp();
+    mockDeps.routines.syncRunStatusForIssue.mockRejectedValue(new Error("routine sync failed"));
+    await approveAndRun(statusPayload);
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(approvalComment()).toContain("✅");
     expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
     expect(approvalComment()).not.toContain("routine sync failed");
+    const executed = mockLogActivity.mock.calls
+      .map((call) => (call as unknown as [unknown, { action: string; details: Record<string, unknown> }])[1])
+      .find((entry) => entry.action === "voice_action.executed");
+    expect(executed?.details).toEqual(expect.objectContaining({ failedSteps: ["routine_sync"] }));
   });
 
-  it("names failed side effect steps after the write", async () => {
-    mockIssueEffects.afterStatusChange.mockResolvedValue({ cancelledStatusRunId: null, failedSteps: ["routine_sync"] });
-    approve(statusPayload);
-    const app = await createApp();
+  it.each([
+    ["the issue tree is paused", () => mockDeps.treeControl.getActivePauseHoldGate.mockResolvedValue({ holdId: "hold-1" }), "Task is paused"],
+    [
+      "the comment would reopen the issue",
+      () => mockIssueRouteHelpers.shouldImplicitlyMoveCommentedIssueToTodo.mockReturnValue(true),
+      "would reopen",
+    ],
+    [
+      "the comment would resume a scheduled retry",
+      () => {
+        mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+        mockIssuesSvc.getCurrentScheduledRetry.mockResolvedValue({ agentId: AGENT_ID });
+      },
+      "scheduled retry",
+    ],
+    [
+      "the issue workspace is closed",
+      () => {
+        mockIssuesSvc.getById.mockResolvedValue({ ...issue, executionWorkspaceId: "workspace-1" });
+        mockDeps.executionWorkspaces.getById.mockResolvedValue({
+          id: "workspace-1",
+          mode: "isolated_workspace",
+          status: "archived",
+          closedAt: new Date(),
+        });
+      },
+      "closed workspace",
+    ],
+  ])("refuses a comment when %s", async (_name, arrange, reason) => {
+    arrange();
+    // The proposal snapshot matches the issue the case arranged.
+    const current = (await mockIssuesSvc.getById()) as typeof issue;
+    mockIssuesSvc.getById.mockClear();
+    await approveAndRun({ ...commentPayload, assigneeAgentIdAtProposal: current.assigneeAgentId });
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
-    expect(approvalComment()).toContain("✅");
-    expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
-  });
-
-  it("refuses the write when the issue changed while the runner goal stopped", async () => {
-    mockIssuesSvc.getById
-      .mockResolvedValueOnce(issue)
-      .mockResolvedValueOnce({ ...issue, status: "in_review" });
-    mockIssueEffects.beforeStatusChange.mockResolvedValue({
-      interruptedRunId: "run-1",
-      goalStopped: true,
-      runToCancel: null,
-      activeRecoveryAction: null,
-    });
-    approve(statusPayload);
-    const app = await createApp();
-
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
-    expect(mockIssueEffects.beforeStatusChange).toHaveBeenCalled();
-    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
-    expect(mockIssueEffects.afterStatusChange).not.toHaveBeenCalled();
-    expect(approvalComment()).toContain("status changed after the proposal (in_progress → in_review)");
-    expect(approvalComment()).toContain("goal was paused and run run-1 cancelled");
-  });
-
-  it("refuses a status change that needs a route-only step", async () => {
-    mockIssueEffects.statusChangeRefusal.mockResolvedValue("skill test issues complete their test run; set done in Paperclip");
-    approve(statusPayload);
-    const app = await createApp();
-
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
-    expect(mockIssueEffects.beforeStatusChange).not.toHaveBeenCalled();
-    expect(mockIssuesSvc.update).not.toHaveBeenCalled();
-    expect(approvalComment()).toContain("skill test issues");
-  });
-
-  it("refuses a comment while the issue tree is paused", async () => {
-    mockIssueEffects.commentRefusal.mockResolvedValue("Task is paused. Resume it before sending a message.");
-    approve(commentPayload);
-    const app = await createApp();
-
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
-    expect(mockIssueEffects.afterComment).not.toHaveBeenCalled();
-    expect(approvalComment()).toContain("Task is paused");
+    expect(mockDeps.heartbeat.wakeup).not.toHaveBeenCalled();
+    expect(approvalComment()).toContain(reason);
+  });
+
+  it("allows a comment on a blocked issue that keeps an open blocker", async () => {
+    mockIssueRouteHelpers.shouldImplicitlyMoveCommentedIssueToTodo.mockReturnValue(true);
+    mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "blocked" });
+    mockIssuesSvc.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+    await approveAndRun({ ...commentPayload, issueStatusAtProposal: "blocked" });
+
+    expect(mockIssuesSvc.addComment).toHaveBeenCalled();
+    expect(approvalComment()).toContain("✅");
   });
 
   it.each([
@@ -342,51 +430,26 @@ describe("voice_action approve executes the stored payload", () => {
     ["the assignee changed", { assigneeAgentId: AGENT_ID }, "assignee changed after the proposal"],
   ])("refuses a stale proposal when %s", async (_name, change, reason) => {
     mockIssuesSvc.getById.mockResolvedValue({ ...issue, ...change });
-    approve(statusPayload);
-    const app = await createApp();
+    await approveAndRun(statusPayload);
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
-    expect(mockIssueEffects.beforeStatusChange).not.toHaveBeenCalled();
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
     expect(approvalComment()).toContain(reason);
   });
 
   it("refuses a stale comment proposal too", async () => {
     mockIssuesSvc.getById.mockResolvedValue({ ...issue, status: "done" });
-    approve(commentPayload);
-    const app = await createApp();
+    await approveAndRun(commentPayload);
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
     expect(approvalComment()).toContain("status changed after the proposal");
   });
 
   it("refuses a proposal stored before the issue snapshot existed", async () => {
     const { issueStatusAtProposal: _status, assigneeAgentIdAtProposal: _assignee, ...legacy } = statusPayload;
-    approve(legacy);
-    const app = await createApp();
+    await approveAndRun(legacy);
 
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
     expect(mockIssuesSvc.update).not.toHaveBeenCalled();
     expect(approvalComment()).toContain("no issue snapshot");
-  });
-
-  it("refuses the action when the issue side effects are not wired", async () => {
-    effectsSlot.current = null;
-    approve(commentPayload);
-    const app = await createApp();
-
-    const res = await request(app).post("/api/approvals/approval-1/approve").send({});
-
-    expect(res.status).toBe(200);
-    expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
-    expect(approvalComment()).toContain("issue side effects are not available");
   });
 
   it("refuses an issue that belongs to another company", async () => {

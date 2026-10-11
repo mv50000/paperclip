@@ -40,24 +40,42 @@ Palvelin ei yritä tilamuutosta, jonka `PATCH /issues/:id` hylkäisi tai joka va
 
 Operaattorin päätös 11.10.2026: hyväksytty `voice_action` toimii kuin sama toimi UI:ssa.
 
-- Kommentti: tauotetun puun tarkistus (`assertBoardCommentNotPaused`-logiikka), viittausten synkronointi, aktiivisen goalin ohjaus, korvattujen vahvistusten vanhentaminen sekä assigneen ja @-mainittujen herätys.
-- `done`/`cancelled`: assigneen runner goal pysäytetään ennen kirjoitusta, ja goalin ajo perutaan. `cancelled` peruu lisäksi tiketin aktiivisen ajon.
-- Kirjoituksen jälkeen: unblock-omistajan herätys, routine-synkronointi, recovery-actionin uudelleenarviointi (sama `revalidateActiveSourceRecoveryAfterCommittedWrite` kuin reitillä; kommentilla `trigger: "comment"`), handoff-kirjaus, assigneen herätys backlog/blocked/suljettu → todo -siirrossa, riippuvien tikettien ja parentin herätys sekä terminaalisiivous.
-- Logiikka on `issueRoutes`in sulkeumissa, joita `PATCH /issues/:id` ja `POST /issues/:id/comments` kutsuvat. `issueRoutes` antaa ne `VoiceActionIssueEffectsSlot`in kautta approve-reitille (`app.ts`). Jos slotti on tyhjä, toimi hylätään.
-- Goalin pysäytyksen 409 hylkää toimen ennen kirjoitusta. Kirjoituksen jälkeiset vaiheet ajetaan toisistaan riippumatta. Sivuvaikutusvirhe ei muuta tulosta: kommenttiin lisätään "sivuvaikutukset epäonnistuivat" ja virhe jää palvelinlokiin.
-- Hylätään eikä toteuteta reitin erityispolkua:
-  - Kommentti tikettiin, jonka isolated workspace on suljettu (kommenttireitti avaisi sen).
-  - Kommentti, jonka kommenttireitti tulkitsisi odottavan reviewn hyväksynnäksi (`commentApprovesPendingReview`).
-  - Kommentti, jonka UI:n kommenttireitti avaisi uudelleen todo-tilaan: suljettu tai blocked tiketti ilman avointa blokkeria, kun assignee on agentti, tai in_progress-tiketti, jolla on ajastettu uusinta. Ehto on `humanCommentMovesIssueToTodo`, joka käyttää reitin omia predikaatteja.
-  - Skill test -tiketin tilamuutos (reitti päättää testiajon).
-  - `blocked`/`cancelled` tiketille, jonka parent saa stop-raportin (`directParentReportDisabledForIssue`).
-- Goalin pysäytys voi odottaa 30 s. Siksi palvelin lukee tiketin uudelleen ja toistaa staleness- ja tilatarkistukset ennen kirjoitusta. Jos tarkistus hylkää, jo pysäytetty goal ja ajo mainitaan kommentissa.
-- Goalin pysäytys voi venyttää approve-pyynnön yli Telegram-kuuntelijan 30 s aikakatkaisun. Kuuntelijan korjaus on erillisessä seurantatiketissä.
-- Ei mukana: blocked-tilan `issue.blockers_restored`-herätys, koska voice-`blocked` vaatii avoimen blokkerin.
+- Kommentti:
+  - Palvelin tarkistaa tauotetun puun samalla tavalla kuin `assertBoardCommentNotPaused`.
+  - Palvelin synkronoi viittaukset ja vanhentaa korvatut vahvistuspyynnöt.
+  - Palvelin herättää assigneen (`issue_commented`) ja @-mainitut agentit (`issue_comment_mentioned`).
+- Tilamuutos, kirjoituksen jälkeen:
+  - unblock-omistajan herätys, kun tiketti siirtyy `blocked`-tilaan
+  - routine-synkronointi
+  - assigneen herätys (`issue_status_changed`), kun tiketti siirtyy backlogista tai blocked-, done- tai cancelled-tilasta todo-tilaan
+  - riippuvien tikettien herätys (`issue_blockers_resolved`), kun tila on `done`
+  - terminaalisiivous: odottavien interaktioiden vanhennus ja sandbox-leasejen purku
+  - parentin herätys (`issue_children_completed`)
+- Kirjoituksen jälkeiset vaiheet ajetaan toisistaan riippumatta. Sivuvaikutusvirhe ei muuta tulosta. Kommenttiin lisätään "sivuvaikutukset epäonnistuivat", ja virhe jää palvelinlokiin.
+- Herätteiden muoto (reason, payload, contextSnapshot) on sama kuin reiteillä. `voice-action-wake-parity.test.ts` ajaa reitin ja voice-polun samoja mockeja vasten ja vertaa herätekutsuja.
+
+### Poikkeama: hylkää, ei pysäytä
+
+UI:n `PATCH /issues/:id` pysäyttää `done`/`cancelled`-siirrossa assigneen runner goalin ja aktiivisen ajon sekä ratkaisee recovery actionin. Voice-polku ei tee näitä. Se hylkää toimen selkeällä syyllä, ja operaattori tekee muutoksen Paperclipissa:
+
+- `done`/`cancelled`, kun assigneella on tällä tiketillä aktiivinen tai odottava runner goal
+- `done`/`cancelled`, kun tiketillä on käynnissä oleva ajo
+- mikä tahansa tilamuutos, kun tiketillä on aktiivinen recovery action
+- `blocked`/`cancelled` tiketille, jolla on parent, koska PATCH voi lähettää parentille stop-raportin
+- skill test -tiketin tilamuutos, koska reitti päättää testiajon
+- kommentti, jonka kommenttireitti muuttaisi muuksi kuin kommentiksi:
+  - tiketin avaus uudelleen todo-tilaan (`shouldImplicitlyMoveCommentedIssueToTodo`); blocked-tiketti, jolla on avoin blokkeri, pysyy blocked-tilassa, joten kommentti sallitaan
+  - ajastetun uusinnan jatko
+  - suljetun isolated workspacen avaus
+  - reviewn hyväksyntä (`isApprovalReviewComment`)
+
+Syy on forkin hygienia. Upstream muuttaa `server/src/routes/issues.ts`:ää jatkuvasti, ja reitin sulkeumien jakaminen olisi tehnyt jokaisesta upstream-mergestä konfliktin. Siksi `issues.ts`:ään lisätään vain kaksi `export`-sanaa (`isApprovalReviewComment`, `shouldImplicitlyMoveCommentedIssueToTodo`). `rk9-voice-action.ts` kutsuu palveluja suoraan (`rk9-voice-action-deps.ts`). Hylkäys korvaa myös goalin pysäytyksen 30 s odotuksen, joten approve-pyyntö ei enää veny yli Telegram-kuuntelijan aikakatkaisun (RK9-502).
+
+Kun upstream muuttaa reitin sivuvaikutuksia, päivitä `rk9-voice-action.ts`. Parity-testi kaatuu, jos herätteiden muoto eroaa.
 
 ## Toteutus
 
-- Koodi: `server/src/services/rk9-voice-action.ts`, kutsu `approvals.ts`:n approve-käsittelijästä.
+- Koodi: `server/src/services/rk9-voice-action.ts` ja palvelut `rk9-voice-action-deps.ts`. Kutsu tulee `approvals.ts`:n approve-käsittelijästä.
 - Toimi tehdään issue-palvelun kautta hyväksyjän nimissä (`addComment` tai `update`). Sivuvaikutukset ks. yllä.
 - Lopputulos kirjataan hyväksynnän kommentiksi ja activity logiin (`voice_action.executed` / `voice_action.failed`, tiketille `issue.comment_added` / `issue.updated` ja `details.source: "voice_action"`).
 - Virhe ei kaada hyväksyntää: hyväksyntä pysyy `approved`-tilassa, ja virhe näkyy kommentissa. Kommenttiin menee vain 4xx-sääntövirheen teksti; muu virhe jää palvelinlokiin.

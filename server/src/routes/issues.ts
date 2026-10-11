@@ -246,7 +246,6 @@ import {
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
-import type { VoiceActionIssueEffectsSlot } from "../services/rk9-voice-action.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
 import {
@@ -2060,7 +2059,7 @@ function actorMatchesExecutionParticipant(
 const APPROVAL_NEGATION_REGEX =
   /\b(?:NOT|REJECT(?:ED|ING|S)?|DENY|DENIED|DENYING|BLOCK(?:ED|ING|S)?|CHANGES?\s+REQUESTED)\b/i;
 
-function isApprovalReviewComment(body: string) {
+export function isApprovalReviewComment(body: string) {
   const normalized = body.replace(/\r\n?/g, "\n");
   const headingMatch = normalized.match(/(?:^|\n)##\s*Review:\s*([^\n]*)/i);
   if (headingMatch) {
@@ -2286,7 +2285,7 @@ function isClosedIssueStatus(
   return status === "done" || status === "cancelled";
 }
 
-function shouldImplicitlyMoveCommentedIssueToTodo(input: {
+export function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   issueStatus: string | null | undefined;
   assigneeAgentId: string | null | undefined;
   actorType: "agent" | "user";
@@ -3461,8 +3460,6 @@ export function issueRoutes(
   db: Db,
   storage: StorageService,
   opts: {
-    /** RK9-490: receives the side effects an approved voice_action runs. */
-    voiceActionIssueEffects?: VoiceActionIssueEffectsSlot;
     chatRunRetries?: Pick<
       ChatChannelService,
       "prepareFailedChatRunRetry" | "processFailedChatRunRetry"
@@ -6520,12 +6517,6 @@ export function issueRoutes(
     return false;
   }
 
-  // RK9 Custom (RK9-490): an approved voice_action comment uses the same hold.
-  const BOARD_COMMENT_PAUSED_ERROR = "Task is paused. Resume it before sending a message.";
-  async function getBoardCommentPauseHold(issue: { id: string; companyId: string }) {
-    return treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id);
-  }
-
   async function assertBoardCommentNotPaused(
     req: Request,
     res: Response,
@@ -6534,10 +6525,10 @@ export function issueRoutes(
     // Agents may still finish reporting an interrupted run. New operator
     // messages must not enter the paused-conversation triage wake path.
     if (req.actor.type !== "board") return true;
-    const hold = await getBoardCommentPauseHold(issue);
+    const hold = await treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id);
     if (!hold) return true;
     res.status(409).json({
-      error: BOARD_COMMENT_PAUSED_ERROR,
+      error: "Task is paused. Resume it before sending a message.",
       details: { issueId: issue.id, holdId: hold.holdId, rootIssueId: hold.rootIssueId },
     });
     return false;
@@ -6945,840 +6936,6 @@ export function issueRoutes(
 
     return runToInterrupt?.status === "running" ? runToInterrupt : null;
   }
-
-  // --- RK9 Custom (RK9-490): issue side effects shared by PATCH /issues/:id,
-  // POST /issues/:id/comments and an approved `voice_action`, so a voice action
-  // behaves like the same action in the UI. ---
-  type IssueRouteActor = ReturnType<typeof getActorInfo>;
-  type IssueWakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
-
-  /** Stops the assignee's runner goal before done/cancelled, and cancels the
-   * active run when a goal was stopped. Returns the goal action and the
-   * cancelled run id. Throws a 409 when the goal or run cannot be stopped. */
-  async function stopAssigneeWorkBeforeTerminalization(
-    existing: {
-      id: string;
-      companyId: string;
-      status: string;
-      assigneeAgentId: string | null;
-      executionRunId?: string | null;
-    },
-    nextStatus: unknown,
-  ): Promise<{ goalStopAction: "pause" | "clear" | null; interruptedRunId: string | null }> {
-    const terminalizingIssue =
-      typeof nextStatus === "string" &&
-      nextStatus !== existing.status &&
-      isClosedIssueStatus(nextStatus);
-    if (!terminalizingIssue || !existing.assigneeAgentId) {
-      return { goalStopAction: null, interruptedRunId: null };
-    }
-    const goalStopAction = await stopRunnerGoalForOwnershipChange({
-      companyId: existing.companyId,
-      issueId: existing.id,
-      agentId: existing.assigneeAgentId,
-    });
-    const runToStopForTerminalization = goalStopAction
-      ? await resolveActiveIssueRun(existing)
-      : null;
-    if (!goalStopAction || !runToStopForTerminalization) {
-      return { goalStopAction, interruptedRunId: null };
-    }
-    const cancelled = await heartbeat.cancelRun(
-      runToStopForTerminalization.id,
-      "Cancelled before issue terminalization",
-      {
-        errorCode: "issue_terminalized",
-        resultJson: { terminalizationStopConfirmed: true },
-        eventMessage: "run cancelled before issue terminalization",
-        eventPayload: {
-          issueId: existing.id,
-          status: nextStatus,
-        },
-      },
-    );
-    if (!cancelled || cancelled.status !== "cancelled") {
-      throw conflict(
-        "The active agent run could not be stopped before terminalizing the issue",
-        {
-          code: "runner_goal_terminalization_stop_unconfirmed",
-          runId: runToStopForTerminalization.id,
-        },
-      );
-    }
-    return { goalStopAction, interruptedRunId: cancelled.id };
-  }
-
-  /** After a status change to cancelled: cancels the run that was active on the
-   * issue before the update. Returns the cancelled run id. */
-  async function cancelRunForCancelledStatus(
-    runToCancel: { id: string } | null,
-    input: {
-      existing: { id: string; companyId: string };
-      interruptedRunId: string | null;
-      actor: IssueRouteActor;
-    },
-  ): Promise<string | null> {
-    const { existing, actor } = input;
-    if (!runToCancel || runToCancel.id === input.interruptedRunId) return null;
-    let cancelledStatusRunId: string | null = null;
-    try {
-      const cancelled = await heartbeat.cancelRun(runToCancel.id);
-      if (!cancelled) return null;
-      cancelledStatusRunId = cancelled.id;
-      await logActivity(db, {
-        companyId: cancelled.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "heartbeat.cancelled",
-        entityType: "heartbeat_run",
-        entityId: cancelled.id,
-        issueId: existing.id,
-        details: {
-          agentId: cancelled.agentId,
-          source: "issue_status_cancelled",
-          issueId: existing.id,
-        },
-      });
-    } catch (err) {
-      logger.warn(
-        {
-          err,
-          issueId: existing.id,
-          runId: runToCancel.id,
-        },
-        "failed to cancel run for cancelled issue",
-      );
-      await logActivity(db, {
-        companyId: existing.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "heartbeat.cancel_failed",
-        entityType: "heartbeat_run",
-        entityId: runToCancel.id,
-        issueId: existing.id,
-        details: { source: "issue_status_cancelled", issueId: existing.id },
-      });
-    }
-    return cancelledStatusRunId;
-  }
-
-  /** After entering blocked: wakes the unblock owner agent once. */
-  async function notifyUnblockOwnerAfterEnteringBlocked<
-    T extends Parameters<typeof deliverAgentUnblockNotification>[0]["issue"] & {
-      companyId: string;
-    },
-  >(blockedIssue: T): Promise<T> {
-    let ownerNotifiedAt: Date | null = null;
-    await deliverAgentUnblockNotification({
-      issue: blockedIssue,
-      wakeup: heartbeat.wakeup,
-      markNotified: async (blockedOwnerNotifiedAt) => {
-        ownerNotifiedAt = blockedOwnerNotifiedAt;
-      },
-    });
-    if (!ownerNotifiedAt) return blockedIssue;
-    await db
-      .update(issueRows)
-      .set({ blockedOwnerNotifiedAt: ownerNotifiedAt })
-      .where(
-        and(
-          eq(issueRows.id, blockedIssue.id),
-          eq(issueRows.companyId, blockedIssue.companyId),
-        ),
-      );
-    return { ...blockedIssue, blockedOwnerNotifiedAt: ownerNotifiedAt };
-  }
-
-  /** Whether a status change wakes the assignee: out of backlog, or into todo
-   * from blocked, done/cancelled or (by a user) in_review. */
-  function statusChangeWakesAssignee(input: {
-    existing: { status: string };
-    issue: { status: string };
-    actor: IssueRouteActor;
-    statusRequested: boolean;
-    reopened: boolean;
-  }) {
-    const { existing, issue } = input;
-    const statusChangedFromBacklog =
-      existing.status === "backlog" &&
-      issue.status !== "backlog" &&
-      input.statusRequested;
-    const statusChangedFromBlockedToTodo =
-      existing.status === "blocked" &&
-      issue.status === "todo" &&
-      (input.statusRequested || input.reopened);
-    const statusChangedFromClosedToTodo =
-      isClosedIssueStatus(existing.status) &&
-      issue.status === "todo" &&
-      input.statusRequested;
-    const userResumedFromReviewToTodo =
-      input.actor.actorType === "user" &&
-      existing.status === "in_review" &&
-      issue.status === "todo" &&
-      input.statusRequested;
-    return (
-      statusChangedFromBacklog ||
-      statusChangedFromBlockedToTodo ||
-      statusChangedFromClosedToTodo ||
-      userResumedFromReviewToTodo
-    );
-  }
-
-  /** Collects wakes for one mutation and enqueues one wake per agent and issue.
-   * `keepFirst` keeps the first wake for a key; otherwise the last one wins. */
-  function createIssueWakeBatch(input: {
-    issue: { id: string; companyId: string };
-    actor: IssueRouteActor;
-    keepFirst: boolean;
-    /** `actorId` of the `issue.blockers_resolved_wake_emitted` activity. */
-    emittedByActorId: string;
-    defaultSource: string;
-    dependencyCheckFailureMessage: string;
-    wakeFailureMessage: string;
-  }) {
-    const { issue, actor } = input;
-    const wakeups = new Map<
-      string,
-      { agentId: string; wakeup: IssueWakeupRequest }
-    >();
-    const add = (agentId: string, wakeup: IssueWakeupRequest) => {
-      const wakeIssueId =
-        wakeup.payload &&
-        typeof wakeup.payload === "object" &&
-        typeof wakeup.payload.issueId === "string"
-          ? wakeup.payload.issueId
-          : issue.id;
-      const key = `${agentId}:${wakeIssueId}`;
-      if (input.keepFirst && wakeups.has(key)) return;
-      wakeups.set(key, { agentId, wakeup });
-    };
-    const addDependencyResolved = async (dependency: {
-      agentId: string;
-      dependentIssueId: string;
-      resolvedBlockerIssueId: string;
-      blockerIssueIds: string[];
-      blockedTransitionAt?: Date | string | null;
-      source: string;
-      mutation: string;
-    }) => {
-      const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-        dependentIssueId: dependency.dependentIssueId,
-        blockerIssueIds: dependency.blockerIssueIds,
-        blockedTransitionAt: dependency.blockedTransitionAt,
-      });
-      try {
-        const existingWake =
-          await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-            companyId: issue.companyId,
-            dependentIssueId: dependency.dependentIssueId,
-            blockerIssueIds: dependency.blockerIssueIds,
-            blockedTransitionAt: dependency.blockedTransitionAt,
-          });
-        if (existingWake) return;
-      } catch (err) {
-        logger.warn(
-          { err, issueId: dependency.dependentIssueId, idempotencyKey },
-          input.dependencyCheckFailureMessage,
-        );
-      }
-      add(dependency.agentId, {
-        source: "automation",
-        triggerDetail: "system",
-        reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-        payload: {
-          issueId: dependency.dependentIssueId,
-          resolvedBlockerIssueId: dependency.resolvedBlockerIssueId,
-          blockerIssueIds: dependency.blockerIssueIds,
-          mutation: dependency.mutation,
-        },
-        idempotencyKey,
-        requestedByActorType: actor.actorType,
-        requestedByActorId: actor.actorId,
-        contextSnapshot: {
-          issueId: dependency.dependentIssueId,
-          taskId: dependency.dependentIssueId,
-          wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-          source: dependency.source,
-          resolvedBlockerIssueId: dependency.resolvedBlockerIssueId,
-          blockerIssueIds: dependency.blockerIssueIds,
-        },
-      });
-    };
-    const dispatch = () => {
-      for (const { agentId, wakeup } of wakeups.values()) {
-        heartbeat
-          .wakeup(agentId, wakeup)
-          .then((wakeRun) => {
-            if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
-            const payload =
-              wakeup.payload && typeof wakeup.payload === "object"
-                ? wakeup.payload
-                : {};
-            const dependentIssueId =
-              typeof payload.issueId === "string"
-                ? payload.issueId
-                : issue.id;
-            return logActivity(db, {
-              companyId: issue.companyId,
-              actorType: "system",
-              actorId: input.emittedByActorId,
-              agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "issue.blockers_resolved_wake_emitted",
-              entityType: "issue",
-              entityId: dependentIssueId,
-              details: {
-                source: wakeup.contextSnapshot?.source ?? input.defaultSource,
-                wakeupRunId: wakeRun?.id ?? null,
-                idempotencyKey: wakeup.idempotencyKey ?? null,
-                resolvedBlockerIssueId:
-                  typeof payload.resolvedBlockerIssueId === "string"
-                    ? payload.resolvedBlockerIssueId
-                    : null,
-                blockerIssueIds: Array.isArray(payload.blockerIssueIds)
-                  ? payload.blockerIssueIds
-                  : [],
-              },
-            });
-          })
-          .catch((err) =>
-            logger.warn(
-              { err, issueId: issue.id, agentId },
-              input.wakeFailureMessage,
-            ),
-          );
-      }
-    };
-    return { add, addDependencyResolved, dispatch };
-  }
-  type IssueWakeBatch = ReturnType<typeof createIssueWakeBatch>;
-
-  function addStatusChangedAssigneeWakeup(
-    batch: IssueWakeBatch,
-    input: {
-      issue: { id: string; assigneeAgentId: string | null };
-      actor: IssueRouteActor;
-      resumeRequested: boolean;
-      interruptedRunId: string | null;
-    },
-  ) {
-    const { issue, actor, resumeRequested, interruptedRunId } = input;
-    if (!issue.assigneeAgentId) return;
-    batch.add(issue.assigneeAgentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "issue_status_changed",
-      payload: {
-        issueId: issue.id,
-        mutation: "update",
-        ...(resumeRequested === true
-          ? { resumeIntent: true, followUpRequested: true }
-          : {}),
-        ...(interruptedRunId ? { interruptedRunId } : {}),
-      },
-      requestedByActorType: actor.actorType,
-      requestedByActorId: actor.actorId,
-      contextSnapshot: {
-        issueId: issue.id,
-        source: "issue.status_change",
-        ...(resumeRequested === true
-          ? { resumeIntent: true, followUpRequested: true }
-          : {}),
-        ...(interruptedRunId ? { interruptedRunId } : {}),
-      },
-    });
-  }
-
-  /** After done: wakes the dependents whose blockers are now resolved. */
-  async function addDependentWakeupsAfterDone(
-    batch: IssueWakeBatch,
-    input: {
-      previousStatus: string;
-      issue: { id: string; status: string };
-      mutation: string;
-    },
-  ) {
-    const { issue } = input;
-    if (input.previousStatus === "done" || issue.status !== "done") return;
-    const dependents = await svc.listWakeableBlockedDependents(issue.id);
-    for (const dependent of dependents) {
-      await batch.addDependencyResolved({
-        agentId: dependent.assigneeAgentId,
-        dependentIssueId: dependent.id,
-        resolvedBlockerIssueId: issue.id,
-        blockerIssueIds: dependent.blockerIssueIds,
-        blockedTransitionAt: dependent.blockedTransitionAt,
-        source: "issue.blockers_resolved",
-        mutation: input.mutation,
-      });
-    }
-  }
-
-  /** After done/cancelled: expires pending interactions, frees sandbox leases
-   * and wakes the parent when all its children are complete. */
-  async function handleIssueBecameTerminal(
-    batch: IssueWakeBatch,
-    input: {
-      previousStatus: string;
-      issue: Parameters<typeof destroyReusableSandboxLeasesForTerminalIssue>[0] &
-        Parameters<
-          ReturnType<typeof issueThreadInteractionService>["expirePendingInteractionsForTerminalIssue"]
-        >[0] & {
-          identifier?: string | null;
-          parentId?: string | null;
-        };
-      actor: IssueRouteActor;
-    },
-  ) {
-    const { issue, actor } = input;
-    const becameTerminal =
-      !["done", "cancelled"].includes(input.previousStatus) &&
-      ["done", "cancelled"].includes(issue.status);
-    if (!becameTerminal) return;
-    const expiredInteractions = await issueThreadInteractionService(
-      db,
-    ).expirePendingInteractionsForTerminalIssue(issue, {
-      agentId: actor.agentId,
-      userId: actor.actorType === "user" ? actor.actorId : null,
-    });
-    await logExpiredRequestConfirmations({
-      issue,
-      interactions: expiredInteractions,
-      actor,
-      source: "issue.status_transition.issue_closed",
-    });
-    await destroyReusableSandboxLeasesForTerminalIssue(issue);
-    if (!issue.parentId) return;
-    const parent = await svc.getWakeableParentAfterChildCompletion(
-      issue.parentId,
-    );
-    if (!parent) return;
-    batch.add(parent.assigneeAgentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "issue_children_completed",
-      payload: {
-        issueId: parent.id,
-        completedChildIssueId: issue.id,
-        childIssueIds: parent.childIssueIds,
-        childIssueSummaries: parent.childIssueSummaries,
-        childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
-      },
-      requestedByActorType: actor.actorType,
-      requestedByActorId: actor.actorId,
-      contextSnapshot: {
-        issueId: parent.id,
-        taskId: parent.id,
-        wakeReason: "issue_children_completed",
-        source: "issue.children_completed",
-        completedChildIssueId: issue.id,
-        childIssueIds: parent.childIssueIds,
-        childIssueSummaries: parent.childIssueSummaries,
-        childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
-      },
-    });
-  }
-
-  /** A new comment from someone other than the assignee steers the assignee's
-   * active, working session goal. Returns true when the goal took it, so the
-   * comment does not also wake the assignee. */
-  async function steerActiveGoalWithComment(
-    issue: { id: string; companyId: string; assigneeAgentId: string | null },
-    comment: { id: string; body: string },
-    actor: IssueRouteActor,
-  ): Promise<boolean> {
-    if (
-      !issue.assigneeAgentId ||
-      (actor.actorType === "agent" && actor.actorId === issue.assigneeAgentId)
-    ) {
-      return false;
-    }
-    const goalProjection = await runnerGoals.projection(
-      issue.companyId,
-      issue.id,
-      issue.assigneeAgentId,
-    );
-    if (
-      goalProjection?.goal?.status !== "active" ||
-      !goalProjection.workingNow
-    ) {
-      return false;
-    }
-    const steer = queueLiveRunnerPrpCommand({
-      companyId: issue.companyId,
-      issueId: issue.id,
-      agentId: issue.assigneeAgentId,
-      type: "turn.steer",
-      payload: { text: comment.body },
-      commandId: `goal_comment_${comment.id}`,
-    });
-    if (!steer) return false;
-    try {
-      await steer.completion;
-      return true;
-    } catch (err) {
-      logger.warn(
-        {
-          err,
-          issueId: issue.id,
-          commentId: comment.id,
-          runId: steer.runId,
-        },
-        "failed to steer an active session goal; falling back to a boundary wake",
-      );
-      return false;
-    }
-  }
-
-  /** A comment supersedes the issue's pending request confirmations. Returns a
-   * reference to the lost review path when that leaves an in_review issue
-   * stalled. */
-  async function expireConfirmationsSupersededByComment(
-    issue: Parameters<
-      ReturnType<typeof issueThreadInteractionService>["expireRequestConfirmationsSupersededByComment"]
-    >[0] &
-      Parameters<typeof svc.listReviewAttention>[1][number] & {
-        identifier?: string | null;
-      },
-    comment: Parameters<
-      ReturnType<typeof issueThreadInteractionService>["expireRequestConfirmationsSupersededByComment"]
-    >[1],
-    actor: IssueRouteActor,
-  ): Promise<string | null> {
-    const expiredInteractions = await issueThreadInteractionService(
-      db,
-    ).expireRequestConfirmationsSupersededByComment(issue, comment, {
-      agentId: actor.agentId,
-      userId: actor.actorType === "user" ? actor.actorId : null,
-    });
-    await logExpiredRequestConfirmations({
-      issue,
-      interactions: expiredInteractions,
-      actor,
-      source: "issue.comment",
-    });
-    if (issue.status !== "in_review" || expiredInteractions.length === 0) {
-      return null;
-    }
-    const reviewAttention = await svc
-      .listReviewAttention(issue.companyId, [issue])
-      .then((map) => map.get(issue.id));
-    if (reviewAttention?.state !== "stalled") return null;
-    const expiredInteractionIds = expiredInteractions
-      .map((interaction) => interaction.id)
-      .sort();
-    return expiredInteractionIds.length === 1
-      ? expiredInteractionIds[0]!
-      : `interactions:${expiredInteractionIds.join(",")}`;
-  }
-
-  /** Wakes the assignee for a new comment (unless the assignee wrote it or a
-   * goal took it) and every @-mentioned agent. */
-  async function addIssueCommentWakeups(
-    batch: IssueWakeBatch,
-    input: {
-      issueAtCommentStart: Parameters<
-        typeof shouldWakeAssigneeForIssueComment
-      >[0]["issueAtCommentStart"];
-      currentIssue: { id: string; companyId: string; assigneeAgentId: string | null; status: string };
-      comment: { id: string; body: string; createdByRunId?: string | null };
-      body: string;
-      actor: IssueRouteActor;
-      commentIsFromAssigneeRun: boolean;
-      goalCommentSteered: boolean;
-      resumeRequested: boolean;
-      reopened: boolean;
-      reopenFromStatus: string | null;
-      interruptedRunId: string | null;
-      lostReviewPathRef: string | null;
-      routeDelegation?: (
-        mentionedId: string,
-      ) => Promise<{ kind: string; issueId?: string; commentId?: string } | null>;
-    },
-  ) {
-    const {
-      currentIssue,
-      comment,
-      actor,
-      commentIsFromAssigneeRun,
-      resumeRequested,
-      reopened,
-      reopenFromStatus,
-      interruptedRunId,
-      lostReviewPathRef,
-    } = input;
-    // Re-fetch immediately before deciding whether to wake anyone: outside
-    // the reopen/auto-approval branches above, `currentIssue` is still the
-    // snapshot read before the comment was inserted, so a concurrent
-    // close/unassign/reassign landing in that window would otherwise wake
-    // the wrong (or no-longer-relevant) agent off stale state. The comment
-    // is already committed, so a failed re-fetch is logged and falls back to
-    // the in-hand snapshot rather than aborting this best-effort wake block.
-    const wakeIssueSnapshot =
-      (await svc.getById(currentIssue.id).catch((err) => {
-        logger.warn(
-          { err, issueId: currentIssue.id },
-          "failed to re-fetch issue for comment wake decision; falling back to in-hand snapshot",
-        );
-        return null;
-      })) ?? currentIssue;
-    const assigneeId = wakeIssueSnapshot.assigneeAgentId;
-    const actorIsAgent = actor.actorType === "agent";
-    const selfComment =
-      (actorIsAgent && actor.actorId === assigneeId) ||
-      commentIsFromAssigneeRun;
-    // Re-derive closed-ness from the post-mutation issue so the auto-approval
-    // transition (in_review -> done) suppresses a stale `issue_commented` wake
-    // to the returnAssignee for an already-completed issue.
-    // An explicit resume from the run that still owns this issue is redundant;
-    // explicit resume from a completed prior run remains a valid new turn.
-    const shouldWakeAssigneeForComment = shouldWakeAssigneeForIssueComment({
-      selfComment,
-      resumeRequested: resumeRequested === true,
-      commentCreatedByRunId: comment.createdByRunId,
-      issueAtCommentStart: input.issueAtCommentStart,
-      reopened,
-      currentStatus: wakeIssueSnapshot.status,
-    });
-    if (assigneeId && !input.goalCommentSteered && shouldWakeAssigneeForComment) {
-      if (reopened) {
-        batch.add(assigneeId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "issue_reopened_via_comment",
-          payload: {
-            issueId: currentIssue.id,
-            commentId: comment.id,
-            reopenedFrom: reopenFromStatus,
-            mutation: "comment",
-            ...(resumeRequested === true
-              ? { resumeIntent: true, followUpRequested: true }
-              : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-          },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: currentIssue.id,
-            taskId: currentIssue.id,
-            commentId: comment.id,
-            wakeCommentId: comment.id,
-            source: "issue.comment.reopen",
-            wakeReason: "issue_reopened_via_comment",
-            reopenedFrom: reopenFromStatus,
-            ...(resumeRequested === true
-              ? { resumeIntent: true, followUpRequested: true }
-              : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-          },
-        });
-      } else {
-        batch.add(assigneeId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "issue_commented",
-          payload: {
-            issueId: currentIssue.id,
-            commentId: comment.id,
-            mutation: "comment",
-            ...(resumeRequested === true
-              ? { resumeIntent: true, followUpRequested: true }
-              : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-            ...(lostReviewPathRef
-              ? {
-                  reviewPathLost: true,
-                  reviewPathConsumedRef: lostReviewPathRef,
-                  reviewPathInstruction: REVIEW_PATH_RECOVERY_INSTRUCTION,
-                }
-              : {}),
-          },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: currentIssue.id,
-            taskId: currentIssue.id,
-            commentId: comment.id,
-            wakeCommentId: comment.id,
-            source: "issue.comment",
-            wakeReason: "issue_commented",
-            ...(resumeRequested === true
-              ? { resumeIntent: true, followUpRequested: true }
-              : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-            ...(lostReviewPathRef
-              ? {
-                  reviewPathLost: true,
-                  reviewPathConsumedRef: lostReviewPathRef,
-                  reviewPathInstruction: REVIEW_PATH_RECOVERY_INSTRUCTION,
-                }
-              : {}),
-          },
-        });
-      }
-    }
-
-    let mentionedIds: string[] = [];
-    try {
-      mentionedIds = await svc.findMentionedAgents(
-        currentIssue.companyId,
-        input.body,
-      );
-    } catch (err) {
-      logger.warn({ err, issueId: currentIssue.id }, "failed to resolve @-mentions");
-    }
-
-    for (const mentionedId of mentionedIds) {
-      if (
-        (actorIsAgent && actor.actorId === mentionedId) ||
-        (commentIsFromAssigneeRun && mentionedId === assigneeId)
-      )
-        continue;
-      const delegation =
-        commentIsFromAssigneeRun && input.routeDelegation
-          ? await input.routeDelegation(mentionedId)
-          : null;
-      if (delegation?.kind === "completed") continue;
-      const wakeIssueId = delegation?.issueId ?? currentIssue.id;
-      const wakeCommentId = delegation?.commentId ?? comment.id;
-      batch.add(mentionedId, {
-        source: "automation",
-        triggerDetail: "system",
-        reason: "issue_comment_mentioned",
-        payload: { issueId: wakeIssueId, commentId: wakeCommentId,
-          ...(delegation ? { resumeIntent: true, followUpRequested: true } : {}),
-        },
-        requestedByActorType: actor.actorType,
-        requestedByActorId: actor.actorId,
-        contextSnapshot: {
-          issueId: wakeIssueId,
-          taskId: wakeIssueId,
-          commentId: wakeCommentId,
-          wakeCommentId,
-          wakeReason: "issue_comment_mentioned",
-          source: delegation ? "comment.mention.delegation" : "comment.mention",
-          ...(delegation ? { resumeIntent: true, followUpRequested: true } : {}),
-        },
-      });
-    }
-  }
-
-  /** Whether a plain human comment would move the issue to todo in the
-   * comment route: a closed or blocked (without open blockers) issue with an
-   * agent assignee, or an in_progress issue with a scheduled retry. */
-  async function humanCommentMovesIssueToTodo(
-    issue: {
-      id: string;
-      status: string;
-      assigneeAgentId: string | null;
-      checkoutRunId?: string | null;
-      executionRunId?: string | null;
-    },
-    actor: IssueRouteActor,
-  ): Promise<boolean> {
-    const scheduledRetryForHumanComment =
-      shouldHumanCommentResumeInProgressScheduledRetry({
-        hasComment: true,
-        issueStatus: issue.status,
-        assigneeAgentId: issue.assigneeAgentId,
-        actorType: actor.actorType,
-      })
-        ? await svc.getCurrentScheduledRetry(issue.id)
-        : null;
-    if (
-      scheduledRetryForHumanComment &&
-      scheduledRetryForHumanComment.agentId === issue.assigneeAgentId
-    ) {
-      return true;
-    }
-    const implicitMove = shouldImplicitlyMoveCommentedIssueToTodo({
-      issueStatus: issue.status,
-      assigneeAgentId: issue.assigneeAgentId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      actorRunId: actor.runId,
-      checkoutRunId: issue.checkoutRunId,
-      executionRunId: issue.executionRunId,
-    });
-    if (!implicitMove) return false;
-    if (issue.status !== "blocked") return true;
-    // A blocked issue with open blockers stays blocked in the comment route.
-    return (await svc.getDependencyReadiness(issue.id)).unresolvedBlockerCount === 0;
-  }
-
-  /** Whether a comment is the pending review participant's approval, which the
-   * comment route applies as a review decision. */
-  function commentApprovesPendingReview(
-    issue: { status: string; executionState?: unknown },
-    actor: IssueRouteActor,
-    body: string,
-  ) {
-    const executionState = parseIssueExecutionState(issue.executionState);
-    return (
-      issue.status === "in_review" &&
-      executionState?.status === "pending" &&
-      actorMatchesExecutionParticipant(
-        actor,
-        executionState.currentParticipant ?? null,
-      ) &&
-      isApprovalReviewComment(body)
-    );
-  }
-
-  /** After a status change out of in_progress: records that a required
-   * successful-run handoff was resolved by the new status. */
-  async function logSuccessfulRunHandoffResolution(input: {
-    existing: { status: string };
-    issue: { id: string; companyId: string; status: string; identifier?: string | null };
-    actor: IssueRouteActor;
-  }) {
-    const { existing, issue, actor } = input;
-    if (
-      existing.status !== "in_progress" ||
-      issue.status === existing.status ||
-      issue.status === "in_progress"
-    ) {
-      return;
-    }
-    await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id], {
-      hydrateLiveness: false,
-    })
-      .then(async (handoffStates) => {
-        const handoff = handoffStates.get(issue.id);
-        if (handoff?.state !== "required") return;
-        await logActivity(db, {
-          companyId: issue.companyId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          agentId: actor.agentId,
-          runId: actor.runId,
-          agentApiKeyId: actor.agentApiKeyId,
-          action: "issue.successful_run_handoff_resolved",
-          entityType: "issue",
-          entityId: issue.id,
-          details: {
-            identifier: issue.identifier,
-            sourceRunId: handoff.sourceRunId,
-            correctiveRunId: handoff.correctiveRunId,
-            resolvedByStatus: issue.status,
-          },
-        });
-      })
-      .catch((err) => {
-        logger.warn(
-          { err, issueId: issue.id },
-          "failed to log successful run handoff resolution",
-        );
-      });
-  }
-  // --- end RK9 Custom ---
 
   type IssueQueueDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
   type IssueQueueTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -14289,14 +13446,47 @@ export function issueRoutes(
         }
       }
 
-      if (!assigneeWillChange) {
-        const terminalizationStop =
-          await stopAssigneeWorkBeforeTerminalization(
-            existing,
-            updateFields.status,
+      const terminalizingIssue =
+        typeof updateFields.status === "string" &&
+        updateFields.status !== existing.status &&
+        isClosedIssueStatus(updateFields.status);
+      if (
+        !assigneeWillChange &&
+        terminalizingIssue &&
+        existing.assigneeAgentId
+      ) {
+        const goalStopAction = await stopRunnerGoalForOwnershipChange({
+          companyId: existing.companyId,
+          issueId: existing.id,
+          agentId: existing.assigneeAgentId,
+        });
+        const runToStopForTerminalization = goalStopAction
+          ? await resolveActiveIssueRun(existing)
+          : null;
+        if (goalStopAction && runToStopForTerminalization) {
+          const cancelled = await heartbeat.cancelRun(
+            runToStopForTerminalization.id,
+            "Cancelled before issue terminalization",
+            {
+              errorCode: "issue_terminalized",
+              resultJson: { terminalizationStopConfirmed: true },
+              eventMessage: "run cancelled before issue terminalization",
+              eventPayload: {
+                issueId: existing.id,
+                status: updateFields.status,
+              },
+            },
           );
-        if (terminalizationStop.interruptedRunId) {
-          interruptedRunId = terminalizationStop.interruptedRunId;
+          if (!cancelled || cancelled.status !== "cancelled") {
+            throw conflict(
+              "The active agent run could not be stopped before terminalizing the issue",
+              {
+                code: "runner_goal_terminalization_stop_unconfirmed",
+                runId: runToStopForTerminalization.id,
+              },
+            );
+          }
+          interruptedRunId = cancelled.id;
         }
       }
 
@@ -14582,13 +13772,82 @@ export function issueRoutes(
       await flushIssuePostCommitActions(postCommitIssueActions);
 
       if (enteringBlocked) {
-        issue = await notifyUnblockOwnerAfterEnteringBlocked(issue);
+        const blockedIssue = issue;
+        let ownerNotifiedAt: Date | null = null;
+        await deliverAgentUnblockNotification({
+          issue: blockedIssue,
+          wakeup: heartbeat.wakeup,
+          markNotified: async (blockedOwnerNotifiedAt) => {
+            ownerNotifiedAt = blockedOwnerNotifiedAt;
+          },
+        });
+        if (ownerNotifiedAt) {
+          await db
+            .update(issueRows)
+            .set({ blockedOwnerNotifiedAt: ownerNotifiedAt })
+            .where(
+              and(
+                eq(issueRows.id, blockedIssue.id),
+                eq(issueRows.companyId, blockedIssue.companyId),
+              ),
+            );
+          issue = { ...blockedIssue, blockedOwnerNotifiedAt: ownerNotifiedAt };
+        }
       }
 
-      const cancelledStatusRunId = await cancelRunForCancelledStatus(
-        runToCancelForCancelledStatus,
-        { existing, interruptedRunId, actor },
-      );
+      let cancelledStatusRunId: string | null = null;
+      if (
+        runToCancelForCancelledStatus &&
+        runToCancelForCancelledStatus.id !== interruptedRunId
+      ) {
+        try {
+          const cancelled = await heartbeat.cancelRun(
+            runToCancelForCancelledStatus.id,
+          );
+          if (cancelled) {
+            cancelledStatusRunId = cancelled.id;
+            await logActivity(db, {
+              companyId: cancelled.companyId,
+              actorType: actor.actorType,
+              actorId: actor.actorId,
+              agentId: actor.agentId,
+              runId: actor.runId,
+              agentApiKeyId: actor.agentApiKeyId,
+              action: "heartbeat.cancelled",
+              entityType: "heartbeat_run",
+              entityId: cancelled.id,
+              issueId: existing.id,
+              details: {
+                agentId: cancelled.agentId,
+                source: "issue_status_cancelled",
+                issueId: existing.id,
+              },
+            });
+          }
+        } catch (err) {
+          logger.warn(
+            {
+              err,
+              issueId: existing.id,
+              runId: runToCancelForCancelledStatus.id,
+            },
+            "failed to cancel run for cancelled issue",
+          );
+          await logActivity(db, {
+            companyId: existing.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            agentApiKeyId: actor.agentApiKeyId,
+            action: "heartbeat.cancel_failed",
+            entityType: "heartbeat_run",
+            entityId: runToCancelForCancelledStatus.id,
+            issueId: existing.id,
+            details: { source: "issue_status_cancelled", issueId: existing.id },
+          });
+        }
+      }
 
       if (titleOrDescriptionChanged) {
         await issueReferencesSvc.syncIssue(issue.id);
@@ -14768,7 +14027,42 @@ export function issueRoutes(
           },
         });
 
-      await logSuccessfulRunHandoffResolution({ existing, issue, actor });
+      if (
+        existing.status === "in_progress" &&
+        issue.status !== existing.status &&
+        issue.status !== "in_progress"
+      ) {
+        await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id], {
+          hydrateLiveness: false,
+        })
+          .then(async (handoffStates) => {
+            const handoff = handoffStates.get(issue.id);
+            if (handoff?.state !== "required") return;
+            await logActivity(db, {
+              companyId: issue.companyId,
+              actorType: actor.actorType,
+              actorId: actor.actorId,
+              agentId: actor.agentId,
+              runId: actor.runId,
+              agentApiKeyId: actor.agentApiKeyId,
+              action: "issue.successful_run_handoff_resolved",
+              entityType: "issue",
+              entityId: issue.id,
+              details: {
+                identifier: issue.identifier,
+                sourceRunId: handoff.sourceRunId,
+                correctiveRunId: handoff.correctiveRunId,
+                resolvedByStatus: issue.status,
+              },
+            });
+          })
+          .catch((err) => {
+            logger.warn(
+              { err, issueId: issue.id },
+              "failed to log successful run handoff resolution",
+            );
+          });
+      }
 
       if (Array.isArray(req.body.blockedByIssueIds)) {
         const previousBlockedByIds = new Set(
@@ -15171,6 +14465,19 @@ export function issueRoutes(
       const assigneeChanged =
         issue.assigneeAgentId !== existing.assigneeAgentId ||
         issue.assigneeUserId !== existing.assigneeUserId;
+      const statusChangedFromBacklog =
+        existing.status === "backlog" &&
+        issue.status !== "backlog" &&
+        req.body.status !== undefined;
+      const statusChangedFromClosedToTodo =
+        isClosedIssueStatus(existing.status) &&
+        issue.status === "todo" &&
+        req.body.status !== undefined;
+      const userResumedFromReviewToTodo =
+        actor.actorType === "user" &&
+        existing.status === "in_review" &&
+        issue.status === "todo" &&
+        req.body.status !== undefined;
       const previousExecutionState = parseIssueExecutionState(
         existing.executionState,
       );
@@ -15186,22 +14493,78 @@ export function issueRoutes(
 
       // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
       void (async () => {
+        type WakeupRequest = NonNullable<
+          Parameters<typeof heartbeat.wakeup>[1]
+        >;
         type DependencyReadinessProvider = {
           getDependencyReadiness?: typeof svc.getDependencyReadiness;
         };
         const dependencyReadinessSvc = svc as DependencyReadinessProvider;
-        const wakeBatch = createIssueWakeBatch({
-          issue,
-          actor,
-          keepFirst: false,
-          emittedByActorId: "issue_update",
-          defaultSource: "issue.update",
-          dependencyCheckFailureMessage:
-            "failed to check existing dependency wake before issue update wake",
-          wakeFailureMessage: "failed to wake agent on issue update",
-        });
-        const addWakeup = wakeBatch.add;
-        const addDependencyResolvedWakeup = wakeBatch.addDependencyResolved;
+        const wakeups = new Map<
+          string,
+          { agentId: string; wakeup: WakeupRequest }
+        >();
+        const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+          const wakeIssueId =
+            wakeup.payload &&
+            typeof wakeup.payload === "object" &&
+            typeof wakeup.payload.issueId === "string"
+              ? wakeup.payload.issueId
+              : issue.id;
+          wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+        };
+        const addDependencyResolvedWakeup = async (input: {
+          agentId: string;
+          dependentIssueId: string;
+          resolvedBlockerIssueId: string;
+          blockerIssueIds: string[];
+          blockedTransitionAt?: Date | string | null;
+          source: string;
+          mutation: string;
+        }) => {
+          const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+            dependentIssueId: input.dependentIssueId,
+            blockerIssueIds: input.blockerIssueIds,
+            blockedTransitionAt: input.blockedTransitionAt,
+          });
+          try {
+            const existingWake =
+              await findExistingIssueBlockersResolvedWakeForReadyState(db, {
+                companyId: issue.companyId,
+                dependentIssueId: input.dependentIssueId,
+                blockerIssueIds: input.blockerIssueIds,
+                blockedTransitionAt: input.blockedTransitionAt,
+              });
+            if (existingWake) return;
+          } catch (err) {
+            logger.warn(
+              { err, issueId: input.dependentIssueId, idempotencyKey },
+              "failed to check existing dependency wake before issue update wake",
+            );
+          }
+          addWakeup(input.agentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+            payload: {
+              issueId: input.dependentIssueId,
+              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+              blockerIssueIds: input.blockerIssueIds,
+              mutation: input.mutation,
+            },
+            idempotencyKey,
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: input.dependentIssueId,
+              taskId: input.dependentIssueId,
+              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+              source: input.source,
+              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+              blockerIssueIds: input.blockerIssueIds,
+            },
+          });
+        };
 
         if (executionStageWakeup && deferWakeForGoal !== true) {
           addWakeup(executionStageWakeup.agentId, executionStageWakeup.wakeup);
@@ -15246,19 +14609,34 @@ export function issueRoutes(
 
         if (
           !assigneeChanged &&
-          statusChangeWakesAssignee({
-            existing,
-            issue,
-            actor,
-            statusRequested: req.body.status !== undefined,
-            reopened,
-          })
+          (statusChangedFromBacklog ||
+            statusChangedFromBlockedToTodo ||
+            statusChangedFromClosedToTodo ||
+            userResumedFromReviewToTodo) &&
+          issue.assigneeAgentId
         ) {
-          addStatusChangedAssigneeWakeup(wakeBatch, {
-            issue,
-            actor,
-            resumeRequested: resumeRequested === true,
-            interruptedRunId,
+          addWakeup(issue.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_status_changed",
+            payload: {
+              issueId: issue.id,
+              mutation: "update",
+              ...(resumeRequested === true
+                ? { resumeIntent: true, followUpRequested: true }
+                : {}),
+              ...(interruptedRunId ? { interruptedRunId } : {}),
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: issue.id,
+              source: "issue.status_change",
+              ...(resumeRequested === true
+                ? { resumeIntent: true, followUpRequested: true }
+                : {}),
+              ...(interruptedRunId ? { interruptedRunId } : {}),
+            },
           });
         }
 
@@ -15383,11 +14761,22 @@ export function issueRoutes(
           }
         }
 
-        await addDependentWakeupsAfterDone(wakeBatch, {
-          previousStatus: existing.status,
-          issue,
-          mutation: "blocker_done",
-        });
+        const becameDone =
+          existing.status !== "done" && issue.status === "done";
+        if (becameDone) {
+          const dependents = await svc.listWakeableBlockedDependents(issue.id);
+          for (const dependent of dependents) {
+            await addDependencyResolvedWakeup({
+              agentId: dependent.assigneeAgentId,
+              dependentIssueId: dependent.id,
+              resolvedBlockerIssueId: issue.id,
+              blockerIssueIds: dependent.blockerIssueIds,
+              blockedTransitionAt: dependent.blockedTransitionAt,
+              source: "issue.blockers_resolved",
+              mutation: "blocker_done",
+            });
+          }
+        }
 
         const restoredBlockedReadyDependency =
           issue.status === "blocked" &&
@@ -15469,13 +14858,100 @@ export function issueRoutes(
           }
         }
 
-        await handleIssueBecameTerminal(wakeBatch, {
-          previousStatus: existing.status,
-          issue,
-          actor,
-        });
+        const becameTerminal =
+          !["done", "cancelled"].includes(existing.status) &&
+          ["done", "cancelled"].includes(issue.status);
+        if (becameTerminal) {
+          const expiredInteractions = await issueThreadInteractionService(
+            db,
+          ).expirePendingInteractionsForTerminalIssue(issue, {
+            agentId: actor.agentId,
+            userId: actor.actorType === "user" ? actor.actorId : null,
+          });
+          await logExpiredRequestConfirmations({
+            issue,
+            interactions: expiredInteractions,
+            actor,
+            source: "issue.status_transition.issue_closed",
+          });
+          await destroyReusableSandboxLeasesForTerminalIssue(issue);
+        }
+        if (becameTerminal && issue.parentId) {
+          const parent = await svc.getWakeableParentAfterChildCompletion(
+            issue.parentId,
+          );
+          if (parent) {
+            addWakeup(parent.assigneeAgentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "issue_children_completed",
+              payload: {
+                issueId: parent.id,
+                completedChildIssueId: issue.id,
+                childIssueIds: parent.childIssueIds,
+                childIssueSummaries: parent.childIssueSummaries,
+                childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+              },
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+              contextSnapshot: {
+                issueId: parent.id,
+                taskId: parent.id,
+                wakeReason: "issue_children_completed",
+                source: "issue.children_completed",
+                completedChildIssueId: issue.id,
+                childIssueIds: parent.childIssueIds,
+                childIssueSummaries: parent.childIssueSummaries,
+                childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+              },
+            });
+          }
+        }
 
-        wakeBatch.dispatch();
+        for (const { agentId, wakeup } of wakeups.values()) {
+          heartbeat
+            .wakeup(agentId, wakeup)
+            .then((wakeRun) => {
+              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
+              const payload =
+                wakeup.payload && typeof wakeup.payload === "object"
+                  ? wakeup.payload
+                  : {};
+              const dependentIssueId =
+                typeof payload.issueId === "string"
+                  ? payload.issueId
+                  : issue.id;
+              return logActivity(db, {
+                companyId: issue.companyId,
+                actorType: "system",
+                actorId: "issue_update",
+                agentId,
+                runId: actor.runId,
+                agentApiKeyId: actor.agentApiKeyId,
+                action: "issue.blockers_resolved_wake_emitted",
+                entityType: "issue",
+                entityId: dependentIssueId,
+                details: {
+                  source: wakeup.contextSnapshot?.source ?? "issue.update",
+                  wakeupRunId: wakeRun?.id ?? null,
+                  idempotencyKey: wakeup.idempotencyKey ?? null,
+                  resolvedBlockerIssueId:
+                    typeof payload.resolvedBlockerIssueId === "string"
+                      ? payload.resolvedBlockerIssueId
+                      : null,
+                  blockerIssueIds: Array.isArray(payload.blockerIssueIds)
+                    ? payload.blockerIssueIds
+                    : [],
+                },
+              });
+            })
+            .catch((err) =>
+              logger.warn(
+                { err, issueId: issue.id, agentId },
+                "failed to wake agent on issue update",
+              ),
+            );
+        }
       })();
 
       await queueTaskWatchdogEvaluation(issue, actor.runId);
@@ -18110,11 +17586,14 @@ export function issueRoutes(
       const currentExecutionPolicy = normalizeIssueExecutionPolicy(
         currentIssue.executionPolicy ?? null,
       );
-      const shouldAutoApproveReviewComment = commentApprovesPendingReview(
-        currentIssue,
-        actor,
-        req.body.body,
-      );
+      const shouldAutoApproveReviewComment =
+        currentIssue.status === "in_review" &&
+        currentExecutionState?.status === "pending" &&
+        actorMatchesExecutionParticipant(
+          actor,
+          currentExecutionState.currentParticipant ?? null,
+        ) &&
+        isApprovalReviewComment(req.body.body);
 
       // Persist the comment and the auto-approval state transition atomically when both apply.
       // Without a single transaction, a 422 (or any error) thrown by the status update after the
@@ -18302,8 +17781,47 @@ export function issueRoutes(
 
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
-      if (await steerActiveGoalWithComment(currentIssue, comment, actor)) {
-        goalCommentSteered = true;
+      if (
+        currentIssue.assigneeAgentId &&
+        !(
+          actor.actorType === "agent" &&
+          actor.actorId === currentIssue.assigneeAgentId
+        )
+      ) {
+        const goalProjection = await runnerGoals.projection(
+          currentIssue.companyId,
+          currentIssue.id,
+          currentIssue.assigneeAgentId,
+        );
+        if (
+          goalProjection?.goal?.status === "active" &&
+          goalProjection.workingNow
+        ) {
+          const steer = queueLiveRunnerPrpCommand({
+            companyId: currentIssue.companyId,
+            issueId: currentIssue.id,
+            agentId: currentIssue.assigneeAgentId,
+            type: "turn.steer",
+            payload: { text: comment.body },
+            commandId: `goal_comment_${comment.id}`,
+          });
+          if (steer) {
+            try {
+              await steer.completion;
+              goalCommentSteered = true;
+            } catch (err) {
+              logger.warn(
+                {
+                  err,
+                  issueId: currentIssue.id,
+                  commentId: comment.id,
+                  runId: steer.runId,
+                },
+                "failed to steer an active session goal; falling back to a boundary wake",
+              );
+            }
+          }
+        }
       }
       const commentReferenceSummaryAfter =
         await issueReferencesSvc.listIssueReferenceSummary(currentIssue.id);
@@ -18381,11 +17899,36 @@ export function issueRoutes(
         },
       });
 
-      const lostReviewPathRef = await expireConfirmationsSupersededByComment(
-        currentIssue,
-        comment,
+      const expiredInteractions = await issueThreadInteractionService(
+        db,
+      ).expireRequestConfirmationsSupersededByComment(currentIssue, comment, {
+        agentId: actor.agentId,
+        userId: actor.actorType === "user" ? actor.actorId : null,
+      });
+      await logExpiredRequestConfirmations({
+        issue: currentIssue,
+        interactions: expiredInteractions,
         actor,
-      );
+        source: "issue.comment",
+      });
+      let lostReviewPathRef: string | null = null;
+      if (
+        currentIssue.status === "in_review" &&
+        expiredInteractions.length > 0
+      ) {
+        const reviewAttention = await svc
+          .listReviewAttention(currentIssue.companyId, [currentIssue])
+          .then((map) => map.get(currentIssue.id));
+        if (reviewAttention?.state === "stalled") {
+          const expiredInteractionIds = expiredInteractions
+            .map((interaction) => interaction.id)
+            .sort();
+          lostReviewPathRef =
+            expiredInteractionIds.length === 1
+              ? expiredInteractionIds[0]!
+              : `interactions:${expiredInteractionIds.join(",")}`;
+        }
+      }
 
       const commentIsFromAssigneeRun = await commentWasCreatedByAssigneeRun(
         comment,
@@ -18407,54 +17950,348 @@ export function issueRoutes(
 
       // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
       void (async () => {
-        const wakeBatch = createIssueWakeBatch({
-          issue: currentIssue,
-          actor,
-          keepFirst: true,
-          emittedByActorId: "issue_comment",
-          defaultSource: "issue.comment",
-          dependencyCheckFailureMessage:
-            "failed to check existing dependency wake before issue comment wake",
-          wakeFailureMessage: "failed to wake agent on issue comment",
-        });
+        type WakeupRequest = NonNullable<
+          Parameters<typeof heartbeat.wakeup>[1]
+        >;
+        const wakeups = new Map<
+          string,
+          { agentId: string; wakeup: WakeupRequest }
+        >();
+        const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+          const wakeIssueId =
+            wakeup.payload &&
+            typeof wakeup.payload === "object" &&
+            typeof wakeup.payload.issueId === "string"
+              ? wakeup.payload.issueId
+              : currentIssue.id;
+          const key = `${agentId}:${wakeIssueId}`;
+          if (wakeups.has(key)) return;
+          wakeups.set(key, { agentId, wakeup });
+        };
+        const addDependencyResolvedWakeup = async (input: {
+          agentId: string;
+          dependentIssueId: string;
+          resolvedBlockerIssueId: string;
+          blockerIssueIds: string[];
+          blockedTransitionAt?: Date | string | null;
+        }) => {
+          const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+            dependentIssueId: input.dependentIssueId,
+            blockerIssueIds: input.blockerIssueIds,
+            blockedTransitionAt: input.blockedTransitionAt,
+          });
+          try {
+            const existingWake =
+              await findExistingIssueBlockersResolvedWakeForReadyState(db, {
+                companyId: currentIssue.companyId,
+                dependentIssueId: input.dependentIssueId,
+                blockerIssueIds: input.blockerIssueIds,
+                blockedTransitionAt: input.blockedTransitionAt,
+              });
+            if (existingWake) return;
+          } catch (err) {
+            logger.warn(
+              { err, issueId: input.dependentIssueId, idempotencyKey },
+              "failed to check existing dependency wake before issue comment wake",
+            );
+          }
+          addWakeup(input.agentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+            payload: {
+              issueId: input.dependentIssueId,
+              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+              blockerIssueIds: input.blockerIssueIds,
+              mutation: "comment",
+            },
+            idempotencyKey,
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: input.dependentIssueId,
+              taskId: input.dependentIssueId,
+              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+              source: "issue.blockers_resolved",
+              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+              blockerIssueIds: input.blockerIssueIds,
+            },
+          });
+        };
 
         if (commentDecisionStageWakeup) {
-          wakeBatch.add(
+          addWakeup(
             commentDecisionStageWakeup.agentId,
             commentDecisionStageWakeup.wakeup,
           );
         }
 
-        await addIssueCommentWakeups(wakeBatch, {
-          issueAtCommentStart: issue,
-          currentIssue,
-          comment,
-          body: req.body.body,
-          actor,
-          commentIsFromAssigneeRun,
-          goalCommentSteered,
+        // Re-fetch immediately before deciding whether to wake anyone: outside
+        // the reopen/auto-approval branches above, `currentIssue` is still the
+        // snapshot read before the comment was inserted, so a concurrent
+        // close/unassign/reassign landing in that window would otherwise wake
+        // the wrong (or no-longer-relevant) agent off stale state. The comment
+        // is already committed, so a failed re-fetch is logged and falls back to
+        // the in-hand snapshot rather than aborting this best-effort wake block.
+        const wakeIssueSnapshot =
+          (await svc.getById(currentIssue.id).catch((err) => {
+            logger.warn(
+              { err, issueId: currentIssue.id },
+              "failed to re-fetch issue for comment wake decision; falling back to in-hand snapshot",
+            );
+            return null;
+          })) ?? currentIssue;
+        const assigneeId = wakeIssueSnapshot.assigneeAgentId;
+        const actorIsAgent = actor.actorType === "agent";
+        const selfComment =
+          (actorIsAgent && actor.actorId === assigneeId) ||
+          commentIsFromAssigneeRun;
+        // Re-derive closed-ness from the post-mutation issue so the auto-approval
+        // transition (in_review -> done) suppresses a stale `issue_commented` wake
+        // to the returnAssignee for an already-completed issue.
+        // An explicit resume from the run that still owns this issue is redundant;
+        // explicit resume from a completed prior run remains a valid new turn.
+        const shouldWakeAssigneeForComment = shouldWakeAssigneeForIssueComment({
+          selfComment,
           resumeRequested: resumeRequested === true,
+          commentCreatedByRunId: comment.createdByRunId,
+          issueAtCommentStart: issue,
           reopened,
-          reopenFromStatus,
-          interruptedRunId,
-          lostReviewPathRef,
-          routeDelegation: (mentionedId) =>
-            routeDelegationMention(req, currentIssue, mentionedId, comment),
+          currentStatus: wakeIssueSnapshot.status,
         });
+        if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment) {
+          if (reopened) {
+            addWakeup(assigneeId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "issue_reopened_via_comment",
+              payload: {
+                issueId: currentIssue.id,
+                commentId: comment.id,
+                reopenedFrom: reopenFromStatus,
+                mutation: "comment",
+                ...(resumeRequested === true
+                  ? { resumeIntent: true, followUpRequested: true }
+                  : {}),
+                ...(interruptedRunId ? { interruptedRunId } : {}),
+              },
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+              contextSnapshot: {
+                issueId: currentIssue.id,
+                taskId: currentIssue.id,
+                commentId: comment.id,
+                wakeCommentId: comment.id,
+                source: "issue.comment.reopen",
+                wakeReason: "issue_reopened_via_comment",
+                reopenedFrom: reopenFromStatus,
+                ...(resumeRequested === true
+                  ? { resumeIntent: true, followUpRequested: true }
+                  : {}),
+                ...(interruptedRunId ? { interruptedRunId } : {}),
+              },
+            });
+          } else {
+            addWakeup(assigneeId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "issue_commented",
+              payload: {
+                issueId: currentIssue.id,
+                commentId: comment.id,
+                mutation: "comment",
+                ...(resumeRequested === true
+                  ? { resumeIntent: true, followUpRequested: true }
+                  : {}),
+                ...(interruptedRunId ? { interruptedRunId } : {}),
+                ...(lostReviewPathRef
+                  ? {
+                      reviewPathLost: true,
+                      reviewPathConsumedRef: lostReviewPathRef,
+                      reviewPathInstruction: REVIEW_PATH_RECOVERY_INSTRUCTION,
+                    }
+                  : {}),
+              },
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+              contextSnapshot: {
+                issueId: currentIssue.id,
+                taskId: currentIssue.id,
+                commentId: comment.id,
+                wakeCommentId: comment.id,
+                source: "issue.comment",
+                wakeReason: "issue_commented",
+                ...(resumeRequested === true
+                  ? { resumeIntent: true, followUpRequested: true }
+                  : {}),
+                ...(interruptedRunId ? { interruptedRunId } : {}),
+                ...(lostReviewPathRef
+                  ? {
+                      reviewPathLost: true,
+                      reviewPathConsumedRef: lostReviewPathRef,
+                      reviewPathInstruction: REVIEW_PATH_RECOVERY_INSTRUCTION,
+                    }
+                  : {}),
+              },
+            });
+          }
+        }
 
-        await addDependentWakeupsAfterDone(wakeBatch, {
-          previousStatus: issueBeforeCommentDecision.status,
-          issue: currentIssue,
-          mutation: "comment",
-        });
+        let mentionedIds: string[] = [];
+        try {
+          mentionedIds = await svc.findMentionedAgents(
+            issue.companyId,
+            req.body.body,
+          );
+        } catch (err) {
+          logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
+        }
 
-        await handleIssueBecameTerminal(wakeBatch, {
-          previousStatus: issueBeforeCommentDecision.status,
-          issue: currentIssue,
-          actor,
-        });
+        for (const mentionedId of mentionedIds) {
+          if (
+            (actorIsAgent && actor.actorId === mentionedId) ||
+            (commentIsFromAssigneeRun && mentionedId === assigneeId)
+          )
+            continue;
+          const delegation = commentIsFromAssigneeRun
+            ? await routeDelegationMention(req, currentIssue, mentionedId, comment)
+            : null;
+          if (delegation?.kind === "completed") continue;
+          const wakeIssueId = delegation?.issueId ?? id;
+          const wakeCommentId = delegation?.commentId ?? comment.id;
+          addWakeup(mentionedId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_comment_mentioned",
+            payload: { issueId: wakeIssueId, commentId: wakeCommentId,
+              ...(delegation ? { resumeIntent: true, followUpRequested: true } : {}),
+            },
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
+            contextSnapshot: {
+              issueId: wakeIssueId,
+              taskId: wakeIssueId,
+              commentId: wakeCommentId,
+              wakeCommentId,
+              wakeReason: "issue_comment_mentioned",
+              source: delegation ? "comment.mention.delegation" : "comment.mention",
+              ...(delegation ? { resumeIntent: true, followUpRequested: true } : {}),
+            },
+          });
+        }
 
-        wakeBatch.dispatch();
+        const becameDone =
+          issueBeforeCommentDecision.status !== "done" &&
+          currentIssue.status === "done";
+        if (becameDone) {
+          const dependents = await svc.listWakeableBlockedDependents(
+            currentIssue.id,
+          );
+          for (const dependent of dependents) {
+            await addDependencyResolvedWakeup({
+              agentId: dependent.assigneeAgentId,
+              dependentIssueId: dependent.id,
+              resolvedBlockerIssueId: currentIssue.id,
+              blockerIssueIds: dependent.blockerIssueIds,
+              blockedTransitionAt: dependent.blockedTransitionAt,
+            });
+          }
+        }
+
+        const becameTerminal =
+          !["done", "cancelled"].includes(issueBeforeCommentDecision.status) &&
+          ["done", "cancelled"].includes(currentIssue.status);
+        if (becameTerminal) {
+          const expiredInteractions = await issueThreadInteractionService(
+            db,
+          ).expirePendingInteractionsForTerminalIssue(currentIssue, {
+            agentId: actor.agentId,
+            userId: actor.actorType === "user" ? actor.actorId : null,
+          });
+          await logExpiredRequestConfirmations({
+            issue: currentIssue,
+            interactions: expiredInteractions,
+            actor,
+            source: "issue.status_transition.issue_closed",
+          });
+          await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
+        }
+        if (becameTerminal && currentIssue.parentId) {
+          const parent = await svc.getWakeableParentAfterChildCompletion(
+            currentIssue.parentId,
+          );
+          if (parent) {
+            addWakeup(parent.assigneeAgentId, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "issue_children_completed",
+              payload: {
+                issueId: parent.id,
+                completedChildIssueId: currentIssue.id,
+                childIssueIds: parent.childIssueIds,
+                childIssueSummaries: parent.childIssueSummaries,
+                childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+              },
+              requestedByActorType: actor.actorType,
+              requestedByActorId: actor.actorId,
+              contextSnapshot: {
+                issueId: parent.id,
+                taskId: parent.id,
+                wakeReason: "issue_children_completed",
+                source: "issue.children_completed",
+                completedChildIssueId: currentIssue.id,
+                childIssueIds: parent.childIssueIds,
+                childIssueSummaries: parent.childIssueSummaries,
+                childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
+              },
+            });
+          }
+        }
+
+        for (const { agentId, wakeup } of wakeups.values()) {
+          heartbeat
+            .wakeup(agentId, wakeup)
+            .then((wakeRun) => {
+              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
+              const payload =
+                wakeup.payload && typeof wakeup.payload === "object"
+                  ? wakeup.payload
+                  : {};
+              const dependentIssueId =
+                typeof payload.issueId === "string"
+                  ? payload.issueId
+                  : currentIssue.id;
+              return logActivity(db, {
+                companyId: currentIssue.companyId,
+                actorType: "system",
+                actorId: "issue_comment",
+                agentId,
+                runId: actor.runId,
+                agentApiKeyId: actor.agentApiKeyId,
+                action: "issue.blockers_resolved_wake_emitted",
+                entityType: "issue",
+                entityId: dependentIssueId,
+                details: {
+                  source: wakeup.contextSnapshot?.source ?? "issue.comment",
+                  wakeupRunId: wakeRun?.id ?? null,
+                  idempotencyKey: wakeup.idempotencyKey ?? null,
+                  resolvedBlockerIssueId:
+                    typeof payload.resolvedBlockerIssueId === "string"
+                      ? payload.resolvedBlockerIssueId
+                      : null,
+                  blockerIssueIds: Array.isArray(payload.blockerIssueIds)
+                    ? payload.blockerIssueIds
+                    : [],
+                },
+              });
+            })
+            .catch((err) =>
+              logger.warn(
+                { err, issueId: currentIssue.id, agentId },
+                "failed to wake agent on issue comment",
+              ),
+            );
+        }
       })();
 
       await queueTaskWatchdogEvaluation(currentIssue, actor.runId);
@@ -18894,195 +18731,6 @@ export function issueRoutes(
 
     res.json({ ok: true });
   });
-
-
-  // --- RK9 Custom (RK9-490): an approved voice_action runs the same side
-  // effects as the same action through PATCH /issues/:id or
-  // POST /issues/:id/comments by a board user. ---
-  if (opts.voiceActionIssueEffects) {
-    opts.voiceActionIssueEffects.current = {
-      commentRefusal: async (issue, actor, body) => {
-        if (await getBoardCommentPauseHold(issue)) return BOARD_COMMENT_PAUSED_ERROR;
-        // Paths of the comment route that a voice comment does not take.
-        if (await getClosedIssueExecutionWorkspace(issue)) {
-          return "a comment would reopen the issue's closed workspace; comment in Paperclip";
-        }
-        if (commentApprovesPendingReview(issue, actor, body)) {
-          return "the comment would approve the pending review; approve it in Paperclip";
-        }
-        if (await humanCommentMovesIssueToTodo(issue, actor)) {
-          return `a comment would reopen the ${issue.status} issue; reopen it in Paperclip`;
-        }
-        return null;
-      },
-      statusChangeRefusal: async (issue, status) => {
-        if (issue.harnessKind === "skill_test") {
-          return `skill test issues complete their test run; set ${status} in Paperclip`;
-        }
-        const relaysStopToParent =
-          Boolean(issue.parentId) &&
-          issue.status !== status &&
-          (status === "blocked" || status === "cancelled") &&
-          (await directParentReportDisabledForIssue({
-            companyId: issue.companyId,
-            projectId: issue.projectId,
-            executionPolicy: issue.executionPolicy,
-            assigneeAgentId: issue.assigneeAgentId,
-            checkoutRunId: issue.checkoutRunId,
-            executionRunId: issue.executionRunId,
-          }));
-        return relaysStopToParent
-          ? `the parent issue gets a stop report; set ${status} in Paperclip`
-          : null;
-      },
-      afterComment: async ({ issue, comment, actor }) => {
-        await issueReferencesSvc.syncComment(comment.id);
-        await externalObjectsSvc.syncCommentSafely(comment.id);
-        const goalCommentSteered = await steerActiveGoalWithComment(issue, comment, actor);
-        const lostReviewPathRef = await expireConfirmationsSupersededByComment(issue, comment, actor);
-        await revalidateActiveSourceRecoveryAfterCommittedWrite({
-          issue,
-          trigger: "comment",
-          actor,
-          statusChanged: false,
-          resumeRequested: false,
-          reopened: false,
-          blockedToTodoRecovery: false,
-        });
-        void (async () => {
-          const wakeBatch = createIssueWakeBatch({
-            issue,
-            actor,
-            keepFirst: true,
-            emittedByActorId: "issue_comment",
-            defaultSource: "issue.comment",
-            dependencyCheckFailureMessage:
-              "failed to check existing dependency wake before issue comment wake",
-            wakeFailureMessage: "failed to wake agent on issue comment",
-          });
-          await addIssueCommentWakeups(wakeBatch, {
-            issueAtCommentStart: issue,
-            currentIssue: issue,
-            comment,
-            body: comment.body,
-            actor,
-            commentIsFromAssigneeRun: false,
-            goalCommentSteered,
-            resumeRequested: false,
-            reopened: false,
-            reopenFromStatus: null,
-            interruptedRunId: null,
-            lostReviewPathRef,
-          });
-          wakeBatch.dispatch();
-        })().catch((err) =>
-          logger.warn({ err, issueId: issue.id }, "failed to wake agents for voice_action comment"),
-        );
-        await queueTaskWatchdogEvaluation(issue, actor.runId);
-      },
-      beforeStatusChange: async (issue, status) => {
-        // Same order as PATCH: the recovery action and the run to cancel are
-        // read before the goal stop.
-        const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
-          issue.companyId,
-          issue.id,
-        );
-        const runToCancel =
-          issue.status !== "cancelled" && status === "cancelled"
-            ? await resolveActiveIssueRun(issue)
-            : null;
-        const stop = await stopAssigneeWorkBeforeTerminalization(issue, status);
-        return {
-          interruptedRunId: stop.interruptedRunId,
-          goalStopped: stop.goalStopAction !== null,
-          runToCancel,
-          activeRecoveryAction,
-        };
-      },
-      afterStatusChange: async ({ existing, updated, actor, interruptedRunId, runToCancel, activeRecoveryAction }) => {
-        // The write is committed: one failed step must not skip the others.
-        const failedSteps: string[] = [];
-        const attempt = async <T,>(step: string, fallback: T, run: () => Promise<T>): Promise<T> => {
-          try {
-            return await run();
-          } catch (err) {
-            logger.warn({ err, issueId: existing.id, step }, "voice_action status side effect failed");
-            failedSteps.push(step);
-            return fallback;
-          }
-        };
-        const issue =
-          existing.status !== "blocked" && updated.status === "blocked"
-            ? await attempt("unblock_owner_wake", updated, () => notifyUnblockOwnerAfterEnteringBlocked(updated))
-            : updated;
-        const cancelledStatusRunId = await attempt("cancel_run", null, () =>
-          cancelRunForCancelledStatus(runToCancel, { existing, interruptedRunId, actor }),
-        );
-        await attempt("routine_sync", undefined, () => routinesSvc.syncRunStatusForIssue(issue.id));
-        await revalidateActiveSourceRecoveryAfterCommittedWrite({
-          issue,
-          trigger: "issue_update",
-          actor,
-          activeRecoveryAction:
-            (activeRecoveryAction as Awaited<ReturnType<typeof recoveryActionsSvc.getActiveForIssue>>) ??
-            undefined,
-          statusChanged: existing.status !== issue.status,
-          assigneeChanged: false,
-          blockersChanged: false,
-          executionPolicyChanged: false,
-          monitorChanged: false,
-          resumeRequested: false,
-          reopened: false,
-          blockedToTodoRecovery: existing.status === "blocked" && issue.status === "todo",
-        });
-        await logSuccessfulRunHandoffResolution({ existing, issue, actor });
-        void (async () => {
-          const wakeBatch = createIssueWakeBatch({
-            issue,
-            actor,
-            keepFirst: false,
-            emittedByActorId: "issue_update",
-            defaultSource: "issue.update",
-            dependencyCheckFailureMessage:
-              "failed to check existing dependency wake before issue update wake",
-            wakeFailureMessage: "failed to wake agent on issue update",
-          });
-          if (
-            statusChangeWakesAssignee({
-              existing,
-              issue,
-              actor,
-              statusRequested: true,
-              reopened: false,
-            })
-          ) {
-            addStatusChangedAssigneeWakeup(wakeBatch, {
-              issue,
-              actor,
-              resumeRequested: false,
-              interruptedRunId,
-            });
-          }
-          await addDependentWakeupsAfterDone(wakeBatch, {
-            previousStatus: existing.status,
-            issue,
-            mutation: "blocker_done",
-          });
-          await handleIssueBecameTerminal(wakeBatch, {
-            previousStatus: existing.status,
-            issue,
-            actor,
-          });
-          wakeBatch.dispatch();
-        })().catch((err) =>
-          logger.warn({ err, issueId: issue.id }, "failed to wake agents for voice_action status change"),
-        );
-        await queueTaskWatchdogEvaluation(issue, actor.runId);
-        return { cancelledStatusRunId, failedSteps };
-      },
-    };
-  }
-  // --- end RK9 Custom ---
 
   return router;
 }

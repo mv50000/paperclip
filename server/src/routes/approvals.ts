@@ -32,8 +32,8 @@ import {
   resolveVoiceAction,
   VOICE_ACTION_APPROVAL_TYPE,
   voiceActionPayloadToPersist,
-  type VoiceActionIssueEffectsSlot,
 } from "../services/rk9-voice-action.js";
+import { createVoiceActionDeps } from "../services/rk9-voice-action-deps.js";
 
 // --- RK9 Custom (RK9-436): only a board user may put an agent on human_proxy. A runless
 // human_proxy write skips the cross-issue run cap, so an agent cannot ask for a
@@ -69,14 +69,14 @@ function isStatusOnlyRecoveryContext(contextSnapshot: unknown) {
 
 export function approvalRoutes(
   db: Db,
-  options: {
-    pluginWorkerManager?: PluginWorkerManager;
-    /** RK9-490: filled by issueRoutes with the issue side effects. */
-    voiceActionIssueEffects?: VoiceActionIssueEffectsSlot;
-  } = {},
+  options: { pluginWorkerManager?: PluginWorkerManager } = {},
 ) {
   const router = Router();
   const svc = approvalService(db);
+  // RK9-490: built on first use; most approvals are not voice actions.
+  let voiceActionDepsCache: ReturnType<typeof createVoiceActionDeps> | null = null;
+  const voiceActionDeps = () =>
+    (voiceActionDepsCache ??= createVoiceActionDeps(db, { pluginWorkerManager: options.pluginWorkerManager }));
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
@@ -465,16 +465,9 @@ export function approvalRoutes(
       // the approval; the outcome lands as an approval comment.
       if (approval.type === VOICE_ACTION_APPROVAL_TYPE) {
         await executeVoiceAction(
-          db,
-          {
-            issuesSvc,
-            approvalSvc: svc,
-            logActivity,
-            issueEffects: options.voiceActionIssueEffects?.current ?? null,
-          },
+          { ...voiceActionDeps(), approvalSvc: svc, logActivity },
           approval,
           decidedByUserId,
-          getActorInfo(req),
         );
       }
 
