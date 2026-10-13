@@ -65,6 +65,9 @@ const SCAN_MIN_INTERVAL_MS = 20_000;
 const NOTE_PROMPT_TTL_MS = 30 * 60_000;
 // RK9-502: how long a timed-out approve waits for the server's outcome comment.
 const APPROVE_OUTCOME_WAIT_MS = 30 * 60_000;
+// RK9-502: a timed-out approve may still be queued on the server; a pending
+// approval counts as "not recorded" only after this long.
+const APPROVE_PENDING_GRACE_MS = 60_000;
 const OUTREACH_ENABLED = (process.env.OUTREACH_TG_ENABLED ?? "1") !== "0";
 const OUTREACH_MAX_OPEN = Math.max(1, Number.parseInt(process.env.OUTREACH_TG_MAX_OPEN ?? "5", 10) || 5);
 
@@ -289,10 +292,10 @@ async function scan() {
       pendingIds.add(approval.id);
       const posted = state.posted[approval.id];
       if (posted?.awaitingSince) {
-        // RK9-502: the approve timed out and the state read failed then; a
-        // still-pending approval closes the old card and gets a fresh one.
-        await settleApprove(approval.id, posted);
-        if (state.posted[approval.id]) continue;
+        // RK9-502: a timed-out approve whose approval is still pending: once
+        // settled, the old card is closed and a fresh one is posted now, so a
+        // queued tap on the old card meets the stale-card check.
+        if ((await settleApprove(approval.id, posted)) !== "pending") continue;
       } else if (
         posted &&
         approval.type === VOICE_ACTION &&
@@ -485,10 +488,22 @@ async function doOutreachReject(messageId, entry, reason) {
 }
 
 // ── decisions ─────────────────────────────────────────────────────────────────
-async function latestOutcomeComment(approvalId) {
+// The server writes the outcome as the deciding user after the decision. An
+// agent may comment on the approval too (RK9-502), so its ✅/⚠️ text and any
+// comment from before this decision are not the outcome.
+async function latestOutcomeComment(approvalId, approval) {
   const res = await pcp("GET", `/approvals/${approvalId}/comments`);
   if (!res.ok || !Array.isArray(res.json)) return null;
-  const outcome = [...res.json].reverse().find((c) => /^(✅|⚠️)/.test(c.body ?? ""));
+  const decidedAt = Date.parse(approval?.decidedAt ?? "");
+  const outcome = [...res.json]
+    .reverse()
+    .find(
+      (c) =>
+        /^(✅|⚠️)/.test(c.body ?? "") &&
+        !c.authorAgentId &&
+        // 60 s slack: decidedAt is the app clock, createdAt the database clock.
+        !(Date.parse(c.createdAt ?? "") < decidedAt - 60_000),
+    );
   return outcome?.body ?? null;
 }
 
@@ -507,7 +522,7 @@ async function doApprove(approvalId, entry) {
   if (!res.ok) {
     await editDone(entry.messageId, `⚠️ Hyväksyntä epäonnistui (HTTP ${res.status}). Käsittele Paperclip-UI:ssa.`);
   } else {
-    const outcome = (await latestOutcomeComment(approvalId).catch(() => null)) ?? "✅ Hyväksytty.";
+    const outcome = (await latestOutcomeComment(approvalId, res.json).catch(() => null)) ?? "✅ Hyväksytty.";
     await editDone(entry.messageId, outcome);
   }
   delete state.posted[approvalId];
@@ -518,6 +533,7 @@ async function doApprove(approvalId, entry) {
 // is unknown. svc.approve sets `approved` before it runs the action, and the
 // action can outlast the request. Read the approval and show its real state;
 // never approve again. Called again by each scan until the card is settled.
+// Returns the status it settled on, or null while the row stays open.
 async function settleApprove(approvalId, entry) {
   entry.awaitingSince ??= Date.now();
   delete entry.handling;
@@ -529,24 +545,31 @@ async function settleApprove(approvalId, entry) {
     /* still unreachable — the next scan asks again */
   }
   const status = res?.status === 404 ? "poistettu" : res?.ok ? res.json?.status : null;
+  const age = Date.now() - entry.awaitingSince;
+  const why = entry.why ?? "virhe";
   let text;
   let settled = true;
-  if (!status) {
-    text = `⚠️ Palvelin ei vastannut (${entry.why ?? "virhe"}). Hyväksynnän tila ei selvinnyt — kortti päivittyy, kun palvelin vastaa.`;
+  if (!status && age > APPROVE_OUTCOME_WAIT_MS) {
+    text = `⚠️ Hyväksynnän tila ei selvinnyt (${why}). Tarkista se Paperclip-UI:sta.`;
+  } else if (!status) {
+    text = `⚠️ Palvelin ei vastannut (${why}). Hyväksynnän tila ei selvinnyt — kortti päivittyy, kun palvelin vastaa.`;
     settled = false;
   } else if (status === "approved") {
-    const outcome = await latestOutcomeComment(approvalId).catch(() => null);
+    const outcome = await latestOutcomeComment(approvalId, res.json).catch(() => null);
     if (outcome) {
       text = outcome;
-    } else if (Date.now() - entry.awaitingSince > APPROVE_OUTCOME_WAIT_MS) {
+    } else if (age > APPROVE_OUTCOME_WAIT_MS) {
       text = "✅ Hyväksytty. Toteutuksen tulos ei näkynyt — tarkista tiketti Paperclip-UI:sta.";
     } else {
       text = "⏳ Hyväksytty — palvelin toteuttaa vielä. Kortti päivittyy, kun tulos on valmis.";
       settled = false;
     }
+  } else if (status === "pending" && age <= APPROVE_PENDING_GRACE_MS) {
+    text = `⏳ Palvelin ei vastannut ajoissa (${why}). Tarkistetaan, kirjautuiko hyväksyntä…`;
+    settled = false;
   } else if (status === "pending") {
-    // Not approved: the scan posts a fresh card (the full proposal again).
-    text = `⚠️ Palvelin ei vastannut ajoissa (${entry.why ?? "virhe"}). Hyväksyntää ei kirjattu, se odottaa yhä — uusi kortti tulee tähän chattiin.`;
+    // The scan posts a fresh card (the full proposal again) right after this.
+    text = `⚠️ Hyväksyntä ei kirjautunut (${why}). Se odottaa yhä — uusi kortti tulee tähän chattiin.`;
   } else {
     text = `☑️ Käsitelty muualla (${status}).`;
   }
@@ -556,6 +579,7 @@ async function settleApprove(approvalId, entry) {
   }
   if (settled) delete state.posted[approvalId];
   saveState(state);
+  return settled ? status : null;
 }
 
 async function doDecline(action, approvalId, entry, note) {
@@ -611,6 +635,12 @@ async function handleCallback(cq) {
     return;
   }
   const [, action, approvalId] = m;
+  // RK9-502: an approve already timed out on this card and its state is still
+  // being read; any tap (a queued double tap) waits instead of deciding again.
+  if (state.posted[approvalId]?.awaitingSince) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Odotetaan palvelimen vastausta — kortti päivittyy." });
+    return;
+  }
   const entry = state.posted[approvalId] ?? { messageId: cq.message.message_id };
   // Rows posted before RK9-481 and rows lost from state.json carry no type.
   if (!entry.type) entry.type = await approvalType(approvalId);

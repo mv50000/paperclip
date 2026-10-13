@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("../../scripts/approval-telegram-listener.mjs", import.meta.url));
 const COMPANY = { id: "c1", name: "RK9" };
@@ -41,7 +41,7 @@ const approvals: Approval[] = [
     payload: { action: "issue_status", issueId: uuid(202), identifier: "RK9-470", status: "done", source: "grok" },
   },
 ];
-const approvalComments = new Map<string, Array<{ body: string }>>();
+const approvalComments = new Map<string, Array<{ body: string; authorAgentId?: string }>>();
 
 const apiCalls: Array<{ method: string; url: string; body: any }> = [];
 const tgCalls: Array<{ method: string; body: any }> = [];
@@ -384,6 +384,10 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
   });
 
   describe("an approve whose response is lost (RK9-502)", () => {
+    afterEach(() => {
+      approveMode = "normal";
+      approvalReadDown = false;
+    });
     const addPending = (n: number) =>
       approvals.push({
         id: uuid(n),
@@ -397,19 +401,24 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       expect(run.code, run.out).toBe(0);
       return readState().posted[uuid(n)].messageId as number;
     };
-    const approveVia = async (n: number, cardId: number) => {
-      updatesQueue.push([callback(`pa:a:${uuid(n)}`, cardId)]);
+    const tap = async (data: string, cardId: number) => {
+      updatesQueue.push([callback(data, cardId)]);
       const run = await runOnce();
       expect(run.code, run.out).toBe(0);
     };
+    const ageRow = (n: number, ms: number) => {
+      const saved = readState();
+      saved.posted[uuid(n)].awaitingSince = Date.now() - ms;
+      writeFileSync(join(stateDir, "state.json"), JSON.stringify(saved));
+    };
+    const OUTCOME = "✅ Toteutettu: tila done tiketissä RK9-470.";
 
-    it("shows the outcome comment once the server, which did approve, posts it", async () => {
+    it("shows the server's outcome once it lands; a double tap and an agent's ✅ comment change nothing", async () => {
       const cardId = await postCard(6);
       const before = apiCalls.length;
       approveMode = "lost-after-apply";
-      await approveVia(6, cardId);
+      await tap(`pa:a:${uuid(6)}`, cardId);
       approveMode = "normal";
-      expect(postsTo(before, `/api/approvals/${uuid(6)}/approve`)).toHaveLength(1);
       expect(editsOf(cardId).map((c) => c.body.text)).toEqual([
         "⏳ Hyväksytään — palvelin toteuttaa…",
         "⏳ Hyväksytty — palvelin toteuttaa vielä. Kortti päivittyy, kun tulos on valmis.",
@@ -418,39 +427,62 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       expect(row.awaitingSince).toEqual(expect.any(Number));
       expect(row.handling).toBeUndefined();
 
-      // a scan before the outcome lands does not edit the card again
+      // a queued second ✅ (or ❌) waits instead of deciding again
+      const prompts = tgCalls.filter((c) => c.body?.reply_markup?.force_reply).length;
+      await tap(`pa:a:${uuid(6)}`, cardId);
+      await tap(`pa:r:${uuid(6)}`, cardId);
+      expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").at(-1)?.body.text).toMatch(/^Odotetaan/);
+      expect(postsTo(before, `/api/approvals/${uuid(6)}/approve`)).toHaveLength(1);
+      expect(tgCalls.filter((c) => c.body?.reply_markup?.force_reply)).toHaveLength(prompts);
+
+      // an agent's ✅ comment is not the server's outcome
+      approvalComments.set(uuid(6), [{ body: "✅ Sähköposti lähetetty (agentti).", authorAgentId: AGENT.id }]);
       const run = await runOnce();
       expect(run.code, run.out).toBe(0);
       expect(editsOf(cardId)).toHaveLength(2);
 
-      approvalComments.set(uuid(6), [{ body: "✅ Toteutettu: tila done tiketissä RK9-470." }]);
+      approvalComments.get(uuid(6))!.push({ body: OUTCOME });
       const before2 = apiCalls.length;
       const run2 = await runOnce();
       expect(run2.code, run2.out).toBe(0);
-      expect(editsOf(cardId).at(-1)?.body.text).toBe("✅ Toteutettu: tila done tiketissä RK9-470.");
+      expect(editsOf(cardId).at(-1)?.body.text).toBe(OUTCOME);
       expect(readState().posted[uuid(6)]).toBeUndefined();
       expect(apiCalls.slice(before2).some((c) => c.method === "POST")).toBe(false);
     });
 
-    it("says a still-pending approval was not recorded, never approves again and posts a fresh card", async () => {
+    it("a still-pending approval waits out the grace period, then gets a fresh card and is never approved again", async () => {
       const cardId = await postCard(7);
       const before = apiCalls.length;
       approveMode = "lost";
-      await approveVia(7, cardId);
+      await tap(`pa:a:${uuid(7)}`, cardId);
       approveMode = "normal";
       expect(editsOf(cardId).at(-1)?.body.text).toBe(
-        "⚠️ Palvelin ei vastannut ajoissa (yhteysvirhe). Hyväksyntää ei kirjattu, se odottaa yhä — uusi kortti tulee tähän chattiin.",
+        "⏳ Palvelin ei vastannut ajoissa (yhteysvirhe). Tarkistetaan, kirjautuiko hyväksyntä…",
       );
-      expect(readState().posted[uuid(7)]).toBeUndefined();
-      expect(approvals.find((a) => a.id === uuid(7))?.status).toBe("pending");
+      expect(readState().posted[uuid(7)].awaitingSince).toEqual(expect.any(Number));
 
       const cards = sentCards().length;
       const run = await runOnce();
       expect(run.code, run.out).toBe(0);
+      expect(sentCards()).toHaveLength(cards);
+
+      ageRow(7, 120_000);
+      const run2 = await runOnce();
+      expect(run2.code, run2.out).toBe(0);
+      expect(editsOf(cardId).at(-1)?.body.text).toBe(
+        "⚠️ Hyväksyntä ei kirjautunut (yhteysvirhe). Se odottaa yhä — uusi kortti tulee tähän chattiin.",
+      );
       expect(sentCards()).toHaveLength(cards + 1);
       expect(sentCards().at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data).toBe(`pa:a:${uuid(7)}`);
-      expect(readState().posted[uuid(7)].messageId).not.toBe(cardId);
+      const fresh = readState().posted[uuid(7)];
+      expect(fresh.messageId).not.toBe(cardId);
+      expect(fresh.awaitingSince).toBeUndefined();
+
+      // a queued ✅ on the old card meets the stale-card check
+      await tap(`pa:a:${uuid(7)}`, cardId);
+      expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").at(-1)?.body.text).toMatch(/vanhentunut/);
       expect(postsTo(before, `/api/approvals/${uuid(7)}/approve`)).toHaveLength(1);
+      expect(approvals.find((a) => a.id === uuid(7))?.status).toBe("pending");
     });
 
     it("waits when the state read fails too and settles the card on a later scan", async () => {
@@ -458,18 +490,32 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       const before = apiCalls.length;
       approveMode = "lost-after-apply";
       approvalReadDown = true;
-      await approveVia(8, cardId);
+      await tap(`pa:a:${uuid(8)}`, cardId);
       approveMode = "normal";
       expect(editsOf(cardId).at(-1)?.body.text).toMatch(/^⚠️ Palvelin ei vastannut \(yhteysvirhe\)\. Hyväksynnän tila ei selvinnyt/);
       expect(readState().posted[uuid(8)].awaitingSince).toEqual(expect.any(Number));
 
       approvalReadDown = false;
-      approvalComments.set(uuid(8), [{ body: "✅ Toteutettu: tila done tiketissä RK9-470." }]);
+      approvalComments.set(uuid(8), [{ body: OUTCOME }]);
       const run = await runOnce();
       expect(run.code, run.out).toBe(0);
-      expect(editsOf(cardId).at(-1)?.body.text).toBe("✅ Toteutettu: tila done tiketissä RK9-470.");
+      expect(editsOf(cardId).at(-1)?.body.text).toBe(OUTCOME);
       expect(readState().posted[uuid(8)]).toBeUndefined();
       expect(postsTo(before, `/api/approvals/${uuid(8)}/approve`)).toHaveLength(1);
+    });
+
+    it("stops waiting for an outcome after 30 minutes", async () => {
+      const cardId = await postCard(9);
+      approveMode = "lost-after-apply";
+      await tap(`pa:a:${uuid(9)}`, cardId);
+      approveMode = "normal";
+      ageRow(9, 31 * 60_000);
+      const run = await runOnce();
+      expect(run.code, run.out).toBe(0);
+      expect(editsOf(cardId).at(-1)?.body.text).toBe(
+        "✅ Hyväksytty. Toteutuksen tulos ei näkynyt — tarkista tiketti Paperclip-UI:sta.",
+      );
+      expect(readState().posted[uuid(9)]).toBeUndefined();
     });
   });
 });
