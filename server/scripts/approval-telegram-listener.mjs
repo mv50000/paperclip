@@ -28,7 +28,7 @@
 //   When the issue has an assignee agent, the card names it ("🔔 herättää"),
 //   because an approved action wakes that agent (operator decision, RK9-490).
 //
-// An approve that times out or loses its connection (RK9-502) is never sent
+// An approve that times out, loses its connection or gets a 5xx (RK9-502) is never sent
 // again. The listener reads the approval instead and puts its real state on
 // the card: the outcome comment once approved, a fresh card if still pending.
 //
@@ -519,6 +519,13 @@ async function doApprove(approvalId, entry) {
     await settleApprove(approvalId, entry);
     return;
   }
+  if (res.status >= 500) {
+    // The route sets `approved` before its follow-up steps, and one of those
+    // may fail: a 5xx leaves the result unknown, like a timeout.
+    entry.why = `HTTP ${res.status}`;
+    await settleApprove(approvalId, entry);
+    return;
+  }
   if (!res.ok) {
     await editDone(entry.messageId, `⚠️ Hyväksyntä epäonnistui (HTTP ${res.status}). Käsittele Paperclip-UI:ssa.`);
   } else {
@@ -565,7 +572,7 @@ async function settleApprove(approvalId, entry) {
       settled = false;
     }
   } else if (status === "pending" && age <= APPROVE_PENDING_GRACE_MS) {
-    text = `⏳ Palvelin ei vastannut ajoissa (${why}). Tarkistetaan, kirjautuiko hyväksyntä…`;
+    text = `⏳ Hyväksynnän tulos ei selvinnyt (${why}). Tarkistetaan, kirjautuiko hyväksyntä…`;
     settled = false;
   } else if (status === "pending") {
     // The scan posts a fresh card (the full proposal again) right after this.

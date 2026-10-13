@@ -18,7 +18,7 @@ const CHAT = "42";
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const AGENT = { id: uuid(900), name: "CTO" };
 
-type Approval = { id: string; type: string; status: string; payload: Record<string, unknown> };
+type Approval = { id: string; type: string; status: string; payload: Record<string, unknown>; decidedAt?: string };
 type Issue = { id: string; identifier: string; title: string; status: string; assigneeAgentId: string | null };
 
 const issues = new Map<string, Issue>([
@@ -41,7 +41,7 @@ const approvals: Approval[] = [
     payload: { action: "issue_status", issueId: uuid(202), identifier: "RK9-470", status: "done", source: "grok" },
   },
 ];
-const approvalComments = new Map<string, Array<{ body: string; authorAgentId?: string }>>();
+const approvalComments = new Map<string, Array<{ body: string; authorAgentId?: string; createdAt?: string }>>();
 
 const apiCalls: Array<{ method: string; url: string; body: any }> = [];
 const tgCalls: Array<{ method: string; body: any }> = [];
@@ -49,7 +49,7 @@ const updatesQueue: unknown[][] = [];
 let nextTgMessageId = 500;
 // RK9-502: "lost" drops the connection before the approve is applied,
 // "lost-after-apply" applies it (no outcome comment yet) and then drops it.
-let approveMode: "normal" | "lost" | "lost-after-apply" = "normal";
+let approveMode: "normal" | "lost" | "lost-after-apply" | "500-after-apply" = "normal";
 // RK9-502: drops the connection on GET /api/approvals/:id.
 let approvalReadDown = false;
 
@@ -114,7 +114,11 @@ beforeAll(async () => {
       if (req.method !== "POST") return send(404, { error: "unmatched", path: p });
       if (approval.status !== "pending") return send(409, { error: "already decided" });
       if (action === "approve" && approveMode !== "normal") {
-        if (approveMode === "lost-after-apply") approval.status = "approved";
+        if (approveMode !== "lost") {
+          approval.status = "approved";
+          approval.decidedAt = new Date().toISOString();
+        }
+        if (approveMode === "500-after-apply") return send(500, { error: "Internal server error" });
         return req.socket.destroy();
       }
       if (action === "approve") {
@@ -435,13 +439,16 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       expect(postsTo(before, `/api/approvals/${uuid(6)}/approve`)).toHaveLength(1);
       expect(tgCalls.filter((c) => c.body?.reply_markup?.force_reply)).toHaveLength(prompts);
 
-      // an agent's ✅ comment is not the server's outcome
-      approvalComments.set(uuid(6), [{ body: "✅ Sähköposti lähetetty (agentti).", authorAgentId: AGENT.id }]);
+      // an agent's ✅ comment and a user comment from before the decision are not the outcome
+      approvalComments.set(uuid(6), [
+        { body: "✅ Vanha kommentti ennen päätöstä.", createdAt: new Date(Date.now() - 10 * 60_000).toISOString() },
+        { body: "✅ Sähköposti lähetetty (agentti).", authorAgentId: AGENT.id, createdAt: new Date().toISOString() },
+      ]);
       const run = await runOnce();
       expect(run.code, run.out).toBe(0);
       expect(editsOf(cardId)).toHaveLength(2);
 
-      approvalComments.get(uuid(6))!.push({ body: OUTCOME });
+      approvalComments.get(uuid(6))!.push({ body: OUTCOME, createdAt: new Date().toISOString() });
       const before2 = apiCalls.length;
       const run2 = await runOnce();
       expect(run2.code, run2.out).toBe(0);
@@ -457,7 +464,7 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       await tap(`pa:a:${uuid(7)}`, cardId);
       approveMode = "normal";
       expect(editsOf(cardId).at(-1)?.body.text).toBe(
-        "⏳ Palvelin ei vastannut ajoissa (yhteysvirhe). Tarkistetaan, kirjautuiko hyväksyntä…",
+        "⏳ Hyväksynnän tulos ei selvinnyt (yhteysvirhe). Tarkistetaan, kirjautuiko hyväksyntä…",
       );
       expect(readState().posted[uuid(7)].awaitingSince).toEqual(expect.any(Number));
 
@@ -516,6 +523,15 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
         "✅ Hyväksytty. Toteutuksen tulos ei näkynyt — tarkista tiketti Paperclip-UI:sta.",
       );
       expect(readState().posted[uuid(9)]).toBeUndefined();
+    });
+
+    it("a 5xx after the server approved settles the card like a timeout", async () => {
+      const cardId = await postCard(10);
+      approvalComments.set(uuid(10), [{ body: OUTCOME }]);
+      approveMode = "500-after-apply";
+      await tap(`pa:a:${uuid(10)}`, cardId);
+      expect(editsOf(cardId).at(-1)?.body.text).toBe(OUTCOME);
+      expect(readState().posted[uuid(10)]).toBeUndefined();
     });
   });
 });
