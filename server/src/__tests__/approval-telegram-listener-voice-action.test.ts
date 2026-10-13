@@ -47,6 +47,11 @@ const apiCalls: Array<{ method: string; url: string; body: any }> = [];
 const tgCalls: Array<{ method: string; body: any }> = [];
 const updatesQueue: unknown[][] = [];
 let nextTgMessageId = 500;
+// RK9-502: "lost" drops the connection before the approve is applied,
+// "lost-after-apply" applies it (no outcome comment yet) and then drops it.
+let approveMode: "normal" | "lost" | "lost-after-apply" = "normal";
+// RK9-502: drops the connection on GET /api/approvals/:id.
+let approvalReadDown = false;
 
 async function readJson(req: IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
@@ -103,10 +108,15 @@ beforeAll(async () => {
       const approval = approvals.find((a) => a.id === m![1]);
       if (!approval) return send(404, { error: "not_found" });
       const action = m[2];
+      if (!action && approvalReadDown) return req.socket.destroy();
       if (!action) return send(200, approval);
       if (action === "comments") return send(200, approvalComments.get(approval.id) ?? []);
       if (req.method !== "POST") return send(404, { error: "unmatched", path: p });
       if (approval.status !== "pending") return send(409, { error: "already decided" });
+      if (action === "approve" && approveMode !== "normal") {
+        if (approveMode === "lost-after-apply") approval.status = "approved";
+        return req.socket.destroy();
+      }
       if (action === "approve") {
         approval.status = "approved";
         approvalComments.set(approval.id, [{ body: "✅ Toteutettu: kommentti lisätty tikettiin RK9-469." }]);
@@ -371,5 +381,95 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     const prompt = tgCalls.filter((c) => c.method === "sendMessage" && c.body?.reply_markup?.force_reply).at(-1);
     expect(prompt?.body.text).toMatch(/^✏️ Revisio/);
     expect(readState().posted[uuid(5)].type).toBe("email_send");
+  });
+
+  describe("an approve whose response is lost (RK9-502)", () => {
+    const addPending = (n: number) =>
+      approvals.push({
+        id: uuid(n),
+        type: "voice_action",
+        status: "pending",
+        payload: { action: "issue_status", issueId: uuid(202), identifier: "RK9-470", status: "done", source: "grok" },
+      });
+    const postCard = async (n: number) => {
+      addPending(n);
+      const run = await runOnce();
+      expect(run.code, run.out).toBe(0);
+      return readState().posted[uuid(n)].messageId as number;
+    };
+    const approveVia = async (n: number, cardId: number) => {
+      updatesQueue.push([callback(`pa:a:${uuid(n)}`, cardId)]);
+      const run = await runOnce();
+      expect(run.code, run.out).toBe(0);
+    };
+
+    it("shows the outcome comment once the server, which did approve, posts it", async () => {
+      const cardId = await postCard(6);
+      const before = apiCalls.length;
+      approveMode = "lost-after-apply";
+      await approveVia(6, cardId);
+      approveMode = "normal";
+      expect(postsTo(before, `/api/approvals/${uuid(6)}/approve`)).toHaveLength(1);
+      expect(editsOf(cardId).map((c) => c.body.text)).toEqual([
+        "⏳ Hyväksytään — palvelin toteuttaa…",
+        "⏳ Hyväksytty — palvelin toteuttaa vielä. Kortti päivittyy, kun tulos on valmis.",
+      ]);
+      const row = readState().posted[uuid(6)];
+      expect(row.awaitingSince).toEqual(expect.any(Number));
+      expect(row.handling).toBeUndefined();
+
+      // a scan before the outcome lands does not edit the card again
+      const run = await runOnce();
+      expect(run.code, run.out).toBe(0);
+      expect(editsOf(cardId)).toHaveLength(2);
+
+      approvalComments.set(uuid(6), [{ body: "✅ Toteutettu: tila done tiketissä RK9-470." }]);
+      const before2 = apiCalls.length;
+      const run2 = await runOnce();
+      expect(run2.code, run2.out).toBe(0);
+      expect(editsOf(cardId).at(-1)?.body.text).toBe("✅ Toteutettu: tila done tiketissä RK9-470.");
+      expect(readState().posted[uuid(6)]).toBeUndefined();
+      expect(apiCalls.slice(before2).some((c) => c.method === "POST")).toBe(false);
+    });
+
+    it("says a still-pending approval was not recorded, never approves again and posts a fresh card", async () => {
+      const cardId = await postCard(7);
+      const before = apiCalls.length;
+      approveMode = "lost";
+      await approveVia(7, cardId);
+      approveMode = "normal";
+      expect(editsOf(cardId).at(-1)?.body.text).toBe(
+        "⚠️ Palvelin ei vastannut ajoissa (yhteysvirhe). Hyväksyntää ei kirjattu, se odottaa yhä — uusi kortti tulee tähän chattiin.",
+      );
+      expect(readState().posted[uuid(7)]).toBeUndefined();
+      expect(approvals.find((a) => a.id === uuid(7))?.status).toBe("pending");
+
+      const cards = sentCards().length;
+      const run = await runOnce();
+      expect(run.code, run.out).toBe(0);
+      expect(sentCards()).toHaveLength(cards + 1);
+      expect(sentCards().at(-1)!.body.reply_markup.inline_keyboard[0][0].callback_data).toBe(`pa:a:${uuid(7)}`);
+      expect(readState().posted[uuid(7)].messageId).not.toBe(cardId);
+      expect(postsTo(before, `/api/approvals/${uuid(7)}/approve`)).toHaveLength(1);
+    });
+
+    it("waits when the state read fails too and settles the card on a later scan", async () => {
+      const cardId = await postCard(8);
+      const before = apiCalls.length;
+      approveMode = "lost-after-apply";
+      approvalReadDown = true;
+      await approveVia(8, cardId);
+      approveMode = "normal";
+      expect(editsOf(cardId).at(-1)?.body.text).toMatch(/^⚠️ Palvelin ei vastannut \(yhteysvirhe\)\. Hyväksynnän tila ei selvinnyt/);
+      expect(readState().posted[uuid(8)].awaitingSince).toEqual(expect.any(Number));
+
+      approvalReadDown = false;
+      approvalComments.set(uuid(8), [{ body: "✅ Toteutettu: tila done tiketissä RK9-470." }]);
+      const run = await runOnce();
+      expect(run.code, run.out).toBe(0);
+      expect(editsOf(cardId).at(-1)?.body.text).toBe("✅ Toteutettu: tila done tiketissä RK9-470.");
+      expect(readState().posted[uuid(8)]).toBeUndefined();
+      expect(postsTo(before, `/api/approvals/${uuid(8)}/approve`)).toHaveLength(1);
+    });
   });
 });
