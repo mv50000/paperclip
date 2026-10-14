@@ -1,0 +1,19 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); subcode as reported to Sunspot in 2026-06 (aur_marketing_runbook)",
+  "status": 400,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "error": {
+      "message": "Invalid parameter",
+      "type": "OAuthException",
+      "code": 100,
+      "error_subcode": 2859024,
+      "is_transient": false,
+      "error_user_title": "Ad account has not accepted the terms",
+      "error_user_msg": "Accept the terms before creating ads.",
+      "fbtrace_id": "AbCdEf2859024"
+    }
+  }
+}

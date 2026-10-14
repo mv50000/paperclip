@@ -1,0 +1,15 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); Graph echoes a malformed token in the message, __TOKEN__ is replaced in tests",
+  "status": 400,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "error": {
+      "message": "Malformed access token __TOKEN__",
+      "type": "OAuthException",
+      "code": 190,
+      "fbtrace_id": "AbCdEf190"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made)",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "images": {
+      "bytes": {
+        "hash": "0d500843a1d4699a0b41e99f4137a5c3",
+        "url": "https://scontent.example.fbcdn.net/image.png"
+      }
+    }
+  }
+}

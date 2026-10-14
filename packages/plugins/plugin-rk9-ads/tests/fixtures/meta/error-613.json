@@ -1,0 +1,16 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); usage header estimates 0 minutes, so the client backs off and retries",
+  "status": 400,
+  "headers": {
+    "facebook-api-version": "v23.0",
+    "x-business-use-case-usage": "{\"1336862981968191\": [{\"type\": \"ads_management\", \"call_count\": 100, \"total_cputime\": 40, \"total_time\": 60, \"estimated_time_to_regain_access\": 0, \"ads_api_access_tier\": \"development_access\"}]}"
+  },
+  "body": {
+    "error": {
+      "message": "(#613) Calls to this api have exceeded the rate limit.",
+      "type": "OAuthException",
+      "code": 613,
+      "fbtrace_id": "AbCdEf613"
+    }
+  }
+}

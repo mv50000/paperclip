@@ -1,0 +1,25 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made)",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "data": [
+      {
+        "id": "111",
+        "uri": "https://scontent.example.fbcdn.net/thumb1.jpg",
+        "is_preferred": true,
+        "width": 1080,
+        "height": 1920
+      },
+      {
+        "id": "112",
+        "uri": "https://scontent.example.fbcdn.net/thumb2.jpg",
+        "is_preferred": false,
+        "width": 1080,
+        "height": 1920
+      }
+    ]
+  }
+}

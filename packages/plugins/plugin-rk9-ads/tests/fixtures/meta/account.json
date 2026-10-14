@@ -1,0 +1,16 @@
+{
+  "source": "recorded 2026-10-14 from Sunspot act_1336862981968191 with scripts/live-smoke-sunspot.ts --record, token-scrubbed; facebook-api-version header set to v23.0 by hand (live answered v25.0)",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0",
+    "x-business-use-case-usage": "{\"1336862981968191\":[{\"type\":\"ads_management\",\"call_count\":1,\"total_cputime\":1,\"total_time\":1,\"estimated_time_to_regain_access\":0,\"ads_api_access_tier\":\"development_access\"}]}"
+  },
+  "body": {
+    "currency": "EUR",
+    "timezone_name": "Europe/Helsinki",
+    "spend_cap": "10000",
+    "amount_spent": "0",
+    "account_status": 1,
+    "id": "act_1336862981968191"
+  }
+}

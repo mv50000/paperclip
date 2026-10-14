@@ -1,0 +1,10 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made)",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "id": "1234567890123456"
+  }
+}

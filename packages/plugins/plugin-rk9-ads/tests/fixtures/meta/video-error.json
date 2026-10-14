@@ -1,0 +1,25 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made)",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "status": {
+      "video_status": "error",
+      "uploading_phase": {
+        "status": "complete"
+      },
+      "processing_phase": {
+        "status": "error",
+        "errors": [
+          {
+            "code": 1363008,
+            "message": "Video file is corrupt or uses an unsupported codec."
+          }
+        ]
+      }
+    },
+    "id": "1234567890123456"
+  }
+}

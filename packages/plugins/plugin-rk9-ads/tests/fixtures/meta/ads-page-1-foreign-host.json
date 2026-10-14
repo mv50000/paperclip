@@ -1,0 +1,36 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); paging.next pointing outside Graph",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "data": [
+      {
+        "id": "120248676310950775",
+        "name": "Aurinkopulssi reel 2026-09-15",
+        "status": "PAUSED",
+        "effective_status": "PAUSED",
+        "adset_id": "120247250925850775",
+        "campaign_id": "120247250925830775",
+        "creative": {
+          "id": "1834346481095193"
+        }
+      },
+      {
+        "id": "120248499449520775",
+        "name": "Aurinkopulssi reel 2026-09-02",
+        "status": "PAUSED",
+        "effective_status": "PAUSED",
+        "adset_id": "120247250925850775",
+        "campaign_id": "120247250925830775",
+        "creative": {
+          "id": "1067690496001346"
+        }
+      }
+    ],
+    "paging": {
+      "next": "https://evil.example/v23.0/act_1336862981968191/ads?after=x"
+    }
+  }
+}
