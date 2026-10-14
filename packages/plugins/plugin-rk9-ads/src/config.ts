@@ -111,6 +111,8 @@ export interface BrandConfig {
     allowedUserIds: string[];
     mode: TelegramMode;
     webhookSecretRef?: SecretRef;
+    /** Public https URL of the plugin webhook (only in webhook mode). */
+    webhookUrl?: string;
   };
   schedule: {
     scheduledPause: { enabled: boolean; at: string };
@@ -245,6 +247,11 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
         allowedUserIds: { type: "array", title: "Allowed approver user ids", items: { type: "string" } },
         mode: { type: "string", title: "Update mode (default poll)", enum: [...TELEGRAM_MODES] },
         webhookSecretRef: secretRefField("Webhook secret token (only in webhook mode)"),
+        webhookUrl: {
+          type: "string",
+          title: "Webhook URL (only in webhook mode)",
+          description: "Public https URL of /api/plugins/<pluginId>/webhooks/telegram on this instance.",
+        },
       },
     },
     schedule: {
@@ -655,13 +662,21 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
       return true;
     });
   if (telegramRaw && telegramTouched) {
-    c.known(telegramRaw, ["botTokenRef", "chatId", "allowedUserIds", "mode", "webhookSecretRef"], "telegram");
+    c.known(telegramRaw, ["botTokenRef", "chatId", "allowedUserIds", "mode", "webhookSecretRef", "webhookUrl"], "telegram");
     const botTokenRef = c.secretRef(telegramRaw, "botTokenRef", "telegram", true);
     const chatId = c.string(telegramRaw, "chatId", "telegram", { required: true, pattern: /^-?\d+$/ });
     const allowedUserIds = c.stringArray(telegramRaw, "allowedUserIds", "telegram", { pattern: /^\d+$/ });
     if (allowedUserIds.length === 0) c.add("telegram.allowedUserIds", "must list at least one approver");
     const mode = c.enumValue(telegramRaw, "mode", "telegram", TELEGRAM_MODES, "poll");
     const webhookSecretRef = c.secretRef(telegramRaw, "webhookSecretRef", "telegram", mode === "webhook");
+    let webhookUrl: string | undefined;
+    if (telegramRaw.webhookUrl !== undefined && telegramRaw.webhookUrl !== "") {
+      const url = parseHttpsUrl(telegramRaw.webhookUrl);
+      if (!url) c.add("telegram.webhookUrl", "must be an https URL");
+      else webhookUrl = url.toString();
+    } else if (mode === "webhook") {
+      c.add("telegram.webhookUrl", "is required");
+    }
     if (botTokenRef && chatId && mode) {
       telegram = {
         botTokenRef,
@@ -669,6 +684,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
         allowedUserIds,
         mode,
         ...(webhookSecretRef ? { webhookSecretRef } : {}),
+        ...(webhookUrl ? { webhookUrl } : {}),
       };
     }
   }
