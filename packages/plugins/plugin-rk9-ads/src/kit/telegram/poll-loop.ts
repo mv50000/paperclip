@@ -11,8 +11,10 @@
  *   update being processed finishes. The host cannot abort a `ctx.http`
  *   request, so that request ends on its own within `timeoutSeconds`; its
  *   result is discarded and no new getUpdates starts.
- * - 409 means another consumer owns the token (a second instance or a
+ * - 409 means another consumer polls the same token (a second instance or a
  *   webhook). The loop logs it as an error and waits `conflictBackoffMs`.
+ *   After `maxConflicts` 409s in a row it stops with status "conflict", so
+ *   two consumers do not keep taking each other's updates.
  */
 
 import type { PluginLogger, PluginStateClient } from "@paperclipai/plugin-sdk";
@@ -53,11 +55,16 @@ export interface PollLoopOptions {
   timeoutSeconds?: number;
   errorBackoffMs?: number;
   conflictBackoffMs?: number;
+  /** 409s in a row before the loop gives up. Default 2. */
+  maxConflicts?: number;
 }
+
+export type PollLoopStatus = "new" | "running" | "stopped" | "conflict" | "failed";
 
 export interface PollLoop {
   readonly botKey: string;
   readonly running: boolean;
+  readonly status: PollLoopStatus;
   start(): void;
   /** Stops the loop. Resolves when no getUpdates is pending on our side. */
   stop(): Promise<void>;
@@ -73,9 +80,11 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
   );
   const errorBackoffMs = options.errorBackoffMs ?? 5_000;
   const conflictBackoffMs = options.conflictBackoffMs ?? 60_000;
+  const maxConflicts = Math.max(1, options.maxConflicts ?? 2);
 
   let stopped = false;
   let running = false;
+  let status: PollLoopStatus = "new";
   let done: Promise<void> = Promise.resolve();
   const controller = new AbortController();
   const stopSignal = new Promise<typeof STOPPED>((resolve) => {
@@ -93,40 +102,55 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
     try {
       offset = await offsets.load();
     } catch (error) {
-      logger.error("telegram poll: offset unreadable, loop not started", { botKey: api.botKey, error: describe(error) });
+      logger.error("telegram poll: offset unreadable, loop not started", { botKey: api.botKey, detail: describe(error) });
+      status = "failed";
       return;
     }
+    let conflicts = 0;
     logger.info("telegram poll: started", { botKey: api.botKey, offset, timeoutSeconds: timeout });
 
     while (!stopped) {
       let updates: TelegramUpdate[] | typeof STOPPED;
       try {
+        // No AbortSignal: ctx.http.fetch drops it. The race abandons the request locally.
         updates = await Promise.race([
-          api.getUpdates(
-            { ...(offset !== null ? { offset } : {}), timeout, allowed_updates: [...POLL_ALLOWED_UPDATES] },
-            { signal: controller.signal },
-          ),
+          api.getUpdates({ ...(offset !== null ? { offset } : {}), timeout, allowed_updates: [...POLL_ALLOWED_UPDATES] }),
           stopSignal,
         ]);
       } catch (error) {
         if (stopped) break;
         if (error instanceof TelegramApiError && error.isConflict) {
+          conflicts += 1;
           logger.error(
             "telegram poll: 409 conflict, another consumer uses this bot token (second instance or a webhook). Dev and prod need separate bots.",
-            { botKey: api.botKey, error: error.message },
+            { botKey: api.botKey, detail: error.message, conflicts, maxConflicts },
           );
+          if (conflicts >= maxConflicts) {
+            logger.error("telegram poll: stopped after repeated 409 conflicts; fix the bot token, then save the config again", {
+              botKey: api.botKey,
+            });
+            status = "conflict";
+            return;
+          }
+          await sleep(conflictBackoffMs);
+        } else if (error instanceof TelegramApiError && (error.errorCode === 401 || error.errorCode === 404)) {
+          logger.error("telegram poll: Telegram rejected the bot token (401/404); check the bot token secret", {
+            botKey: api.botKey,
+            detail: error.message,
+          });
           await sleep(conflictBackoffMs);
         } else if (error instanceof TelegramApiError && error.retryAfterSeconds) {
           logger.warn("telegram poll: rate limited", { botKey: api.botKey, retryAfterSeconds: error.retryAfterSeconds });
           await sleep(error.retryAfterSeconds * 1000);
         } else {
-          logger.warn("telegram poll: getUpdates failed", { botKey: api.botKey, error: describe(error) });
+          logger.warn("telegram poll: getUpdates failed", { botKey: api.botKey, detail: describe(error) });
           await sleep(errorBackoffMs);
         }
         continue;
       }
       // Fetched but not processed: Telegram delivers it again after a restart.
       if (updates === STOPPED || stopped) break;
+      conflicts = 0;
       if (!Array.isArray(updates) || updates.length === 0) continue;
 
       const ordered = [...updates]
@@ -141,7 +165,7 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
           logger.error("telegram poll: update handler failed, update skipped", {
             botKey: api.botKey,
             updateId: update.update_id,
-            error: describe(error),
+            detail: describe(error),
           });
         }
         offset = update.update_id + 1;
@@ -152,7 +176,7 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
           await offsets.save(offset);
         } catch (error) {
           // Not fatal: the next save covers it, and update_id dedupe absorbs a redelivery.
-          logger.warn("telegram poll: offset save failed", { botKey: api.botKey, error: describe(error) });
+          logger.warn("telegram poll: offset save failed", { botKey: api.botKey, detail: describe(error) });
         }
       }
     }
@@ -164,12 +188,20 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
     get running() {
       return running;
     },
+    get status() {
+      return status;
+    },
     start() {
       if (running || stopped) return;
       running = true;
+      status = "running";
       done = run()
+        .then(() => {
+          if (status === "running") status = "stopped";
+        })
         .catch((error) => {
-          logger.error("telegram poll: loop crashed", { botKey: api.botKey, error: describe(error) });
+          status = "failed";
+          logger.error("telegram poll: loop crashed", { botKey: api.botKey, detail: describe(error) });
         })
         .finally(() => {
           running = false;

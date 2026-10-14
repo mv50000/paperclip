@@ -47,22 +47,37 @@ shutdown.
 - "stops within a few seconds on shutdown and calls getUpdates no more".
 
 A live check against the real Bot API was not run. Ololla has no plugin bot
-yet (operator TODO below). Webhook mode has unit tests only. No public
-reachability test was run.
+yet (operator TODO below). No public reachability test was run for webhook
+mode, which is off (decision 2).
 
-## Decision 2: webhook mode is optional and mutually exclusive per token
+## Decision 2: webhook mode is implemented but off
 
-`telegram.mode: "webhook"` needs `webhookSecretRef` and an https `webhookUrl`
-(the plugin route `/api/plugins/<pluginId>/webhooks/telegram`). On startup
-the plugin calls `setWebhook` with `secret_token`. A delivery is accepted only
-when `X-Telegram-Bot-Api-Secret-Token` matches. The check compares sha256
-digests with `timingSafeEqual` against every candidate. A missing, empty or
-repeated header is refused and logged. A token that one brand uses in poll
-mode and another in webhook mode is not started. The plugin logs an error.
+The independent security review found a high-severity problem. The host's
+public webhook route (`server/src/routes/plugins.ts`) writes every delivery
+into `plugin_webhook_deliveries` in plain text. The `headers` column holds
+`X-Telegram-Bot-Api-Secret-Token`. The `payload` column holds the update,
+and a callback update includes `message.reply_markup` with both card tokens.
+Someone who reads the database could therefore send a forged, correctly
+signed tap and approve spend. The plugin cannot fix this without a core
+change, and G1 does not allow core changes. So:
 
-The host stores every webhook request's headers in
-`plugin_webhook_deliveries`, including the secret header. That is one more
-reason to prefer poll mode.
+- The worker runs with `webhookMode: "disabled"`. A brand in webhook mode
+  gets an error log ("webhook mode is disabled"), and its bot is not
+  started. Every delivery to the `telegram` endpoint is refused.
+- The code stays and is tested with `webhookMode: "enabled"`:
+  - `setWebhook` with `secret_token` (32-256 chars).
+  - A constant-time check of `X-Telegram-Bot-Api-Secret-Token`: sha256
+    digests are compared with `timingSafeEqual` against every candidate. A
+    missing, empty or repeated header is refused and logged.
+  - Two bots with the same secret are refused.
+  - A token in poll mode for one brand and webhook mode for another is not
+    started.
+- Webhook mode can be turned on after one of two things exists: a core
+  change that stops storing the secret header and the callback payload, or
+  an operator decision to accept that risk.
+
+Poll mode never goes through that route. The database then holds only the
+token hash, the offset and the update ids.
 
 ## Decision 3: never take a bot from another consumer
 
@@ -79,7 +94,11 @@ their own tokens. So:
 - In webhook mode, the plugin does not overwrite a webhook that another
   consumer set.
 - A 409 from `getUpdates` is logged as an error ("another consumer uses this
-  bot token"), and the loop waits 60 s before the next try.
+  bot token"), and the loop waits 60 s. After two 409s in a row, the loop
+  stops, so two consumers do not keep taking each other's updates. The retry
+  timer does not restart that loop. The next config save or worker restart
+  does.
+- A callback that is not a gate button is left unanswered.
 
 This deviates from the literal acceptance criterion "startup calls
 deleteWebhook in poll mode". An unconditional `deleteWebhook` could
@@ -114,11 +133,38 @@ card's company.
   `editMessageText` for text). The plugin also removes the buttons. Then
   the kind handler runs off the poll loop, and the final outcome is edited
   into the card.
+- Only an approval runs the kind handler. A denial is final: the card shows
+  "❌ Hylätty", and nothing else runs.
+- The handler runs at most once. Before it runs, the outcome is set to
+  `{ "handler": "started" }`. If the worker dies during the handler, the card
+  stays `approved` with that outcome, so the handler may or may not have
+  acted. The activation item (RK9-517) must make its handler idempotent
+  against Meta, and a reconciler must check the ad's real state instead of
+  re-running the handler.
+- A handler error moves the card to `failed`. The chat sees only
+  "⚠️ Epäonnistui". The redacted message (token shapes,
+  `access_token=...`, bearer values) goes to the log and the `error` column.
+- A brand whose config the host refuses ("unavailable") stays on its bot for
+  `pause_all` cards only. Its allowlist may be stale, so it cannot approve
+  spend.
 - Handlers are registered per kind (`registerGateHandler`). The allowed kinds
   are `activate_ad` and `pause_all`. `scale_budget` is refused (G9). A card of
   a kind without a handler is refused, and its state does not change.
 - The plugin never calls `ctx.approvals`, and it declares no `approvals.*`
   capability.
+
+## Host facts found on a dev instance
+
+- The host refuses a proactive worker call without an invocation id while any
+  invocation is open (`server/src/services/plugin-worker-manager.ts`). Inside
+  `onConfigChanged`, `ctx.companies.list` therefore fails with "missing,
+  expired, or unknown invocation scope". The plugin plans 500 ms after the
+  hook returns, and the retry timer covers a plan that still fails.
+- On a dev instance (embedded database, own `PAPERCLIP_HOME`) the worker
+  reached `api.telegram.org` through `ctx.http.fetch`. A fake token got 401.
+  The loop logged the error without the token and backed off. A config save
+  re-planned the bot, and a POST to the webhook route got 502 ("webhook mode
+  is disabled").
 
 ## Operator TODO
 

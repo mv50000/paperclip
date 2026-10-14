@@ -13,21 +13,29 @@
  *      moves to expired and shows "vanhentunut";
  *   6. answerCallbackQuery, then edit the card to the hourglass and drop the
  *      buttons;
- * then, off the poll loop: run the kind handler and edit the final outcome
+ * then, off the poll loop: mark the handler as started (outcome
+ * `{ handler: "started" }`), run the kind handler and edit the final outcome
  * into the card. `idle()` waits for those handler runs.
+ *
+ * Only an approval runs the kind handler. A denial is final at step 5.
+ *
+ * The handler runs at most once. A worker that dies during the handler leaves
+ * the card `approved` with outcome `{ handler: "started" }`: the handler may
+ * or may not have acted. A reconciler must check the real state (for example
+ * the ad's status at Meta) and must not re-run the handler blindly.
  */
 
 import type { PluginLogger } from "@paperclipai/plugin-sdk";
 import {
   editCard,
   messageMedia,
-  redactToken,
+  redactSecrets,
   type BotApi,
   type CardMedia,
   type TelegramCallbackQuery,
   type TelegramUpdate,
 } from "../telegram/bot-api.js";
-import type { GateRegistry } from "./registry.js";
+import type { GateHandlerResult, GateRegistry } from "./registry.js";
 import {
   gateTokenHash,
   parseGateCallbackData,
@@ -42,14 +50,16 @@ export interface GateBrand {
   companyId: string;
   chatId: string;
   allowedUserIds: readonly string[];
+  /** When set, only cards of these kinds can be decided (e.g. a brand whose config is unreadable). */
+  allowedKinds?: readonly string[];
 }
 
 export type GateAuditEvent =
-  | { type: "unauthorized"; companyId: string; gateRequestId: string; tgUserId: number; chatId: string | null; reason: "chat" | "user" | "bot" }
+  | { type: "unauthorized"; companyId: string; gateRequestId: string; tgUserId: number; chatId: string | null; reason: "chat" | "user" | "bot" | "kind" }
   | { type: "unknown_kind"; companyId: string; gateRequestId: string; kind: string }
   | { type: "expired"; companyId: string; gateRequestId: string; tgUserId: number }
   | { type: "decided"; companyId: string; gateRequestId: string; kind: string; decision: GateDecision; tgUserId: number }
-  | { type: "handler_failed"; companyId: string; gateRequestId: string; kind: string; error: string };
+  | { type: "handler_failed"; companyId: string; gateRequestId: string; kind: string; errorName: string };
 
 export const GATE_TEXT = {
   unauthorized: "ei oikeutta",
@@ -88,7 +98,7 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     try {
       await options.audit(event);
     } catch (error) {
-      logger.warn("gate: audit write failed", { type: event.type, error: safe(error) });
+      logger.warn("gate: audit write failed", { type: event.type, detail: safe(error) });
     }
   }
 
@@ -96,7 +106,7 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     try {
       await api.answerCallbackQuery({ callback_query_id: query.id, text, ...(showAlert ? { show_alert: true } : {}) });
     } catch (error) {
-      logger.warn("gate: answerCallbackQuery failed", { botKey: api.botKey, error: safe(error) });
+      logger.warn("gate: answerCallbackQuery failed", { botKey: api.botKey, detail: safe(error) });
     }
   }
 
@@ -110,48 +120,66 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     try {
       await editCard(api, { chatId, messageId, media, original, status, buttons: null });
     } catch (error) {
-      logger.warn("gate: card edit failed", { botKey: api.botKey, gateRequestId: request.id, error: safe(error) });
+      logger.warn("gate: card edit failed", { botKey: api.botKey, gateRequestId: request.id, detail: safe(error) });
     }
   }
 
-  function authorize(request: GateRequestRecord, query: TelegramCallbackQuery): "chat" | "user" | "bot" | null {
+  function authorize(request: GateRequestRecord, query: TelegramCallbackQuery): "chat" | "user" | "bot" | "kind" | null {
     const brand = options.brandFor(request.companyId);
     if (!brand) return "bot";
     const chatId = query.message ? String(query.message.chat.id) : null;
     if (!chatId || chatId !== brand.chatId || (request.chatId !== null && request.chatId !== chatId)) return "chat";
     if (request.messageId !== null && query.message && query.message.message_id !== request.messageId) return "chat";
     if (!brand.allowedUserIds.includes(String(query.from?.id))) return "user";
+    if (brand.allowedKinds && !brand.allowedKinds.includes(request.kind)) return "kind";
     return null;
   }
 
-  async function runHandler(request: GateRequestRecord, query: TelegramCallbackQuery, decision: GateDecision): Promise<void> {
+  async function runHandler(request: GateRequestRecord, query: TelegramCallbackQuery): Promise<void> {
     const handler = registry.get(request.kind);
     const tgUserId = query.from.id;
     try {
+      await store.settle(request.companyId, request.id, { from: "approved", to: "approved", outcome: { handler: "started" } });
+    } catch (error) {
+      logger.warn("gate: could not mark the handler as started", { gateRequestId: request.id, detail: safe(error) });
+    }
+    let result: GateHandlerResult;
+    try {
       if (!handler) throw new Error(`No handler for gate kind ${request.kind}`);
-      const result = (await handler({ decision, request: { ...request, status: decision }, tgUserId })) ?? {};
-      await store.settle(request.companyId, request.id, { from: decision, to: decision, outcome: result.outcome ?? null });
-      await edit(request, query, result.statusText ?? (decision === "approved" ? GATE_TEXT.approved : GATE_TEXT.denied));
+      result = (await handler({ request: { ...request, status: "approved" }, tgUserId })) ?? {};
     } catch (error) {
       const message = safe(error);
-      logger.error("gate: handler failed", { gateRequestId: request.id, kind: request.kind, error: message });
-      // A denied card stays denied: nothing was activated.
-      const to = decision === "approved" ? "failed" : decision;
+      logger.error("gate: handler failed", { gateRequestId: request.id, kind: request.kind, detail: message });
       try {
-        await store.settle(request.companyId, request.id, { from: decision, to, error: message });
+        await store.settle(request.companyId, request.id, { from: "approved", to: "failed", error: message });
       } catch (settleError) {
-        logger.error("gate: could not record handler failure", { gateRequestId: request.id, error: safe(settleError) });
+        logger.error("gate: could not record handler failure", { gateRequestId: request.id, detail: safe(settleError) });
       }
-      await audit({ type: "handler_failed", companyId: request.companyId, gateRequestId: request.id, kind: request.kind, error: message });
-      await edit(request, query, `${GATE_TEXT.failed}: ${message.slice(0, 200)}`);
+      await audit({
+        type: "handler_failed",
+        companyId: request.companyId,
+        gateRequestId: request.id,
+        kind: request.kind,
+        errorName: error instanceof Error ? error.name : "Error",
+      });
+      // The chat sees a generic line; the redacted message is in the log and the error column.
+      await edit(request, query, GATE_TEXT.failed);
+      return;
     }
+    // The handler has acted: a later storage error must not show the card as failed.
+    try {
+      await store.settle(request.companyId, request.id, { from: "approved", to: "approved", outcome: result.outcome ?? { handler: "done" } });
+    } catch (error) {
+      logger.error("gate: handler succeeded but its outcome was not stored", { gateRequestId: request.id, detail: safe(error) });
+    }
+    await edit(request, query, result.statusText ?? GATE_TEXT.approved);
   }
 
   async function handleCallback(update: TelegramUpdate, query: TelegramCallbackQuery): Promise<void> {
     const parsed = parseGateCallbackData(query.data);
     if (!parsed) {
-      // Not a gate button. Stop the client spinner and move on.
-      await answer(query, "");
+      // Not a gate button. Leave it alone: it may belong to another consumer.
+      logger.debug("gate: callback is not a gate button", { botKey: api.botKey, updateId: update.update_id });
       return;
     }
     const tokenHash = gateTokenHash(parsed.token);
@@ -209,8 +237,13 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       return;
     }
 
-    await answer(query, parsed.decision === "approved" ? GATE_TEXT.processing : GATE_TEXT.denied);
-    await edit(request, query, GATE_TEXT.processing);
+    if (parsed.decision === "denied") {
+      await answer(query, GATE_TEXT.denied);
+      await edit(request, query, GATE_TEXT.denied);
+    } else {
+      await answer(query, GATE_TEXT.processing);
+      await edit(request, query, GATE_TEXT.processing);
+    }
     await audit({
       type: "decided",
       companyId: request.companyId,
@@ -220,7 +253,8 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       tgUserId,
     });
 
-    const run = runHandler(request, query, parsed.decision).finally(() => {
+    if (parsed.decision !== "approved") return;
+    const run = runHandler(request, query).finally(() => {
       running.delete(run);
     });
     running.add(run);
@@ -244,5 +278,5 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
 }
 
 function safe(error: unknown): string {
-  return redactToken(error instanceof Error ? error.message : String(error)).slice(0, 300);
+  return redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 300);
 }

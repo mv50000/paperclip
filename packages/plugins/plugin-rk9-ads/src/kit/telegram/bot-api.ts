@@ -141,11 +141,23 @@ export class TelegramApiError extends Error {
 
 const GENERIC_TOKEN_RE = /\d{5,}:[A-Za-z0-9_-]{20,}/g;
 
+const CREDENTIAL_PARAM_RE = /\b(access_token|token|secret|password|key|signature|appsecret_proof)=[^&\s"']+/gi;
+const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+
 /** Removes the token (and anything shaped like a bot token) from a string. */
 export function redactToken(text: string, token?: string): string {
   let out = text;
   if (token) out = out.split(token).join("<redacted>");
   return out.replace(GENERIC_TOKEN_RE, "<redacted>");
+}
+
+/**
+ * `redactToken` plus credential-shaped query parameters (`access_token=...`)
+ * and bearer headers. For error text from other APIs (for example Meta) that
+ * reaches a log or a database column.
+ */
+export function redactSecrets(text: string, token?: string): string {
+  return redactToken(text, token).replace(CREDENTIAL_PARAM_RE, "$1=<redacted>").replace(BEARER_RE, "Bearer <redacted>");
 }
 
 /**

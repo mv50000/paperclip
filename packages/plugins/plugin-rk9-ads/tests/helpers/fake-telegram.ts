@@ -3,7 +3,8 @@
  *
  * It keeps an update queue with Telegram's confirmation rule (an update is
  * dropped only when a later getUpdates passes a higher offset), long-polls
- * until an update arrives, the timeout passes or the request is aborted, and
+ * until an update arrives or the timeout passes (it ignores AbortSignal, like
+ * ctx.http.fetch), and
  * enforces the caption/text split of edits and "message is not modified".
  * Every call is recorded with the bot key of its token, never the token.
  */
@@ -66,8 +67,15 @@ export class FakeTelegram {
         ...(failure.retryAfter ? { parameters: { retry_after: failure.retryAfter } } : {}),
       });
     }
-    return this.dispatch(botKey, method, params, init?.signal ?? undefined);
+    return this.dispatch(botKey, method, params);
   };
+
+  /** Resolves when no getUpdates is open (the host finishes an abandoned long-poll on its own). */
+  async drained(): Promise<void> {
+    while ([...this.inflight.values()].some((count) => count > 0)) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
 
   callsOf(method: string, botKey?: string): FakeCall[] {
     return this.calls.filter((call) => call.method === method && (!botKey || call.botKey === botKey));
@@ -137,7 +145,7 @@ export class FakeTelegram {
     return queue.slice(0, 100).map((update) => structuredClone(update));
   }
 
-  private async getUpdates(botKey: string, params: Record<string, any>, signal: AbortSignal | undefined): Promise<Response> {
+  private async getUpdates(botKey: string, params: Record<string, any>): Promise<Response> {
     if (this.conflicts.has(botKey)) {
       return json(409, { ok: false, error_code: 409, description: "Conflict: terminated by other getUpdates request" });
     }
@@ -152,22 +160,12 @@ export class FakeTelegram {
       for (;;) {
         const updates = this.pending(botKey, params.offset);
         if (updates.length > 0 || Date.now() >= deadline) return json(200, { ok: true, result: updates });
-        if (signal?.aborted) throw abortError();
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(done, Math.max(1, deadline - Date.now()));
-          const onAbort = () => {
-            clearTimeout(timer);
-            reject(abortError());
-          };
-          function done() {
-            signal?.removeEventListener("abort", onAbort);
-            resolve();
-          }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, Math.max(1, deadline - Date.now()));
           this.waiters.push(() => {
             clearTimeout(timer);
-            done();
+            resolve();
           });
-          signal?.addEventListener("abort", onAbort, { once: true });
         });
       }
     } finally {
@@ -175,10 +173,10 @@ export class FakeTelegram {
     }
   }
 
-  private async dispatch(botKey: string, method: string, params: Record<string, any>, signal: AbortSignal | undefined): Promise<Response> {
+  private async dispatch(botKey: string, method: string, params: Record<string, any>): Promise<Response> {
     switch (method) {
       case "getUpdates":
-        return this.getUpdates(botKey, params, signal);
+        return this.getUpdates(botKey, params);
       case "getWebhookInfo":
         return ok({ url: this.webhooks.get(botKey)?.url ?? "", pending_update_count: 0 });
       case "setWebhook":
@@ -243,10 +241,4 @@ function ok(result: unknown): Response {
 
 function badRequest(description: string): Response {
   return json(400, { ok: false, error_code: 400, description });
-}
-
-function abortError(): Error {
-  const error = new Error("The operation was aborted");
-  error.name = "AbortError";
-  return error;
 }

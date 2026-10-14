@@ -9,6 +9,8 @@ import { resetGateRegistry } from "./gates.js";
  * return at once. Features registered after this one add gate handlers with
  * `registerGateHandler()` (./gates.ts).
  */
+const CONFIG_PLAN_DELAY_MS = 500;
+
 export function register(runtime: FeatureRuntime): void {
   const { ctx } = runtime;
   const registry = resetGateRegistry();
@@ -16,12 +18,14 @@ export function register(runtime: FeatureRuntime): void {
   setTelegramController(controller);
 
   runtime.handleWebhook("telegram", (input) => controller.handleWebhook(input));
+  // Plan after the onConfigChanged call has returned: while it is open, the
+  // host refuses the proactive companies.list that planning needs.
   runtime.onConfigChanged(async () => {
-    void controller.replan();
+    setTimeout(() => void controller.replan("config"), CONFIG_PLAN_DELAY_MS).unref?.();
   });
   runtime.onShutdown(async () => {
     await controller.stop();
     setTelegramController(null);
   });
-  void controller.replan();
+  void controller.replan("setup");
 }

@@ -10,19 +10,24 @@
  * - Poll mode (default): one long-poll loop. A webhook on the bot is deleted
  *   only when this plugin set it (owner marker in state); a webhook set by
  *   anyone else (core chat-channels, another instance) refuses poll mode, so
- *   the plugin never takes a bot from another consumer.
- * - Webhook mode: setWebhook with secret_token, and deliveries are verified
- *   against the secret digest. Poll and webhook on one token conflict, and
- *   that bot is not started.
+ *   the plugin never takes a bot from another consumer. A loop that stops on
+ *   repeated 409s stays off until the config is saved again or the worker
+ *   restarts.
+ * - Webhook mode is implemented but OFF in the worker (`webhookMode`
+ *   "disabled"): the host stores every webhook delivery's headers (the secret
+ *   token) and body (the card tokens in reply_markup) in
+ *   plugin_webhook_deliveries, so a database reader could forge an approval.
+ *   See the ADR.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { PluginContext, PluginWebhookInput } from "@paperclipai/plugin-sdk";
 import { listCompanyConfigs } from "../../company-configs.js";
 import type { TelegramMode } from "../../config.js";
 import { createCallbackRouter, type CallbackRouter, type GateAuditEvent, type GateBrand } from "../../kit/gate/callback-router.js";
 import type { GateRegistry } from "../../kit/gate/registry.js";
 import { createGateCard, type GateCard, type GateStore } from "../../kit/gate/state-machine.js";
-import { createBotApi, redactToken, telegramBotKey, type BotApi, type TelegramFetch } from "../../kit/telegram/bot-api.js";
+import { createBotApi, redactSecrets, telegramBotKey, type BotApi, type TelegramFetch } from "../../kit/telegram/bot-api.js";
 import {
   createPollLoop,
   POLL_ALLOWED_UPDATES,
@@ -39,8 +44,32 @@ import {
 import type { GateKind } from "./gates.js";
 
 export const GATE_ACTIVITY_PREFIX = "rk9-ads gate";
+/** Kinds a brand can still decide while its config is unreadable: stopping, never spending. */
+const HELD_BRAND_KINDS: readonly GateKind[] = ["pause_all"];
 const RETRY_PLAN_MS = 60_000;
+/**
+ * First retry after a setup or config-change plan. Seen on a dev instance:
+ * the host sends onConfigChanged before it refreshes the worker's list of
+ * configured companies, so the first config read can be refused; and the host
+ * refuses a proactive companies.list while any other invocation is in flight.
+ */
+const FIRST_RETRY_PLAN_MS = 5_000;
+const PLAN_WAIT_ON_STOP_MS = 2_000;
 const SHUTDOWN_HANDLER_WAIT_MS = 5_000;
+const MIN_WEBHOOK_SECRET_CHARS = 32;
+const BOT_TOKEN_RE = /^\d{3,}:[A-Za-z0-9_-]{20,}$/;
+
+export type PlanReason = "setup" | "config" | "retry";
+
+/**
+ * Runs a function in the async context of module load, outside any host
+ * invocation. The SDK tags each worker->host call with the invocation it runs
+ * in (AsyncLocalStorage), and the host refuses a call whose invocation has
+ * ended ("missing, expired, or unknown invocation scope"). Planning, poll
+ * loops and gate handlers outlive the onConfigChanged or webhook call that
+ * started them, so they run detached. Seen on a dev instance.
+ */
+const detached: <R>(fn: () => R) => R = AsyncLocalStorage.snapshot();
 
 interface BrandEntry extends GateBrand {
   brandCode: string;
@@ -53,8 +82,7 @@ interface BotEntry {
   brands: Map<string, BrandEntry>;
   router: CallbackRouter;
   loop: PollLoop | null;
-  webhookDigest: Buffer | null;
-  ready: boolean;
+  webhook: { digest: Buffer; url: string } | null;
 }
 
 interface DesiredBot {
@@ -70,6 +98,8 @@ export interface TelegramControllerOptions {
   /** Defaults to `ctx.http.fetch`. */
   fetch?: TelegramFetch;
   apiBase?: string;
+  /** "disabled" (default): webhook-mode bots are not started and every delivery is refused. */
+  webhookMode?: "disabled" | "enabled";
   pollTimeoutSeconds?: number;
   errorBackoffMs?: number;
   conflictBackoffMs?: number;
@@ -81,7 +111,11 @@ function ownerKey(botKey: string) {
 }
 
 function safe(error: unknown, token?: string): string {
-  return redactToken(error instanceof Error ? error.message : String(error), token).slice(0, 300);
+  return redactSecrets(error instanceof Error ? error.message : String(error), token).slice(0, 300);
+}
+
+function ready(entry: BotEntry): boolean {
+  return entry.mode === "poll" ? entry.loop?.running === true : entry.webhook !== null;
 }
 
 export class TelegramController {
@@ -98,11 +132,12 @@ export class TelegramController {
   }
 
   /** Re-reads every brand config and starts, keeps or stops bots. Serialized. */
-  replan(): Promise<void> {
+  replan(reason: PlanReason = "config"): Promise<void> {
     this.chain = this.chain
-      .then(() => this.plan())
+      .then(() => detached(() => this.plan(reason)))
       .catch((error) => {
-        this.ctx.logger.error("rk9-ads telegram: planning failed", { error: safe(error) });
+        this.ctx.logger.error("rk9-ads telegram: planning failed, retrying", { detail: safe(error) });
+        this.scheduleRetry(reason !== "retry");
       });
     return this.chain;
   }
@@ -113,10 +148,11 @@ export class TelegramController {
   }
 
   async stop(): Promise<void> {
+    // From here on, no planning run starts a loop or sets a webhook.
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
-    await this.chain;
+    await Promise.race([this.chain, new Promise((resolve) => setTimeout(resolve, PLAN_WAIT_ON_STOP_MS).unref?.())]);
     const entries = [...this.bots.values()];
     this.bots.clear();
     await Promise.all(entries.map((entry) => entry.loop?.stop()));
@@ -128,13 +164,13 @@ export class TelegramController {
   }
 
   /** Bot summary for health and tests. No token, no secret. */
-  summary(): Array<{ botKey: string; mode: TelegramMode; companies: string[]; polling: boolean; ready: boolean }> {
+  summary(): Array<{ botKey: string; mode: TelegramMode; companies: string[]; ready: boolean; loop: string | null }> {
     return [...this.bots.values()].map((entry) => ({
       botKey: entry.botKey,
       mode: entry.mode,
       companies: [...entry.brands.keys()],
-      polling: entry.loop?.running ?? false,
-      ready: entry.ready,
+      ready: ready(entry),
+      loop: entry.loop?.status ?? null,
     }));
   }
 
@@ -147,7 +183,7 @@ export class TelegramController {
   botFor(companyId: string): { api: BotApi; chatId: string; brandCode: string } | null {
     for (const entry of this.bots.values()) {
       const brand = entry.brands.get(companyId);
-      if (brand && entry.ready) return { api: entry.api, chatId: brand.chatId, brandCode: brand.brandCode };
+      if (brand && !brand.allowedKinds && ready(entry)) return { api: entry.api, chatId: brand.chatId, brandCode: brand.brandCode };
     }
     return null;
   }
@@ -177,9 +213,13 @@ export class TelegramController {
   }
 
   async handleWebhook(input: PluginWebhookInput): Promise<void> {
+    if (this.options.webhookMode !== "enabled") {
+      this.ctx.logger.warn("rk9-ads telegram: webhook delivery rejected", { reason: "webhook_mode_disabled", requestId: input.requestId });
+      throw new Error("Telegram webhook rejected (webhook mode is disabled)");
+    }
     const candidates = [...this.bots.values()]
-      .filter((entry) => entry.mode === "webhook" && entry.ready && entry.webhookDigest)
-      .map((entry) => ({ digest: entry.webhookDigest!, value: entry }));
+      .filter((entry) => entry.mode === "webhook" && entry.webhook)
+      .map((entry) => ({ digest: entry.webhook!.digest, value: entry }));
     const verified = verifyWebhookSecret(input.headers, candidates);
     if (!verified.ok) {
       this.ctx.logger.warn("rk9-ads telegram: webhook delivery rejected", { reason: verified.reason, requestId: input.requestId });
@@ -191,10 +231,22 @@ export class TelegramController {
       this.ctx.logger.warn("rk9-ads telegram: webhook body is not an update", { requestId: input.requestId });
       return;
     }
-    await verified.value.router.handleUpdate(update);
+    const { router } = verified.value;
+    await detached(() => router.handleUpdate(update));
   }
 
-  private async plan(): Promise<void> {
+  private scheduleRetry(first = false): void {
+    if (this.stopped) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    const delay = this.options.retryPlanMs ?? (first ? FIRST_RETRY_PLAN_MS : RETRY_PLAN_MS);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.replan("retry");
+    }, delay);
+    this.retryTimer.unref?.();
+  }
+
+  private async plan(reason: PlanReason): Promise<void> {
     if (this.stopped) return;
     const { ctx } = this;
     let retry = false;
@@ -214,14 +266,14 @@ export class TelegramController {
         token = await ctx.secrets.resolve(telegram.botTokenRef, { companyId, configPath: "telegram.botTokenRef" });
       } catch (error) {
         retry = true;
-        ctx.logger.warn("rk9-ads telegram: bot token did not resolve", { companyId, error: error instanceof Error ? error.name : "unknown" });
+        ctx.logger.warn("rk9-ads telegram: bot token did not resolve", { companyId, detail: error instanceof Error ? error.name : "unknown" });
         continue;
       }
-      if (typeof token !== "string" || token.trim() === "") {
-        ctx.logger.warn("rk9-ads telegram: bot token is empty", { companyId });
+      token = typeof token === "string" ? token.trim() : "";
+      if (!BOT_TOKEN_RE.test(token)) {
+        ctx.logger.warn("rk9-ads telegram: bot token is empty or not shaped like a Telegram bot token", { companyId });
         continue;
       }
-      token = token.trim();
       const botKey = telegramBotKey(token);
       const bot: DesiredBot = desired.get(botKey) ?? { token, modes: new Set(), brands: new Map(), webhooks: [] };
       bot.modes.add(telegram.mode);
@@ -237,19 +289,22 @@ export class TelegramController {
           bot.webhooks.push({ companyId, secret, url: telegram.webhookUrl });
         } catch (error) {
           retry = true;
-          ctx.logger.warn("rk9-ads telegram: webhook secret did not resolve", { companyId, error: error instanceof Error ? error.name : "unknown" });
+          ctx.logger.warn("rk9-ads telegram: webhook secret did not resolve", { companyId, detail: error instanceof Error ? error.name : "unknown" });
         }
       }
       desired.set(botKey, bot);
     }
+    if (this.stopped) return;
 
-    // A company whose config the host refused stays on its current bot,
-    // instead of losing its gate on a host hiccup.
+    // A company whose config the host refused stays on its current bot, but
+    // only for stopping kinds: its allowlist may be stale, so it cannot approve spend.
     const keep = new Set<string>();
     for (const [botKey, entry] of this.bots) {
-      const held = [...entry.brands.values()].filter((brand) => unavailable.has(brand.companyId));
+      const held = [...entry.brands.values()]
+        .filter((brand) => unavailable.has(brand.companyId))
+        .map((brand): BrandEntry => ({ ...brand, allowedKinds: HELD_BRAND_KINDS }));
       if (held.length === 0) continue;
-      ctx.logger.warn("rk9-ads telegram: config unavailable, keeping the current bot", {
+      ctx.logger.warn("rk9-ads telegram: config unavailable, keeping the current bot for pause cards only", {
         botKey,
         companies: held.map((brand) => brand.companyId),
       });
@@ -262,21 +317,49 @@ export class TelegramController {
       }
     }
 
-    // Stop bots that are gone or changed mode. Webhook bots are set up again,
-    // so a rotated secret or URL takes effect.
+    // Webhook secrets tell bots apart on the one endpoint: a shared secret is refused.
+    const digestOwners = new Map<string, string[]>();
+    for (const [botKey, bot] of desired) {
+      for (const hook of bot.webhooks) {
+        const hex = webhookSecretDigest(hook.secret).toString("hex");
+        const owners = digestOwners.get(hex) ?? [];
+        if (!owners.includes(botKey)) owners.push(botKey);
+        digestOwners.set(hex, owners);
+      }
+    }
+    const sharedSecretBots = new Set([...digestOwners.values()].filter((owners) => owners.length > 1).flat());
+
+    // Stop bots that are gone, changed mode, or whose loop is no longer running.
     for (const [botKey, entry] of [...this.bots]) {
       if (keep.has(botKey)) continue;
       const bot = desired.get(botKey);
-      if (!bot || bot.modes.size !== 1 || !bot.modes.has(entry.mode) || entry.mode === "webhook") {
-        await entry.loop?.stop();
-        entry.ready = false;
-        this.bots.delete(botKey);
-        if (!bot) ctx.logger.info("rk9-ads telegram: bot stopped", { botKey });
+      const sameMode = bot !== undefined && bot.modes.size === 1 && bot.modes.has(entry.mode);
+      let keepEntry = sameMode;
+      if (keepEntry && entry.mode === "poll") {
+        // A loop that stopped on repeated 409s waits for a config save, not for the retry timer.
+        keepEntry = entry.loop?.running === true || (reason === "retry" && entry.loop?.status === "conflict");
       }
+      if (keepEntry && entry.mode === "webhook") {
+        const first = bot!.webhooks[0];
+        keepEntry =
+          entry.webhook !== null &&
+          first !== undefined &&
+          first.url === entry.webhook.url &&
+          webhookSecretDigest(first.secret).equals(entry.webhook.digest) &&
+          !sharedSecretBots.has(botKey);
+      }
+      if (keepEntry) {
+        entry.brands = bot!.brands;
+        continue;
+      }
+      await entry.loop?.stop();
+      this.bots.delete(botKey);
+      if (!bot) ctx.logger.info("rk9-ads telegram: bot stopped", { botKey });
     }
 
     for (const [botKey, bot] of desired) {
       if (this.stopped) return;
+      if (this.bots.has(botKey)) continue;
       if (bot.modes.size !== 1) {
         ctx.logger.error("rk9-ads telegram: poll and webhook mode on one bot token; the bot is not started", {
           botKey,
@@ -285,10 +368,15 @@ export class TelegramController {
         continue;
       }
       const mode = [...bot.modes][0]!;
-      const existing = this.bots.get(botKey);
-      if (existing) {
-        // Same token, same poll mode: keep the loop, take the new brand list.
-        existing.brands = bot.brands;
+      if (mode === "webhook" && this.options.webhookMode !== "enabled") {
+        ctx.logger.error(
+          "rk9-ads telegram: webhook mode is disabled (the host stores webhook headers and bodies in plain text); use poll mode",
+          { botKey, companies: [...bot.brands.keys()] },
+        );
+        continue;
+      }
+      if (mode === "webhook" && sharedSecretBots.has(botKey)) {
+        ctx.logger.error("rk9-ads telegram: two bots use the same webhook secret; the bot is not started", { botKey });
         continue;
       }
       const api = createBotApi({
@@ -302,8 +390,7 @@ export class TelegramController {
         api,
         brands: bot.brands,
         loop: null,
-        webhookDigest: null,
-        ready: false,
+        webhook: null,
         router: null as unknown as CallbackRouter,
       };
       entry.router = createCallbackRouter({
@@ -315,21 +402,19 @@ export class TelegramController {
         audit: (event) => this.audit(event),
       });
       this.bots.set(botKey, entry);
-      if (mode === "poll") await this.startPolling(entry);
-      else await this.startWebhook(entry, bot);
+      const started = mode === "poll" ? await this.startPolling(entry) : await this.startWebhook(entry, bot);
+      if (!started) retry = true;
     }
 
-    if (retry && !this.stopped) {
-      if (this.retryTimer) clearTimeout(this.retryTimer);
-      this.retryTimer = setTimeout(() => {
-        this.retryTimer = null;
-        void this.replan();
-      }, this.options.retryPlanMs ?? RETRY_PLAN_MS);
-      this.retryTimer.unref?.();
-    }
+    if (retry) this.scheduleRetry(reason !== "retry");
+    ctx.logger.info("rk9-ads telegram: plan done", {
+      reason,
+      bots: [...this.bots.values()].map((entry) => ({ botKey: entry.botKey, mode: entry.mode, ready: ready(entry), companies: entry.brands.size })),
+      retryScheduled: retry,
+    });
   }
 
-  private async startPolling(entry: BotEntry): Promise<void> {
+  private async startPolling(entry: BotEntry): Promise<boolean> {
     const { ctx } = this;
     try {
       const info = await entry.api.getWebhookInfo();
@@ -340,17 +425,18 @@ export class TelegramController {
             "rk9-ads telegram: the bot has a webhook set by another consumer; poll mode refused. The plugin needs its own bot, separate from dev, core chat-channels and other listeners.",
             { botKey: entry.botKey },
           );
-          return;
+          return false;
         }
+        if (this.stopped) return true;
         await entry.api.deleteWebhook({ drop_pending_updates: false });
         await ctx.state.delete(ownerKey(entry.botKey));
         ctx.logger.info("rk9-ads telegram: removed this plugin's own webhook for poll mode", { botKey: entry.botKey });
       }
     } catch (error) {
       // getUpdates reports a webhook conflict (409) on its own.
-      ctx.logger.warn("rk9-ads telegram: webhook check failed, polling anyway", { botKey: entry.botKey, error: safe(error) });
+      ctx.logger.warn("rk9-ads telegram: webhook check failed, polling anyway", { botKey: entry.botKey, detail: safe(error) });
     }
-    if (this.stopped) return;
+    if (this.stopped) return true;
     entry.loop = createPollLoop({
       api: entry.api,
       offsets: stateOffsetStore(ctx.state, entry.botKey),
@@ -361,34 +447,39 @@ export class TelegramController {
       ...(this.options.conflictBackoffMs !== undefined ? { conflictBackoffMs: this.options.conflictBackoffMs } : {}),
     });
     entry.loop.start();
-    entry.ready = true;
+    return true;
   }
 
-  private async startWebhook(entry: BotEntry, bot: DesiredBot): Promise<void> {
+  private async startWebhook(entry: BotEntry, bot: DesiredBot): Promise<boolean> {
     const { ctx } = this;
     const first = bot.webhooks[0];
-    if (!first || bot.webhooks.length !== bot.brands.size) {
-      ctx.logger.error("rk9-ads telegram: webhook mode needs a resolved secret and URL for every brand", { botKey: entry.botKey });
-      return;
+    if (!first) {
+      ctx.logger.error("rk9-ads telegram: webhook mode needs a resolved secret and URL", { botKey: entry.botKey });
+      return false;
     }
     const digest = webhookSecretDigest(first.secret);
     if (bot.webhooks.some((hook) => hook.url !== first.url || !webhookSecretDigest(hook.secret).equals(digest))) {
       ctx.logger.error("rk9-ads telegram: brands on one bot token disagree on the webhook URL or secret", { botKey: entry.botKey });
-      return;
+      return true;
     }
-    if (!isValidWebhookSecret(first.secret)) {
-      ctx.logger.error("rk9-ads telegram: webhook secret must be 1-256 chars of A-Z, a-z, 0-9, _ or -", { botKey: entry.botKey });
-      return;
+    if (!isValidWebhookSecret(first.secret) || first.secret.length < MIN_WEBHOOK_SECRET_CHARS) {
+      ctx.logger.error(
+        `rk9-ads telegram: webhook secret must be ${MIN_WEBHOOK_SECRET_CHARS}-256 chars of A-Z, a-z, 0-9, _ or -`,
+        { botKey: entry.botKey },
+      );
+      return true;
     }
     try {
       const info = await entry.api.getWebhookInfo();
       const owned = await ctx.state.get(ownerKey(entry.botKey));
-      if (info.url && info.url !== first.url && info.url !== owned) {
+      // Our own URL, or a fresh bot (no webhook, no owner marker): webhook mode is the operator's explicit choice.
+      if (info.url !== first.url && info.url !== owned && !(info.url === "" && owned === null)) {
         ctx.logger.error("rk9-ads telegram: the bot has a webhook set by another consumer; webhook mode refused", {
           botKey: entry.botKey,
         });
-        return;
+        return false;
       }
+      if (this.stopped) return true;
       await entry.api.setWebhook({
         url: first.url,
         secret_token: first.secret,
@@ -397,12 +488,12 @@ export class TelegramController {
       });
       await ctx.state.set(ownerKey(entry.botKey), first.url);
     } catch (error) {
-      ctx.logger.error("rk9-ads telegram: setWebhook failed", { botKey: entry.botKey, error: safe(error, bot.token) });
-      return;
+      ctx.logger.error("rk9-ads telegram: setWebhook failed", { botKey: entry.botKey, detail: safe(error, bot.token) });
+      return false;
     }
-    entry.webhookDigest = digest;
-    entry.ready = true;
+    entry.webhook = { digest, url: first.url };
     ctx.logger.info("rk9-ads telegram: webhook mode ready", { botKey: entry.botKey });
+    return true;
   }
 
   private async audit(event: GateAuditEvent): Promise<void> {

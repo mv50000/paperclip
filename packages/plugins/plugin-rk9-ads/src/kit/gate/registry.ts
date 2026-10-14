@@ -5,10 +5,10 @@
  * whose kind has no handler, without changing its state.
  */
 
-import type { GateDecision, GateRequestRecord } from "./state-machine.js";
+import type { GateRequestRecord } from "./state-machine.js";
 
+/** Runs only for an approval; a denial is final without a handler. */
 export interface GateHandlerInput {
-  decision: GateDecision;
   request: GateRequestRecord;
   /** Telegram user id of the approver. */
   tgUserId: number;
@@ -22,8 +22,8 @@ export interface GateHandlerResult {
 }
 
 /**
- * Runs after the state transition. A throw on an approved card moves it to
- * `failed` and shows the error line on the card.
+ * Runs once after pending -> approved. A throw moves the card to `failed`.
+ * The handler should be idempotent at the remote side (see callback-router).
  */
 export type GateHandler = (input: GateHandlerInput) => Promise<GateHandlerResult | void>;
 

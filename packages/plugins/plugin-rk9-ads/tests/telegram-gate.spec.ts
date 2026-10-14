@@ -30,7 +30,7 @@ const TOKEN_A = "1234567:AAE-company-a-fake-bot-token-0123456789";
 const TOKEN_C = "7654321:AAE-company-c-fake-bot-token-9876543210";
 const SECRET_C_BOT = "cccccccc-0000-4000-8000-00000000000b";
 const SECRET_WEBHOOK = "aaaaaaaa-0000-4000-8000-00000000000c";
-const WEBHOOK_SECRET_VALUE = "wh_secret-Value_0123456789";
+const WEBHOOK_SECRET_VALUE = "wh_secret-Value_0123456789_abcdefghijklmnop";
 const WEBHOOK_URL = "https://paperclip.example/api/plugins/rk9-ads/webhooks/telegram";
 const CHAT_A = "-100111";
 const CHAT_B = "-100222";
@@ -86,6 +86,7 @@ async function rig(input: {
   fake?: FakeTelegram;
   store?: ReturnType<typeof createMemoryGateStore>;
   handler?: (input: GateHandlerInput) => Promise<unknown>;
+  webhookMode?: "enabled" | "disabled";
 } = {}): Promise<Rig> {
   const harness =
     input.harness ??
@@ -98,12 +99,13 @@ async function rig(input: {
     fake.mark("handler");
     handlerCalls.push(call);
     if (input.handler) return (await input.handler(call)) as never;
-    return { statusText: call.decision === "approved" ? "✅ Mainos aktivoitu" : "❌ Ei aktivoitu", outcome: { ok: true } };
+    return { statusText: "✅ Mainos aktivoitu", outcome: { ok: true } };
   });
   const controller = new TelegramController(harness.ctx, {
     store,
     registry,
     fetch: fake.fetch,
+    webhookMode: input.webhookMode ?? "disabled",
     pollTimeoutSeconds: 2,
     errorBackoffMs: 20,
     conflictBackoffMs: 60,
@@ -298,6 +300,7 @@ describe("long-poll transport", () => {
     // Simulate a kill between the handler and the offset save: Telegram delivers it again.
     const offsets = stateOffsetStore(harness.ctx.state, BOT_A);
     await offsets.save(tapId);
+    await fake.drained();
     fake.pushUpdate(BOT_A, { ...tap, update_id: tapId });
     const second = await rig({ harness, fake, store });
     await waitFor(async () => (await offsets.load()) === tapId + 1);
@@ -315,9 +318,37 @@ describe("long-poll transport", () => {
     const error = r.harness.logs.find((log) => /409 conflict/.test(log.message))!;
     expect(error.message).toMatch(/another consumer uses this bot token/);
     expect(error.message).toMatch(/Dev and prod need separate bots/);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    // 60 ms backoff: a handful of attempts, not a hot loop.
-    expect(fake.callsOf("getUpdates").length).toBeLessThan(10);
+    // Two 409s in a row stop the loop, so the two consumers do not trade updates.
+    await waitFor(() => r.controller.summary()[0]?.loop === "conflict");
+    expect(fake.callsOf("getUpdates")).toHaveLength(2);
+    expect(r.controller.summary()[0]?.ready).toBe(false);
+    await expect(
+      r.controller.sendGateCard({ companyId: COMPANY_A, kind: "activate_ad", validUntil: new Date(Date.now() + 1000), card: { media: "text", text: "x" } }),
+    ).rejects.toThrow(/not ready/);
+    // The retry timer does not restart it; a config save does.
+    await r.controller.replan("retry");
+    expect(fake.callsOf("getUpdates")).toHaveLength(2);
+    fake.conflicts.delete(BOT_A);
+    await r.controller.replan("config");
+    await waitFor(() => r.controller.summary()[0]?.loop === "running");
+  });
+
+  it("keeps a brand with an unreadable config on its bot for pause cards only", async () => {
+    const configs: Record<string, Record<string, unknown>> = { [COMPANY_A]: brandConfig({ telegram: telegramBlock() }) };
+    const harness = harnessWith(configs, { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A } });
+    const r = await rig({ harness });
+    const card = await photoCard(r);
+    // The host now refuses company A's config (marker says it has one): "unavailable".
+    harness.ctx.config.get = async () => {
+      throw new Error("company context is required");
+    };
+    await r.controller.replan("retry");
+    expect(r.controller.summary()).toMatchObject([{ botKey: BOT_A, companies: [COMPANY_A] }]);
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 1);
+    expect(r.fake.callsOf("answerCallbackQuery")[0]!.params.text).toBe(GATE_TEXT.unauthorized);
+    expect(r.store.rows.get(card.id)?.status).toBe("pending");
+    expect(r.controller.botFor(COMPANY_A)).toBeNull();
   });
 
   it("refuses poll mode on a bot whose webhook belongs to another consumer, and deletes only its own webhook", async () => {
@@ -398,7 +429,7 @@ describe("gate transitions", () => {
     expect(r.harness.activity.some((entry) => entry.message === "rk9-ads gate: decided")).toBe(true);
   });
 
-  it("edits a text card with editMessageText", async () => {
+  it("edits a text card with editMessageText; a denial is final and runs no handler", async () => {
     const r = await rig();
     const card = await r.controller.sendGateCard({
       companyId: COMPANY_A,
@@ -406,13 +437,20 @@ describe("gate transitions", () => {
       validUntil: new Date(Date.now() + 60_000),
       card: { media: "text", text: "Hyväksy mainos?" },
     });
+    const lastDeny = denyData(r, card.messageId);
     r.fake.tap(BOT_A, { messageId: card.messageId, data: denyData(r, card.messageId), fromId: APPROVER });
-    await waitFor(() => r.handlerCalls.length === 1);
+    await waitFor(() => r.store.rows.get(card.id)?.status === "denied");
+    await waitFor(() => r.fake.callsOf("editMessageText").length === 1);
     await r.controller.idle();
     expect(r.fake.callsOf("editMessageCaption")).toHaveLength(0);
-    expect(r.fake.messages.get(card.messageId)?.text).toBe("Hyväksy mainos?\n\n❌ Ei aktivoitu");
-    expect(r.store.rows.get(card.id)?.status).toBe("denied");
-    expect(r.handlerCalls[0]!.decision).toBe("denied");
+    expect(r.fake.messages.get(card.messageId)?.text).toBe(`Hyväksy mainos?\n\n${GATE_TEXT.denied}`);
+    expect(r.fake.messages.get(card.messageId)?.reply_markup).toEqual({ inline_keyboard: [] });
+    expect(r.handlerCalls).toHaveLength(0);
+    // A second tap on the decided card changes nothing.
+    r.fake.pushUpdate(BOT_A, r.fake.callbackUpdate({ messageId: card.messageId, data: lastDeny, fromId: APPROVER }));
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 2);
+    expect(r.fake.callsOf("answerCallbackQuery")[1]!.params.text).toMatch(/Jo käsitelty \(denied\)/);
+    expect(r.handlerCalls).toHaveLength(0);
   });
 
   it("refuses a tap from a user outside the allowlist or from another chat: 'ei oikeutta', state unchanged", async () => {
@@ -487,10 +525,10 @@ describe("gate transitions", () => {
     ).rejects.toThrow(/has no handler/);
   });
 
-  it("moves an approved card to failed when the handler throws", async () => {
+  it("moves an approved card to failed when the handler throws, with a generic card line and a redacted error", async () => {
     const r = await rig({
       handler: async () => {
-        throw new Error("Meta API: (#100) invalid parameter");
+        throw new Error("Meta API: (#100) invalid parameter for https://graph.facebook.com/v23.0/act_1/ads?access_token=EAAGsecretvalue123");
       },
     });
     const card = await photoCard(r);
@@ -498,7 +536,44 @@ describe("gate transitions", () => {
     await waitFor(() => r.store.rows.get(card.id)?.status === "failed");
     await r.controller.idle();
     expect(r.store.rows.get(card.id)?.error).toMatch(/invalid parameter/);
-    expect(r.fake.messages.get(card.messageId)?.caption).toMatch(/⚠️ Epäonnistui: Meta API/);
+    expect(r.store.rows.get(card.id)?.error).toContain("access_token=<redacted>");
+    expect(r.fake.messages.get(card.messageId)?.caption).toBe(`Ololla: syysmainos 1\n\n${GATE_TEXT.failed}`);
+    expect(recordedOutput(r.harness)).not.toContain("EAAGsecretvalue123");
+  });
+
+  it("marks the handler as started before it runs, and a storage error after success does not fail the card", async () => {
+    const store = createMemoryGateStore();
+    let seenOutcome: unknown;
+    const r = await rig({
+      store,
+      handler: async (input) => {
+        seenOutcome = store.rows.get(input.request.id)?.outcome;
+        // The final settle fails: the ad is live, so the card must not say failed.
+        const settle = store.settle.bind(store);
+        store.settle = async () => {
+          store.settle = settle;
+          throw new Error("connection reset");
+        };
+        return { statusText: "✅ Mainos aktivoitu" };
+      },
+    });
+    const card = await photoCard(r);
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.handlerCalls.length === 1);
+    await r.controller.idle();
+    expect(seenOutcome).toEqual({ handler: "started" });
+    expect(store.rows.get(card.id)?.status).toBe("approved");
+    expect(r.fake.messages.get(card.messageId)?.caption).toMatch(/✅ Mainos aktivoitu$/);
+    expect(r.harness.logs.some((log) => /outcome was not stored/.test(log.message))).toBe(true);
+  });
+
+  it("leaves a callback that is not a gate button unanswered (it may belong to another consumer)", async () => {
+    const r = await rig();
+    const message = r.fake.addMessage({ chat: { id: Number(CHAT_A) }, text: "muu botti" });
+    r.fake.tap(BOT_A, { messageId: message.message_id, data: "approve:RK9-1", fromId: APPROVER });
+    const offsets = stateOffsetStore(r.harness.ctx.state, BOT_A);
+    await waitFor(async () => (await offsets.load()) !== null);
+    expect(r.fake.callsOf("answerCallbackQuery")).toHaveLength(0);
   });
 
   it("never calls ctx.approvals and keeps the token out of every log, activity and state key", async () => {
@@ -665,6 +740,7 @@ describeDb("gate on real Postgres (migration 001, host SQL validators)", () => {
     useCompanySecrets(harness, { [companyA]: { [SECRET_A_BOT]: TOKEN_A } });
     (harness.ctx as { db: unknown }).db = testDb.client;
     const fake = new FakeTelegram();
+    fake.maxWaitMs = 200;
     harness.ctx.http.fetch = fake.fetch;
     const approvalsBefore = await testDb.adminQuery<{ n: number }>("SELECT count(*)::int AS n FROM approvals");
 
@@ -707,6 +783,7 @@ describeDb("gate on real Postgres (migration 001, host SQL validators)", () => {
 
     // Restart with the offset save lost: Telegram delivers the tap again, processed_updates absorbs it.
     await stateOffsetStore(harness.ctx.state, BOT_A).save(tapId);
+    await fake.drained();
     fake.pushUpdate(BOT_A, { ...tap, update_id: tapId });
     const restarted = await start();
     await waitFor(async () => (await stateOffsetStore(harness.ctx.state, BOT_A).load()) === tapId + 1);
@@ -735,8 +812,23 @@ describe("webhook mode", () => {
   }
   const webhookSecrets = { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A, [SECRET_WEBHOOK]: WEBHOOK_SECRET_VALUE } };
 
-  it("calls setWebhook with secret_token and polls nothing", async () => {
+  it("is disabled by default: no setWebhook, no polling, every delivery refused", async () => {
     const r = await rig({ configs: webhookConfig(), secrets: webhookSecrets });
+    expect(r.fake.callsOf("setWebhook")).toHaveLength(0);
+    expect(r.fake.callsOf("getUpdates")).toHaveLength(0);
+    expect(r.harness.logs.some((log) => log.level === "error" && /webhook mode is disabled/.test(log.message))).toBe(true);
+    await expect(
+      r.controller.handleWebhook({
+        endpointKey: "telegram",
+        headers: { [TELEGRAM_SECRET_HEADER]: WEBHOOK_SECRET_VALUE },
+        rawBody: "{}",
+        requestId: "r0",
+      }),
+    ).rejects.toThrow(/webhook mode is disabled/);
+  });
+
+  it("calls setWebhook with secret_token and polls nothing (when enabled)", async () => {
+    const r = await rig({ configs: webhookConfig(), secrets: webhookSecrets, webhookMode: "enabled" });
     const [call] = r.fake.callsOf("setWebhook");
     expect(call?.params).toMatchObject({ url: WEBHOOK_URL, secret_token: WEBHOOK_SECRET_VALUE, allowed_updates: ["callback_query", "message"] });
     expect(r.fake.callsOf("getUpdates")).toHaveLength(0);
@@ -744,7 +836,7 @@ describe("webhook mode", () => {
   });
 
   it("rejects a delivery with a missing or wrong secret header and logs it; accepts the right one", async () => {
-    const r = await rig({ configs: webhookConfig(), secrets: webhookSecrets });
+    const r = await rig({ configs: webhookConfig(), secrets: webhookSecrets, webhookMode: "enabled" });
     const card = await photoCard(r);
     const update = { update_id: 1, ...r.fake.callbackUpdate({ messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER }) };
     const body = JSON.stringify(update);
@@ -787,6 +879,7 @@ describe("webhook mode", () => {
         }),
       },
       secrets: { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A }, [COMPANY_B]: { [SECRET_A_BOT]: TOKEN_A, [SECRET_WEBHOOK]: WEBHOOK_SECRET_VALUE } },
+      webhookMode: "enabled",
     });
     expect(r.controller.summary()).toEqual([]);
     expect(r.fake.callsOf("getUpdates")).toHaveLength(0);
