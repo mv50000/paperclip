@@ -22,6 +22,8 @@ the features.
 | `src/features/<name>/declarations.ts` | Manifest entries of a feature (pure data) |
 | `src/features/<name>/register.ts` | Worker handlers of a feature |
 | `src/kit/` | Ads-agnostic code: local time, SDK harness helpers, later Telegram and the gate state machine |
+| `src/meta/` | The one Meta Graph client (G12): `graph.ts`, `methods.ts`, `errors.ts`, `redact.ts`, `types.ts` |
+| `scripts/live-smoke-sunspot.ts` | Read-only live smoke against Sunspot's ad account; never run by tests or CI |
 | `tests/helpers/embedded-pg.ts` | Real Postgres with the host migration and runtime SQL validators |
 | `src/ui/` | UI placeholders; RK9-518 owns this directory |
 | `migrations/001_rk9_ads_ledger.sql` | All ledger tables with their final columns and status sets |
@@ -112,6 +114,56 @@ needs, including `ui.sidebar.register` for the sidebar link (RK9-518).
 The Meta Graph API version is one constant, `GRAPH_VERSION`, in
 `src/meta/graph.ts` (RK9-508). No other file builds a Graph URL or names a
 version. A version upgrade is then a one-line change with one review.
+
+### The Meta client (RK9-508)
+
+All Meta calls go through `src/meta/`. Other children import from there and
+build no Graph helpers of their own (G12).
+
+- `createMetaClient(ctx, { companyId, tokenRef: config.meta.accessTokenRef, mode })`
+  returns a `MetaGraphClient`. It sends every request through `ctx.http.fetch`.
+  It resolves the token with `ctx.secrets.resolve` on each call and sends it as
+  an `Authorization: Bearer` header, never in the URL.
+- Request bodies are form-encoded strings. The worker RPC turns any other body
+  into `String(body)`, so FormData and Blob cannot cross it. Media therefore
+  goes by URL (G4): a video with `uploadVideoByUrl` (`file_url`), an image with
+  `uploadImageBytes` from base64 the brand repo already made.
+- Modes: `live`; `readOnly`, where a write throws `ReadOnlyViolationError`
+  before any fetch; and `dryRun`, where a write is logged (redacted) and returns
+  `{ dryRun: true, planned }`.
+- Every write passes the `guardedWrite` hook first. The spend guard and the
+  kill switch (RK9-511) plug in there. The default hook allows every write.
+- Errors are typed: `TokenInvalidError` (190), `RateLimitError` (4, 17, 613,
+  80004), `InvalidParamError` (100), `PolicyAcceptanceRequiredError` (subcode
+  2859024, with the fix in the message) and `MetaGraphError` for the rest.
+  Rate limits are retried with exponential backoff. The total wait per call
+  stays under 25 s, because the host aborts a plugin fetch after 30 s. When
+  Meta's own `estimated_time_to_regain_access` is longer than that, the client
+  throws at once and sets `retryAfterMs`.
+- `redact.ts` removes the token from error messages, logs, activity metadata and
+  dry-run plans, as a known value and by shape (`access_token=`, `Bearer`,
+  `EAA...`). Errors carry no `cause`.
+- Version drift: when a paging `next` URL or the `facebook-api-version`
+  response header shows a version other than `GRAPH_VERSION`, the client warns
+  once (logger and one activity entry) and `onHealth()` reports `degraded`.
+  Paging stays on the pinned version, and a `next` URL on any other host is
+  refused, because the client would send its token there.
+
+The first live smoke (14.10.2026) showed `facebook-api-version: v25.0` on
+answers to v23.0 requests: Meta upgrades calls to a deprecated Marketing API
+version automatically. Bumping `GRAPH_VERSION` is a one-line change, made as a
+separate, reviewed step.
+
+Run the live smoke (read-only, Sunspot G19):
+
+```sh
+RK9_ADS_LIVE_SMOKE=1 pnpm exec tsx scripts/live-smoke-sunspot.ts [--record <dir>]
+```
+
+It reads `META_ADS_ACCESS_TOKEN` from the environment or from
+`~/.config/sunspot/meta-ads.env`. `--record` writes each Graph answer,
+token-scrubbed, as a fixture file. The fixtures in `tests/fixtures/meta/` name
+their source: recorded live, or hand-written from the recorded shapes.
 
 ### ADR 3: No per-company enable switch
 

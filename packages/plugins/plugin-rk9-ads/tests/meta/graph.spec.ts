@@ -1,0 +1,490 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  InvalidParamError,
+  MediaProcessingError,
+  MediaTimeoutError,
+  MetaGraphError,
+  MetaResponseError,
+  POLICY_ACCEPTANCE_FIX,
+  PolicyAcceptanceRequiredError,
+  RateLimitError,
+  ReadOnlyViolationError,
+  TokenInvalidError,
+  WriteRefusedError,
+} from "../../src/meta/errors.js";
+import { encodeParams, GRAPH_VERSION, GraphHealth, graphUrl, regainAccessMs, type WritePlan } from "../../src/meta/graph.js";
+import {
+  createAd,
+  createAdCreative,
+  getAccountSummary,
+  getInsights,
+  getObjectStatus,
+  getVideoThumbnails,
+  listAds,
+  listAdSets,
+  listCampaigns,
+  parseMinorUnits,
+  setObjectStatus,
+  uploadImageBytes,
+  uploadVideoByUrl,
+  waitForVideoReady,
+} from "../../src/meta/methods.js";
+import { isDryRun } from "../../src/meta/types.js";
+import { ACT, COMPANY, FakeGraph, fixture, makeClient, SENTINEL_TOKEN } from "./fake-graph.js";
+
+const GRAPH_PREFIX = `https://graph.facebook.com/${GRAPH_VERSION}/`;
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/** Every write method, called once. Used by the read-only and dry-run sweeps. */
+const WRITE_CALLS: Array<[string, (client: ReturnType<typeof makeClient>["client"]) => Promise<unknown>]> = [
+  ["uploadVideoByUrl", (c) => uploadVideoByUrl(c, ACT, { fileUrl: "https://cdn.example.com/reel.mp4", name: "reel" })],
+  ["uploadImageBytes", (c) => uploadImageBytes(c, ACT, { bytesBase64: PNG_BASE64, name: "pic" })],
+  ["createAdCreative", (c) => createAdCreative(c, ACT, { name: "creative", object_story_spec: { page_id: "1" } })],
+  ["createAd", (c) => createAd(c, ACT, { name: "ad", adsetId: "120247250925850775", creativeId: "23850000000000001" })],
+  ["setObjectStatus", (c) => setObjectStatus(c, "120247250925830775", "PAUSED")],
+  ["post", (c) => c.post("120247250925830775", { name: "x" })],
+  ["delete", (c) => c.delete("120247250925830775")],
+];
+
+describe("Graph URL and request shape", () => {
+  it("builds every URL on the one pinned version", () => {
+    expect(GRAPH_VERSION).toBe("v23.0");
+    expect(graphUrl("act_1/campaigns", { fields: "id", limit: 5 }).toString()).toBe(
+      `${GRAPH_PREFIX}act_1/campaigns?fields=id&limit=5`,
+    );
+  });
+
+  it("refuses paths that could leave the Graph host or the version", () => {
+    for (const bad of ["../v2.0/me", "https://evil.example/x", "act_1/../me", "a b", "act_1?x=1", "", "a//b"]) {
+      expect(() => graphUrl(bad), bad).toThrow(InvalidParamError);
+    }
+  });
+
+  it("refuses access_token as a parameter", () => {
+    expect(() => encodeParams({ access_token: "x" })).toThrow(InvalidParamError);
+  });
+
+  it("sends the token as a Bearer header resolved per call, never in the URL", async () => {
+    const graph = new FakeGraph(fixture("account"), fixture("account"));
+    const { client, captured } = makeClient(graph);
+    await getAccountSummary(client, ACT);
+    await getAccountSummary(client, "1336862981968191");
+
+    expect(graph.calls).toHaveLength(2);
+    for (const call of graph.calls) {
+      expect(call.url.startsWith(`${GRAPH_PREFIX}act_1336862981968191?`)).toBe(true);
+      expect(call.url).not.toContain("access_token");
+      expect(call.url).not.toContain(encodeURIComponent(SENTINEL_TOKEN));
+      expect(call.headers.Authorization).toBe(`Bearer ${SENTINEL_TOKEN}`);
+    }
+    expect(captured.resolves).toEqual([
+      { companyId: COMPANY, configPath: "meta.accessTokenRef" },
+      { companyId: COMPANY, configPath: "meta.accessTokenRef" },
+    ]);
+  });
+
+  it("sends write bodies as form-encoded strings with objects as JSON", async () => {
+    const graph = new FakeGraph(fixture("ad"));
+    const { client } = makeClient(graph);
+    const result = await createAd(client, ACT, {
+      name: "Ololla 1",
+      adsetId: "120247250925850775",
+      creativeId: "23850000000000001",
+    });
+    expect(result).toEqual({ adId: "23850000000000002" });
+    const call = graph.calls[0]!;
+    expect(call.method).toBe("POST");
+    expect(call.url).toBe(`${GRAPH_PREFIX}act_1336862981968191/ads`);
+    expect(typeof call.body).toBe("string");
+    expect(call.headers["Content-Type"]).toBe("application/x-www-form-urlencoded");
+    const body = new URLSearchParams(call.body as string);
+    expect(body.get("status")).toBe("PAUSED");
+    expect(body.get("adset_id")).toBe("120247250925850775");
+    expect(JSON.parse(body.get("creative")!)).toEqual({ creative_id: "23850000000000001" });
+    expect(body.has("access_token")).toBe(false);
+  });
+});
+
+describe("account summary", () => {
+  it("normalises the recorded Sunspot account without float math", async () => {
+    const { client } = makeClient(new FakeGraph(fixture("account")));
+    expect(await getAccountSummary(client, ACT)).toEqual({
+      accountId: "1336862981968191",
+      currency: "EUR",
+      timezone: "Europe/Helsinki",
+      spendCapCents: 10000,
+      amountSpentCents: 0,
+      status: "ACTIVE",
+      statusCode: 1,
+    });
+  });
+
+  it("maps spend_cap 0 or absent to null and keeps large minor-unit strings exact", async () => {
+    const base = fixture("account");
+    const body = base.body as Record<string, unknown>;
+    const zero = { ...base, body: { ...body, spend_cap: "0", amount_spent: "9007199254740991", account_status: 9 } };
+    const absent = { ...base, body: { ...body, spend_cap: undefined, account_status: 12345 } };
+    const { client } = makeClient(new FakeGraph(zero, absent));
+
+    const first = await getAccountSummary(client, ACT);
+    expect(first.spendCapCents).toBeNull();
+    expect(first.amountSpentCents).toBe(9007199254740991);
+    expect(first.status).toBe("IN_GRACE_PERIOD");
+    const second = await getAccountSummary(client, ACT);
+    expect(second.spendCapCents).toBeNull();
+    expect(second.status).toBe("UNKNOWN");
+  });
+
+  it("rejects money that is not an integer string", () => {
+    for (const bad of ["12.50", "-1", "1e3", "", "9007199254740993", 1.5, null]) {
+      expect(() => parseMinorUnits(bad, "amount_spent"), String(bad)).toThrow(MetaResponseError);
+    }
+    expect(parseMinorUnits("0012", "x")).toBe(12);
+  });
+
+  it("refuses a malformed ad account id before any request", async () => {
+    const graph = new FakeGraph();
+    const { client } = makeClient(graph);
+    await expect(getAccountSummary(client, "act_12a")).rejects.toThrow(InvalidParamError);
+    expect(graph.calls).toHaveLength(0);
+  });
+});
+
+describe("paging", () => {
+  it("follows two pages, strips access_token from next and stays on the pinned version", async () => {
+    const graph = new FakeGraph(fixture("ads-page-1"), fixture("ads-page-2"));
+    const { client } = makeClient(graph);
+    const ads = await listAds(client, ACT);
+
+    expect(ads.map((ad) => ad.id)).toEqual([
+      "120248676310950775",
+      "120248499449520775",
+      "120248441720170775",
+      expect.any(String),
+    ]);
+    expect(ads[0]).toMatchObject({
+      status: "PAUSED",
+      effectiveStatus: "PAUSED",
+      adsetId: "120247250925850775",
+      campaignId: "120247250925830775",
+      creativeId: "1834346481095193",
+    });
+    const second = new URL(graph.calls[1]!.url);
+    expect(second.searchParams.has("access_token")).toBe(false);
+    expect(second.searchParams.get("after")).toBeTruthy();
+    expect(graph.calls[1]!.url.startsWith(`${GRAPH_PREFIX}act_1336862981968191/ads?`)).toBe(true);
+    expect(graph.calls[1]!.url).not.toContain(encodeURIComponent(SENTINEL_TOKEN));
+  });
+
+  it("stops at the page cap and says so", async () => {
+    const graph = new FakeGraph(fixture("ads-page-1"));
+    const { client } = makeClient(graph);
+    const page = await client.paginate("act_1336862981968191/ads", {}, { maxPages: 1 });
+    expect(page).toMatchObject({ pages: 1, truncated: true });
+    expect(page.data).toHaveLength(2);
+    expect(graph.calls).toHaveLength(1);
+  });
+
+  it("refuses a next URL on another host, so the token never leaves Graph", async () => {
+    const graph = new FakeGraph(fixture("ads-page-1-foreign-host"));
+    const { client } = makeClient(graph);
+    await expect(listAds(client, ACT)).rejects.toThrow(/refused/);
+    expect(graph.calls).toHaveLength(1);
+  });
+
+  it("warns once on version drift: logger, one activity entry, client status and worker health", async () => {
+    const health = new GraphHealth();
+    const graph = new FakeGraph(fixture("ads-page-1-drift"), fixture("ads-page-2"), fixture("ads-page-1-drift"), fixture("ads-page-2"));
+    const { client, captured } = makeClient(graph, { health });
+
+    await listAds(client, ACT);
+    await listAds(client, ACT);
+
+    expect(graph.calls[1]!.url.startsWith(GRAPH_PREFIX)).toBe(true);
+    expect(captured.activity).toHaveLength(1);
+    expect(captured.activity[0]).toMatchObject({
+      companyId: COMPANY,
+      message: "rk9-ads: Meta Graph API version drift",
+      metadata: { expectedVersion: "v23.0", observedVersion: "v25.0", source: "paging" },
+    });
+    expect(captured.logs.filter((log) => log.message.includes("drift"))).toHaveLength(1);
+    expect(client.status().drift).toMatchObject({ observedVersion: "v25.0" });
+    expect(health.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v25.0" } });
+  });
+
+  it("also notices drift in the facebook-api-version response header", async () => {
+    const health = new GraphHealth();
+    const account = fixture("account");
+    const graph = new FakeGraph({ ...account, headers: { "facebook-api-version": "v25.0" } });
+    const { client, captured } = makeClient(graph, { health });
+    await getAccountSummary(client, ACT);
+    await Promise.resolve();
+    expect(health.snapshot().status).toBe("degraded");
+    expect(captured.activity).toHaveLength(1);
+  });
+});
+
+describe("error mapping", () => {
+  it.each([
+    ["error-190", TokenInvalidError, 190, null],
+    ["error-100", InvalidParamError, 100, null],
+    ["error-2859024", PolicyAcceptanceRequiredError, 100, 2859024],
+    ["error-unknown", MetaGraphError, 2, 99],
+  ] as const)("maps %s", async (name, type, code, subcode) => {
+    const { client } = makeClient(new FakeGraph(fixture(name)));
+    const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as MetaGraphError;
+    expect(error).toBeInstanceOf(type);
+    expect(error.code).toBe(code);
+    expect(error.subcode).toBe(subcode);
+    expect(error.fbtraceId).toMatch(/^AbCdEf/);
+    expect(error.message).toContain(`code ${code}`);
+  });
+
+  it("gives the policy error a human-readable fix", async () => {
+    const { client } = makeClient(new FakeGraph(fixture("error-2859024")));
+    const error = (await createAd(client, ACT, {
+      name: "ad",
+      adsetId: "1",
+      creativeId: "2",
+    }).catch((e: unknown) => e)) as PolicyAcceptanceRequiredError;
+    expect(error).toBeInstanceOf(PolicyAcceptanceRequiredError);
+    expect(error.fix).toBe(POLICY_ACCEPTANCE_FIX);
+    expect(error.message).toContain("Ads Manager");
+  });
+
+  it("wraps a non-JSON answer", async () => {
+    const { client } = makeClient(new FakeGraph({ status: 502, body: "<html>Bad gateway</html>" }));
+    const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as MetaGraphError;
+    expect(error).toBeInstanceOf(MetaGraphError);
+    expect(error.httpStatus).toBe(502);
+  });
+});
+
+describe("rate limits", () => {
+  it("retries with backoff and succeeds within the bounds", async () => {
+    const graph = new FakeGraph(fixture("error-613"), fixture("error-613"), fixture("account"));
+    const { client, captured } = makeClient(graph);
+    const summary = await getAccountSummary(client, ACT);
+    expect(summary.currency).toBe("EUR");
+    expect(graph.calls).toHaveLength(3);
+    expect(captured.sleeps).toEqual([1_000, 2_000]);
+    expect(captured.logs.filter((log) => log.message.includes("rate limited"))).toHaveLength(2);
+  });
+
+  it("gives up after the attempt cap with a RateLimitError", async () => {
+    const graph = new FakeGraph(fixture("error-613"), fixture("error-613"), fixture("error-613"), fixture("account"));
+    const { client, captured } = makeClient(graph);
+    const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as RateLimitError;
+    expect(error).toBeInstanceOf(RateLimitError);
+    expect(error.attempts).toBe(3);
+    expect(graph.calls).toHaveLength(3);
+    expect(captured.sleeps.reduce((a, b) => a + b, 0)).toBeLessThan(30_000);
+  });
+
+  it("fails at once when Meta's own estimate exceeds the wait budget", async () => {
+    const graph = new FakeGraph(fixture("error-80004-long-wait"), fixture("account"));
+    const { client, captured } = makeClient(graph);
+    const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as RateLimitError;
+    expect(error).toBeInstanceOf(RateLimitError);
+    expect(error.code).toBe(80004);
+    expect(error.retryAfterMs).toBe(5 * 60_000);
+    expect(error.attempts).toBe(1);
+    expect(captured.sleeps).toEqual([]);
+  });
+
+  it("caps the configured total wait below the host's 30 s call limit", async () => {
+    const graph = new FakeGraph(...Array.from({ length: 10 }, () => fixture("error-613")));
+    const { client, captured } = makeClient(graph, { retry: { maxAttempts: 10, baseDelayMs: 4_000, maxTotalWaitMs: 120_000 } });
+    await expect(getAccountSummary(client, ACT)).rejects.toThrow(RateLimitError);
+    expect(captured.sleeps.reduce((a, b) => a + b, 0)).toBeLessThan(30_000);
+  });
+
+  it("reads estimated_time_to_regain_access from either usage header", () => {
+    const headers = new Headers({
+      "x-business-use-case-usage": JSON.stringify({ "1": [{ estimated_time_to_regain_access: 2 }] }),
+      "x-app-usage": JSON.stringify({ call_count: 99, estimated_time_to_regain_access: 3 }),
+    });
+    expect(regainAccessMs(headers)).toBe(3 * 60_000);
+    expect(regainAccessMs(new Headers({ "x-app-usage": "not json" }))).toBeNull();
+  });
+});
+
+describe("read-only and dry-run modes", () => {
+  it.each(WRITE_CALLS)("read-only refuses %s before any fetch or secret read", async (_name, call) => {
+    const graph = new FakeGraph();
+    const { client, captured } = makeClient(graph, { mode: "readOnly" });
+    await expect(call(client)).rejects.toThrow(ReadOnlyViolationError);
+    expect(graph.calls).toHaveLength(0);
+    expect(captured.resolves).toHaveLength(0);
+  });
+
+  it("dry-run plans every write and sends none", async () => {
+    const graph = new FakeGraph();
+    const { client, captured } = makeClient(graph, { mode: "dryRun" });
+    for (const [name, call] of WRITE_CALLS) {
+      const result = await call(client);
+      expect(isDryRun(result), name).toBe(true);
+    }
+    expect(graph.calls).toHaveLength(0);
+    expect(graph.nonGetCalls).toHaveLength(0);
+    expect(captured.logs.filter((log) => log.message === "rk9-ads meta dry-run write")).toHaveLength(WRITE_CALLS.length);
+    const planned = (await createAd(client, ACT, { name: "ad", adsetId: "1", creativeId: "2" })) as {
+      planned: { method: string; path: string; fields: Record<string, unknown> };
+    };
+    expect(planned.planned).toMatchObject({ method: "POST", path: "act_1336862981968191/ads", fields: { status: "PAUSED" } });
+  });
+
+  it("dry-run still serves reads", async () => {
+    const graph = new FakeGraph(fixture("account"));
+    const { client } = makeClient(graph, { mode: "dryRun" });
+    await getAccountSummary(client, ACT);
+    expect(graph.calls.map((call) => call.method)).toEqual(["GET"]);
+  });
+
+  it("passes every write through the guardedWrite hook, which can refuse it", async () => {
+    const graph = new FakeGraph();
+    const plans: WritePlan[] = [];
+    const { client } = makeClient(graph, {
+      guardedWrite: (plan) => {
+        plans.push(plan);
+        return plan.fields.status === "ACTIVE" ? { allow: false, reason: "kill switch on" } : { allow: true };
+      },
+      mode: "dryRun",
+    });
+    await expect(setObjectStatus(client, "120247250925830775", "ACTIVE")).rejects.toThrow(WriteRefusedError);
+    await setObjectStatus(client, "120247250925830775", "PAUSED");
+    expect(plans.map((plan) => plan.fields.status)).toEqual(["ACTIVE", "PAUSED"]);
+    expect(plans[0]).toMatchObject({ companyId: COMPANY, method: "POST", path: "120247250925830775", mode: "dryRun" });
+    expect(graph.calls).toHaveLength(0);
+  });
+});
+
+describe("media", () => {
+  it("uploads a video by file_url and waits until it is ready", async () => {
+    const graph = new FakeGraph(fixture("video-upload"), fixture("video-processing"), fixture("video-processing"), fixture("video-ready"));
+    const { client, captured } = makeClient(graph);
+    const upload = await uploadVideoByUrl(client, ACT, { fileUrl: "https://cdn.example.com/reel.mp4" });
+    expect(upload).toEqual({ videoId: "1234567890123456" });
+    const body = new URLSearchParams(graph.calls[0]!.body as string);
+    expect(body.get("file_url")).toBe("https://cdn.example.com/reel.mp4");
+    expect(graph.calls[0]!.url).toBe(`${GRAPH_PREFIX}act_1336862981968191/advideos`);
+
+    await expect(waitForVideoReady(client, "1234567890123456", { intervalMs: 3_000 })).resolves.toEqual({
+      videoId: "1234567890123456",
+      status: "ready",
+    });
+    expect(captured.sleeps).toEqual([3_000, 3_000]);
+  });
+
+  it("refuses a non-https video URL", async () => {
+    const graph = new FakeGraph();
+    const { client } = makeClient(graph);
+    await expect(uploadVideoByUrl(client, ACT, { fileUrl: "file:///etc/passwd" })).rejects.toThrow(InvalidParamError);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("throws MediaProcessingError when processing fails", async () => {
+    const { client } = makeClient(new FakeGraph(fixture("video-processing"), fixture("video-error")));
+    const error = (await waitForVideoReady(client, "1234567890123456", { intervalMs: 10 }).catch((e: unknown) => e)) as Error;
+    expect(error).toBeInstanceOf(MediaProcessingError);
+    expect(error.message).toContain("unsupported codec");
+  });
+
+  describe("with fake timers", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("throws MediaTimeoutError when the video stays in processing", async () => {
+      vi.useFakeTimers();
+      const graph = new FakeGraph(...Array.from({ length: 20 }, () => fixture("video-processing")));
+      // Default sleep and clock, so the vitest fake timers drive them.
+      const { client } = makeClient(graph, { sleep: undefined, now: undefined });
+      const waiting = waitForVideoReady(client, "1234567890123456", { intervalMs: 5_000, timeoutMs: 30_000 });
+      const assertion = expect(waiting).rejects.toBeInstanceOf(MediaTimeoutError);
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(graph.calls.length).toBe(7);
+    });
+  });
+
+  it("uploads image bytes as the base64 bytes field and returns the hash", async () => {
+    const graph = new FakeGraph(fixture("adimages"));
+    const { client } = makeClient(graph);
+    const result = await uploadImageBytes(client, ACT, { bytesBase64: PNG_BASE64 });
+    expect(result).toEqual({ imageHash: "0d500843a1d4699a0b41e99f4137a5c3", url: "https://scontent.example.fbcdn.net/image.png" });
+    expect(typeof graph.calls[0]!.body).toBe("string");
+    expect(new URLSearchParams(graph.calls[0]!.body as string).get("bytes")).toBe(PNG_BASE64);
+  });
+
+  it("refuses bytes that are not base64 before any request", async () => {
+    const graph = new FakeGraph();
+    const { client } = makeClient(graph);
+    await expect(uploadImageBytes(client, ACT, { bytesBase64: "not base64!" })).rejects.toThrow(InvalidParamError);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("lists video thumbnails", async () => {
+    const { client } = makeClient(new FakeGraph(fixture("video-thumbnails")));
+    const thumbs = await getVideoThumbnails(client, "1234567890123456");
+    expect(thumbs).toEqual([
+      { id: "111", uri: "https://scontent.example.fbcdn.net/thumb1.jpg", isPreferred: true, width: 1080, height: 1920 },
+      { id: "112", uri: "https://scontent.example.fbcdn.net/thumb2.jpg", isPreferred: false, width: 1080, height: 1920 },
+    ]);
+  });
+
+  it("creates an ad creative with a JSON object_story_spec", async () => {
+    const graph = new FakeGraph(fixture("adcreative"));
+    const { client } = makeClient(graph);
+    const spec = { page_id: "1284777064729996", video_data: { video_id: "1234567890123456", image_hash: "abc" } };
+    expect(await createAdCreative(client, ACT, { name: "c", object_story_spec: spec })).toEqual({ creativeId: "23850000000000001" });
+    expect(JSON.parse(new URLSearchParams(graph.calls[0]!.body as string).get("object_story_spec")!)).toEqual(spec);
+  });
+});
+
+describe("lists, status and insights", () => {
+  it("lists campaigns and ad sets with status fields", async () => {
+    const campaigns = { status: 200, body: { data: [{ id: "1", name: "C", status: "PAUSED", effective_status: "PAUSED" }] } };
+    const adsets = {
+      status: 200,
+      body: { data: [{ id: "2", name: "S", status: "ACTIVE", effective_status: "CAMPAIGN_PAUSED", campaign_id: "1" }] },
+    };
+    const graph = new FakeGraph(campaigns, adsets);
+    const { client } = makeClient(graph);
+    expect(await listCampaigns(client, ACT, { effectiveStatus: ["ACTIVE", "PAUSED"] })).toEqual([
+      { id: "1", name: "C", status: "PAUSED", effectiveStatus: "PAUSED" },
+    ]);
+    expect(await listAdSets(client, ACT)).toEqual([
+      { id: "2", name: "S", status: "ACTIVE", effectiveStatus: "CAMPAIGN_PAUSED", campaignId: "1" },
+    ]);
+    expect(new URL(graph.calls[0]!.url).searchParams.get("effective_status")).toBe('["ACTIVE","PAUSED"]');
+  });
+
+  it("reads one object's status", async () => {
+    const graph = new FakeGraph({ status: 200, body: { id: "9", name: "A", status: "PAUSED", effective_status: "PAUSED" } });
+    const { client } = makeClient(graph);
+    expect(await getObjectStatus(client, "9")).toEqual({ id: "9", name: "A", status: "PAUSED", effectiveStatus: "PAUSED" });
+  });
+
+  it("gets insights by date preset or time range, never both", async () => {
+    const graph = new FakeGraph(fixture("insights-yesterday"), fixture("insights-yesterday"));
+    const { client } = makeClient(graph);
+    const rows = await getInsights(client, ACT, { level: "account", datePreset: "yesterday", fields: ["spend", "impressions"] });
+    expect(rows[0]).toMatchObject({ spend: "3.21", date_start: "2026-10-13" });
+    await getInsights(client, ACT, {
+      level: "ad",
+      timeRange: { since: "2026-10-01", until: "2026-10-13" },
+      timeIncrement: 1,
+      fields: ["spend"],
+    });
+    const second = new URL(graph.calls[1]!.url).searchParams;
+    expect(JSON.parse(second.get("time_range")!)).toEqual({ since: "2026-10-01", until: "2026-10-13" });
+    expect(second.get("date_preset")).toBeNull();
+
+    await expect(
+      getInsights(client, ACT, { level: "ad", datePreset: "yesterday", timeRange: { since: "2026-10-01", until: "2026-10-02" }, fields: ["spend"] }),
+    ).rejects.toThrow(InvalidParamError);
+    await expect(getInsights(client, ACT, { level: "ad", fields: ["spend"] })).rejects.toThrow(InvalidParamError);
+    expect(graph.calls).toHaveLength(2);
+  });
+});

@@ -1,0 +1,15 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made)",
+  "status": 400,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "error": {
+      "message": "(#100) Tried accessing nonexisting field (spendcap) on node type (AdAccount)",
+      "type": "OAuthException",
+      "code": 100,
+      "fbtrace_id": "AbCdEf100"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); shape of the recorded insights call (Sunspot had 0 rows yesterday)",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "data": [
+      {
+        "date_start": "2026-10-13",
+        "date_stop": "2026-10-13",
+        "spend": "3.21",
+        "impressions": "812",
+        "reach": "640",
+        "clicks": "19",
+        "inline_link_clicks": "11"
+      }
+    ]
+  }
+}

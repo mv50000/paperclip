@@ -1,0 +1,39 @@
+{
+  "source": "recorded 2026-10-14 from Sunspot act_1336862981968191 with scripts/live-smoke-sunspot.ts --record, token-scrubbed; rows 3-4 of the same response, last page",
+  "status": 200,
+  "headers": {
+    "facebook-api-version": "v23.0"
+  },
+  "body": {
+    "data": [
+      {
+        "id": "120248441720170775",
+        "name": "Aurinkopulssi reel 2026-08-28",
+        "status": "PAUSED",
+        "effective_status": "PAUSED",
+        "adset_id": "120247250925850775",
+        "campaign_id": "120247250925830775",
+        "creative": {
+          "id": "1618532986585294"
+        }
+      },
+      {
+        "id": "120248358668610775",
+        "name": "Aurinkopulssi reel 2026-08-21",
+        "status": "PAUSED",
+        "effective_status": "PAUSED",
+        "adset_id": "120247250925850775",
+        "campaign_id": "120247250925830775",
+        "creative": {
+          "id": "1735298457723150"
+        }
+      }
+    ],
+    "paging": {
+      "cursors": {
+        "before": "QVFIVDI3a25jakhWWDFfdklkdXJ4NlJ2WERXcUZAiVld6d3ZAJYkVwTWQzOTVFeXVZAWVBGS1dBakszQUZA4QUZAKTnFXSVpCVS1vbGt1RlV4eTk5cjBJQkZAibVlB",
+        "after": "QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
+      }
+    }
+  }
+}

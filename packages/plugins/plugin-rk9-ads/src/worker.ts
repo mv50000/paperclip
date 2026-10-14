@@ -4,6 +4,7 @@ import { parseBrandConfig } from "./config.js";
 import { rememberConfigPresence } from "./company-configs.js";
 import { createLedger } from "./db.js";
 import { FEATURES } from "./features/index.js";
+import { GRAPH_VERSION, graphHealth } from "./meta/graph.js";
 import type {
   ApiRouteHandler,
   ConfigChangedHandler,
@@ -59,10 +60,18 @@ const plugin = definePlugin({
 
   async onHealth() {
     if (!state) return { status: "error", message: "Worker setup has not finished" };
+    const graph = graphHealth.snapshot();
+    if (graph.drift) {
+      return {
+        status: "degraded",
+        message: `Meta Graph API version drift: the client pins ${GRAPH_VERSION} but Meta answered with ${graph.drift.observedVersion}. Review and bump GRAPH_VERSION in src/meta/graph.ts.`,
+        details: { features: FEATURES.map((feature) => feature.key), graphDrift: graph.drift },
+      };
+    }
     return {
       status: "ok",
       message: "Ready. A company is enabled when it has a valid brand config; an empty config keeps it off.",
-      details: { features: FEATURES.map((feature) => feature.key) },
+      details: { features: FEATURES.map((feature) => feature.key), graphVersion: GRAPH_VERSION },
     };
   },
 
