@@ -13,8 +13,10 @@
  *   result is discarded and no new getUpdates starts.
  * - 409 means another consumer polls the same token (a second instance or a
  *   webhook). The loop logs it as an error and waits `conflictBackoffMs`.
- *   After `maxConflicts` 409s in a row it stops with status "conflict", so
- *   two consumers do not keep taking each other's updates.
+ *   After `maxConflicts` 409s within `conflictWindowMs` it stops with status
+ *   "conflict", so two consumers do not keep taking each other's updates. A
+ *   success between two 409s does not reset the count: two consumers that
+ *   alternate also get successes.
  */
 
 import type { PluginLogger, PluginStateClient } from "@paperclipai/plugin-sdk";
@@ -55,8 +57,10 @@ export interface PollLoopOptions {
   timeoutSeconds?: number;
   errorBackoffMs?: number;
   conflictBackoffMs?: number;
-  /** 409s in a row before the loop gives up. Default 2. */
+  /** 409s within `conflictWindowMs` before the loop gives up. Default 2. */
   maxConflicts?: number;
+  /** A 409 counts for this long. Default 10 min. */
+  conflictWindowMs?: number;
 }
 
 export type PollLoopStatus = "new" | "running" | "stopped" | "conflict" | "failed";
@@ -81,6 +85,7 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
   const errorBackoffMs = options.errorBackoffMs ?? 5_000;
   const conflictBackoffMs = options.conflictBackoffMs ?? 60_000;
   const maxConflicts = Math.max(1, options.maxConflicts ?? 2);
+  const conflictWindowMs = options.conflictWindowMs ?? 10 * 60_000;
 
   let stopped = false;
   let running = false;
@@ -106,7 +111,7 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
       status = "failed";
       return;
     }
-    let conflicts = 0;
+    let conflictTimes: number[] = [];
     logger.info("telegram poll: started", { botKey: api.botKey, offset, timeoutSeconds: timeout });
 
     while (!stopped) {
@@ -120,7 +125,9 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
       } catch (error) {
         if (stopped) break;
         if (error instanceof TelegramApiError && error.isConflict) {
-          conflicts += 1;
+          const now = Date.now();
+          conflictTimes = [...conflictTimes.filter((at) => now - at < conflictWindowMs), now];
+          const conflicts = conflictTimes.length;
           logger.error(
             "telegram poll: 409 conflict, another consumer uses this bot token (second instance or a webhook). Dev and prod need separate bots.",
             { botKey: api.botKey, detail: error.message, conflicts, maxConflicts },
@@ -150,7 +157,6 @@ export function createPollLoop(options: PollLoopOptions): PollLoop {
       }
       // Fetched but not processed: Telegram delivers it again after a restart.
       if (updates === STOPPED || stopped) break;
-      conflicts = 0;
       if (!Array.isArray(updates) || updates.length === 0) continue;
 
       const ordered = [...updates]

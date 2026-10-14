@@ -139,7 +139,7 @@ export class TelegramApiError extends Error {
   }
 }
 
-const GENERIC_TOKEN_RE = /\d{5,}:[A-Za-z0-9_-]{20,}/g;
+const GENERIC_TOKEN_RE = /\d{3,}:[A-Za-z0-9_-]{20,}/g;
 
 const CREDENTIAL_PARAM_RE = /\b(access_token|token|secret|password|key|signature|appsecret_proof)=[^&\s"']+/gi;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;

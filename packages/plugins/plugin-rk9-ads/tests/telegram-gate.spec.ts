@@ -333,6 +333,49 @@ describe("long-poll transport", () => {
     await waitFor(() => r.controller.summary()[0]?.loop === "running");
   });
 
+  it("stops after two 409s even when a success comes between them (two consumers that alternate)", async () => {
+    const fake = new FakeTelegram();
+    const conflict = { status: 409, description: "Conflict: terminated by other getUpdates request" };
+    fake.failNext.set("getUpdates", conflict);
+    const r = await rig({ fake });
+    // The second getUpdates succeeds: it long-polls until an update arrives.
+    await waitFor(() => fake.callsOf("getUpdates").length === 2);
+    fake.failNext.set("getUpdates", conflict);
+    fake.pushUpdate(BOT_A, { message: { message_id: 900, date: 0, chat: { id: Number(CHAT_A) }, text: "moi" } });
+    await waitFor(() => r.controller.summary()[0]?.loop === "conflict");
+    expect(fake.callsOf("getUpdates")).toHaveLength(3);
+  });
+
+  it("holds every brand for pause cards only while a plan fails, and lifts the hold when a plan succeeds", async () => {
+    const r = await rig();
+    const card = await photoCard(r);
+    // An operator saves the config (it may revoke an approver), and the plan
+    // cannot list the companies: the old allowlist must not approve spend.
+    const list = r.harness.ctx.companies.list;
+    r.harness.ctx.companies.list = async () => {
+      throw new Error("missing, expired, or unknown invocation scope");
+    };
+    await r.controller.replan("config");
+    expect(r.harness.logs.some((log) => log.level === "error" && /planning failed/.test(log.message))).toBe(true);
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 1);
+    expect(r.fake.callsOf("answerCallbackQuery")[0]!.params.text).toBe(GATE_TEXT.unauthorized);
+    expect(r.store.rows.get(card.id)?.status).toBe("pending");
+    expect(r.handlerCalls).toHaveLength(0);
+    expect(r.controller.botFor(COMPANY_A)).toBeNull();
+
+    r.harness.ctx.companies.list = list;
+    await r.controller.replan("retry");
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.handlerCalls.length === 1);
+    await r.controller.idle();
+    expect(r.store.rows.get(card.id)?.status).toBe("approved");
+    // A config change holds spend decisions at once, before its plan runs.
+    expect(r.controller.botFor(COMPANY_A)).not.toBeNull();
+    r.controller.holdAll("config_changed");
+    expect(r.controller.botFor(COMPANY_A)).toBeNull();
+  });
+
   it("keeps a brand with an unreadable config on its bot for pause cards only", async () => {
     const configs: Record<string, Record<string, unknown>> = { [COMPANY_A]: brandConfig({ telegram: telegramBlock() }) };
     const harness = harnessWith(configs, { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A } });
@@ -486,6 +529,27 @@ describe("gate transitions", () => {
     expect(r.store.rows.get(card.id)?.status).toBe("pending");
   });
 
+  it("on a bot shared by two companies in one chat, only the card's own company approvers can decide it", async () => {
+    const OTHER_APPROVER = 77;
+    const r = await rig({
+      configs: {
+        [COMPANY_A]: brandConfig({ telegram: telegramBlock() }),
+        [COMPANY_B]: brandConfig({ brandCode: "AUR", telegram: telegramBlock({ allowedUserIds: [String(OTHER_APPROVER)] }) }),
+      },
+      secrets: { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A }, [COMPANY_B]: { [SECRET_A_BOT]: TOKEN_A } },
+    });
+    expect(r.controller.summary()).toMatchObject([{ botKey: BOT_A, companies: [COMPANY_A, COMPANY_B] }]);
+    const cardA = await photoCard(r, 60_000, COMPANY_A);
+    const cardB = await photoCard(r, 60_000, COMPANY_B);
+    r.fake.tap(BOT_A, { messageId: cardA.messageId, data: approveData(r, cardA.messageId), fromId: OTHER_APPROVER });
+    r.fake.tap(BOT_A, { messageId: cardB.messageId, data: approveData(r, cardB.messageId), fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 2);
+    for (const call of r.fake.callsOf("answerCallbackQuery")) expect(call.params.text).toBe(GATE_TEXT.unauthorized);
+    expect(r.store.rows.get(cardA.id)?.status).toBe("pending");
+    expect(r.store.rows.get(cardB.id)?.status).toBe("pending");
+    expect(r.handlerCalls).toHaveLength(0);
+  });
+
   it("expires a card past valid_until on tap: 'vanhentunut', buttons removed, handler not run", async () => {
     const r = await rig();
     const card = await photoCard(r, 30);
@@ -565,6 +629,23 @@ describe("gate transitions", () => {
     expect(store.rows.get(card.id)?.status).toBe("approved");
     expect(r.fake.messages.get(card.messageId)?.caption).toMatch(/✅ Mainos aktivoitu$/);
     expect(r.harness.logs.some((log) => /outcome was not stored/.test(log.message))).toBe(true);
+  });
+
+  it("does not run the handler when its start marker cannot be stored", async () => {
+    const store = createMemoryGateStore();
+    const r = await rig({ store });
+    const card = await photoCard(r);
+    const settle = store.settle.bind(store);
+    store.settle = async () => {
+      store.settle = settle;
+      throw new Error("connection reset");
+    };
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => store.rows.get(card.id)?.status === "failed");
+    await r.controller.idle();
+    expect(r.handlerCalls).toHaveLength(0);
+    expect(store.rows.get(card.id)?.error).toMatch(/did not run/);
+    expect(r.fake.messages.get(card.messageId)?.caption).toBe(`Ololla: syysmainos 1\n\n${GATE_TEXT.failed}`);
   });
 
   it("leaves a callback that is not a gate button unanswered (it may belong to another consumer)", async () => {

@@ -94,8 +94,10 @@ their own tokens. So:
 - In webhook mode, the plugin does not overwrite a webhook that another
   consumer set.
 - A 409 from `getUpdates` is logged as an error ("another consumer uses this
-  bot token"), and the loop waits 60 s. After two 409s in a row, the loop
-  stops, so two consumers do not keep taking each other's updates. The retry
+  bot token"), and the loop waits 60 s. After two 409s within 10 minutes,
+  the loop stops, so two consumers do not keep taking each other's updates.
+  A success between the two 409s does not reset the count, because two
+  consumers that alternate also get successes. The retry
   timer does not restart that loop. The next config save or worker restart
   does.
 - A callback that is not a gate button is left unanswered.
@@ -136,7 +138,8 @@ card's company.
 - Only an approval runs the kind handler. A denial is final: the card shows
   "❌ Hylätty", and nothing else runs.
 - The handler runs at most once. Before it runs, the outcome is set to
-  `{ "handler": "started" }`. If the worker dies during the handler, the card
+  `{ "handler": "started" }`. When that write fails, the handler does not
+  run, and the card moves to `failed`. If the worker dies during the handler, the card
   stays `approved` with that outcome, so the handler may or may not have
   acted. The activation item (RK9-517) must make its handler idempotent
   against Meta, and a reconciler must check the ad's real state instead of
@@ -147,6 +150,13 @@ card's company.
 - A brand whose config the host refuses ("unavailable") stays on its bot for
   `pause_all` cards only. Its allowlist may be stale, so it cannot approve
   spend.
+- The same hold applies to every brand when a config change arrives and
+  when a plan fails. A saved config may revoke an approver, so the old
+  allowlist cannot approve spend until a plan has read the new config. A
+  successful plan lifts the hold.
+- One bot can serve several companies in one chat. A tap is checked against
+  the brand of the card's company, so an approver of company B cannot decide
+  a card of company A.
 - Handlers are registered per kind (`registerGateHandler`). The allowed kinds
   are `activate_ad` and `pause_all`. `scale_budget` is refused (G9). A card of
   a kind without a handler is refused, and its state does not change.

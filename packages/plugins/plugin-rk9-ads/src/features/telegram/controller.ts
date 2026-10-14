@@ -137,9 +137,28 @@ export class TelegramController {
       .then(() => detached(() => this.plan(reason)))
       .catch((error) => {
         this.ctx.logger.error("rk9-ads telegram: planning failed, retrying", { detail: safe(error) });
+        this.holdAll("plan_failed");
         this.scheduleRetry(reason !== "retry");
       });
     return this.chain;
+  }
+
+  /**
+   * Lets every brand decide stopping cards only, until a plan succeeds. Called
+   * when a config change arrives and when a plan fails: the allowlists in
+   * memory may be stale, so they must not approve spend.
+   */
+  holdAll(reason: "config_changed" | "plan_failed"): void {
+    if (this.bots.size === 0) return;
+    for (const entry of this.bots.values()) {
+      entry.brands = new Map(
+        [...entry.brands].map(([companyId, brand]): [string, BrandEntry] => [
+          companyId,
+          brand.allowedKinds ? brand : { ...brand, allowedKinds: HELD_BRAND_KINDS },
+        ]),
+      );
+    }
+    this.ctx.logger.warn("rk9-ads telegram: brands held for pause cards only until the next plan", { reason });
   }
 
   /** Resolves when the queued planning runs have finished. */

@@ -24,7 +24,7 @@
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
-import { CALLBACK_DATA_MAX_BYTES, sendCard, type BotApi, type CardMedia, type InlineKeyboardMarkup } from "../telegram/bot-api.js";
+import { CALLBACK_DATA_MAX_BYTES, redactSecrets, sendCard, type BotApi, type CardMedia, type InlineKeyboardMarkup } from "../telegram/bot-api.js";
 import type { GateRegistry } from "./registry.js";
 
 export const GATE_STATUSES = ["pending", "approved", "denied", "skipped", "expired", "failed"] as const;
@@ -171,11 +171,15 @@ export async function createGateCard(input: {
     });
     messageId = message.message_id;
   } catch (error) {
-    await input.store.settle(input.companyId, id, {
-      from: "pending",
-      to: "failed",
-      error: error instanceof Error ? error.message.slice(0, 300) : "card send failed",
-    });
+    try {
+      await input.store.settle(input.companyId, id, {
+        from: "pending",
+        to: "failed",
+        error: redactSecrets(error instanceof Error ? error.message : "card send failed").slice(0, 300),
+      });
+    } catch {
+      // The send error is the one the caller needs.
+    }
     throw error;
   }
   await input.store.setMessageId(input.companyId, id, messageId);

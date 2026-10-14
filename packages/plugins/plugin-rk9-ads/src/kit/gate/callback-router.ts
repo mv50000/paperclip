@@ -138,10 +138,29 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
   async function runHandler(request: GateRequestRecord, query: TelegramCallbackQuery): Promise<void> {
     const handler = registry.get(request.kind);
     const tgUserId = query.from.id;
+    // The chat sees a generic line; the redacted message is in the log and the error column.
+    async function fail(message: string, errorName: string): Promise<void> {
+      try {
+        await store.settle(request.companyId, request.id, { from: "approved", to: "failed", error: message });
+      } catch (settleError) {
+        logger.error("gate: could not record handler failure", { gateRequestId: request.id, detail: safe(settleError) });
+      }
+      await audit({ type: "handler_failed", companyId: request.companyId, gateRequestId: request.id, kind: request.kind, errorName });
+      await edit(request, query, GATE_TEXT.failed);
+    }
+
+    // Without the marker a crash during the handler would look like "never
+    // ran", and a reconciler could act twice. No marker, no handler.
+    let marked = false;
     try {
-      await store.settle(request.companyId, request.id, { from: "approved", to: "approved", outcome: { handler: "started" } });
+      marked = await store.settle(request.companyId, request.id, { from: "approved", to: "approved", outcome: { handler: "started" } });
     } catch (error) {
-      logger.warn("gate: could not mark the handler as started", { gateRequestId: request.id, detail: safe(error) });
+      logger.error("gate: could not mark the handler as started", { gateRequestId: request.id, detail: safe(error) });
+    }
+    if (!marked) {
+      logger.error("gate: handler not run because its start was not recorded", { gateRequestId: request.id, kind: request.kind });
+      await fail("handler start was not recorded; the handler did not run", "HandlerStartNotRecorded");
+      return;
     }
     let result: GateHandlerResult;
     try {
@@ -150,20 +169,7 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     } catch (error) {
       const message = safe(error);
       logger.error("gate: handler failed", { gateRequestId: request.id, kind: request.kind, detail: message });
-      try {
-        await store.settle(request.companyId, request.id, { from: "approved", to: "failed", error: message });
-      } catch (settleError) {
-        logger.error("gate: could not record handler failure", { gateRequestId: request.id, detail: safe(settleError) });
-      }
-      await audit({
-        type: "handler_failed",
-        companyId: request.companyId,
-        gateRequestId: request.id,
-        kind: request.kind,
-        errorName: error instanceof Error ? error.name : "Error",
-      });
-      // The chat sees a generic line; the redacted message is in the log and the error column.
-      await edit(request, query, GATE_TEXT.failed);
+      await fail(message, error instanceof Error ? error.name : "Error");
       return;
     }
     // The handler has acted: a later storage error must not show the card as failed.
