@@ -91,7 +91,8 @@ export async function getAccountSummary(client: MetaGraphClient, actId: string):
     currency: requireString(raw.currency, "currency"),
     timezone: requireString(raw.timezone_name, "timezone_name"),
     spendCapCents: parseSpendCap(raw.spend_cap),
-    amountSpentCents: raw.amount_spent === undefined ? 0 : parseMinorUnits(raw.amount_spent, "amount_spent"),
+    // Missing spend must not read as zero spend.
+    amountSpentCents: parseMinorUnits(raw.amount_spent, "amount_spent"),
     status: (statusCode !== null ? AD_ACCOUNT_STATUS_BY_CODE[statusCode] : undefined) ?? "UNKNOWN",
     statusCode,
   };
@@ -340,21 +341,22 @@ export async function createAdCreative(
   return { creativeId: requireString(result.id, "id") };
 }
 
-/** Creates an ad, PAUSED unless the caller says otherwise. Activation belongs to the gate (G1). */
+/**
+ * Creates an ad, always PAUSED. Activation is a separate `setObjectStatus`
+ * write that only the gate's hook lets through (G1).
+ */
 export async function createAd(
   client: MetaGraphClient,
   actId: string,
-  input: { name: string; adsetId: string; creativeId: string; status?: WritableStatus; extra?: Record<string, unknown> },
+  input: { name: string; adsetId: string; creativeId: string; extra?: Record<string, unknown> },
 ): Promise<WriteResult<{ adId: string }>> {
   if (!input.name) throw new InvalidParamError("ad name is required");
-  const status = input.status ?? "PAUSED";
-  if (status !== "ACTIVE" && status !== "PAUSED") throw new InvalidParamError("status must be ACTIVE or PAUSED");
   const result = await client.post<{ id?: unknown }>(`${adAccountPath(actId)}/ads`, {
     ...input.extra,
     name: input.name,
     adset_id: requireId(input.adsetId, "adsetId"),
     creative: { creative_id: requireId(input.creativeId, "creativeId") },
-    status,
+    status: "PAUSED",
   });
   if (isDryRun(result)) return result;
   return { adId: requireString(result.id, "id") };

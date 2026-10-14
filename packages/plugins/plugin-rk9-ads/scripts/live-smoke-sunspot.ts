@@ -28,8 +28,9 @@ function loadToken(): string {
   if (fromEnv) return fromEnv;
   const file = process.env.META_ADS_ENV ?? path.join(homedir(), ".config", "sunspot", "meta-ads.env");
   if (existsSync(file)) {
-    const match = readFileSync(file, "utf8").match(/^\s*META_ADS_ACCESS_TOKEN\s*=\s*(.+?)\s*$/m);
-    if (match?.[1]) return match[1];
+    const match = readFileSync(file, "utf8").match(/^\s*(?:export\s+)?META_ADS_ACCESS_TOKEN\s*=\s*(.+?)\s*$/m);
+    const value = match?.[1]?.replace(/^(["'])(.*)\1$/, "$2");
+    if (value) return value;
   }
   throw new Error(`No token: set META_ADS_ACCESS_TOKEN or put it in ${file}`);
 }

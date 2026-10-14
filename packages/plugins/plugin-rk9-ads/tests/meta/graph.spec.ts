@@ -12,7 +12,17 @@ import {
   TokenInvalidError,
   WriteRefusedError,
 } from "../../src/meta/errors.js";
-import { encodeParams, GRAPH_VERSION, GraphHealth, graphUrl, regainAccessMs, type WritePlan } from "../../src/meta/graph.js";
+import {
+  createMetaClient,
+  encodeParams,
+  GRAPH_VERSION,
+  GraphHealth,
+  graphHealth,
+  graphUrl,
+  pausedOnlyWrites,
+  regainAccessMs,
+  type WritePlan,
+} from "../../src/meta/graph.js";
 import {
   createAd,
   createAdCreative,
@@ -30,7 +40,7 @@ import {
   waitForVideoReady,
 } from "../../src/meta/methods.js";
 import { isDryRun } from "../../src/meta/types.js";
-import { ACT, COMPANY, FakeGraph, fixture, makeClient, SENTINEL_TOKEN } from "./fake-graph.js";
+import { ACT, COMPANY, FakeGraph, fixture, makeClient, SENTINEL_TOKEN, TOKEN_REF } from "./fake-graph.js";
 
 const GRAPH_PREFIX = `https://graph.facebook.com/${GRAPH_VERSION}/`;
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -60,8 +70,18 @@ describe("Graph URL and request shape", () => {
     }
   });
 
-  it("refuses access_token as a parameter", () => {
-    expect(() => encodeParams({ access_token: "x" })).toThrow(InvalidParamError);
+  it("refuses access_token and write overrides as parameters", () => {
+    for (const key of ["access_token", "ACCESS_TOKEN", "method", "Method", "_method", "batch", "appsecret_proof"]) {
+      expect(() => encodeParams({ [key]: "x" }), key).toThrow(InvalidParamError);
+    }
+  });
+
+  it("cannot smuggle a write through a GET in read-only mode", async () => {
+    const graph = new FakeGraph(fixture("account"));
+    const { client } = makeClient(graph, { mode: "readOnly" });
+    await expect(client.get("120247250925830775", { method: "post", status: "ACTIVE" })).rejects.toThrow(InvalidParamError);
+    await expect(client.get("120247250925830775", { batch: [{ method: "POST" }] })).rejects.toThrow(InvalidParamError);
+    expect(graph.calls).toHaveLength(0);
   });
 
   it("sends the token as a Bearer header resolved per call, never in the URL", async () => {
@@ -117,6 +137,12 @@ describe("account summary", () => {
       status: "ACTIVE",
       statusCode: 1,
     });
+  });
+
+  it("refuses a summary without amount_spent instead of reading it as zero spend", async () => {
+    const base = fixture("account");
+    const { client } = makeClient(new FakeGraph({ ...base, body: { ...(base.body as object), amount_spent: undefined } }));
+    await expect(getAccountSummary(client, ACT)).rejects.toThrow(MetaResponseError);
   });
 
   it("maps spend_cap 0 or absent to null and keeps large minor-unit strings exact", async () => {
@@ -192,6 +218,35 @@ describe("paging", () => {
     expect(graph.calls).toHaveLength(1);
   });
 
+  it("refuses a next URL that leaves the edge or carries a write override", async () => {
+    const page = fixture("ads-page-1");
+    const body = page.body as { data: unknown[]; paging: { next: string } };
+    const withNext = (next: string) => ({ ...page, body: { ...body, paging: { next } } });
+    const base = `${GRAPH_PREFIX}act_1336862981968191`;
+    const graph = new FakeGraph(
+      withNext(`${base}/ads?after=c&method=post&status=ACTIVE`),
+      withNext(`${base}/ads?after=c&BATCH=x`),
+      withNext(`${GRAPH_PREFIX}act_999/ads?after=c`),
+      withNext(`${GRAPH_PREFIX}me/adaccounts?after=c`),
+    );
+    const { client } = makeClient(graph);
+    for (let i = 0; i < 4; i += 1) {
+      await expect(listAds(client, ACT)).rejects.toThrow(/refused/);
+    }
+    expect(graph.calls).toHaveLength(4);
+    expect(graph.calls.every((call) => call.url.includes("act_1336862981968191/ads?"))).toBe(true);
+  });
+
+  it("strips access_token in any letter case from next", async () => {
+    const page = fixture("ads-page-1");
+    const body = page.body as { data: unknown[]; paging: { next: string } };
+    const next = `${GRAPH_PREFIX}act_1336862981968191/ads?Access_Token=${encodeURIComponent(SENTINEL_TOKEN)}&after=c`;
+    const graph = new FakeGraph({ ...page, body: { ...body, paging: { next } } }, fixture("ads-page-2"));
+    const { client } = makeClient(graph);
+    await listAds(client, ACT);
+    expect(graph.calls[1]!.url).toBe(`${GRAPH_PREFIX}act_1336862981968191/ads?after=c`);
+  });
+
   it("warns once on version drift: logger, one activity entry, client status and worker health", async () => {
     const health = new GraphHealth();
     const graph = new FakeGraph(fixture("ads-page-1-drift"), fixture("ads-page-2"), fixture("ads-page-1-drift"), fixture("ads-page-2"));
@@ -210,6 +265,47 @@ describe("paging", () => {
     expect(captured.logs.filter((log) => log.message.includes("drift"))).toHaveLength(1);
     expect(client.status().drift).toMatchObject({ observedVersion: "v25.0" });
     expect(health.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v25.0" } });
+  });
+
+  it("writes the drift activity entry once per worker and observed version, and keeps the latest drift", async () => {
+    const health = new GraphHealth();
+    const header = (version: string) => ({ ...fixture("account"), headers: { "facebook-api-version": version } });
+    const first = makeClient(new FakeGraph(header("v25.0")), { health });
+    const second = makeClient(new FakeGraph(header("v25.0")), { health });
+    const third = makeClient(new FakeGraph(header("v26.0")), { health });
+    for (const { client } of [first, second, third]) {
+      await getAccountSummary(client, ACT);
+      await Promise.resolve();
+    }
+    expect(first.captured.activity).toHaveLength(1);
+    expect(second.captured.activity).toHaveLength(0);
+    expect(second.client.status().drift).toMatchObject({ observedVersion: "v25.0" });
+    expect(third.captured.activity).toHaveLength(1);
+    expect(health.snapshot().drift).toMatchObject({ observedVersion: "v26.0" });
+  });
+
+  it("createMetaClient feeds the worker-wide graphHealth through ctx", async () => {
+    graphHealth.reset();
+    try {
+      const graph = new FakeGraph({ ...fixture("account"), headers: { "facebook-api-version": "v25.0" } });
+      const activity: unknown[] = [];
+      const client = createMetaClient(
+        {
+          http: { fetch: graph.fetch },
+          secrets: { resolve: async () => SENTINEL_TOKEN },
+          logger: { info: () => undefined, warn: () => undefined },
+          activity: { log: async (entry) => void activity.push(entry) },
+        },
+        { companyId: COMPANY, tokenRef: TOKEN_REF },
+      );
+      await getAccountSummary(client, ACT);
+      await Promise.resolve();
+      expect(graphHealth.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v25.0" } });
+      expect(activity).toHaveLength(1);
+      expect(graph.calls[0]!.headers.Authorization).toBe(`Bearer ${SENTINEL_TOKEN}`);
+    } finally {
+      graphHealth.reset();
+    }
   });
 
   it("also notices drift in the facebook-api-version response header", async () => {
@@ -299,6 +395,35 @@ describe("rate limits", () => {
     expect(captured.sleeps.reduce((a, b) => a + b, 0)).toBeLessThan(30_000);
   });
 
+  it("falls back to bounded defaults for NaN, infinite or missing retry settings", async () => {
+    const graph = new FakeGraph(...Array.from({ length: 20 }, () => fixture("error-613")));
+    const { client, captured } = makeClient(graph, {
+      retry: { maxAttempts: Number.NaN, baseDelayMs: Number.POSITIVE_INFINITY, maxTotalWaitMs: undefined },
+    });
+    const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as RateLimitError;
+    expect(error).toBeInstanceOf(RateLimitError);
+    expect(error.attempts).toBe(3);
+    expect(captured.sleeps).toEqual([1_000, 2_000]);
+
+    const many = new FakeGraph(...Array.from({ length: 20 }, () => fixture("error-613")));
+    const capped = makeClient(many, { retry: { maxAttempts: 1_000, baseDelayMs: 0 } });
+    await expect(getAccountSummary(capped.client, ACT)).rejects.toThrow(RateLimitError);
+    expect(many.calls).toHaveLength(5);
+  });
+
+  it("counts time spent in fetches against the wait budget", async () => {
+    let now = 0;
+    const graph = new FakeGraph(fixture("error-613"), fixture("account"));
+    const slowFetch = async (url: string, init?: RequestInit) => {
+      now += 19_500;
+      return graph.fetch(url, init);
+    };
+    const { client } = makeClient(graph, { http: { fetch: slowFetch }, now: () => now, sleep: async (ms) => void (now += ms) });
+    const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as RateLimitError;
+    expect(error).toBeInstanceOf(RateLimitError);
+    expect(graph.calls).toHaveLength(1);
+  });
+
   it("reads estimated_time_to_regain_access from either usage header", () => {
     const headers = new Headers({
       "x-business-use-case-usage": JSON.stringify({ "1": [{ estimated_time_to_regain_access: 2 }] }),
@@ -339,6 +464,26 @@ describe("read-only and dry-run modes", () => {
     const { client } = makeClient(graph, { mode: "dryRun" });
     await getAccountSummary(client, ACT);
     expect(graph.calls.map((call) => call.method)).toEqual(["GET"]);
+  });
+
+  it("by default refuses activation and creates that are not PAUSED", async () => {
+    const graph = new FakeGraph(fixture("ad"));
+    const { client } = makeClient(graph);
+    await expect(setObjectStatus(client, "120247250925830775", "ACTIVE")).rejects.toThrow(WriteRefusedError);
+    await expect(client.post("act_1336862981968191/campaigns", { name: "c", objective: "OUTCOME_TRAFFIC" })).rejects.toThrow(
+      WriteRefusedError,
+    );
+    await expect(client.post("act_1336862981968191/adsets", { name: "s", configured_status: "active" })).rejects.toThrow(
+      WriteRefusedError,
+    );
+    expect(graph.calls).toHaveLength(0);
+
+    // createAd always sends PAUSED, whatever `extra` says.
+    await createAd(client, ACT, { name: "ad", adsetId: "1", creativeId: "2", extra: { status: "ACTIVE" } });
+    expect(new URLSearchParams(graph.calls[0]!.body as string).get("status")).toBe("PAUSED");
+    expect(pausedOnlyWrites({ companyId: COMPANY, mode: "live", method: "POST", path: "1", fields: { name: "x" } })).toEqual({
+      allow: true,
+    });
   });
 
   it("passes every write through the guardedWrite hook, which can refuse it", async () => {

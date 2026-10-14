@@ -48,6 +48,7 @@ const PATH_SEGMENT_RE = /^[A-Za-z0-9_]+$/;
 
 /** The host aborts one plugin fetch after 30 s, so the client's own waits stay well below it. */
 const HOST_CALL_BUDGET_MS = 30_000;
+const MAX_ATTEMPTS_CEILING = 5;
 
 export interface RetryPolicy {
   /** Requests per call, the first one included. */
@@ -77,13 +78,32 @@ export type GuardDecision = { allow: true } | { allow: false; reason: string };
 /**
  * Called before every write, in live and dry-run mode. A refusal throws
  * `WriteRefusedError` and nothing is sent. RK9-511 (spend guard, kill switch)
- * supplies the real hook; the default allows everything.
+ * and the activation gate (RK9-505 A9) supply the real hooks.
  */
 export type GuardedWriteHook = (plan: WritePlan) => GuardDecision | Promise<GuardDecision>;
 
-export const allowAllWrites: GuardedWriteHook = () => ({ allow: true });
+/** Edges whose POST creates an object that can spend money. */
+const SPENDING_CREATE_EDGE_RE = /^act_\d+\/(campaigns|adsets|ads)$/;
+
+/**
+ * The default hook fails closed on spend: it refuses a write that sets any
+ * status field to ACTIVE, and a create on the campaigns, adsets or ads edge
+ * that is not explicitly PAUSED. Activation happens only through the gate's
+ * own hook (G1). Every other write is allowed.
+ */
+export const pausedOnlyWrites: GuardedWriteHook = (plan) => {
+  const statusFields = ["status", "configured_status"] as const;
+  if (statusFields.some((key) => String(plan.fields[key] ?? "").toUpperCase() === "ACTIVE")) {
+    return { allow: false, reason: "activation needs the gate's write hook" };
+  }
+  if (plan.method === "POST" && SPENDING_CREATE_EDGE_RE.test(plan.path) && plan.fields.status !== "PAUSED") {
+    return { allow: false, reason: "a campaign, ad set or ad must be created PAUSED" };
+  }
+  return { allow: true };
+};
 
 export interface GraphDriftEvent {
+  /** The company whose client saw it first. Not shown in worker health. */
   companyId: string;
   expectedVersion: string;
   observedVersion: string;
@@ -94,23 +114,30 @@ export interface GraphDriftEvent {
 }
 
 /**
- * Worker-wide Graph health. A client records the first version drift it sees,
- * and `onHealth()` reports the plugin as degraded until the worker restarts
- * with a reviewed `GRAPH_VERSION`.
+ * Worker-wide Graph health. Clients record the version drift they see, and
+ * `onHealth()` reports the plugin as degraded until the worker restarts with
+ * a reviewed `GRAPH_VERSION`. The latest drift wins, so a second upgrade
+ * (for example v25 to v26) is visible too.
  */
 export class GraphHealth {
-  private drift: GraphDriftEvent | null = null;
+  private latest: GraphDriftEvent | null = null;
+  private readonly seen = new Set<string>();
 
-  recordDrift(event: GraphDriftEvent): void {
-    this.drift ??= event;
+  /** Records a drift. True when this worker had not seen that observed version yet. */
+  recordDrift(event: GraphDriftEvent): boolean {
+    this.latest = event;
+    if (this.seen.has(event.observedVersion)) return false;
+    this.seen.add(event.observedVersion);
+    return true;
   }
 
   snapshot(): { status: "ok" | "degraded"; drift: GraphDriftEvent | null } {
-    return { status: this.drift ? "degraded" : "ok", drift: this.drift };
+    return { status: this.latest ? "degraded" : "ok", drift: this.latest };
   }
 
   reset(): void {
-    this.drift = null;
+    this.latest = null;
+    this.seen.clear();
   }
 }
 
@@ -168,17 +195,28 @@ export function graphUrl(path: string, params: GraphParams = {}): URL {
   return url;
 }
 
+/**
+ * Parameters the client never sends. `access_token` travels as a header only.
+ * `method` and `batch` would let a GET act as a write on Graph and slip past
+ * read-only mode and the write guard.
+ */
+const FORBIDDEN_PARAM_RE = /^(access_token|appsecret_proof|method|_method|batch)$/i;
+
 /** Form-encodes Graph params: objects and arrays as JSON, undefined and null skipped. */
 export function encodeParams(params: GraphParams): URLSearchParams {
   const out = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
-    if (key.toLowerCase() === "access_token") {
-      throw new InvalidParamError("access_token must not be passed as a parameter; the client sends a Bearer header");
+    if (FORBIDDEN_PARAM_RE.test(key)) {
+      throw new InvalidParamError(`Parameter ${key} is not allowed: the client sends the token as a header and writes only through post/delete`);
     }
     out.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
   }
   return out;
+}
+
+function retryValue(value: number | undefined, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, min), max) : fallback;
 }
 
 function asNumber(value: unknown): number | null {
@@ -279,15 +317,16 @@ export class MetaGraphClient {
     this.options = options;
     this.companyId = options.companyId;
     this.mode = options.mode ?? "live";
-    const retry = { ...DEFAULT_RETRY, ...options.retry };
+    const retry = options.retry ?? {};
+    // A missing, NaN or infinite value falls back to the default; every value has a hard ceiling.
     this.retry = {
-      maxAttempts: Math.max(1, Math.floor(retry.maxAttempts)),
-      baseDelayMs: Math.max(0, retry.baseDelayMs),
+      maxAttempts: Math.floor(retryValue(retry.maxAttempts, DEFAULT_RETRY.maxAttempts, 1, MAX_ATTEMPTS_CEILING)),
+      baseDelayMs: retryValue(retry.baseDelayMs, DEFAULT_RETRY.baseDelayMs, 0, 10_000),
       // Never plan a wait the host would cut off.
-      maxTotalWaitMs: Math.min(Math.max(0, retry.maxTotalWaitMs), HOST_CALL_BUDGET_MS - 5_000),
+      maxTotalWaitMs: retryValue(retry.maxTotalWaitMs, DEFAULT_RETRY.maxTotalWaitMs, 0, HOST_CALL_BUDGET_MS - 5_000),
     };
     this.health = options.health ?? graphHealth;
-    this.guard = options.guardedWrite ?? allowAllWrites;
+    this.guard = options.guardedWrite ?? pausedOnlyWrites;
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? (() => Date.now());
   }
@@ -377,7 +416,8 @@ export class MetaGraphClient {
     const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
 
-    let waitedMs = 0;
+    // Wall-clock time, fetches included, counts against the wait budget.
+    const started = this.now();
     for (let attempt = 1; ; attempt += 1) {
       let response: Response;
       let text: string;
@@ -414,7 +454,7 @@ export class MetaGraphClient {
       const regainMs = regainAccessMs(response.headers);
       const backoffMs = this.retry.baseDelayMs * 2 ** (attempt - 1);
       const delayMs = Math.max(backoffMs, regainMs ?? 0);
-      if (attempt >= this.retry.maxAttempts || waitedMs + delayMs > this.retry.maxTotalWaitMs) {
+      if (attempt >= this.retry.maxAttempts || this.now() - started + delayMs > this.retry.maxTotalWaitMs) {
         throw new RateLimitError(error.message, {
           httpStatus: error.httpStatus,
           code: error.code,
@@ -434,13 +474,13 @@ export class MetaGraphClient {
         delayMs,
       });
       await this.sleep(delayMs);
-      waitedMs += delayMs;
     }
   }
 
   /**
    * Turns a paging `next` URL into a URL on the pinned version. It refuses any
-   * host but Graph (the client would send its Bearer token there) and drops
+   * host but Graph (the client would send its Bearer token there), any path
+   * but the edge being walked, and a `method` or `batch` override. It drops
    * any `access_token` Meta put in the query.
    */
   private async followNext(next: string, path: string): Promise<URL> {
@@ -458,7 +498,16 @@ export class MetaGraphClient {
       const observed = segments.shift()!;
       if (observed !== GRAPH_VERSION) await this.noteDrift(observed, "paging", path);
     }
-    const url = graphUrl(segments.join("/"));
+    const walked = path.replace(/^\/+/, "");
+    if (segments.join("/") !== walked) {
+      throw new MetaResponseError(`Meta GET ${path}: paging.next leaves the edge being walked; refused`);
+    }
+    for (const key of parsed.searchParams.keys()) {
+      if (FORBIDDEN_PARAM_RE.test(key)) {
+        throw new MetaResponseError(`Meta GET ${path}: paging.next carries parameter ${key}; refused`);
+      }
+    }
+    const url = graphUrl(walked);
     url.search = parsed.search;
     return url;
   }
@@ -470,7 +519,11 @@ export class MetaGraphClient {
     }
   }
 
-  /** Warns once per client: a logger line, one activity entry and the shared health status. */
+  /**
+   * Warns once per client (logger line, client status) and records the drift
+   * in the shared health. The activity entry is written once per worker and
+   * observed version, so a client per job does not flood the activity log.
+   */
   private async noteDrift(observedVersion: string, source: GraphDriftEvent["source"], path: string): Promise<void> {
     if (this.drift) return;
     const event: GraphDriftEvent = {
@@ -482,8 +535,9 @@ export class MetaGraphClient {
       at: new Date(this.now()).toISOString(),
     };
     this.drift = event;
-    this.health.recordDrift(event);
+    const firstInWorker = this.health.recordDrift(event);
     this.options.logger?.warn("rk9-ads meta Graph API version drift", { ...event });
+    if (!firstInWorker) return;
     try {
       await this.options.activity?.log({
         companyId: this.companyId,

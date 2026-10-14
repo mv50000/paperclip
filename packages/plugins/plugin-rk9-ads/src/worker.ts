@@ -65,7 +65,16 @@ const plugin = definePlugin({
       return {
         status: "degraded",
         message: `Meta Graph API version drift: the client pins ${GRAPH_VERSION} but Meta answered with ${graph.drift.observedVersion}. Review and bump GRAPH_VERSION in src/meta/graph.ts.`,
-        details: { features: FEATURES.map((feature) => feature.key), graphDrift: graph.drift },
+        details: {
+          features: FEATURES.map((feature) => feature.key),
+          // No company id or ad account path: instance health is visible across companies.
+          graphDrift: {
+            expectedVersion: graph.drift.expectedVersion,
+            observedVersion: graph.drift.observedVersion,
+            source: graph.drift.source,
+            at: graph.drift.at,
+          },
+        },
       };
     }
     return {

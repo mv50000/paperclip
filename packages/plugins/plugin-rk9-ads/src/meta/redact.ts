@@ -81,12 +81,13 @@ export function redactValue<T>(value: T, knownSecrets: readonly string[] = []): 
 }
 
 /**
- * Removes `access_token` (and `appsecret_proof`) from a URL's query. Used on
+ * Removes `access_token` and `appsecret_proof` (any letter case) from a URL's query. Used on
  * paging `next` URLs before the client fetches them with its own header.
  */
 export function stripAccessToken(url: string | URL): URL {
   const parsed = new URL(url.toString());
-  parsed.searchParams.delete("access_token");
-  parsed.searchParams.delete("appsecret_proof");
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (/^(access_token|appsecret_proof)$/i.test(key)) parsed.searchParams.delete(key);
+  }
   return parsed;
 }

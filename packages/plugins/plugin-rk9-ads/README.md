@@ -131,13 +131,19 @@ build no Graph helpers of their own (G12).
 - Modes: `live`; `readOnly`, where a write throws `ReadOnlyViolationError`
   before any fetch; and `dryRun`, where a write is logged (redacted) and returns
   `{ dryRun: true, planned }`.
-- Every write passes the `guardedWrite` hook first. The spend guard and the
-  kill switch (RK9-511) plug in there. The default hook allows every write.
+- Every write passes the `guardedWrite` hook first. The spend guard, the kill
+  switch (RK9-511) and the activation gate plug in there. The default hook,
+  `pausedOnlyWrites`, fails closed on spend: it refuses any write that sets a
+  status to ACTIVE, and a campaign, ad set or ad create that is not PAUSED.
+  `createAd` always sends PAUSED.
+- A GET cannot carry a write: the client refuses the `method`, `batch` and
+  `access_token` parameters, also in a paging `next` URL.
 - Errors are typed: `TokenInvalidError` (190), `RateLimitError` (4, 17, 613,
   80004), `InvalidParamError` (100), `PolicyAcceptanceRequiredError` (subcode
   2859024, with the fix in the message) and `MetaGraphError` for the rest.
-  Rate limits are retried with exponential backoff. The total wait per call
-  stays under 25 s, because the host aborts a plugin fetch after 30 s. When
+  Rate limits are retried with exponential backoff, at most 5 attempts. The
+  wall-clock time per call, fetches included, stays under 25 s, because the
+  host aborts a plugin fetch after 30 s. When
   Meta's own `estimated_time_to_regain_access` is longer than that, the client
   throws at once and sets `retryAfterMs`.
 - `redact.ts` removes the token from error messages, logs, activity metadata and
@@ -146,8 +152,10 @@ build no Graph helpers of their own (G12).
 - Version drift: when a paging `next` URL or the `facebook-api-version`
   response header shows a version other than `GRAPH_VERSION`, the client warns
   once (logger and one activity entry) and `onHealth()` reports `degraded`.
-  Paging stays on the pinned version, and a `next` URL on any other host is
-  refused, because the client would send its token there.
+  Paging stays on the pinned version and on the edge being walked. A `next`
+  URL on any other host or path is refused, because the client would send its
+  token there. The activity entry is written once per worker and observed
+  version.
 
 The first live smoke (14.10.2026) showed `facebook-api-version: v25.0` on
 answers to v23.0 requests: Meta upgrades calls to a deprecated Marketing API
