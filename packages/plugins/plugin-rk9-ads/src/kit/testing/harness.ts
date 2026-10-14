@@ -7,6 +7,7 @@
  * string secret refs fail closed. Test-only; never imported by the worker.
  */
 
+import type { ScopeKey } from "@paperclipai/plugin-sdk";
 import type { TestHarness } from "@paperclipai/plugin-sdk/testing";
 
 export interface SecretResolutionRecord {
@@ -20,6 +21,7 @@ export interface SecretResolutionRecord {
  * Serves `configs[companyId]`. Like the host in a job or webhook (no
  * invocation company), a company without a config row is refused with
  * "company context is required", and so is a call without a company.
+ * Company-scoped `ctx.state` calls get the same gate.
  */
 export function useCompanyConfigs(harness: TestHarness, configs: Record<string, Record<string, unknown>>): void {
   harness.ctx.config.get = async (companyId?: string) => {
@@ -27,6 +29,17 @@ export function useCompanyConfigs(harness: TestHarness, configs: Record<string, 
     if (!config) throw new Error("company context is required");
     return config;
   };
+  // The host gates company-scoped state the same way; instance state is not gated.
+  const state = harness.ctx.state;
+  const base = { get: state.get.bind(state), set: state.set.bind(state), delete: state.delete.bind(state) };
+  const gate = (input: ScopeKey): void => {
+    if (input.scopeKind === "company" && !(input.scopeId && configs[input.scopeId])) {
+      throw new Error("company context is required");
+    }
+  };
+  state.get = async (input) => (gate(input), base.get(input));
+  state.set = async (input, value) => (gate(input), base.set(input, value));
+  state.delete = async (input) => (gate(input), base.delete(input));
 }
 
 /**

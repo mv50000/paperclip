@@ -121,6 +121,14 @@ smoke activity) and treated as off. There is no `enabled` flag to forget in the
 wrong state. Removing the config turns a brand off. The emergency stop is the
 kill switch (RK9-511), not a config flag.
 
+The host checks a saved config only against the JSON schema, not with
+`onValidateConfig`. A live brand can therefore end up `invalid` after an edit
+(for example a mistyped time zone). A job that acts for safety (pause, spend
+guard, scheduled pause) treats `invalid` and `unavailable` like a live brand it
+cannot read: it warns and keeps the pause side working, it never skips silently.
+`listCompanyConfigs()` returns `unavailable` when the host refuses a company that
+has a saved config (an instance-scoped marker per company records that).
+
 ### ADR 4: UTC host, Europe/Helsinki jobs
 
 The host runs UTC, and the plugin job scheduler only understands UTC cron

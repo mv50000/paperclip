@@ -8,8 +8,8 @@
  *
  * That list can be stale: the host fills it at worker start and refreshes it on
  * save, and both paths swallow their own failures. So the refusal alone does
- * not prove a company is off. The plugin keeps its own company-scoped marker
- * ("this company has a saved config"), set on every config change and on every
+ * not prove a company is off. The plugin keeps its own marker per company
+ * ("this company has a saved config", instance-scoped state), set on every config change and on every
  * successful read. A refusal for a marked company is "unavailable"; only an
  * unmarked company is "absent". Any other failure is "unavailable" too, so a
  * job that must act for safety (a pause) warns instead of silently skipping.
@@ -23,8 +23,13 @@ const MAX_COMPANIES = 5000;
 /** Host refusal for a company outside its configured list (sdk host-client-factory). */
 const NOT_CONFIGURED_RE = /company context is required/i;
 
+/**
+ * Instance scope on purpose: in a job the host refuses company-scoped state
+ * for exactly the companies whose config it refuses, so a company-scoped
+ * marker could never be read when it matters.
+ */
 function configMarkerKey(companyId: string): ScopeKey {
-  return { scopeKind: "company", scopeId: companyId, namespace: "config", stateKey: "has-config" };
+  return { scopeKind: "instance", namespace: "config-markers", stateKey: companyId };
 }
 
 /**
