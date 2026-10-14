@@ -595,6 +595,57 @@ describe("read-only and dry-run modes", () => {
     expect(graph.calls).toHaveLength(1);
   });
 
+  it("cannot be fooled by a __proto__ field from JSON.parse", async () => {
+    const graph = new FakeGraph(fixture("ad"));
+    const { client } = makeClient(graph);
+    const parsed = JSON.parse('{"__proto__":{"status":"PAUSED"},"name":"a","adset_id":"1","creative":{"creative_id":"2"}}');
+    await expect(client.post("act_1336862981968191/ads", parsed)).rejects.toThrow(InvalidParamError);
+    for (const key of ["constructor", "prototype"]) {
+      await expect(client.post("123", { [key]: "x" }), key).rejects.toThrow(InvalidParamError);
+    }
+    // A plan built by hand with an inherited status is refused too.
+    const inherited = Object.assign(Object.create({ status: "PAUSED" }) as Record<string, unknown>, { name: "a" });
+    expect(pausedOnlyWrites({ companyId: COMPANY, mode: "live", method: "POST", path: "act_1/ads", fields: inherited }).allow).toBe(false);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("refuses status look-alikes and inline parent specs on creates", async () => {
+    const graph = new FakeGraph();
+    const { client } = makeClient(graph);
+    await expect(client.post("act_1336862981968191/ads", { name: "a", status: "PAUSED", Status: "ACTIVE" })).rejects.toThrow(
+      WriteRefusedError,
+    );
+    await expect(
+      client.post("act_1336862981968191/ads", { name: "a", status: "PAUSED", adset_spec: { status: "ACTIVE" } }),
+    ).rejects.toThrow(WriteRefusedError);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("maps a field that cannot be serialised to InvalidParamError", async () => {
+    const { client } = makeClient(new FakeGraph());
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    await expect(client.post("act_1336862981968191/adcreatives", { name: "c", spec: circular })).rejects.toThrow(InvalidParamError);
+    await expect(client.post("act_1336862981968191/adcreatives", { name: "c", spec: { n: 1n } })).rejects.toThrow(InvalidParamError);
+    await expect(client.post("act_1336862981968191/adcreatives", { name: "c", spec: { toJSON: () => undefined } })).rejects.toThrow(
+      InvalidParamError,
+    );
+  });
+
+  it("survives a logger that throws while it reports drift", async () => {
+    const graph = new FakeGraph({ ...fixture("account"), headers: { "facebook-api-version": "v25.0" } });
+    const { client } = makeClient(graph, {
+      health: new GraphHealth(),
+      logger: {
+        info: () => undefined,
+        warn: () => {
+          throw new Error("logger down");
+        },
+      },
+    });
+    await expect(getAccountSummary(client, ACT)).resolves.toMatchObject({ currency: "EUR" });
+  });
+
   it("hands the guard a frozen copy", async () => {
     let frozen = false;
     const { client } = makeClient(new FakeGraph(), {

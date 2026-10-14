@@ -87,6 +87,8 @@ const MEDIA_EDGE_RE = /^act_\d+\/(adimages|advideos|adcreatives)$/;
 /** Creates of objects that can spend money. */
 const SPENDING_CREATE_EDGE_RE = /^act_\d+\/(campaigns|adsets|ads)$/;
 const NODE_RE = /^\d+$/;
+/** Inline specs that create a parent object together with the child. */
+const INLINE_PARENT_SPEC_RE = /^(adset|campaign)_spec$/i;
 
 /**
  * The default hook is an allowlist that fails closed on spend (G1). It allows:
@@ -100,7 +102,9 @@ const NODE_RE = /^\d+$/;
  * path that is actually sent.
  */
 export const pausedOnlyWrites = (plan: WritePlan): GuardDecision => {
+  // Own keys only: an inherited value is never sent.
   const keys = Object.keys(plan.fields).filter((key) => plan.fields[key] !== undefined && plan.fields[key] !== null);
+  const status = Object.hasOwn(plan.fields, "status") ? plan.fields.status : undefined;
   if (plan.method === "DELETE") {
     return NODE_RE.test(plan.path) && keys.length === 0
       ? { allow: true }
@@ -108,7 +112,10 @@ export const pausedOnlyWrites = (plan: WritePlan): GuardDecision => {
   }
   if (MEDIA_EDGE_RE.test(plan.path)) return { allow: true };
   if (SPENDING_CREATE_EDGE_RE.test(plan.path)) {
-    return plan.fields.status === "PAUSED"
+    if (keys.some((key) => (key !== "status" && /status/i.test(key)) || INLINE_PARENT_SPEC_RE.test(key))) {
+      return { allow: false, reason: "a create may carry only the plain status field, and no inline campaign or ad set spec" };
+    }
+    return status === "PAUSED"
       ? { allow: true }
       : { allow: false, reason: "a campaign, ad set or ad must be created with status PAUSED" };
   }
@@ -116,7 +123,7 @@ export const pausedOnlyWrites = (plan: WritePlan): GuardDecision => {
     const pauseOrRename =
       keys.length > 0 &&
       keys.every((key) => key === "name" || key === "status") &&
-      (plan.fields.status === undefined || plan.fields.status === "PAUSED");
+      (status === undefined || status === "PAUSED");
     return pauseOrRename
       ? { allow: true }
       : { allow: false, reason: "the default write hook only pauses or renames an object; activation and budget changes need their own hook" };
@@ -231,8 +238,11 @@ const FORBIDDEN_PARAM_RE = /^(access_token|appsecret_proof|method|_method|batch)
 /** Graph parameter names are plain identifiers; anything else could be rewritten by a lenient parser. */
 const PARAM_NAME_RE = /^[A-Za-z0-9_]+$/;
 
+/** Names that touch the prototype chain of a plain object. */
+const PROTOTYPE_KEY_RE = /^(__proto__|constructor|prototype)$/;
+
 function checkParamName(key: string): string | null {
-  if (!PARAM_NAME_RE.test(key)) return `Parameter name "${redactText(key)}" is not a plain identifier`;
+  if (!PARAM_NAME_RE.test(key) || PROTOTYPE_KEY_RE.test(key)) return `Parameter name "${redactText(key)}" is not a plain identifier`;
   if (FORBIDDEN_PARAM_RE.test(key)) return `Parameter ${key} is not allowed: the client sends the token as a header and writes only through post/delete`;
   return null;
 }
@@ -333,13 +343,24 @@ export function mapGraphError(
  * this point reads the copy.
  */
 function snapshotFields(fields: Record<string, unknown>): Record<string, string | number | boolean | object> {
-  const out: Record<string, string | number | boolean | object> = {};
+  // No prototype, and names are checked first, so a "__proto__" field cannot
+  // swap in inherited values that the guard would see but the body would not.
+  const out = Object.create(null) as Record<string, string | number | boolean | object>;
   for (const [key, value] of Object.entries(fields)) {
+    const problem = checkParamName(key);
+    if (problem) throw new InvalidParamError(problem);
     if (value === undefined || value === null) continue;
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
       out[key] = value;
     } else if (typeof value === "object") {
-      out[key] = deepFreeze(JSON.parse(JSON.stringify(value)) as object);
+      let copy: unknown;
+      try {
+        copy = JSON.parse(JSON.stringify(value));
+      } catch {
+        throw new InvalidParamError(`Field ${key} is not JSON-serialisable`);
+      }
+      if (copy === null || copy === undefined) throw new InvalidParamError(`Field ${key} is not JSON-serialisable`);
+      out[key] = typeof copy === "object" ? deepFreeze(copy) : (copy as string | number | boolean);
     } else {
       throw new InvalidParamError(`Field ${key} must be a string, number, boolean or plain object`);
     }
@@ -604,7 +625,7 @@ export class MetaGraphClient {
   private checkVersionHeader(headers: Headers, path: string): void {
     const observed = headers.get("facebook-api-version");
     if (observed && VERSION_SEGMENT_RE.test(observed) && observed !== GRAPH_VERSION) {
-      void this.noteDrift(observed, "header", path);
+      this.noteDrift(observed, "header", path).catch(() => undefined);
     }
   }
 
@@ -625,7 +646,11 @@ export class MetaGraphClient {
     };
     this.drift = event;
     const firstInWorker = this.health.recordDrift(event);
-    this.#options.logger?.warn("rk9-ads meta Graph API version drift", { ...event });
+    try {
+      this.#options.logger?.warn("rk9-ads meta Graph API version drift", { ...event });
+    } catch {
+      // A failing logger must not turn a warning into a failed call.
+    }
     if (!firstInWorker) return;
     try {
       await this.#options.activity?.log({
