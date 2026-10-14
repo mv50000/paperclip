@@ -149,9 +149,11 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     const handler = registry.get(request.kind);
     const tgUserId = query.from.id;
     // The chat sees a generic line; the redacted message is in the log and the error column.
-    async function fail(message: string, errorName: string): Promise<void> {
+    // The outcome tells a reconciler whether the handler may have acted:
+    // "not_run" never acted, "threw" may have acted before it failed.
+    async function fail(message: string, errorName: string, handlerState: "not_run" | "threw"): Promise<void> {
       try {
-        await store.settle(request.companyId, request.id, { from: "approved", to: "failed", error: message });
+        await store.settle(request.companyId, request.id, { from: "approved", to: "failed", outcome: { handler: handlerState }, error: message });
       } catch (settleError) {
         logger.error("gate: could not record handler failure", { gateRequestId: request.id, detail: safe(settleError) });
       }
@@ -169,7 +171,7 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     }
     if (!marked) {
       logger.error("gate: handler not run because its start was not recorded", { gateRequestId: request.id, kind: request.kind });
-      await fail("handler start was not recorded; the handler did not run", "HandlerStartNotRecorded");
+      await fail("handler start was not recorded; the handler did not run", "HandlerStartNotRecorded", "not_run");
       return;
     }
     let result: GateHandlerResult;
@@ -179,7 +181,7 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     } catch (error) {
       const message = safe(error);
       logger.error("gate: handler failed", { gateRequestId: request.id, kind: request.kind, detail: message });
-      await fail(message, error instanceof Error ? error.name : "Error");
+      await fail(message, error instanceof Error ? error.name : "Error", "threw");
       return;
     }
     // The handler has acted: a later storage error must not show the card as failed.

@@ -144,7 +144,10 @@ card's company.
   acted. The activation item (RK9-517) must make its handler idempotent
   against Meta, and a reconciler must check the ad's real state instead of
   re-running the handler.
-- A handler error moves the card to `failed`. The chat sees only
+- A handler error moves the card to `failed` with outcome
+  `{ "handler": "threw" }`: the handler may have acted before it failed, so
+  a reconciler must check the real state. A card whose handler never ran
+  gets `{ "handler": "not_run" }`. The chat sees only
   "⚠️ Epäonnistui". The redacted message (token shapes,
   `access_token=...`, bearer values) goes to the log and the `error` column.
 - A brand whose config the host refuses ("unavailable") stays on its bot for

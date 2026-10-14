@@ -671,6 +671,7 @@ describe("gate transitions", () => {
     await r.controller.idle();
     expect(r.store.rows.get(card.id)?.error).toMatch(/invalid parameter/);
     expect(r.store.rows.get(card.id)?.error).toContain("access_token=<redacted>");
+    expect(r.store.rows.get(card.id)?.outcome).toEqual({ handler: "threw" });
     expect(r.fake.messages.get(card.messageId)?.caption).toBe(`Ololla: syysmainos 1\n\n${GATE_TEXT.failed}`);
     expect(recordedOutput(r.harness)).not.toContain("EAAGsecretvalue123");
   });
@@ -715,6 +716,7 @@ describe("gate transitions", () => {
     await r.controller.idle();
     expect(r.handlerCalls).toHaveLength(0);
     expect(store.rows.get(card.id)?.error).toMatch(/did not run/);
+    expect(store.rows.get(card.id)?.outcome).toEqual({ handler: "not_run" });
     expect(r.fake.messages.get(card.messageId)?.caption).toBe(`Ololla: syysmainos 1\n\n${GATE_TEXT.failed}`);
   });
 
