@@ -184,6 +184,43 @@ describe("smoke job", () => {
     expect(harness.logs.filter((log) => log.level === "warn" && /config unavailable/.test(log.message))).toHaveLength(3);
   });
 
+  it("warns for a configured company that the host refuses, and only for that one", async () => {
+    // The host keeps its own list of configured companies; it can be stale after a failed refresh.
+    const harness = await setupHarness();
+    await plugin.definition.onConfigChanged?.(brandConfig(), { companyId: COMPANY_A });
+    useCompanyConfigs(harness, {});
+
+    await harness.runJob("smoke", { trigger: "manual" });
+
+    const warnings = harness.logs.filter((log) => log.level === "warn" && /config unavailable/.test(log.message));
+    expect(warnings.map((log) => log.meta?.companyId)).toEqual([COMPANY_A]);
+    expect(harness.activity).toEqual([]);
+  });
+
+  it("remembers a company after a successful read", async () => {
+    const harness = await setupHarness();
+    useCompanyConfigs(harness, { [COMPANY_B]: brandConfig({ brandCode: "AUR" }) });
+    useCompanySecrets(harness, {});
+    await harness.runJob("smoke", { trigger: "manual" });
+
+    useCompanyConfigs(harness, {});
+    await harness.runJob("smoke", { trigger: "manual" });
+
+    const warnings = harness.logs.filter((log) => log.level === "warn" && /config unavailable/.test(log.message));
+    expect(warnings.map((log) => log.meta?.companyId)).toEqual([COMPANY_B]);
+  });
+
+  it("forgets a company whose config was saved empty", async () => {
+    const harness = await setupHarness();
+    await plugin.definition.onConfigChanged?.(brandConfig(), { companyId: COMPANY_A });
+    await plugin.definition.onConfigChanged?.({}, { companyId: COMPANY_A });
+    useCompanyConfigs(harness, {});
+
+    await harness.runJob("smoke", { trigger: "manual" });
+
+    expect(harness.logs.filter((log) => /unavailable/.test(log.message))).toEqual([]);
+  });
+
   it("logs an invalid config without resolving its secrets", async () => {
     const harness = await setupHarness();
     useCompanyConfigs(harness, { [COMPANY_A]: { brandCode: "OLL" } });

@@ -1,6 +1,7 @@
 import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { parseBrandConfig } from "./config.js";
+import { rememberConfigPresence } from "./company-configs.js";
 import { createLedger } from "./db.js";
 import { FEATURES } from "./features/index.js";
 import type {
@@ -75,6 +76,17 @@ const plugin = definePlugin({
   },
 
   async onConfigChanged(config, context) {
+    const companyId = context?.companyId ?? null;
+    if (companyId && state) {
+      try {
+        await rememberConfigPresence(state.ctx, companyId, config);
+      } catch (error) {
+        state.ctx.logger.warn("rk9-ads: could not record config marker", {
+          companyId,
+          error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+        });
+      }
+    }
     for (const handler of state?.configChanged ?? []) {
       await handler(config, context?.companyId ?? null);
     }
