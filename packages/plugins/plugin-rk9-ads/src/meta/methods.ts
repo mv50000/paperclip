@@ -8,7 +8,7 @@
 
 import { normaliseAdAccountId } from "../config.js";
 import { InvalidParamError, MediaProcessingError, MediaTimeoutError, MetaResponseError } from "./errors.js";
-import type { MetaGraphClient } from "./graph.js";
+import type { MetaGraphClient, PageResult } from "./graph.js";
 import { redactText } from "./redact.js";
 import {
   AD_ACCOUNT_STATUS_BY_CODE,
@@ -117,6 +117,17 @@ function toStatusRow(raw: RawStatusRow): StatusRow {
   };
 }
 
+/**
+ * A list or insights read that hit its page cap throws instead of returning
+ * part of the data: a short spend sum would make the spend guard fail open.
+ */
+function complete<T>(page: PageResult<T>, path: string): T[] {
+  if (page.truncated) {
+    throw new MetaResponseError(`Meta GET ${path}: stopped at ${page.pages} pages before the last page; raise maxPages`);
+  }
+  return page.data;
+}
+
 export interface ListOptions {
   maxPages?: number;
   /** Graph `effective_status` filter, e.g. ["ACTIVE", "PAUSED"]. */
@@ -132,26 +143,23 @@ function listParams(fields: string, options: ListOptions) {
 }
 
 export async function listCampaigns(client: MetaGraphClient, actId: string, options: ListOptions = {}): Promise<Campaign[]> {
-  const page = await client.paginate<RawStatusRow>(`${adAccountPath(actId)}/campaigns`, listParams(STATUS_FIELDS, options), options);
-  return page.data.map(toStatusRow);
+  const path = `${adAccountPath(actId)}/campaigns`;
+  return complete(await client.paginate<RawStatusRow>(path, listParams(STATUS_FIELDS, options), options), path).map(toStatusRow);
 }
 
 export async function listAdSets(client: MetaGraphClient, actId: string, options: ListOptions = {}): Promise<AdSet[]> {
-  const page = await client.paginate<RawStatusRow>(
-    `${adAccountPath(actId)}/adsets`,
-    listParams(`${STATUS_FIELDS},campaign_id`, options),
-    options,
-  );
-  return page.data.map((raw) => ({ ...toStatusRow(raw), campaignId: optionalString(raw.campaign_id) }));
+  const path = `${adAccountPath(actId)}/adsets`;
+  const rows = complete(await client.paginate<RawStatusRow>(path, listParams(`${STATUS_FIELDS},campaign_id`, options), options), path);
+  return rows.map((raw) => ({ ...toStatusRow(raw), campaignId: optionalString(raw.campaign_id) }));
 }
 
 export async function listAds(client: MetaGraphClient, actId: string, options: ListOptions = {}): Promise<Ad[]> {
-  const page = await client.paginate<RawStatusRow>(
-    `${adAccountPath(actId)}/ads`,
-    listParams(`${STATUS_FIELDS},adset_id,campaign_id,creative{id}`, options),
-    options,
+  const path = `${adAccountPath(actId)}/ads`;
+  const rows = complete(
+    await client.paginate<RawStatusRow>(path, listParams(`${STATUS_FIELDS},adset_id,campaign_id,creative{id}`, options), options),
+    path,
   );
-  return page.data.map((raw) => ({
+  return rows.map((raw) => ({
     ...toStatusRow(raw),
     adsetId: optionalString(raw.adset_id),
     campaignId: optionalString(raw.campaign_id),
@@ -205,8 +213,9 @@ export async function getInsights(
     throw new InvalidParamError("timeRange since/until must be YYYY-MM-DD");
   }
   if (options.fields.length === 0) throw new InvalidParamError("getInsights needs at least one field");
+  const path = `${node}/insights`;
   const page = await client.paginate<InsightsRow>(
-    `${node}/insights`,
+    path,
     {
       level: options.level,
       fields: options.fields.join(","),
@@ -218,7 +227,7 @@ export async function getInsights(
     },
     { maxPages: options.maxPages },
   );
-  return page.data;
+  return complete(page, path);
 }
 
 function requireHttpsUrl(value: string, field: string): string {
@@ -313,11 +322,12 @@ export async function uploadImageBytes(
 }
 
 export async function getVideoThumbnails(client: MetaGraphClient, videoId: string): Promise<VideoThumbnail[]> {
+  const path = `${requireId(videoId, "videoId")}/thumbnails`;
   const page = await client.paginate<{ id?: unknown; uri?: unknown; is_preferred?: unknown; width?: unknown; height?: unknown }>(
-    `${requireId(videoId, "videoId")}/thumbnails`,
+    path,
     { fields: "id,uri,is_preferred,width,height" },
   );
-  return page.data.map((raw) => ({
+  return complete(page, path).map((raw) => ({
     id: requireString(raw.id, "id"),
     uri: requireString(raw.uri, "uri"),
     isPreferred: raw.is_preferred === true,

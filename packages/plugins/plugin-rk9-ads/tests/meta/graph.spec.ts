@@ -76,6 +76,13 @@ describe("Graph URL and request shape", () => {
     }
   });
 
+  it("refuses parameter names that are not plain identifiers", () => {
+    for (const key of ["method ", " method", "a.b", "fields[]", ""]) {
+      expect(() => encodeParams({ [key]: "x" }), JSON.stringify(key)).toThrow(InvalidParamError);
+    }
+    expect(encodeParams({ time_range: { since: "a" }, fields: "id" }).toString()).toBe("time_range=%7B%22since%22%3A%22a%22%7D&fields=id");
+  });
+
   it("cannot smuggle a write through a GET in read-only mode", async () => {
     const graph = new FakeGraph(fixture("account"));
     const { client } = makeClient(graph, { mode: "readOnly" });
@@ -202,6 +209,25 @@ describe("paging", () => {
     expect(graph.calls[1]!.url).not.toContain(encodeURIComponent(SENTINEL_TOKEN));
   });
 
+  it("makes list and insights methods throw instead of returning a truncated result", async () => {
+    const graph = new FakeGraph(fixture("ads-page-1"), {
+      ...fixture("insights-yesterday"),
+      body: { data: [{ spend: "1.00" }], paging: { next: `${GRAPH_PREFIX}act_1336862981968191/insights?after=c` } },
+    });
+    const { client } = makeClient(graph);
+    await expect(listAds(client, ACT, { maxPages: 1 })).rejects.toThrow(/raise maxPages/);
+    await expect(
+      getInsights(client, ACT, { level: "ad", datePreset: "this_month", fields: ["spend"], maxPages: 1 }),
+    ).rejects.toThrow(/raise maxPages/);
+  });
+
+  it("treats a NaN or infinite page cap as the default", async () => {
+    const graph = new FakeGraph(fixture("ads-page-1"), fixture("ads-page-2"));
+    const { client } = makeClient(graph);
+    const page = await client.paginate("act_1336862981968191/ads", {}, { maxPages: Number.NaN });
+    expect(page).toMatchObject({ pages: 2, truncated: false });
+  });
+
   it("stops at the page cap and says so", async () => {
     const graph = new FakeGraph(fixture("ads-page-1"));
     const { client } = makeClient(graph);
@@ -228,12 +254,13 @@ describe("paging", () => {
       withNext(`${base}/ads?after=c&BATCH=x`),
       withNext(`${GRAPH_PREFIX}act_999/ads?after=c`),
       withNext(`${GRAPH_PREFIX}me/adaccounts?after=c`),
+      withNext(`${base}/ads?after=c&method%20=post`),
     );
     const { client } = makeClient(graph);
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 5; i += 1) {
       await expect(listAds(client, ACT)).rejects.toThrow(/refused/);
     }
-    expect(graph.calls).toHaveLength(4);
+    expect(graph.calls).toHaveLength(5);
     expect(graph.calls.every((call) => call.url.includes("act_1336862981968191/ads?"))).toBe(true);
   });
 
@@ -411,6 +438,19 @@ describe("rate limits", () => {
     expect(many.calls).toHaveLength(5);
   });
 
+  it("reserves the slowest fetch so far for the next attempt", async () => {
+    let now = 0;
+    const graph = new FakeGraph(fixture("error-613"), fixture("account"));
+    const slowFetch = async (url: string, init?: RequestInit) => {
+      now += 12_000;
+      return graph.fetch(url, init);
+    };
+    // 12 s fetch + 1 s backoff + 12 s reserved > 20 s budget: no retry.
+    const { client } = makeClient(graph, { http: { fetch: slowFetch }, now: () => now, sleep: async (ms) => void (now += ms) });
+    await expect(getAccountSummary(client, ACT)).rejects.toThrow(RateLimitError);
+    expect(graph.calls).toHaveLength(1);
+  });
+
   it("counts time spent in fetches against the wait budget", async () => {
     let now = 0;
     const graph = new FakeGraph(fixture("error-613"), fixture("account"));
@@ -484,6 +524,45 @@ describe("read-only and dry-run modes", () => {
     expect(pausedOnlyWrites({ companyId: COMPANY, mode: "live", method: "POST", path: "1", fields: { name: "x" } })).toEqual({
       allow: true,
     });
+  });
+
+  it.each([
+    ["a leading slash on a create without status", "/act_1336862981968191/ads", { name: "a", adset_id: "1" }],
+    ["an upper-case account prefix", "ACT_1336862981968191/campaigns", { name: "c", status: "PAUSED" }],
+    ["activation through copies", "120247250925830775/copies", { status_option: "ACTIVE" }],
+    ["an async batch", "act_1336862981968191/async_batch_requests", { adbatch: [{ relative_url: "1", body: "status=ACTIVE" }] }],
+    ["a budget change", "120247250925850775", { daily_budget: "100000000" }],
+    ["a padded ACTIVE", "120247250925850775", { status: " ACTIVE" }],
+    ["a padded PAUSED create", "act_1336862981968191/ads", { name: "a", status: " PAUSED" }],
+    ["an unknown edge", "act_1336862981968191/customaudiences", { name: "x" }],
+  ] as const)("the default hook refuses %s", async (_label, path, fields) => {
+    const graph = new FakeGraph(fixture("ad"));
+    const { client } = makeClient(graph);
+    await expect(client.post(path, fields as Record<string, unknown>)).rejects.toThrow(WriteRefusedError);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("the default hook allows media, PAUSED creates, pause, rename and a bare delete", () => {
+    const plan = (method: "POST" | "DELETE", path: string, fields: Record<string, unknown>) =>
+      pausedOnlyWrites({ companyId: COMPANY, mode: "live", method, path, fields });
+    expect(plan("POST", "act_1/adimages", { bytes: "AAAA" })).toEqual({ allow: true });
+    expect(plan("POST", "act_1/advideos", { file_url: "https://x" })).toEqual({ allow: true });
+    expect(plan("POST", "act_1/adcreatives", { name: "c" })).toEqual({ allow: true });
+    expect(plan("POST", "act_1/adsets", { name: "s", status: "PAUSED", daily_budget: "322" })).toEqual({ allow: true });
+    expect(plan("POST", "123", { status: "PAUSED" })).toEqual({ allow: true });
+    expect(plan("POST", "123", { name: "renamed" })).toEqual({ allow: true });
+    expect(plan("DELETE", "123", {})).toEqual({ allow: true });
+    expect(plan("DELETE", "123", { status: "ACTIVE" }).allow).toBe(false);
+    expect(plan("POST", "123", {}).allow).toBe(false);
+  });
+
+  it("gives the guard the normalised path that is actually sent", async () => {
+    const plans: WritePlan[] = [];
+    const graph = new FakeGraph(fixture("ad"));
+    const { client } = makeClient(graph, { guardedWrite: (plan) => (plans.push(plan), { allow: true }) });
+    await client.post("//act_1336862981968191/ads", { name: "a", status: "PAUSED" });
+    expect(plans[0]!.path).toBe("act_1336862981968191/ads");
+    expect(graph.calls[0]!.url).toBe(`${GRAPH_PREFIX}act_1336862981968191/ads`);
   });
 
   it("passes every write through the guardedWrite hook, which can refuse it", async () => {

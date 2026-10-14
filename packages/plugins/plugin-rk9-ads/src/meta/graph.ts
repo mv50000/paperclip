@@ -82,24 +82,46 @@ export type GuardDecision = { allow: true } | { allow: false; reason: string };
  */
 export type GuardedWriteHook = (plan: WritePlan) => GuardDecision | Promise<GuardDecision>;
 
-/** Edges whose POST creates an object that can spend money. */
+/** Media and creative uploads: they cannot spend money on their own. */
+const MEDIA_EDGE_RE = /^act_\d+\/(adimages|advideos|adcreatives)$/;
+/** Creates of objects that can spend money. */
 const SPENDING_CREATE_EDGE_RE = /^act_\d+\/(campaigns|adsets|ads)$/;
+const NODE_RE = /^\d+$/;
 
 /**
- * The default hook fails closed on spend: it refuses a write that sets any
- * status field to ACTIVE, and a create on the campaigns, adsets or ads edge
- * that is not explicitly PAUSED. Activation happens only through the gate's
- * own hook (G1). Every other write is allowed.
+ * The default hook is an allowlist that fails closed on spend (G1). It allows:
+ * - POST to an ad account's adimages, advideos or adcreatives edge;
+ * - POST to its campaigns, adsets or ads edge only with `status: "PAUSED"`;
+ * - POST to an object id that only renames it or sets `status: "PAUSED"`;
+ * - DELETE of an object id.
+ * Everything else is refused, for example activation, a budget change, the
+ * copies or async batch edges. The gate (A9) and the spend guard (RK9-511)
+ * pass their own hooks for the writes they own. `plan.path` is the normalised
+ * path that is actually sent.
  */
-export const pausedOnlyWrites: GuardedWriteHook = (plan) => {
-  const statusFields = ["status", "configured_status"] as const;
-  if (statusFields.some((key) => String(plan.fields[key] ?? "").toUpperCase() === "ACTIVE")) {
-    return { allow: false, reason: "activation needs the gate's write hook" };
+export const pausedOnlyWrites = (plan: WritePlan): GuardDecision => {
+  const keys = Object.keys(plan.fields).filter((key) => plan.fields[key] !== undefined && plan.fields[key] !== null);
+  if (plan.method === "DELETE") {
+    return NODE_RE.test(plan.path) && keys.length === 0
+      ? { allow: true }
+      : { allow: false, reason: "the default write hook deletes only a bare object id" };
   }
-  if (plan.method === "POST" && SPENDING_CREATE_EDGE_RE.test(plan.path) && plan.fields.status !== "PAUSED") {
-    return { allow: false, reason: "a campaign, ad set or ad must be created PAUSED" };
+  if (MEDIA_EDGE_RE.test(plan.path)) return { allow: true };
+  if (SPENDING_CREATE_EDGE_RE.test(plan.path)) {
+    return plan.fields.status === "PAUSED"
+      ? { allow: true }
+      : { allow: false, reason: "a campaign, ad set or ad must be created with status PAUSED" };
   }
-  return { allow: true };
+  if (NODE_RE.test(plan.path)) {
+    const pauseOrRename =
+      keys.length > 0 &&
+      keys.every((key) => key === "name" || key === "status") &&
+      (plan.fields.status === undefined || plan.fields.status === "PAUSED");
+    return pauseOrRename
+      ? { allow: true }
+      : { allow: false, reason: "the default write hook only pauses or renames an object; activation and budget changes need their own hook" };
+  }
+  return { allow: false, reason: "this edge is not on the default write allowlist" };
 };
 
 export interface GraphDriftEvent {
@@ -186,13 +208,18 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  * only place that knows the host and the version.
  */
 export function graphUrl(path: string, params: GraphParams = {}): URL {
+  const url = new URL(`${GRAPH_BASE_URL}/${normaliseGraphPath(path)}`);
+  url.search = encodeParams(params).toString();
+  return url;
+}
+
+/** The path as it is sent: leading slashes dropped, every segment validated. */
+export function normaliseGraphPath(path: string): string {
   const segments = path.replace(/^\/+/, "").split("/");
   if (segments.length === 0 || segments.some((segment) => !PATH_SEGMENT_RE.test(segment))) {
     throw new InvalidParamError(`Invalid Graph path "${redactText(path)}"`);
   }
-  const url = new URL(`${GRAPH_BASE_URL}/${segments.join("/")}`);
-  url.search = encodeParams(params).toString();
-  return url;
+  return segments.join("/");
 }
 
 /**
@@ -201,15 +228,22 @@ export function graphUrl(path: string, params: GraphParams = {}): URL {
  * read-only mode and the write guard.
  */
 const FORBIDDEN_PARAM_RE = /^(access_token|appsecret_proof|method|_method|batch)$/i;
+/** Graph parameter names are plain identifiers; anything else could be rewritten by a lenient parser. */
+const PARAM_NAME_RE = /^[A-Za-z0-9_]+$/;
+
+function checkParamName(key: string): string | null {
+  if (!PARAM_NAME_RE.test(key)) return `Parameter name "${redactText(key)}" is not a plain identifier`;
+  if (FORBIDDEN_PARAM_RE.test(key)) return `Parameter ${key} is not allowed: the client sends the token as a header and writes only through post/delete`;
+  return null;
+}
 
 /** Form-encodes Graph params: objects and arrays as JSON, undefined and null skipped. */
 export function encodeParams(params: GraphParams): URLSearchParams {
   const out = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null) continue;
-    if (FORBIDDEN_PARAM_RE.test(key)) {
-      throw new InvalidParamError(`Parameter ${key} is not allowed: the client sends the token as a header and writes only through post/delete`);
-    }
+    const problem = checkParamName(key);
+    if (problem) throw new InvalidParamError(problem);
     out.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
   }
   return out;
@@ -340,9 +374,14 @@ export class MetaGraphClient {
     return this.send<T>("GET", graphUrl(path, params), undefined, path);
   }
 
-  /** Follows `paging.next` up to `maxPages` pages. */
+  /**
+   * Follows `paging.next` up to `maxPages` pages (default 10, at most 1000).
+   * `truncated` says whether the cap cut the walk short.
+   */
   async paginate<T>(path: string, params: GraphParams = {}, options: { maxPages?: number } = {}): Promise<PageResult<T>> {
-    const maxPages = Math.max(1, Math.floor(options.maxPages ?? 10));
+    const requested = options.maxPages;
+    const maxPages =
+      typeof requested === "number" && Number.isFinite(requested) ? Math.min(Math.max(1, Math.floor(requested)), 1_000) : 10;
     const data: T[] = [];
     let pages = 0;
     let url: URL | null = graphUrl(path, params);
@@ -368,12 +407,13 @@ export class MetaGraphClient {
   }
 
   private async write<T>(method: "POST" | "DELETE", path: string, fields: Record<string, unknown>): Promise<WriteResult<T>> {
-    // Validates the path and refuses an access_token field before anything else.
-    const url = graphUrl(path);
+    // Validates the path and the field names before anything else.
+    const normalised = normaliseGraphPath(path);
+    const url = graphUrl(normalised);
     const body = encodeParams(fields as GraphParams).toString();
-    if (this.mode === "readOnly") throw new ReadOnlyViolationError(method, path);
+    if (this.mode === "readOnly") throw new ReadOnlyViolationError(method, normalised);
 
-    const plan: WritePlan = { companyId: this.companyId, mode: this.mode, method, path, fields };
+    const plan: WritePlan = { companyId: this.companyId, mode: this.mode, method, path: normalised, fields };
     const decision = await this.guard(plan);
     if (!decision.allow) {
       this.options.logger?.warn("rk9-ads meta write refused", redactValue({ companyId: this.companyId, method, path, reason: decision.reason }));
@@ -416,14 +456,18 @@ export class MetaGraphClient {
     const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
 
-    // Wall-clock time, fetches included, counts against the wait budget.
+    // Wall-clock time, fetches included, counts against the wait budget, and
+    // the slowest fetch so far is reserved for the next attempt.
     const started = this.now();
+    let slowestFetchMs = 0;
     for (let attempt = 1; ; attempt += 1) {
       let response: Response;
       let text: string;
       try {
+        const fetchStarted = this.now();
         response = await this.options.http.fetch(url.toString(), { method, headers, ...(body !== undefined ? { body } : {}) });
         text = await response.text();
+        slowestFetchMs = Math.max(slowestFetchMs, this.now() - fetchStarted);
       } catch (error) {
         // No cause: a fetch error can carry the request, headers included.
         const reason = error instanceof Error ? `${error.name}: ${error.message}` : "unknown error";
@@ -454,7 +498,7 @@ export class MetaGraphClient {
       const regainMs = regainAccessMs(response.headers);
       const backoffMs = this.retry.baseDelayMs * 2 ** (attempt - 1);
       const delayMs = Math.max(backoffMs, regainMs ?? 0);
-      if (attempt >= this.retry.maxAttempts || this.now() - started + delayMs > this.retry.maxTotalWaitMs) {
+      if (attempt >= this.retry.maxAttempts || this.now() - started + delayMs + slowestFetchMs > this.retry.maxTotalWaitMs) {
         throw new RateLimitError(error.message, {
           httpStatus: error.httpStatus,
           code: error.code,
@@ -498,14 +542,13 @@ export class MetaGraphClient {
       const observed = segments.shift()!;
       if (observed !== GRAPH_VERSION) await this.noteDrift(observed, "paging", path);
     }
-    const walked = path.replace(/^\/+/, "");
+    const walked = normaliseGraphPath(path);
     if (segments.join("/") !== walked) {
       throw new MetaResponseError(`Meta GET ${path}: paging.next leaves the edge being walked; refused`);
     }
     for (const key of parsed.searchParams.keys()) {
-      if (FORBIDDEN_PARAM_RE.test(key)) {
-        throw new MetaResponseError(`Meta GET ${path}: paging.next carries parameter ${key}; refused`);
-      }
+      const problem = checkParamName(key);
+      if (problem) throw new MetaResponseError(`Meta GET ${path}: paging.next refused (${problem})`);
     }
     const url = graphUrl(walked);
     url.search = parsed.search;

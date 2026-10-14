@@ -131,19 +131,27 @@ build no Graph helpers of their own (G12).
 - Modes: `live`; `readOnly`, where a write throws `ReadOnlyViolationError`
   before any fetch; and `dryRun`, where a write is logged (redacted) and returns
   `{ dryRun: true, planned }`.
-- Every write passes the `guardedWrite` hook first. The spend guard, the kill
-  switch (RK9-511) and the activation gate plug in there. The default hook,
-  `pausedOnlyWrites`, fails closed on spend: it refuses any write that sets a
-  status to ACTIVE, and a campaign, ad set or ad create that is not PAUSED.
-  `createAd` always sends PAUSED.
+- Every write passes the `guardedWrite` hook first, with the normalised path
+  that is actually sent. The spend guard, the kill switch (RK9-511) and the
+  activation gate plug in there. The default hook, `pausedOnlyWrites`, is an
+  allowlist that fails closed on spend. It allows media and creative uploads,
+  campaign, ad set and ad creates with `status: "PAUSED"`, a pause or rename of
+  an object and a bare delete. It refuses everything else, for example
+  activation, budget changes and the copies or async batch edges. `createAd`
+  always sends PAUSED.
+- List and insights methods throw when the page cap cuts the result short, so
+  a spend sum is never built on partial data.
 - A GET cannot carry a write: the client refuses the `method`, `batch` and
-  `access_token` parameters, also in a paging `next` URL.
+  `access_token` parameters and any parameter name that is not a plain
+  identifier, also in a paging `next` URL.
 - Errors are typed: `TokenInvalidError` (190), `RateLimitError` (4, 17, 613,
   80004), `InvalidParamError` (100), `PolicyAcceptanceRequiredError` (subcode
   2859024, with the fix in the message) and `MetaGraphError` for the rest.
   Rate limits are retried with exponential backoff, at most 5 attempts. The
-  wall-clock time per call, fetches included, stays under 25 s, because the
-  host aborts a plugin fetch after 30 s. When
+  wall-clock time per request, fetches included and the slowest fetch so far
+  reserved for the next attempt, stays under 25 s, because the host aborts a
+  plugin fetch after 30 s. The budget is per request: a long paging walk
+  belongs in a job, not in an action or API route. When
   Meta's own `estimated_time_to_regain_access` is longer than that, the client
   throws at once and sets `retryAfterMs`.
 - `redact.ts` removes the token from error messages, logs, activity metadata and
