@@ -104,6 +104,12 @@ describe("parseBrandConfig", () => {
     })).join("\n");
     expect(errors).toMatch(/telegram\.allowedUserIds: must list at least one approver/);
     expect(errors).toMatch(/telegram\.webhookSecretRef: is required/);
+    expect(errors).toMatch(/telegram\.webhookUrl: is required/);
+    expect(
+      errorsOf(brandConfig({
+        telegram: { botTokenRef: secretRef(SECRET_A_BOT), chatId: "-1", allowedUserIds: ["1"], webhookUrl: "http://insecure.example/hook" },
+      })).join("\n"),
+    ).toMatch(/telegram\.webhookUrl: must be an https URL/);
   });
 
   it("treats an untouched telegram block from the settings form as no telegram", () => {

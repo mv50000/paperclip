@@ -79,11 +79,11 @@ describe("worker", () => {
       });
       expect(response.status).toBe(501);
     }
-    // A placeholder webhook fails the delivery instead of looking accepted.
+    // A webhook without verification fails the delivery instead of looking accepted.
     for (const webhook of manifest.webhooks ?? []) {
       await expect(
         plugin.definition.onWebhook!({ endpointKey: webhook.endpointKey, headers: {}, rawBody: "{}", requestId: "r1" }),
-      ).rejects.toThrow(/not implemented yet/);
+      ).rejects.toThrow(/not implemented yet|Telegram webhook rejected/);
     }
   });
 

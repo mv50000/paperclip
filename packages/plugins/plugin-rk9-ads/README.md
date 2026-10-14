@@ -21,7 +21,7 @@ the features.
 | `src/company-configs.ts` | Lists companies and their parsed config for jobs (jobs carry no company) |
 | `src/features/<name>/declarations.ts` | Manifest entries of a feature (pure data) |
 | `src/features/<name>/register.ts` | Worker handlers of a feature |
-| `src/kit/` | Ads-agnostic code: local time, SDK harness helpers, later Telegram and the gate state machine |
+| `src/kit/` | Ads-agnostic code: local time, Telegram transport, the gate state machine, SDK harness helpers |
 | `src/meta/` | The one Meta Graph client (G12): `graph.ts`, `methods.ts`, `errors.ts`, `redact.ts`, `types.ts` |
 | `scripts/live-smoke-sunspot.ts` | Read-only live smoke against Sunspot's ad account; never run by tests or CI |
 | `tests/helpers/embedded-pg.ts` | Real Postgres with the host migration and runtime SQL validators |
@@ -89,6 +89,18 @@ new table uses its reserved number: A7 = 002, A10 = 003, A11 = 004, A9 = 005.
 
 `publications.idempotency_key` is unique across the whole table, so the code
 that builds the key (A8) must hash `company_id` into it.
+
+## Telegram transport and gate
+
+`src/features/telegram/` runs one Telegram consumer per distinct bot token
+(long-poll by default, webhook optional) and routes taps to the gate state
+machine in `src/kit/gate/`. A later feature adds its gate handler with
+`registerGateHandler(kind, fn)` from `src/features/telegram/gates.ts`. It posts
+a card with `getTelegramController().sendGateCard(...)`. The digest reuses
+`botFor(companyId)` and the helpers in `src/kit/telegram/bot-api.ts`. The bot
+token must belong to this plugin alone: dev and prod use different bots, and
+the core chat-channels bot is never shared. See
+`doc/plans/2026-10-14-rk9-ads-telegram-transport-adr.md`.
 
 ## Architecture decisions
 
