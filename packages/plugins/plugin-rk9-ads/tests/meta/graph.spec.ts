@@ -659,6 +659,15 @@ describe("read-only and dry-run modes", () => {
     expect(frozen).toBe(true);
   });
 
+  it("refuses an unknown mode instead of running live", () => {
+    expect(() => makeClient(new FakeGraph(), { mode: "readonly" as never })).toThrow(InvalidParamError);
+  });
+
+  it("treats a 200 answer with error: null as data", async () => {
+    const { client } = makeClient(new FakeGraph({ status: 200, body: { success: true, error: null } }));
+    await expect(setObjectStatus(client, "1", "PAUSED")).resolves.toEqual({ success: true });
+  });
+
   it("keeps mode and the sender out of reach of a cast", async () => {
     const graph = new FakeGraph(fixture("ad"));
     const { client } = makeClient(graph, { mode: "readOnly" });

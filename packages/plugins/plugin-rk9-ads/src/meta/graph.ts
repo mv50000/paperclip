@@ -65,6 +65,11 @@ export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 export type MetaClientMode = "live" | "readOnly" | "dryRun";
 export type GraphParams = Record<string, string | number | boolean | object | null | undefined>;
 
+/**
+ * What the write guard sees. `fields` is a frozen copy with no prototype, the
+ * same data the body is encoded from: read it with `Object.hasOwn` or plain
+ * property access, not `fields.hasOwnProperty(...)`.
+ */
 export interface WritePlan {
   companyId: string;
   mode: MetaClientMode;
@@ -400,7 +405,12 @@ export class MetaGraphClient {
   constructor(options: MetaClientOptions) {
     this.#options = options;
     this.companyId = options.companyId;
-    this.#mode = options.mode ?? "live";
+    const mode = options.mode ?? "live";
+    // An unknown mode (a typo, untyped config) must not fall through to live.
+    if (mode !== "live" && mode !== "readOnly" && mode !== "dryRun") {
+      throw new InvalidParamError(`Unknown Meta client mode "${String(mode)}"`);
+    }
+    this.#mode = mode;
     const retry = options.retry ?? {};
     // A missing, NaN or infinite value falls back to the default; every value has a hard ceiling.
     this.retry = {
@@ -549,8 +559,8 @@ export class MetaGraphClient {
       } catch {
         parsed = undefined;
       }
-      const errorBody =
-        parsed && typeof parsed === "object" && "error" in parsed ? ((parsed as { error: GraphErrorBody }).error ?? {}) : null;
+      const rawError = parsed && typeof parsed === "object" ? (parsed as { error?: unknown }).error : undefined;
+      const errorBody = rawError && typeof rawError === "object" ? (rawError as GraphErrorBody) : null;
 
       if (response.ok && !errorBody) {
         if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
