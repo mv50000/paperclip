@@ -106,6 +106,12 @@ describe("parseBrandConfig", () => {
     expect(errors).toMatch(/telegram\.webhookSecretRef: is required/);
   });
 
+  it("treats an untouched telegram block from the settings form as no telegram", () => {
+    const config = enabled(brandConfig({ telegram: { allowedUserIds: [], mode: "poll" } }));
+    expect(config.telegram).toBeUndefined();
+    expect(errorsOf(brandConfig({ telegram: { chatId: "-1" } })).join("\n")).toMatch(/telegram\.botTokenRef: is required/);
+  });
+
   it("keeps propose_scale disabled (G9) and validates rules", () => {
     const errors = errorsOf(brandConfig({
       rules: {

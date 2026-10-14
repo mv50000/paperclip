@@ -243,7 +243,7 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
         botTokenRef: secretRefField("Telegram bot token (company secret). Dev and prod use different bots."),
         chatId: { type: "string", title: "Chat id" },
         allowedUserIds: { type: "array", title: "Allowed approver user ids", items: { type: "string" } },
-        mode: { type: "string", title: "Update mode", enum: [...TELEGRAM_MODES], default: "poll" },
+        mode: { type: "string", title: "Update mode (default poll)", enum: [...TELEGRAM_MODES] },
         webhookSecretRef: secretRefField("Webhook secret token (only in webhook mode)"),
       },
     },
@@ -644,7 +644,17 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
   // telegram (optional block; when present it must be complete)
   let telegram: BrandConfig["telegram"];
   const telegramRaw = c.record(raw, "telegram", root, false);
-  if (telegramRaw && Object.keys(telegramRaw).length > 0) {
+  // The host settings form fills schema defaults into an untouched block, so a
+  // block without a bot token and a chat id counts as "no Telegram".
+  const telegramTouched =
+    telegramRaw !== undefined &&
+    Object.entries(telegramRaw).some(([key, value]) => {
+      if (value === undefined || value === null || value === "") return false;
+      if (key === "mode") return false;
+      if (key === "allowedUserIds") return Array.isArray(value) && value.length > 0;
+      return true;
+    });
+  if (telegramRaw && telegramTouched) {
     c.known(telegramRaw, ["botTokenRef", "chatId", "allowedUserIds", "mode", "webhookSecretRef"], "telegram");
     const botTokenRef = c.secretRef(telegramRaw, "botTokenRef", "telegram", true);
     const chatId = c.string(telegramRaw, "chatId", "telegram", { required: true, pattern: /^-?\d+$/ });

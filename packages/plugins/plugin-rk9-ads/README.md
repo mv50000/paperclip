@@ -68,6 +68,11 @@ from caller strings. A link between ledger rows (for example
 `publications.creative_id`) is a composite `(company_id, id)` foreign key, so a
 row can never point at a row of another company.
 
+The generic host settings form cannot edit the `landing.urls` map. Until the
+settings page of RK9-518 ships, save a brand config with
+`POST /api/plugins/:pluginId/config` (`{ companyId, configJson }`, instance
+admin).
+
 Secret fields in the config accept only `{ type: "secret_ref", secretId }`. The
 host refuses a raw token on save, so a token is never stored as plain config.
 

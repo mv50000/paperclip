@@ -17,13 +17,15 @@ export interface SecretResolutionRecord {
 }
 
 /**
- * Serves `configs[companyId]`. Like the host, a company without a config row
- * gets `{}`, and a call without a company throws.
+ * Serves `configs[companyId]`. Like the host in a job or webhook (no
+ * invocation company), a company without a config row is refused with
+ * "company context is required", and so is a call without a company.
  */
 export function useCompanyConfigs(harness: TestHarness, configs: Record<string, Record<string, unknown>>): void {
   harness.ctx.config.get = async (companyId?: string) => {
-    if (!companyId) throw new Error("company context is required");
-    return configs[companyId] ?? {};
+    const config = companyId ? configs[companyId] : undefined;
+    if (!config) throw new Error("company context is required");
+    return config;
   };
 }
 

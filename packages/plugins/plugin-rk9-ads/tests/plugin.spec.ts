@@ -150,6 +150,9 @@ describe("smoke job", () => {
     expect(harness.dbQueries.map((query) => query.params?.[0])).toEqual([COMPANY_A, COMPANY_B]);
     for (const query of harness.dbQueries) expect(query.sql).toMatch(/WHERE company_id = \$1\b/);
 
+    // The unconfigured company is "off", not a warning.
+    expect(harness.logs.filter((log) => /unavailable/.test(log.message))).toEqual([]);
+
     // No secret value reaches logs, activity, metrics, telemetry or SQL.
     const output = recordedOutput(harness);
     for (const value of [META_TOKEN_A, BOT_TOKEN_A, META_TOKEN_B]) {
@@ -169,6 +172,16 @@ describe("smoke job", () => {
       refChecks: [{ path: "meta.accessTokenRef", resolved: false }],
     });
     expect(harness.logs.some((log) => log.level === "warn" && /did not resolve/.test(log.message))).toBe(true);
+  });
+
+  it("warns when a config read fails for another reason than a missing row", async () => {
+    const harness = await setupHarness();
+    harness.ctx.config.get = async () => {
+      throw new Error("worker RPC timeout");
+    };
+    await harness.runJob("smoke", { trigger: "manual" });
+    expect(harness.activity).toEqual([]);
+    expect(harness.logs.filter((log) => log.level === "warn" && /config unavailable/.test(log.message))).toHaveLength(3);
   });
 
   it("logs an invalid config without resolving its secrets", async () => {

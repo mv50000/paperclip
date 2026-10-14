@@ -2,10 +2,11 @@
  * Enumerates companies and their parsed brand config.
  *
  * Scheduled jobs and webhooks run without a company context, so a job lists
- * companies and reads each config explicitly. A company without a config row
- * gets `{}` (plugin off). When `config.get` throws, the result is
- * "unavailable", not "absent": a job that must act for safety (a pause) can
- * then warn instead of silently skipping the company.
+ * companies and reads each config explicitly. Without an invocation company,
+ * the host serves config only for companies that have a config row and refuses
+ * the others with "company context is required": that refusal means the
+ * plugin is off there ("absent"). Any other failure is "unavailable", so a job
+ * that must act for safety (a pause) can warn instead of silently skipping.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -13,6 +14,8 @@ import { parseBrandConfig, type BrandConfigParseResult } from "./config.js";
 
 const PAGE_SIZE = 100;
 const MAX_COMPANIES = 5000;
+/** Host refusal for a company without a config row (sdk host-client-factory). */
+const NO_CONFIG_ROW_RE = /company context is required/i;
 
 export type CompanyConfigResult = BrandConfigParseResult | { state: "unavailable"; error: string };
 
@@ -27,7 +30,9 @@ export async function loadCompanyConfig(ctx: PluginContext, companyId: string): 
   try {
     raw = await ctx.config.get(companyId);
   } catch (error) {
-    return { state: "unavailable", error: error instanceof Error ? error.message.slice(0, 200) : "unknown error" };
+    const message = error instanceof Error ? error.message : String(error);
+    if (NO_CONFIG_ROW_RE.test(message)) return { state: "absent" };
+    return { state: "unavailable", error: message.slice(0, 200) };
   }
   return parseBrandConfig(raw);
 }
