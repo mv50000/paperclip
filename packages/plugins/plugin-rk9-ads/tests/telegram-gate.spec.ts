@@ -550,6 +550,76 @@ describe("gate transitions", () => {
     expect(r.handlerCalls).toHaveLength(0);
   });
 
+  it("checks a spend approval against the saved config: a revocation counts even when no plan has read it", async () => {
+    const configs: Record<string, Record<string, unknown>> = { [COMPANY_A]: brandConfig({ telegram: telegramBlock() }) };
+    const harness = harnessWith(configs, { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A } });
+    const r = await rig({ harness });
+    const card = await photoCard(r);
+    // The operator revokes the approver. The configChanged call is lost: no hold, no plan.
+    configs[COMPANY_A] = brandConfig({ telegram: telegramBlock({ allowedUserIds: ["99"] }) });
+    expect(r.controller.botFor(COMPANY_A)).not.toBeNull();
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 1);
+    expect(r.fake.callsOf("answerCallbackQuery")[0]!.params.text).toBe(GATE_TEXT.unauthorized);
+    expect(r.store.rows.get(card.id)?.status).toBe("pending");
+    expect(r.store.processed.size).toBe(0);
+    expect(r.handlerCalls).toHaveLength(0);
+    // Both lists must allow a spend approval: the new approver can approve once a plan has read the config.
+    await r.controller.replan("config");
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: 99 });
+    await waitFor(() => r.handlerCalls.length === 1);
+    await r.controller.idle();
+    expect(r.store.rows.get(card.id)?.status).toBe("approved");
+  });
+
+  it("refuses a spend approval when a plan that read the old config finishes after the hold", async () => {
+    const configs: Record<string, Record<string, unknown>> = { [COMPANY_A]: brandConfig({ telegram: telegramBlock() }) };
+    const harness = harnessWith(configs, { [COMPANY_A]: { [SECRET_A_BOT]: TOKEN_A } });
+    const r = await rig({ harness });
+    const card = await photoCard(r);
+    // A retry plan reads the old config, then waits on secrets.resolve.
+    const resolve = harness.ctx.secrets.resolve;
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    let entered = false;
+    harness.ctx.secrets.resolve = async (...args: Parameters<typeof resolve>) => {
+      entered = true;
+      await gate;
+      return resolve(...args);
+    };
+    const plan = r.controller.replan("retry");
+    await waitFor(() => entered);
+    configs[COMPANY_A] = brandConfig({ telegram: telegramBlock({ allowedUserIds: ["99"] }) });
+    r.controller.holdAll("config_changed");
+    harness.ctx.secrets.resolve = resolve;
+    release();
+    await plan;
+    // The old plan put the old allowlist back in memory; the tap is still checked against the saved config.
+    expect(r.controller.botFor(COMPANY_A)).not.toBeNull();
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 1);
+    expect(r.fake.callsOf("answerCallbackQuery")[0]!.params.text).toBe(GATE_TEXT.unauthorized);
+    expect(r.handlerCalls).toHaveLength(0);
+    expect(r.store.rows.get(card.id)?.status).toBe("pending");
+  });
+
+  it("refuses a spend approval when the saved config cannot be read, and allows a denial", async () => {
+    const r = await rig();
+    const card = await photoCard(r);
+    r.harness.ctx.config.get = async () => {
+      throw new Error("worker RPC timed out");
+    };
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: approveData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 1);
+    expect(r.fake.callsOf("answerCallbackQuery")[0]!.params.text).toBe(GATE_TEXT.unauthorized);
+    const refusal = r.harness.activity.find((entry) => entry.message === "rk9-ads gate: unauthorized");
+    expect(refusal?.metadata?.reason).toBe("stale");
+    expect(r.store.rows.get(card.id)?.status).toBe("pending");
+    r.fake.tap(BOT_A, { messageId: card.messageId, data: denyData(r, card.messageId), fromId: APPROVER });
+    await waitFor(() => r.store.rows.get(card.id)?.status === "denied");
+    expect(r.handlerCalls).toHaveLength(0);
+  });
+
   it("expires a card past valid_until on tap: 'vanhentunut', buttons removed, handler not run", async () => {
     const r = await rig();
     const card = await photoCard(r, 30);

@@ -151,9 +151,16 @@ card's company.
   `pause_all` cards only. Its allowlist may be stale, so it cannot approve
   spend.
 - The same hold applies to every brand when a config change arrives and
-  when a plan fails. A saved config may revoke an approver, so the old
-  allowlist cannot approve spend until a plan has read the new config. A
-  successful plan lifts the hold.
+  when a plan fails. A successful plan lifts the hold.
+- The list in memory is not enough for spend. A plan may still run on an
+  older read, and the host does not retry a `configChanged` call that failed
+  (`server/src/routes/plugins.ts`). So an approval of a kind other than
+  `pause_all` re-reads the company's saved config and bot token before
+  anything is written. The tap goes on only when both the list in memory and
+  the saved config allow it. A failed read refuses the tap (reason `stale`).
+  A denial and a `pause_all` approval use the list in memory. A config saved
+  in the few milliseconds between that read and the compare-and-set is not
+  seen; that gap is accepted.
 - One bot can serve several companies in one chat. A tap is checked against
   the brand of the card's company, so an approver of company B cannot decide
   a card of company A.

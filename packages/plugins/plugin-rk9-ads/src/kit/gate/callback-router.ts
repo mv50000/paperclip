@@ -55,11 +55,14 @@ export interface GateBrand {
 }
 
 export type GateAuditEvent =
-  | { type: "unauthorized"; companyId: string; gateRequestId: string; tgUserId: number; chatId: string | null; reason: "chat" | "user" | "bot" | "kind" }
+  | { type: "unauthorized"; companyId: string; gateRequestId: string; tgUserId: number; chatId: string | null; reason: RefusalReason }
   | { type: "unknown_kind"; companyId: string; gateRequestId: string; kind: string }
   | { type: "expired"; companyId: string; gateRequestId: string; tgUserId: number }
   | { type: "decided"; companyId: string; gateRequestId: string; kind: string; decision: GateDecision; tgUserId: number }
   | { type: "handler_failed"; companyId: string; gateRequestId: string; kind: string; errorName: string };
+
+/** "stale": the approver list could not be confirmed against the saved config. */
+export type RefusalReason = "chat" | "user" | "bot" | "kind" | "stale";
 
 export const GATE_TEXT = {
   unauthorized: "ei oikeutta",
@@ -79,6 +82,14 @@ export interface CallbackRouterOptions {
   registry: GateRegistry;
   /** The brand this bot serves for `companyId`, or null when it serves none. */
   brandFor(companyId: string): GateBrand | null;
+  /**
+   * The brand as saved right now. When set, an approval of a kind outside
+   * `cachedKinds` is checked again against it before anything is written: the
+   * list in memory can be stale. Null or a throw refuses the tap.
+   */
+  freshBrandFor?(companyId: string): Promise<GateBrand | null>;
+  /** Kinds that may be approved on the brand in memory (stopping kinds). */
+  cachedKinds?: readonly string[];
   logger: PluginLogger;
   audit?(event: GateAuditEvent): Promise<void>;
 }
@@ -124,8 +135,7 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     }
   }
 
-  function authorize(request: GateRequestRecord, query: TelegramCallbackQuery): "chat" | "user" | "bot" | "kind" | null {
-    const brand = options.brandFor(request.companyId);
+  function authorize(request: GateRequestRecord, query: TelegramCallbackQuery, brand: GateBrand | null): RefusalReason | null {
     if (!brand) return "bot";
     const chatId = query.message ? String(query.message.chat.id) : null;
     if (!chatId || chatId !== brand.chatId || (request.chatId !== null && request.chatId !== chatId)) return "chat";
@@ -196,7 +206,16 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       return;
     }
 
-    const refused = authorize(request, query);
+    let refused = authorize(request, query, options.brandFor(request.companyId));
+    if (!refused && parsed.decision === "approved" && options.freshBrandFor && !options.cachedKinds?.includes(request.kind)) {
+      let fresh: GateBrand | null = null;
+      try {
+        fresh = await options.freshBrandFor(request.companyId);
+      } catch (error) {
+        logger.warn("gate: could not re-read the brand config", { companyId: request.companyId, gateRequestId: request.id, detail: safe(error) });
+      }
+      refused = fresh ? authorize(request, query, fresh) : "stale";
+    }
     if (refused) {
       logger.warn("gate: tap refused", {
         botKey: api.botKey,

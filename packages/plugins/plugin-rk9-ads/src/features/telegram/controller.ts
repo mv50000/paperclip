@@ -22,7 +22,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PluginContext, PluginWebhookInput } from "@paperclipai/plugin-sdk";
-import { listCompanyConfigs } from "../../company-configs.js";
+import { listCompanyConfigs, loadCompanyConfig } from "../../company-configs.js";
 import type { TelegramMode } from "../../config.js";
 import { createCallbackRouter, type CallbackRouter, type GateAuditEvent, type GateBrand } from "../../kit/gate/callback-router.js";
 import type { GateRegistry } from "../../kit/gate/registry.js";
@@ -254,6 +254,21 @@ export class TelegramController {
     await detached(() => router.handleUpdate(update));
   }
 
+  /**
+   * The brand as saved now, for a tap that would spend. The list in memory can
+   * be stale: a plan may still run on an older read, and the host does not
+   * retry a configChanged call that failed. Null unless the saved config still
+   * binds this bot.
+   */
+  private async freshBrand(botKey: string, companyId: string): Promise<GateBrand | null> {
+    const result = await loadCompanyConfig(this.ctx, companyId);
+    if (result.state !== "enabled" || !result.config.telegram) return null;
+    const telegram = result.config.telegram;
+    const token = await this.ctx.secrets.resolve(telegram.botTokenRef, { companyId, configPath: "telegram.botTokenRef" });
+    if (typeof token !== "string" || telegramBotKey(token.trim()) !== botKey) return null;
+    return { companyId, chatId: telegram.chatId, allowedUserIds: [...telegram.allowedUserIds] };
+  }
+
   private scheduleRetry(first = false): void {
     if (this.stopped) return;
     if (this.retryTimer) clearTimeout(this.retryTimer);
@@ -417,6 +432,8 @@ export class TelegramController {
         store: this.options.store,
         registry: this.options.registry,
         brandFor: (companyId) => entry.brands.get(companyId) ?? null,
+        freshBrandFor: (companyId) => this.freshBrand(botKey, companyId),
+        cachedKinds: HELD_BRAND_KINDS,
         logger: ctx.logger,
         audit: (event) => this.audit(event),
       });
