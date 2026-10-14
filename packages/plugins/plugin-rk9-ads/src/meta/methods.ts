@@ -262,10 +262,15 @@ interface RawVideoStatus {
   } | null;
 }
 
+/** A finite value clamped to [min, max]; NaN, Infinity or missing gives the default. */
+function boundedMs(value: number | undefined, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, min), max) : fallback;
+}
+
 export interface WaitForVideoOptions {
-  /** Pause between polls. Default 5 s. */
+  /** Pause between polls. Default 5 s, clamped to 0.5–60 s. */
   intervalMs?: number;
-  /** Total wait before MediaTimeoutError. Default 10 min. */
+  /** Total wait before MediaTimeoutError. Default 10 min, at most 1 h. */
   timeoutMs?: number;
 }
 
@@ -280,8 +285,8 @@ export async function waitForVideoReady(
   options: WaitForVideoOptions = {},
 ): Promise<{ videoId: string; status: "ready" }> {
   requireId(videoId, "videoId");
-  const intervalMs = Math.max(0, options.intervalMs ?? 5_000);
-  const timeoutMs = Math.max(0, options.timeoutMs ?? 600_000);
+  const intervalMs = boundedMs(options.intervalMs, 5_000, 500, 60_000);
+  const timeoutMs = boundedMs(options.timeoutMs, 600_000, 0, 3_600_000);
   const started = client.now();
   let last: VideoStatus | null = null;
 

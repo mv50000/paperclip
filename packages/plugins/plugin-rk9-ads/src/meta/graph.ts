@@ -327,6 +327,33 @@ export function mapGraphError(
   return new MetaGraphError(message, details);
 }
 
+/**
+ * Copies the caller's fields once into plain, deep-frozen data: own
+ * enumerable keys only, objects through a JSON round trip. Everything after
+ * this point reads the copy.
+ */
+function snapshotFields(fields: Record<string, unknown>): Record<string, string | number | boolean | object> {
+  const out: Record<string, string | number | boolean | object> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out[key] = value;
+    } else if (typeof value === "object") {
+      out[key] = deepFreeze(JSON.parse(JSON.stringify(value)) as object);
+    } else {
+      throw new InvalidParamError(`Field ${key} must be a string, number, boolean or plain object`);
+    }
+  }
+  return Object.freeze(out);
+}
+
+function deepFreeze<T extends object>(value: T): T {
+  for (const item of Object.values(value)) {
+    if (item && typeof item === "object") deepFreeze(item as object);
+  }
+  return Object.freeze(value);
+}
+
 /** Shortens long strings (base64 image bytes) for log output. */
 function summariseForLog(fields: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -338,19 +365,21 @@ function summariseForLog(fields: Record<string, unknown>): Record<string, unknow
 
 export class MetaGraphClient {
   readonly companyId: string;
-  readonly mode: MetaClientMode;
-  private readonly options: MetaClientOptions;
+  // Runtime-private (#), not only TypeScript-private: mode, guard and the
+  // sender must not be reachable through a cast.
+  readonly #mode: MetaClientMode;
+  readonly #options: MetaClientOptions;
+  readonly #guard: GuardedWriteHook;
   private readonly retry: RetryPolicy;
   private readonly health: GraphHealth;
-  private readonly guard: GuardedWriteHook;
   private drift: GraphDriftEvent | null = null;
   readonly sleep: (ms: number) => Promise<void>;
   readonly now: () => number;
 
   constructor(options: MetaClientOptions) {
-    this.options = options;
+    this.#options = options;
     this.companyId = options.companyId;
-    this.mode = options.mode ?? "live";
+    this.#mode = options.mode ?? "live";
     const retry = options.retry ?? {};
     // A missing, NaN or infinite value falls back to the default; every value has a hard ceiling.
     this.retry = {
@@ -360,9 +389,14 @@ export class MetaGraphClient {
       maxTotalWaitMs: retryValue(retry.maxTotalWaitMs, DEFAULT_RETRY.maxTotalWaitMs, 0, HOST_CALL_BUDGET_MS - 5_000),
     };
     this.health = options.health ?? graphHealth;
-    this.guard = options.guardedWrite ?? pausedOnlyWrites;
+    this.#guard = options.guardedWrite ?? pausedOnlyWrites;
+    Object.freeze(this.retry);
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? (() => Date.now());
+  }
+
+  get mode(): MetaClientMode {
+    return this.#mode;
   }
 
   /** The client's own view: mode and the first version drift it saw. */
@@ -371,7 +405,7 @@ export class MetaGraphClient {
   }
 
   async get<T>(path: string, params: GraphParams = {}): Promise<T> {
-    return this.send<T>("GET", graphUrl(path, params), undefined, path);
+    return this.#send<T>("GET", graphUrl(path, params), undefined, path);
   }
 
   /**
@@ -386,14 +420,20 @@ export class MetaGraphClient {
     let pages = 0;
     let url: URL | null = graphUrl(path, params);
     while (url && pages < maxPages) {
-      const page: { data?: unknown; paging?: { next?: unknown } } = await this.send("GET", url, undefined, path);
+      const page: { data?: unknown; paging?: { next?: unknown } } = await this.#send("GET", url, undefined, path);
       pages += 1;
       if (!Array.isArray(page?.data)) {
         throw new MetaResponseError(`Meta GET ${path}: page ${pages} has no data array`);
       }
       data.push(...(page.data as T[]));
       const next = page.paging?.next;
-      url = typeof next === "string" && next.length > 0 ? await this.followNext(next, path) : null;
+      if (next === undefined || next === null) {
+        url = null;
+      } else if (typeof next === "string" && next.length > 0) {
+        url = await this.followNext(next, path);
+      } else {
+        throw new MetaResponseError(`Meta GET ${path}: paging.next is not a URL string`);
+      }
     }
     return { data, pages, truncated: url !== null };
   }
@@ -410,34 +450,40 @@ export class MetaGraphClient {
     // Validates the path and the field names before anything else.
     const normalised = normaliseGraphPath(path);
     const url = graphUrl(normalised);
-    const body = encodeParams(fields as GraphParams).toString();
-    if (this.mode === "readOnly") throw new ReadOnlyViolationError(method, normalised);
+    // One snapshot feeds both the body and the guard, so a getter, a Proxy or
+    // an inherited property cannot show the guard something else than is sent.
+    const snapshot = snapshotFields(fields);
+    const body = encodeParams(snapshot).toString();
+    if (this.#mode === "readOnly") throw new ReadOnlyViolationError(method, normalised);
 
-    const plan: WritePlan = { companyId: this.companyId, mode: this.mode, method, path: normalised, fields };
-    const decision = await this.guard(plan);
+    const plan: WritePlan = { companyId: this.companyId, mode: this.#mode, method, path: normalised, fields: snapshot };
+    const decision = await this.#guard(plan);
     if (!decision.allow) {
-      this.options.logger?.warn("rk9-ads meta write refused", redactValue({ companyId: this.companyId, method, path, reason: decision.reason }));
-      throw new WriteRefusedError(method, path, redactText(decision.reason));
+      this.#options.logger?.warn(
+        "rk9-ads meta write refused",
+        redactValue({ companyId: this.companyId, method, path: normalised, reason: decision.reason }),
+      );
+      throw new WriteRefusedError(method, normalised, redactText(decision.reason));
     }
 
-    if (this.mode === "dryRun") {
-      this.options.logger?.info(
+    if (this.#mode === "dryRun") {
+      this.#options.logger?.info(
         "rk9-ads meta dry-run write",
-        redactValue({ companyId: this.companyId, method, path, fields: summariseForLog(fields) }),
+        redactValue({ companyId: this.companyId, method, path: normalised, fields: summariseForLog(snapshot) }),
       );
-      const result: DryRunResult = { dryRun: true, planned: { method, path, fields: redactValue(fields) } };
+      const result: DryRunResult = { dryRun: true, planned: { method, path: normalised, fields: redactValue(snapshot) } };
       return result;
     }
 
-    return this.send<T>(method, url, body, path);
+    return this.#send<T>(method, url, body, normalised);
   }
 
   private async resolveToken(): Promise<string> {
     let token: string;
     try {
-      token = await this.options.secrets.resolve(this.options.tokenRef, {
+      token = await this.#options.secrets.resolve(this.#options.tokenRef, {
         companyId: this.companyId,
-        configPath: this.options.tokenConfigPath ?? "meta.accessTokenRef",
+        configPath: this.#options.tokenConfigPath ?? "meta.accessTokenRef",
       });
     } catch (error) {
       const reason = error instanceof Error ? `${error.name}: ${redactText(error.message)}` : "unknown error";
@@ -449,7 +495,7 @@ export class MetaGraphClient {
     return token.trim();
   }
 
-  private async send<T>(method: "GET" | "POST" | "DELETE", url: URL, body: string | undefined, path: string): Promise<T> {
+  async #send<T>(method: "GET" | "POST" | "DELETE", url: URL, body: string | undefined, path: string): Promise<T> {
     const token = await this.resolveToken();
     const known = [token];
     const context = `Meta ${method} ${path}`;
@@ -465,7 +511,7 @@ export class MetaGraphClient {
       let text: string;
       try {
         const fetchStarted = this.now();
-        response = await this.options.http.fetch(url.toString(), { method, headers, ...(body !== undefined ? { body } : {}) });
+        response = await this.#options.http.fetch(url.toString(), { method, headers, ...(body !== undefined ? { body } : {}) });
         text = await response.text();
         slowestFetchMs = Math.max(slowestFetchMs, this.now() - fetchStarted);
       } catch (error) {
@@ -486,8 +532,8 @@ export class MetaGraphClient {
         parsed && typeof parsed === "object" && "error" in parsed ? ((parsed as { error: GraphErrorBody }).error ?? {}) : null;
 
       if (response.ok && !errorBody) {
-        if (parsed === undefined) {
-          throw new MetaResponseError(redactText(`${context}: response is not JSON`, known), { httpStatus: response.status });
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new MetaResponseError(redactText(`${context}: response is not a JSON object`, known), { httpStatus: response.status });
         }
         return parsed as T;
       }
@@ -509,7 +555,7 @@ export class MetaGraphClient {
           attempts: attempt,
         });
       }
-      this.options.logger?.warn("rk9-ads meta rate limited, retrying", {
+      this.#options.logger?.warn("rk9-ads meta rate limited, retrying", {
         companyId: this.companyId,
         method,
         path,
@@ -579,16 +625,16 @@ export class MetaGraphClient {
     };
     this.drift = event;
     const firstInWorker = this.health.recordDrift(event);
-    this.options.logger?.warn("rk9-ads meta Graph API version drift", { ...event });
+    this.#options.logger?.warn("rk9-ads meta Graph API version drift", { ...event });
     if (!firstInWorker) return;
     try {
-      await this.options.activity?.log({
+      await this.#options.activity?.log({
         companyId: this.companyId,
         message: "rk9-ads: Meta Graph API version drift",
         metadata: { expectedVersion: GRAPH_VERSION, observedVersion, source, path },
       });
     } catch (error) {
-      this.options.logger?.warn("rk9-ads: could not log the Graph version drift", {
+      this.#options.logger?.warn("rk9-ads: could not log the Graph version drift", {
         error: error instanceof Error ? error.name : "unknown",
       });
     }

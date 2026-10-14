@@ -221,6 +221,13 @@ describe("paging", () => {
     ).rejects.toThrow(/raise maxPages/);
   });
 
+  it("refuses a paging.next that is present but not a URL string", async () => {
+    const page = fixture("ads-page-1");
+    const body = page.body as { data: unknown[] };
+    const { client } = makeClient(new FakeGraph({ ...page, body: { ...body, paging: { next: { url: "x" } } } }));
+    await expect(listAds(client, ACT)).rejects.toThrow(MetaResponseError);
+  });
+
   it("treats a NaN or infinite page cap as the default", async () => {
     const graph = new FakeGraph(fixture("ads-page-1"), fixture("ads-page-2"));
     const { client } = makeClient(graph);
@@ -373,6 +380,13 @@ describe("error mapping", () => {
     expect(error).toBeInstanceOf(PolicyAcceptanceRequiredError);
     expect(error.fix).toBe(POLICY_ACCEPTANCE_FIX);
     expect(error.message).toContain("Ads Manager");
+  });
+
+  it("refuses a JSON answer that is not an object", async () => {
+    for (const body of ["null", "[]", "42"]) {
+      const { client } = makeClient(new FakeGraph({ status: 200, body }));
+      await expect(setObjectStatus(client, "1", "PAUSED"), body).rejects.toThrow(MetaResponseError);
+    }
   });
 
   it("wraps a non-JSON answer", async () => {
@@ -556,6 +570,63 @@ describe("read-only and dry-run modes", () => {
     expect(plan("POST", "123", {}).allow).toBe(false);
   });
 
+  it("guards the fields that are sent, not a getter, Proxy or prototype", async () => {
+    const graph = new FakeGraph(fixture("ad"), fixture("ad"), fixture("ad"));
+    const { client } = makeClient(graph);
+    let reads = 0;
+    const flipping = {
+      name: "x",
+      get status() {
+        reads += 1;
+        return reads === 1 ? "ACTIVE" : "PAUSED";
+      },
+    };
+    await expect(client.post("act_1336862981968191/campaigns", flipping)).rejects.toThrow(WriteRefusedError);
+
+    const inherited = Object.assign(Object.create({ status: "PAUSED" }) as Record<string, unknown>, { name: "x" });
+    await expect(client.post("act_1336862981968191/ads", inherited)).rejects.toThrow(WriteRefusedError);
+
+    let proxyReads = 0;
+    const proxy = new Proxy({ name: "x", status: "PAUSED" } as Record<string, unknown>, {
+      get: (target, key) => (key === "status" && proxyReads++ > 0 ? "ACTIVE" : target[key as string]),
+    });
+    await client.post("act_1336862981968191/campaigns", proxy);
+    expect(new URLSearchParams(graph.calls[0]!.body as string).get("status")).toBe("PAUSED");
+    expect(graph.calls).toHaveLength(1);
+  });
+
+  it("hands the guard a frozen copy", async () => {
+    let frozen = false;
+    const { client } = makeClient(new FakeGraph(), {
+      mode: "dryRun",
+      guardedWrite: (plan) => {
+        frozen = Object.isFrozen(plan.fields) && Object.isFrozen(plan.fields.creative as object);
+        return { allow: true };
+      },
+    });
+    await createAd(client, ACT, { name: "a", adsetId: "1", creativeId: "2" });
+    expect(frozen).toBe(true);
+  });
+
+  it("keeps mode and the sender out of reach of a cast", async () => {
+    const graph = new FakeGraph(fixture("ad"));
+    const { client } = makeClient(graph, { mode: "readOnly" });
+    const loose = client as unknown as Record<string, unknown>;
+    expect(() => {
+      loose.mode = "live";
+    }).toThrow(TypeError);
+    expect(loose.send).toBeUndefined();
+    expect(loose.options).toBeUndefined();
+    await expect(setObjectStatus(client, "1", "PAUSED")).rejects.toThrow(ReadOnlyViolationError);
+    expect(graph.calls).toHaveLength(0);
+  });
+
+  it("reports the normalised path in a dry-run plan", async () => {
+    const { client } = makeClient(new FakeGraph(), { mode: "dryRun" });
+    const result = await client.post("/123", { status: "PAUSED" });
+    expect(isDryRun(result) && result.planned.path).toBe("123");
+  });
+
   it("gives the guard the normalised path that is actually sent", async () => {
     const plans: WritePlan[] = [];
     const graph = new FakeGraph(fixture("ad"));
@@ -605,6 +676,17 @@ describe("media", () => {
     const { client } = makeClient(graph);
     await expect(uploadVideoByUrl(client, ACT, { fileUrl: "file:///etc/passwd" })).rejects.toThrow(InvalidParamError);
     expect(graph.calls).toHaveLength(0);
+  });
+
+  it("bounds the video wait when given NaN or zero", async () => {
+    const graph = new FakeGraph(...Array.from({ length: 1_300 }, () => fixture("video-processing")));
+    const { client, captured } = makeClient(graph);
+    await expect(waitForVideoReady(client, "1234567890123456", { timeoutMs: Number.NaN, intervalMs: 0 })).rejects.toThrow(
+      MediaTimeoutError,
+    );
+    // Default 10 min timeout, interval clamped up to 0.5 s.
+    expect(captured.sleeps.every((ms) => ms >= 500)).toBe(true);
+    expect(graph.calls.length).toBeLessThanOrEqual(1_201);
   });
 
   it("throws MediaProcessingError when processing fails", async () => {
