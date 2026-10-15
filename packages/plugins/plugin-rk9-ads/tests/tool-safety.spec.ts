@@ -22,7 +22,19 @@ import {
   type PluginTestDatabase,
 } from "./helpers/embedded-pg.js";
 
-const BUDGET_FIELDS = ["daily_budget", "lifetime_budget", "spend_cap", "bid_amount", "budget_remaining", "daily_spend_cap"];
+const BUDGET_FIELDS = [
+  "daily_budget",
+  "lifetime_budget",
+  "spend_cap",
+  "spend_cap_action",
+  "lifetime_spend_cap",
+  "daily_spend_cap",
+  "bid_amount",
+  "bid_strategy",
+  "budget_remaining",
+  "daily_min_spend_target",
+  "lifetime_min_spend_target",
+];
 const SPENDING_EDGE_RE = /\/act_\d+\/(campaigns|adsets|ads|copies|async_batch_requests)$|\/copies$/;
 
 function forbiddenWrite(call: RecordedRequest): string | null {

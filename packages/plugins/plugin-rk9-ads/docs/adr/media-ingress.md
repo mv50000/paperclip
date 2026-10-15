@@ -56,7 +56,10 @@ size.
 - URL checks at ingress: https only, no credentials, default port, no IP
   literal, no private-only host name (`localhost`, `.local`, `.internal` and
   similar). The HEAD goes through the host fetch, whose guard resolves DNS and
-  refuses private addresses. Redirects are not followed.
+  refuses the private ranges it knows (RFC 1918, loopback, link-local, IPv6
+  ULA). It does not refuse 100.64.0.0/10, so a failed HEAD returns no error
+  detail to the caller; the reason goes to the server log only. Redirects are
+  not followed.
 - The plugin cannot prove that the media behind the URL matches `sha256`.
   Dedupe on `(company, brand, sha256)` trusts the brand repo's hash.
 - Tests use a binary fixture that is not valid UTF-8 as every media response

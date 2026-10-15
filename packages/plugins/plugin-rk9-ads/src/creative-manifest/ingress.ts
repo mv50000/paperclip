@@ -207,6 +207,7 @@ function contentType(headers: Headers): string {
  */
 async function checkRemoteMedia(
   fetch: FetchLike,
+  logger: PluginContext["logger"],
   url: string,
   expected: "image" | "video",
   pointer: string,
@@ -215,8 +216,11 @@ async function checkRemoteMedia(
   try {
     response = await fetch(url, { method: "HEAD" });
   } catch (error) {
+    // The reason stays in the server log: a connection or TLS error text would
+    // tell the caller about hosts behind the URL (port open or not, certificate names).
     const reason = error instanceof Error ? error.message : String(error);
-    return fail("media_unreachable", `HEAD failed: ${redactText(reason).slice(0, 200)}`, { path: pointer });
+    logger.warn("rk9-ads: creative media HEAD failed", { reason: redactText(reason).slice(0, 200) });
+    return fail("media_unreachable", "HEAD request failed", { path: pointer });
   }
   if (response.status >= 300 && response.status < 400) {
     return fail("media_unreachable", `HEAD answered ${response.status}; give the final URL, redirects are not followed`, { path: pointer });
@@ -237,14 +241,34 @@ async function checkRemoteMedia(
   return null;
 }
 
+/** An `uploading` row with no video id this old lost its worker mid-upload. */
+export const STALE_UPLOAD_MINUTES = 10;
+
 /**
- * Starts the Meta upload of a staged or failed video. A compare-and-set on the
- * status lets exactly one caller upload.
+ * Claims a stale `uploading` row. `updated_at` moves to now() in the same
+ * statement, so a second caller no longer matches and only one re-uploads.
+ */
+async function claimStaleUpload(deps: StageDeps, companyId: string, id: string): Promise<boolean> {
+  const result = await deps.ctx.db.execute(
+    `UPDATE ${deps.ledger.qualified("creatives")} SET error = NULL, updated_at = now()
+     WHERE company_id = $1 AND id = $2 AND status = 'uploading' AND meta_video_id IS NULL
+       AND updated_at < now() - interval '${STALE_UPLOAD_MINUTES} minutes'`,
+    [companyId, id],
+  );
+  return result.rowCount === 1;
+}
+
+/**
+ * Starts the Meta upload of a staged, failed or stale video. A compare-and-set
+ * on the status (or on the stale `updated_at`) lets exactly one caller upload.
  */
 async function uploadVideo(deps: StageDeps, companyId: string, config: BrandConfig, row: LedgerRow): Promise<StageResult | null> {
   const id = String(row.id);
-  const claimed = await deps.ledger.update(companyId, "creatives", { id, status: String(row.status) }, { status: "uploading", error: null });
-  if (claimed !== 1) return null;
+  const claimed =
+    row.status === "uploading"
+      ? await claimStaleUpload(deps, companyId, id)
+      : (await deps.ledger.update(companyId, "creatives", { id, status: String(row.status) }, { status: "uploading", error: null })) === 1;
+  if (!claimed) return null;
   const client = deps.metaClient
     ? deps.metaClient(companyId, config)
     : createMetaClient(deps.ctx, {
@@ -273,7 +297,9 @@ async function uploadVideo(deps: StageDeps, companyId: string, config: BrandConf
 }
 
 function needsUpload(row: LedgerRow): boolean {
-  return row.kind === "video" && !str(row.meta_video_id) && (row.status === "staged" || row.status === "failed");
+  return (
+    row.kind === "video" && !str(row.meta_video_id) && (row.status === "staged" || row.status === "failed" || row.status === "uploading")
+  );
 }
 
 /**
@@ -313,10 +339,10 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
   let existing = await findExisting(deps.ledger, companyId, manifest);
   let created = false;
   if (!existing) {
-    const media = await checkRemoteMedia(deps.ctx.http.fetch, manifest.mediaUrl, manifest.kind, "/mediaUrl");
+    const media = await checkRemoteMedia(deps.ctx.http.fetch, deps.ctx.logger, manifest.mediaUrl, manifest.kind, "/mediaUrl");
     if (media) return media;
     if (manifest.posterUrl) {
-      const poster = await checkRemoteMedia(deps.ctx.http.fetch, manifest.posterUrl, "image", "/posterUrl");
+      const poster = await checkRemoteMedia(deps.ctx.http.fetch, deps.ctx.logger, manifest.posterUrl, "image", "/posterUrl");
       if (poster) return poster;
     }
     const id = randomUUID();

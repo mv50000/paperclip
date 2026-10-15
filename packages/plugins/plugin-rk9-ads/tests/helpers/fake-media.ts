@@ -11,12 +11,19 @@ export interface RecordedRequest {
 }
 
 export interface MediaHead {
+  /** Makes the fetch throw this message, like a connection or TLS failure. */
+  throws?: string;
   status?: number;
   headers?: Record<string, string>;
 }
 
 /** Bytes that are not valid UTF-8: a lossy text transport would change them. */
 export const NON_UTF8_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0xc3, 0x28, 0x80, 0x00]);
+
+/** graph.facebook.com and its upload hosts such as graph-video.facebook.com. */
+export function isGraphHost(url: string): boolean {
+  return /^graph(-[a-z]+)?\.facebook\.com$/.test(new URL(url).hostname);
+}
 
 export class FakeMediaAndGraph {
   readonly calls: RecordedRequest[] = [];
@@ -33,11 +40,11 @@ export class FakeMediaAndGraph {
   }
 
   get graphWrites(): RecordedRequest[] {
-    return this.calls.filter((call) => call.url.includes("graph.facebook.com") && call.method !== "GET");
+    return this.calls.filter((call) => isGraphHost(call.url) && call.method !== "GET");
   }
 
   get mediaCalls(): RecordedRequest[] {
-    return this.calls.filter((call) => !call.url.includes("graph.facebook.com"));
+    return this.calls.filter((call) => !isGraphHost(call.url));
   }
 
   fetch = async (url: string, init?: RequestInit): Promise<Response> => {
@@ -54,8 +61,9 @@ export class FakeMediaAndGraph {
 
   private answer(url: string, method: string): Response {
     const parsed = new URL(url);
-    if (parsed.hostname !== "graph.facebook.com") {
+    if (!isGraphHost(url)) {
       const head = this.heads.get(url);
+      if (head?.throws) throw new Error(head.throws);
       // A body that is not valid UTF-8: the ingress must never read it.
       return new Response(NON_UTF8_BYTES, { status: head ? (head.status ?? 200) : 404, headers: head?.headers ?? {} });
     }

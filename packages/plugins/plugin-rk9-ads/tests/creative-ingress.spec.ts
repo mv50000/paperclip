@@ -321,6 +321,38 @@ describeDb("creative ingress (tool + route, real Postgres)", () => {
     expect(fake.graphWrites).toHaveLength(2);
   });
 
+  it("returns no connection detail when the HEAD fails (no port or certificate probing)", async () => {
+    const probe = "https://probe.example.com/x.mp4";
+    fake.head(probe, { throws: "connect ECONNREFUSED 100.64.1.2:443 (cert CN=vault.tailnet)" });
+    const response = await viaRoute(companyA, videoManifest({ mediaUrl: probe }));
+    expect(response.status).toBe(422);
+    expect(response.body).toEqual({ error: { code: "media_unreachable", message: "HEAD request failed", path: "/mediaUrl" } });
+    expect(JSON.stringify(response.body)).not.toContain("100.64");
+  });
+
+  it("re-uploads a video stuck in uploading without a video id once it is stale, and only once", async () => {
+    const first = await viaRoute(companyA, videoManifest());
+    const id = (first.body as { creative: { id: string } }).creative.id;
+    // A worker died between the claim and the Meta answer.
+    await testDb.adminQuery(
+      `UPDATE ${testDb.namespace}.creatives SET status = 'uploading', meta_video_id = NULL, updated_at = now() WHERE id = $1`,
+      [id],
+    );
+    const fresh = await viaRoute(companyA, videoManifest());
+    expect(fresh.body).toMatchObject({ created: false, creative: { status: "uploading", metaVideoId: null } });
+    expect(fake.graphWrites).toHaveLength(1);
+
+    await testDb.adminQuery(
+      `UPDATE ${testDb.namespace}.creatives SET updated_at = now() - interval '11 minutes' WHERE id = $1`,
+      [id],
+    );
+    const results = await Promise.all(Array.from({ length: 4 }, () => viaRoute(companyA, videoManifest())));
+    expect(fake.graphWrites).toHaveLength(2);
+    expect(results.map((r) => (r.body as { creative: { id: string } }).creative.id)).toEqual([id, id, id, id]);
+    const [row] = await rows(companyA);
+    expect(row).toMatchObject({ status: "uploading", meta_video_id: "900000000000002" });
+  });
+
   it("never sends the token anywhere but Graph, and never as a query parameter", async () => {
     await viaRoute(companyA, videoManifest());
     for (const call of fake.calls) {

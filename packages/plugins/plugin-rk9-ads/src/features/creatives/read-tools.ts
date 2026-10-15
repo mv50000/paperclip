@@ -44,6 +44,7 @@ export const INSIGHTS_FIELDS = [
 ] as const;
 export const DEFAULT_INSIGHTS_DAYS = 7;
 export const MAX_INSIGHTS_DAYS = 90;
+export const INSIGHTS_MAX_PAGES = 50;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ID_RE = /^\d{1,32}$/;
@@ -149,6 +150,8 @@ export async function getInsightsTool(deps: ReadToolDeps, companyId: string, raw
       fields: [...INSIGHTS_FIELDS],
       timeRange: { since, until },
       timeIncrement: 1,
+      // 90 days of daily rows for dozens of ads; a truncated walk throws rather than under-reports.
+      maxPages: INSIGHTS_MAX_PAGES,
     });
     const filtered = typeof adId === "string" ? rows.filter((row) => row.ad_id === adId) : rows;
     return ok({ brand: config.brandCode, since, until, count: filtered.length, rows: filtered });

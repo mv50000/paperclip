@@ -57,7 +57,9 @@ export type UrlProblem = { code: "url_not_https" | "url_forbidden"; message: str
 /**
  * Checks a media URL before anything uses it. The plugin hands the URL to Meta
  * and sends one HEAD through the host fetch, whose SSRF guard resolves DNS and
- * refuses private addresses. This check adds what can be decided from the URL
+ * refuses the private ranges it knows (RFC 1918, loopback, link-local, IPv6
+ * ULA). It does not cover every internal range (for example 100.64.0.0/10), so
+ * a HEAD failure returns no error detail. This check adds what can be decided from the URL
  * text alone: https only, no credentials, the default port, and no IP literal
  * or private-only host name.
  */

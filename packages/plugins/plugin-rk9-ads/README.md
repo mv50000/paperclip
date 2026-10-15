@@ -178,7 +178,7 @@ Responses:
 | Status | Body | When |
 |---|---|---|
 | 201 | `{ "created": true, "creative": {...} }` | New creative. A video is now `uploading` with `metaVideoId`; an image is `ready`. |
-| 200 | `{ "created": false, "creative": {...} }` | The same `idempotencyKey`, or the same media (`brand` + `sha256`), was staged before. Nothing is fetched or uploaded again; a `failed` video upload is retried. |
+| 200 | `{ "created": false, "creative": {...} }` | The same `idempotencyKey`, or the same media (`brand` + `sha256`), was staged before. Nothing is fetched or uploaded again. A `failed` video upload is retried, and so is an `uploading` row with no video id after 10 minutes (a worker died mid-upload). |
 | 400 | `{ "error": { "code", "message", "path" } }` | `invalid_manifest`, `url_not_https`, `url_forbidden`, `valid_until_past`, `invalid_request`. `path` is a JSON pointer into the manifest, e.g. `/copy/message`. |
 | 409 | same | `plugin_not_enabled` (no valid brand config), `idempotency_key_conflict` (the key names other media) |
 | 422 | same | `unknown_brand`, `unknown_landing_url_key`, `media_unreachable`, `media_type_mismatch`, `media_too_large` |
