@@ -174,7 +174,9 @@ export async function buildDigest(
   };
 }
 
-export type DigestTickOutcome = "not_due" | "done" | "busy" | "sent" | "skipped" | "failed" | "disabled";
+export type DigestTickOutcome = "not_due" | "done" | "busy" | "sent" | "skipped" | "failed" | "disabled" | "telegram_not_ready";
+
+const FINISH_SENT_ATTEMPTS = 3;
 
 /**
  * One brand's tick: sends the digest once per local date at or after
@@ -188,25 +190,21 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
 
   const existing = await deps.store.digestRun(companyId, digestDate);
   if (existing && (existing.status === "sent" || existing.status === "skipped")) return "done";
+  // Checked before the claim, so a bot that is still starting does not use up attempts.
+  const bot = deps.telegram(companyId);
+  if (!bot) return "telegram_not_ready";
   await deps.store.ensureDigestRun(companyId, config.brandCode, digestDate);
   if (!(await deps.store.claimDigestRun(companyId, digestDate, MAX_DIGEST_ATTEMPTS, DIGEST_RETRY_AFTER_MINUTES))) return "busy";
 
+  let delivered: { messageId: number; summary: Record<string, unknown> } | null = null;
   try {
     const built = await buildDigest(deps, companyId, config);
     if (built.text === null) {
       await deps.store.finishDigestRun(companyId, digestDate, { status: "skipped", summary: built.summary });
       return "skipped";
     }
-    const bot = deps.telegram(companyId);
-    if (!bot) throw new Error("Telegram is not ready for this company");
     const message = await bot.api.sendMessage({ chat_id: bot.chatId, text: built.text });
-    await deps.store.finishDigestRun(companyId, digestDate, {
-      status: "sent",
-      chatId: bot.chatId,
-      messageId: message.message_id,
-      summary: built.summary,
-    });
-    return "sent";
+    delivered = { messageId: message.message_id, summary: built.summary };
   } catch (error) {
     const message = error instanceof MetaGraphError ? error.message : errorText(error);
     deps.ctx.logger.warn("rk9-ads digest: send failed", { companyId, brandCode: config.brandCode, digestDate, error: message.slice(0, 200) });
@@ -217,4 +215,15 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
     }
     return "failed";
   }
+
+  // Telegram has the message: never turn this row into "failed" (a retry would send it twice).
+  for (let attempt = 1; attempt <= FINISH_SENT_ATTEMPTS; attempt += 1) {
+    try {
+      await deps.store.finishDigestRun(companyId, digestDate, { status: "sent", chatId: bot.chatId, ...delivered });
+      return "sent";
+    } catch (error) {
+      deps.ctx.logger.warn("rk9-ads digest: could not record a sent digest", { companyId, digestDate, attempt, error: errorText(error) });
+    }
+  }
+  return "sent";
 }

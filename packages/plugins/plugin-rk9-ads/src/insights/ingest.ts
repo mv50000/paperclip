@@ -189,9 +189,11 @@ export async function recordWarning(
   code: WarningCode,
   message: string,
   day: string,
+  detail?: string,
 ): Promise<void> {
+  const key = `insights-warning:${day}:${code}${detail ? `:${detail}` : ""}`;
   try {
-    await deps.store.markOnce(companyId, `insights-warning:${day}:${code}`, INSIGHTS_WARNING_KIND, { code, message: message.slice(0, 300) });
+    await deps.store.markOnce(companyId, key, INSIGHTS_WARNING_KIND, { code, message: message.slice(0, 300) });
   } catch (error) {
     deps.ctx.logger.warn("rk9-ads insights: could not store warning", { companyId, code, error: safeMessage(error) });
   }
@@ -219,7 +221,7 @@ export async function ingestBrand(
   }
   await deps.store.upsertDays(companyId, rows);
   for (const field of skipped) {
-    await recordWarning(deps, companyId, "field", `Meta hylkäsi kentän ${field}; se ohitettiin`, today);
+    await recordWarning(deps, companyId, "field", `Meta hylkäsi kentän ${field}; se ohitettiin`, today, field);
   }
   return {
     companyId,
@@ -236,9 +238,13 @@ export async function ingestBrand(
 
 export type InsightsRunMode = "hourly" | "close";
 
-/** Window per mode: hourly = today; close = the bounded backfill window up to yesterday. */
+/**
+ * Window per mode. Hourly reads yesterday and today, so late reporting for
+ * yesterday is in before the morning digest. Close reads the bounded backfill
+ * window up to yesterday.
+ */
 export function windowFor(mode: InsightsRunMode, today: string): { since: string; until: string } {
-  return mode === "hourly" ? { since: today, until: today } : { since: addDays(today, -CLOSE_WINDOW_DAYS), until: addDays(today, -1) };
+  return mode === "hourly" ? { since: addDays(today, -1), until: today } : { since: addDays(today, -CLOSE_WINDOW_DAYS), until: addDays(today, -1) };
 }
 
 /**

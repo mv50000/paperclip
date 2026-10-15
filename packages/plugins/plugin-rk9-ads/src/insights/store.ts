@@ -124,9 +124,11 @@ export function createInsightsStore(db: PluginDatabaseClient) {
      */
     async upsertDays(companyId: string, rows: readonly InsightDayRow[]): Promise<number> {
       assertCompanyId(companyId);
+      // One row per (ad, date): Postgres refuses an upsert batch that hits the same key twice. The last row wins.
+      const unique = [...new Map(rows.map((row) => [`${row.adId}|${row.date}`, row])).values()];
       let written = 0;
-      for (let start = 0; start < rows.length; start += UPSERT_BATCH) {
-        const batch = rows.slice(start, start + UPSERT_BATCH);
+      for (let start = 0; start < unique.length; start += UPSERT_BATCH) {
+        const batch = unique.slice(start, start + UPSERT_BATCH);
         const params: unknown[] = [companyId];
         const tuples: string[] = [];
         for (const row of batch) {
@@ -327,8 +329,9 @@ export function createInsightsStore(db: PluginDatabaseClient) {
 
     /**
      * Claims one send attempt (compare-and-set). Succeeds for a fresh row, or
-     * for a failed row whose last attempt is older than `retryAfterMinutes`,
-     * while attempts < maxAttempts. A sent or skipped row is never claimed.
+     * for a failed or abandoned (pending, e.g. a worker restart mid-send) row
+     * whose last attempt is older than `retryAfterMinutes`, while attempts <
+     * maxAttempts. A sent or skipped row is never claimed.
      */
     async claimDigestRun(companyId: string, digestDate: string, maxAttempts: number, retryAfterMinutes: number): Promise<boolean> {
       assertCompanyId(companyId);
@@ -336,7 +339,7 @@ export function createInsightsStore(db: PluginDatabaseClient) {
       const result = await db.execute(
         `UPDATE ${ns}.digest_runs SET attempts = attempts + 1, status = 'pending', updated_at = now() ` +
           `WHERE company_id = $1 AND digest_date = $2::date AND attempts < $3::int AND ` +
-          `((status = 'pending' AND attempts = 0) OR (status = 'failed' AND updated_at < now() - make_interval(mins => $4::int)))`,
+          `((status = 'pending' AND attempts = 0) OR (status IN ('failed', 'pending') AND updated_at < now() - make_interval(mins => $4::int)))`,
         [companyId, digestDate, Math.trunc(maxAttempts), Math.trunc(retryAfterMinutes)],
       );
       return result.rowCount === 1;

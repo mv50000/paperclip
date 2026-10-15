@@ -231,9 +231,16 @@ describeDb("insights ingest and digest on real Postgres", () => {
     expect(after).toHaveLength(3);
     expect(after[0]).toMatchObject({ ad_id: AD_1, date: "2026-10-14", spend: "3.21", impressions: "812", inline_link_clicks: "11", cpc: "0.2918" });
     expect(await store.countDays(companyB, "2026-10-01", "2026-10-31")).toBe(0);
-    // Hourly reads today in the account zone only.
+    // Hourly reads yesterday and today in the account zone.
     const range = JSON.parse(new URL(fake.calls[1]!.url).searchParams.get("time_range")!);
-    expect(range).toEqual({ since: "2026-10-15", until: "2026-10-15" });
+    expect(range).toEqual({ since: "2026-10-14", until: "2026-10-15" });
+  });
+
+  it("keeps one row when Meta repeats an (ad, date) in one window", async () => {
+    fake.push(account(), ok({ data: [adDay(AD_1, "2026-10-15", "1.00", 100, 1), adDay(AD_1, "2026-10-15", "2.00", 200, 2)] }), account(), ok({ data: [] }));
+    const results = await runInsights(deps("2026-10-15T09:00:00Z"), "hourly");
+    expect(results[0]!.ok).toBe(true);
+    expect((await storedRows(companyA)).map((row) => row.spend)).toEqual(["2.00"]);
   });
 
   it("isolates brands: a Graph 500 for A is a warning and B still ingests", async () => {
@@ -352,6 +359,35 @@ describeDb("insights ingest and digest on real Postgres", () => {
       expect(sent).toHaveLength(1);
       const [run] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status, attempts, error FROM ${testDb.namespace}.digest_runs`);
       expect(run).toMatchObject({ status: "sent", attempts: 2, error: null });
+    });
+
+    it("does not claim an attempt while the bot is not ready", async () => {
+      expect(await digestTickBrand(deps(due, () => null), companyA, configA)).toBe("telegram_not_ready");
+      expect(await testDb.adminQuery(`SELECT 1 FROM ${testDb.namespace}.digest_runs`)).toHaveLength(0);
+    });
+
+    it("re-claims a row left pending by a worker restart after the retry delay", async () => {
+      await store.ensureDigestRun(companyA, "OLL", "2026-10-15");
+      expect(await store.claimDigestRun(companyA, "2026-10-15", 5, 10)).toBe(true);
+      // The worker died here: the row stays pending with attempts = 1.
+      expect(await digestTickBrand(deps("2026-10-15T05:05:00Z", telegram), companyA, configA)).toBe("busy");
+      await testDb.adminQuery(
+        `UPDATE ${testDb.namespace}.digest_runs SET updated_at = now() - interval '11 minutes' WHERE company_id = $1`,
+        [companyA],
+      );
+      queueDigestGraph();
+      expect(await digestTickBrand(deps("2026-10-15T05:20:00Z", telegram), companyA, configA)).toBe("sent");
+      expect(sent).toHaveLength(1);
+    });
+
+    it("keeps a delivered digest out of the retry path when the sent write fails", async () => {
+      queueDigestGraph();
+      const flaky = { ...store, finishDigestRun: async () => { throw new Error("db down"); } };
+      const result = await digestTickBrand({ ...deps(due, telegram), store: flaky }, companyA, configA);
+      expect(result).toBe("sent");
+      expect(sent).toHaveLength(1);
+      const [run] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status FROM ${testDb.namespace}.digest_runs`);
+      expect(run).toMatchObject({ status: "pending" });
     });
 
     it("skips a quiet zero-spend day in silent mode and does not send", async () => {

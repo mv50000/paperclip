@@ -281,7 +281,7 @@ Jobs (UTC cron; local time is computed in the job):
 
 | Job | Schedule | What it does |
 |---|---|---|
-| `insights-hourly` | `5 * * * *` | Today's ad-level rows (one `level=ad`, `time_increment=1` call per brand). |
+| `insights-hourly` | `5 * * * *` | Yesterday's and today's ad-level rows (one `level=ad`, `time_increment=1` call per brand), so late reporting for yesterday is in before the digest. |
 | `insights-daily-close` | `20 * * * *` | First run of a new local date (`timeZone`, default Europe/Helsinki): re-pulls the last 7 days to yesterday, marks days older than 3 days final, then files fatigue issues if enabled. Marker `insights-close:<date>` in `alert_dedupe`. |
 | `digest-tick` | `*/15 * * * *` | Sends the digest once per local date at or after `digest.time`. |
 
@@ -303,7 +303,9 @@ Digest config (`digest` block): `enabled` (default true), `time` (default
 `silent` sends nothing on such a day unless there is a warning, a gate card, a
 fatigued ad or a rule action). A day's row in `digest_runs` is inserted before
 the send and each attempt is claimed with a compare-and-set, so a day is sent
-at most once. A failed send is retried after 10 minutes, at most 5 attempts.
+at most once. A failed send, or a row left pending by a worker restart, is
+retried after 10 minutes, at most 5 attempts. A bot that is not ready yet
+uses no attempt.
 MTD and pacing are computed in the ad-account time zone from `insights_daily`;
 the projection uses complete days only. Headroom is Meta `spend_cap −
 amount_spent`. The digest warns when `spend_cap` is missing or above the

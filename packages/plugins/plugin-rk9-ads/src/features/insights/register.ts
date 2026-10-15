@@ -23,7 +23,7 @@ import type { FeatureRuntime } from "../types.js";
  *
  * The host cron is UTC only, so every job runs on a UTC schedule and gates on
  * the brand's local time (kit/local-time) with a once-per-local-date marker:
- * - insights-hourly (5 * * * *): today's ad-days.
+ * - insights-hourly (5 * * * *): yesterday's and today's ad-days.
  * - insights-daily-close (20 * * * *): on the first run of a new local date
  *   (config.timeZone, Europe/Helsinki by default) it re-pulls the last 7 days
  *   up to yesterday (finalises yesterday, fills gaps, takes Meta's late
@@ -129,8 +129,9 @@ export function register(runtime: FeatureRuntime): void {
     if (!Number.isInteger(requested) || requested < 1 || requested > MAX_BACKFILL_DAYS) {
       return { error: `days must be an integer 1-${MAX_BACKFILL_DAYS}` };
     }
+    // `days` days ending today.
     const result = await ingestBrand(base, target.companyId, target.config, (_account, today) => ({
-      since: addDays(today, -requested),
+      since: addDays(today, -(requested - 1)),
       until: today,
     }));
     return { rows: result.rows, window: result.window, accountTimeZone: result.accountTimeZone, skippedFields: result.skippedFields };
