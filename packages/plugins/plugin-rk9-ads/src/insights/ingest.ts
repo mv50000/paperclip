@@ -24,9 +24,9 @@ import type { BrandConfig } from "../config.js";
 import { localDate } from "../kit/local-time.js";
 import { InvalidParamError, MetaGraphError, RateLimitError, TokenInvalidError } from "../meta/errors.js";
 import { createMetaClient, type MetaClientOptions, type MetaGraphClient } from "../meta/graph.js";
-import { adAccountPath, getAccountSummary, getInsights } from "../meta/methods.js";
+import { adAccountPath, getAccountSummary, getInsights, parseDecimalMoney } from "../meta/methods.js";
 import type { AccountSummary, InsightsRow } from "../meta/types.js";
-import { cpm, linkCpc, linkCtr, parseCount, parseSpendCents } from "../metrics/cpc.js";
+import { cpm, linkCpc, linkCtr, parseCount } from "../metrics/cpc.js";
 import { addDays } from "./mtd.js";
 import { createInsightsStore, type InsightDayRow, type InsightsStore } from "./store.js";
 
@@ -106,7 +106,8 @@ export function toDayRow(
   const adId = optionalId(raw.ad_id);
   const date = typeof raw.date_start === "string" ? raw.date_start : null;
   if (!adId || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
-  const spendCents = parseSpendCents(raw.spend);
+  // Missing spend must not read as zero: parseDecimalMoney throws and the brand fails loudly.
+  const spendCents = parseDecimalMoney(raw.spend, "spend");
   const impressions = parseCount(raw.impressions);
   const inlineLinkClicks = parseCount(raw.inline_link_clicks);
   return {

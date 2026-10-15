@@ -11,42 +11,16 @@
  * two computations is a separate issue.
  */
 
-import { localDate } from "../kit/local-time.js";
+import { localMonthBounds, type LocalMonthBounds } from "../kit/local-time.js";
 import type { InsightsStore } from "./store.js";
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-function parse(date: string): { y: number; m: number; d: number } {
-  const match = DATE_RE.exec(date);
-  if (!match) throw new Error(`Not a YYYY-MM-DD date: ${date}`);
-  return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
-}
-
-function format(utc: Date): string {
-  return utc.toISOString().slice(0, 10);
-}
-
 /** Calendar arithmetic on a YYYY-MM-DD date (no time zone involved). */
 export function addDays(date: string, days: number): string {
-  const { y, m, d } = parse(date);
-  return format(new Date(Date.UTC(y, m - 1, d + days)));
-}
-
-/** Inclusive list of dates from `since` to `until`. */
-export function dateRange(since: string, until: string): string[] {
-  const out: string[] = [];
-  for (let date = since; date <= until && out.length < 400; date = addDays(date, 1)) out.push(date);
-  return out;
-}
-
-export function monthStartOf(date: string): string {
-  const { y, m } = parse(date);
-  return `${y}-${String(m).padStart(2, "0")}-01`;
-}
-
-export function daysInMonthOf(date: string): number {
-  const { y, m } = parse(date);
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const match = DATE_RE.exec(date);
+  if (!match) throw new Error(`Not a YYYY-MM-DD date: ${date}`);
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days)).toISOString().slice(0, 10);
 }
 
 export interface Pacing {
@@ -69,17 +43,18 @@ export interface Pacing {
  * digest does not divide a few hours of today's spend by a whole day.
  */
 export function computePacing(input: {
-  today: string;
+  /** The account-local month from kit/local-time localMonthBounds. */
+  month: Pick<LocalMonthBounds, "until" | "dayOfMonth" | "daysInMonth">;
   mtdCents: number;
   completeDaysCents: number;
   monthlyCapEur: number;
 }): Pacing {
-  const completeDays = parse(input.today).d - 1;
-  const daysInMonth = daysInMonthOf(input.today);
+  const completeDays = input.month.dayOfMonth - 1;
+  const daysInMonth = input.month.daysInMonth;
   const monthlyCapCents = Math.round(input.monthlyCapEur * 100);
   const projectedCents = completeDays > 0 ? Math.round((input.completeDaysCents / completeDays) * daysInMonth) : null;
   return {
-    today: input.today,
+    today: input.month.until,
     mtdCents: input.mtdCents,
     completeDays,
     daysInMonth,
@@ -95,10 +70,9 @@ export async function monthToDate(
   companyId: string,
   input: { now: Date; accountTimeZone: string; monthlyCapEur: number },
 ): Promise<Pacing> {
-  const today = localDate(input.now, input.accountTimeZone);
-  const start = monthStartOf(today);
-  const mtdCents = await store.spendCents(companyId, start, today);
-  const yesterday = addDays(today, -1);
-  const completeDaysCents = yesterday >= start ? await store.spendCents(companyId, start, yesterday) : 0;
-  return computePacing({ today, mtdCents, completeDaysCents, monthlyCapEur: input.monthlyCapEur });
+  const month = localMonthBounds(input.now, input.accountTimeZone);
+  const mtdCents = await store.spendCents(companyId, month.since, month.until);
+  const yesterday = addDays(month.until, -1);
+  const completeDaysCents = yesterday >= month.since ? await store.spendCents(companyId, month.since, yesterday) : 0;
+  return computePacing({ month, mtdCents, completeDaysCents, monthlyCapEur: input.monthlyCapEur });
 }

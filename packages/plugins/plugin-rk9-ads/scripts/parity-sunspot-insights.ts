@@ -22,12 +22,12 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { GraphHealth, MetaGraphClient } from "../src/meta/graph.js";
-import { getAccountSummary, getInsights } from "../src/meta/methods.js";
+import { getAccountSummary, getInsights, parseDecimalMoney } from "../src/meta/methods.js";
 import { redactText } from "../src/meta/redact.js";
 import { fetchAdDays, OPTIONAL_INSIGHT_FIELDS, toDayRow } from "../src/insights/ingest.js";
 import { addDays } from "../src/insights/mtd.js";
 import { localDate } from "../src/kit/local-time.js";
-import { linkCpc, parseCount, parseSpendCents } from "../src/metrics/cpc.js";
+import { linkCpc, parseCount } from "../src/metrics/cpc.js";
 
 const SUNSPOT_AD_ACCOUNT = "act_1336862981968191";
 
@@ -74,7 +74,8 @@ async function main(): Promise<void> {
     fields: ["spend", "impressions", "inline_link_clicks"],
   });
   const sop = sopRows[0] ?? {};
-  const sopSpend = parseSpendCents(sop.spend);
+  // No row means no spend that day (the SOP prints nothing then).
+  const sopSpend = sopRows.length > 0 ? parseDecimalMoney(sop.spend, "spend") : 0;
   const sopImpressions = parseCount(sop.impressions);
   const sopClicks = parseCount(sop.inline_link_clicks);
 

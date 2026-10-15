@@ -10,6 +10,10 @@ import {
   type DigestInput,
 } from "../src/digest/format.js";
 import { computePacing } from "../src/insights/mtd.js";
+import { localMonthBounds } from "../src/kit/local-time.js";
+
+/** Month bounds of a Helsinki date, at local noon. */
+const month = (date: string) => localMonthBounds(new Date(`${date}T09:00:00Z`));
 
 function normalDay(overrides: Partial<DigestInput> = {}): DigestInput {
   return {
@@ -19,7 +23,7 @@ function normalDay(overrides: Partial<DigestInput> = {}): DigestInput {
     yesterday: { spendCents: 321, impressions: 1812, clicks: 19, inlineLinkClicks: 11 },
     cpcWarnEur: 0.5,
     zeroSpendMode: "message",
-    pacing: computePacing({ today: "2026-10-15", mtdCents: 4510, completeDaysCents: 4300, monthlyCapEur: 100 }),
+    pacing: computePacing({ month: month("2026-10-15"), mtdCents: 4510, completeDaysCents: 4300, monthlyCapEur: 100 }),
     spendCap: { capCents: 10000, headroomCents: 5490 },
     activeAds: 2,
     fatigued: [],
@@ -84,7 +88,7 @@ describe("formatDigest", () => {
 
   it("warns when the pacing goes over the monthly cap", () => {
     const input = normalDay({
-      pacing: computePacing({ today: "2026-10-20", mtdCents: 8200, completeDaysCents: 7800, monthlyCapEur: 100 }),
+      pacing: computePacing({ month: month("2026-10-20"), mtdCents: 8200, completeDaysCents: 7800, monthlyCapEur: 100 }),
       spendCap: { capCents: 10000, headroomCents: 1800 },
     });
     const text = formatDigest(input)!;
@@ -141,7 +145,7 @@ describe("formatDigest", () => {
 
 describe("computePacing", () => {
   it("projects from complete days only", () => {
-    expect(computePacing({ today: "2026-10-11", mtdCents: 3500, completeDaysCents: 3000, monthlyCapEur: 100 })).toEqual({
+    expect(computePacing({ month: month("2026-10-11"), mtdCents: 3500, completeDaysCents: 3000, monthlyCapEur: 100 })).toEqual({
       today: "2026-10-11",
       mtdCents: 3500,
       completeDays: 10,
@@ -153,11 +157,11 @@ describe("computePacing", () => {
   });
 
   it("has no projection on the 1st", () => {
-    expect(computePacing({ today: "2026-11-01", mtdCents: 120, completeDaysCents: 0, monthlyCapEur: 100 }).projectedCents).toBeNull();
+    expect(computePacing({ month: month("2026-11-01"), mtdCents: 120, completeDaysCents: 0, monthlyCapEur: 100 }).projectedCents).toBeNull();
   });
 
   it("uses the month length of the account-local date", () => {
-    expect(computePacing({ today: "2026-02-15", mtdCents: 0, completeDaysCents: 0, monthlyCapEur: 100 }).daysInMonth).toBe(28);
-    expect(computePacing({ today: "2026-09-15", mtdCents: 0, completeDaysCents: 0, monthlyCapEur: 100 }).daysInMonth).toBe(30);
+    expect(computePacing({ month: month("2026-02-15"), mtdCents: 0, completeDaysCents: 0, monthlyCapEur: 100 }).daysInMonth).toBe(28);
+    expect(computePacing({ month: month("2026-09-15"), mtdCents: 0, completeDaysCents: 0, monthlyCapEur: 100 }).daysInMonth).toBe(30);
   });
 });

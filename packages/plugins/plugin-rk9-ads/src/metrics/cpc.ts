@@ -7,30 +7,10 @@
  * - CTR is link CTR in percent: inline_link_clicks / impressions × 100.
  * - CPM: spend / impressions × 1000.
  *
- * Money is integer minor units (cents). Insights `spend` arrives as a decimal
- * string in major units ("3.21"), unlike the account money fields, which are
- * minor units. `parseSpendCents` converts it with string math, so 0.1 + 0.2
- * style float errors cannot reach a sum.
+ * Money is integer minor units (cents). Insights `spend` is a decimal string
+ * in major units ("3.21"); parse it with `parseDecimalMoney` of the Meta
+ * client (src/meta/methods.ts, G12), never with float math.
  */
-
-const DECIMAL_RE = /^(\d+)(?:\.(\d+))?$/;
-
-/** "3.21" -> 321. Rounds half up past two decimals. Throws on anything that is not a non-negative decimal. */
-export function parseSpendCents(value: unknown): number {
-  if (typeof value === "number") {
-    if (!Number.isFinite(value) || value < 0) throw new Error("spend must be a non-negative number");
-    return Math.round(value * 100);
-  }
-  if (value === undefined || value === null || value === "") return 0;
-  if (typeof value !== "string") throw new Error("spend must be a decimal string");
-  const match = DECIMAL_RE.exec(value.trim());
-  if (!match) throw new Error("spend must be a non-negative decimal string");
-  const whole = Number(match[1]);
-  const fraction = (match[2] ?? "").padEnd(3, "0");
-  const cents = whole * 100 + Number(fraction.slice(0, 2)) + (Number(fraction[2]) >= 5 ? 1 : 0);
-  if (!Number.isSafeInteger(cents)) throw new Error("spend is out of range");
-  return cents;
-}
 
 /** Non-negative integer count from a Graph string or number; missing is 0. */
 export function parseCount(value: unknown): number {

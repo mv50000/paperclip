@@ -1,8 +1,9 @@
 /**
  * Company-scoped SQL for insights, digest and fatigue (A10, RK9-512).
  *
- * The generic helpers in ../db.ts cannot express upserts, sums or time
- * windows, so this module writes those statements itself under the same
+ * Plain inserts and lookups go through the generic ledger helpers (../db.ts).
+ * They cannot express upserts, sums or time windows, so this module writes
+ * those statements itself under the same
  * rules: `companyId` is always `$1` and every statement filters or inserts
  * `company_id = $1`; table and column names are literals of this file, never
  * caller strings. Only tables of migration 001 are used (no migration 003):
@@ -10,6 +11,7 @@
  */
 
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
+import { createLedger } from "../db.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -112,6 +114,7 @@ function centsToDecimal(cents: number): string {
 export function createInsightsStore(db: PluginDatabaseClient) {
   const ns = db.namespace;
   if (!NAMESPACE_RE.test(ns)) throw new Error(`Invalid plugin namespace ${ns}`);
+  const ledger = createLedger(db);
 
   return {
     /**
@@ -282,22 +285,12 @@ export function createInsightsStore(db: PluginDatabaseClient) {
 
     /** Inserts a once-only marker. True when this call created it. */
     async markOnce(companyId: string, dedupeKey: string, kind: string, metadata: Record<string, unknown> = {}): Promise<boolean> {
-      assertCompanyId(companyId);
-      const result = await db.execute(
-        `INSERT INTO ${ns}.alert_dedupe (company_id, dedupe_key, kind, metadata) VALUES ($1, $2, $3, $4::jsonb) ` +
-          `ON CONFLICT (company_id, dedupe_key) DO NOTHING`,
-        [companyId, dedupeKey, kind, JSON.stringify(metadata)],
-      );
-      return result.rowCount === 1;
+      const { inserted } = await ledger.insertIfAbsent(companyId, "alert_dedupe", { dedupe_key: dedupeKey, kind, metadata });
+      return inserted;
     },
 
     async hasMark(companyId: string, dedupeKey: string): Promise<boolean> {
-      assertCompanyId(companyId);
-      const rows = await db.query<{ n: unknown }>(
-        `SELECT count(*)::int AS n FROM ${ns}.alert_dedupe WHERE company_id = $1 AND dedupe_key = $2`,
-        [companyId, dedupeKey],
-      );
-      return num(rows[0]?.n) > 0;
+      return (await ledger.count(companyId, "alert_dedupe", { dedupe_key: dedupeKey })) > 0;
     },
 
     /** Removes a marker this run created and could not follow through on. */
@@ -321,25 +314,15 @@ export function createInsightsStore(db: PluginDatabaseClient) {
     },
 
     async digestRun(companyId: string, digestDate: string): Promise<DigestRunRow | null> {
-      assertCompanyId(companyId);
       assertDate(digestDate, "digestDate");
-      const rows = await db.query<Record<string, unknown>>(
-        `SELECT status, attempts FROM ${ns}.digest_runs WHERE company_id = $1 AND digest_date = $2::date`,
-        [companyId, digestDate],
-      );
-      const row = rows[0];
+      const [row] = await ledger.select(companyId, "digest_runs", { where: { digest_date: digestDate }, limit: 1 });
       return row ? { status: row.status as DigestRunRow["status"], attempts: num(row.attempts) } : null;
     },
 
     /** Creates the day's digest row if missing. Runs before any send. */
     async ensureDigestRun(companyId: string, brandCode: string, digestDate: string): Promise<void> {
-      assertCompanyId(companyId);
       assertDate(digestDate, "digestDate");
-      await db.execute(
-        `INSERT INTO ${ns}.digest_runs (company_id, brand_code, digest_date, status) VALUES ($1, $2, $3::date, 'pending') ` +
-          `ON CONFLICT (company_id, digest_date) DO NOTHING`,
-        [companyId, brandCode, digestDate],
-      );
+      await ledger.insertIfAbsent(companyId, "digest_runs", { brand_code: brandCode, digest_date: digestDate, status: "pending" });
     },
 
     /**
