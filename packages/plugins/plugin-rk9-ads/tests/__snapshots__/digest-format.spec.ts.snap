@@ -1,0 +1,50 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`formatDigest > flags a fatigued ad and lists rule actions, gates and warnings 1`] = `
+"📊 Ololla · mainosraportti 14.10.2026
+Eilen: 3,21 € · 1 812 näyttöä · 19 klikkiä · 11 linkkiklikkiä
+CTR 0,61 % · CPC 0,29 €
+Kuukausi: 45,10 € / 100,00 € (45 %)
+Ennuste kuun loppuun: 95,21 €
+Metan kulutusraja: 100,00 €, jäljellä 54,90 €
+Aktiivisia mainoksia: 2
+
+🔁 väsynyt: Syysreel 1 (120248676310950775) – CTR laskenut, CPC noussut
+
+⚙️ Sääntötoimet (24 h): 1
+• cpc-high: pysäytys ad 120248676310950775 (varjotila)
+
+🟡 Odottaa hyväksyntää: 1
+• mainoksen aktivointi 120248676310950999
+
+⚠️ Varoitukset:
+• Metan tilillä ei ole kulutusrajaa (spend_cap)"
+`;
+
+exports[`formatDigest > formats a normal day 1`] = `
+"📊 Ololla · mainosraportti 14.10.2026
+Eilen: 3,21 € · 1 812 näyttöä · 19 klikkiä · 11 linkkiklikkiä
+CTR 0,61 % · CPC 0,29 €
+Kuukausi: 45,10 € / 100,00 € (45 %)
+Ennuste kuun loppuun: 95,21 €
+Metan kulutusraja: 100,00 €, jäljellä 54,90 €
+Aktiivisia mainoksia: 2"
+`;
+
+exports[`formatDigest > formats a zero-spend day in message mode 1`] = `
+"📊 Ololla · mainosraportti 14.10.2026
+Eilen: 0 € kulutus, ei aktiivisia mainoksia
+Kuukausi: 45,10 € / 100,00 € (45 %)
+Ennuste kuun loppuun: 95,21 €
+Metan kulutusraja: 100,00 €, jäljellä 54,90 €"
+`;
+
+exports[`formatDigest > warns when the pacing goes over the monthly cap 1`] = `
+"📊 Ololla · mainosraportti 14.10.2026
+Eilen: 3,21 € · 1 812 näyttöä · 19 klikkiä · 11 linkkiklikkiä
+CTR 0,61 % · CPC 0,29 €
+Kuukausi: 82,00 € / 100,00 € (82 %)
+Ennuste kuun loppuun: 127,26 € ⚠️ ylittää katon 100,00 €
+Metan kulutusraja: 100,00 €, jäljellä 18,00 €
+Aktiivisia mainoksia: 2"
+`;

@@ -264,6 +264,80 @@ the core chat-channels bot is never shared. See
   `action = none` (rule ids `spend-guard`, `spend-alert-80`,
   `spend-alert-100`), because migration 001 has no other fitting type.
 
+## Insights, digest and fatigue (RK9-512)
+
+Code: `src/insights/`, `src/digest/`, `src/metrics/cpc.ts`, wired in
+`src/features/insights/register.ts`. No new tables: it uses `insights_daily`,
+`digest_runs`, `alert_dedupe`, `rule_actions` and `gate_requests` of
+migration 001. All SQL is in `src/insights/store.ts` and binds `company_id` as
+`$1`.
+
+Metrics (`src/metrics/cpc.ts`, the one definition, G18): CPC is link CPC,
+`spend / inline_link_clicks` (the Sunspot SOP definition, not Meta's `cpc`).
+CTR is link CTR in percent. CPM is `spend / impressions × 1000`. Money is
+integer cents; insights `spend` is parsed from Graph's decimal string exactly.
+
+Jobs (UTC cron; local time is computed in the job):
+
+| Job | Schedule | What it does |
+|---|---|---|
+| `insights-hourly` | `5 * * * *` | Yesterday's and today's ad-level rows (one `level=ad`, `time_increment=1` call per brand), so late reporting for yesterday is in before the digest. |
+| `insights-daily-close` | `20 * * * *` | First run of a new local date (`timeZone`, default Europe/Helsinki): re-pulls the last 7 days to yesterday, marks days older than 3 days final, then files fatigue issues if enabled. Marker `insights-close:<date>` in `alert_dedupe`. |
+| `digest-tick` | `*/15 * * * *` | Sends the digest once per local date at or after `digest.time`. |
+
+Rows are upserted by `(company_id, ad_id, date)`, so a re-run gives the same
+rows and values. Dates are ad-account-local (`timezone_name` from the account).
+Each brand runs in its own try/catch: a Graph error, token 190 or rate limit is
+logged and stored as an `insights_warning` marker, which the digest shows. When
+Meta rejects a field (code 100), the core fields are fetched alone and each
+optional field (`reach`, `frequency`, `actions`) is tried on its own. `actions`
+is fetched only when the brand has `meta.datasetId`.
+
+Actions (company from the host context, no manifest entry): `digest.dryRun`
+returns the digest text and writes nothing; `insights.backfill { days: 1-31 }`
+re-pulls that many days.
+
+Digest config (`digest` block): `enabled` (default true), `time` (default
+`07:30`, brand time zone), `cpcWarnEur` (default 0.50, ⚠️ above it) and
+`zeroSpendMode` (`message` sends "0 € kulutus, ei aktiivisia mainoksia";
+`silent` sends nothing on such a day unless there is a warning, a gate card, a
+fatigued ad or a rule action). A day's row in `digest_runs` is inserted before
+the send and each attempt is claimed with a compare-and-set, so a day is sent
+at most once. A failed send is retried after 10 minutes, at most 5 attempts.
+A row left pending (a worker restart mid-send, or a send whose "sent" write
+failed) is closed as failed after 10 minutes and never resent: its send state
+is unknown, and a missed digest is better than a duplicate. A bot that is not
+ready yet uses no attempt.
+MTD and pacing are computed in the ad-account time zone from `insights_daily`;
+the projection uses complete days only. Headroom is Meta `spend_cap −
+amount_spent`. The digest warns when `spend_cap` is missing or above the
+monthly cap, and when `amount_spent` is well above MTD after the 1st (the
+monthly reset looks missing, G2).
+
+Fatigue (`computeFatigue(series, thresholds, asOf)`, pure): status
+`insufficient-data` below `minImpressions` total, `fatigued` with two or more
+signals, `watch` with one, else `ok`. Fatigue never pauses or changes an ad.
+
+| Threshold | Default | Source |
+|---|---|---|
+| `minImpressions` | 1000 | config `fatigue.minImpressions` |
+| `maxFrequency` | 3.5 (impressions-weighted daily frequency, last 3 days) | config `fatigue.maxFrequency` |
+| `ctrDropPct` | 30 % below baseline link CTR | config `fatigue.ctrDropPct` |
+| `cpcRisePct` / `cpmRisePct` | 40 % above baseline | code default |
+| `maxAgeDays` | 28 days since first delivery | code default |
+| baseline | first 3 delivery days, extended to ≥ 300 impressions (max 7 days) | code default |
+| recent window | last 3 days, ≥ 300 impressions | code default |
+
+The baseline is derived from `insights_daily` on each run (no `ad_baselines`
+table). With `fatigue.issuesEnabled=true` (default false) a fatigued ad gets
+one Paperclip issue in its company (`originKind` `plugin:rk9-ads`), deduped by
+the `fatigue-issue:<adId>` marker. The plugin cannot read issues, so the marker
+stays after the issue closes: one issue per ad.
+
+Parity: `RK9_ADS_LIVE_SMOKE=1 pnpm exec tsx scripts/parity-sunspot-insights.ts
+[--date YYYY-MM-DD]` reads one Sunspot day both as the SOP does and through the
+ingest, read-only, and compares spend, impressions, link clicks and CPC.
+
 ## Architecture decisions
 
 ### ADR 1: The core/plugin boundary
