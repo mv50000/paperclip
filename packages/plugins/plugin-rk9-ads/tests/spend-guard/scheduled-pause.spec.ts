@@ -254,10 +254,10 @@ describe("MTD alerts", () => {
     expect(r.ruleActions()[0]).toMatchObject({ rule_id: "spend-alert-80", applied: false });
   });
 
-  it("skips alerts (and retries next tick) when the MTD read fails", async () => {
+  it("fails the run, skips alerts and retries next tick when the MTD read fails", async () => {
     const r = alertRig("81.00");
     r.meta.fail = (call) => (call.path.endsWith("/insights") ? new Error("timeout") : null);
-    await r.harness.runJob("scheduled-pause");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/OLL alerts: MTD not read \(meta_read_failed/);
     expect(r.notifier.cards).toHaveLength(0);
     r.meta.fail = () => null;
     r.clock.now = new Date(r.clock.now.getTime() + 5 * 60_000);

@@ -2,7 +2,8 @@
  * The `scheduled-pause` job (A6, RK9-511). The host cron is UTC only (G18),
  * so the job runs every 5 minutes and decides in the brand's local time:
  *
- * 1. MTD alerts, at most every ALERT_CHECK_INTERVAL_MS per company.
+ * 1. MTD alerts, at most every ALERT_CHECK_INTERVAL_MS per company. A failed
+ *    MTD read fails the run and is retried on the next tick.
  * 2. Scheduled pause: when `schedule.scheduledPause.enabled` and the local
  *    time is at or after `at` (21:30 is right in both EET and EEST), once per
  *    local day. The day's marker is written only after the Meta part
@@ -70,7 +71,9 @@ async function runForCompany(deps: ScheduledPauseDeps, job: PluginJobContext, co
     if (await alertsDue(ctx, companyId, now)) {
       const figures = await checkSpend({ config, client: brandReadClient(ctx, companyId, config), now });
       if (figures.pctUsed === null) {
-        ctx.logger.warn("rk9-ads spend guard: MTD read failed, alerts not evaluated", { companyId, reason: figures.reason, detail: figures.detail });
+        // Not marked as checked, so the next tick retries. The run fails, so an
+        // expired token does not silence the alerts unnoticed.
+        failures.push(`${brand} alerts: MTD not read (${figures.reason}: ${figures.detail})`);
       } else {
         await ctx.state.set(alertCheckKey(companyId), now.toISOString());
         const outcome = await evaluateSpendAlerts(deps, companyId, config, figures, initiator);

@@ -32,7 +32,7 @@ import {
   adAccountPath,
   getAccountSpendCents,
   getAccountSummary,
-  getObjectAccountId,
+  getAdOwner,
   listBudgets,
   parseMinorUnits,
 } from "../../meta/methods.js";
@@ -47,6 +47,7 @@ export const GUARD_DENY_REASONS = [
   "meta_read_failed",
   "meta_read_timeout",
   "object_not_in_account",
+  "account_timezone_mismatch",
   "unsupported_write",
   "gate_required",
 ] as const;
@@ -255,7 +256,12 @@ export interface GuardCheckInput {
 /**
  * guard.check: re-reads Meta and decides. A non-activating write that does
  * not raise any budget is allowed once the reads succeed (`not_spend_raising`),
- * so a budget cut is never blocked by the cap it protects.
+ * so the cap never blocks a budget cut. (The hook still asks `authorizeSpend`
+ * first, and its default refuses every budget write.)
+ *
+ * MTD uses local month bounds in `config.timeZone`, and Meta reads the
+ * insights time_range in the account's time zone. When the two differ, MTD
+ * would be off by hours of spend, so the guard refuses.
  */
 export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
   const { config, client } = input;
@@ -271,6 +277,7 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
     numbers = await withTimeout(
       (async () => {
         const summary = await getAccountSummary(client, account);
+        if (summary.timezone !== config.timeZone) throw new TimezoneMismatchError(summary.timezone, config.timeZone);
         const mtdCents = await getAccountSpendCents(client, account, { since: bounds.since, until: bounds.until });
         const budgets = await listBudgets(client, account, { maxPages: LIST_MAX_PAGES });
         if (change?.objectId) {
@@ -278,13 +285,16 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
           if (known) {
             change.level = known.level;
           } else {
-            // Not a campaign or ad set of this account: it must be an ad of it.
-            const owner = await getObjectAccountId(client, change.objectId);
-            if (`act_${owner}` !== account) throw new ObjectNotInAccountError(change.objectId);
-            change.level = "ad";
+            // Not a listed campaign or ad set of this account. Only an ad of it
+            // passes: an unlisted (e.g. archived) campaign or ad set would
+            // carry a budget the projection does not count. getAdOwner fails
+            // on anything but an ad.
             if (change.dailyBudgetCents !== undefined || change.lifetimeBudgetCents !== undefined) {
-              throw new UnsupportedWriteError("a budget can only be set on a campaign or an ad set");
+              throw new UnsupportedWriteError("a budget can only be set on a listed campaign or ad set");
             }
+            const owner = await getAdOwner(client, change.objectId);
+            if (`act_${owner.accountId}` !== account) throw new ObjectNotInAccountError(change.objectId);
+            change.level = "ad";
           }
         }
         const before = projectBudgets(budgets, null);
@@ -314,6 +324,9 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
     if (error instanceof UnsupportedWriteError) {
       return { ...emptyFigures(config, now), allow: false, reason: "unsupported_write", detail: error.message };
     }
+    if (error instanceof TimezoneMismatchError) {
+      return { ...emptyFigures(config, now), allow: false, reason: "account_timezone_mismatch", detail: error.message };
+    }
     return readFailure(config, now, error);
   }
 
@@ -326,6 +339,13 @@ class ObjectNotInAccountError extends Error {
   constructor(objectId: string) {
     super(`object ${objectId} does not belong to the brand's ad account`);
     this.name = "ObjectNotInAccountError";
+  }
+}
+
+class TimezoneMismatchError extends Error {
+  constructor(accountTimeZone: string, configTimeZone: string) {
+    super(`the ad account reports in ${accountTimeZone} but the brand's month is ${configTimeZone}`);
+    this.name = "TimezoneMismatchError";
   }
 }
 
@@ -344,6 +364,15 @@ const CREATE_EDGE_RE = /^act_(\d+)\/(campaigns|adsets|ads)$/;
 const NODE_RE = /^\d+$/;
 const NODE_WRITE_KEYS = new Set(["name", "status", "daily_budget", "lifetime_budget"]);
 const CREATE_LEVEL = { campaigns: "campaign", adsets: "adset", ads: "ad" } as const;
+/**
+ * Budget fields the projection does not model, e.g. `budget_schedule_specs`
+ * (scheduled budget increases) or `adset_budgets`. Refused on every write,
+ * also on a PAUSED create, which the default hook would let through.
+ */
+const PLAIN_BUDGET_KEYS = new Set(["daily_budget", "lifetime_budget"]);
+export function unmodelledBudgetKeys(fields: Record<string, unknown>): string[] {
+  return Object.keys(fields).filter((key) => fields[key] !== undefined && /budget/i.test(key) && !PLAIN_BUDGET_KEYS.has(key));
+}
 
 function budgetField(fields: Record<string, unknown>, key: string): number | null | undefined {
   if (!Object.hasOwn(fields, key) || fields[key] === undefined) return undefined;
@@ -443,14 +472,16 @@ export function createSpendGuardHook(options: SpendGuardHookOptions) {
   const authorize =
     options.authorizeSpend ?? (() => ({ allow: false, reason: "spend-raising writes need the activation gate (G1)" }));
   return async (plan: WritePlan): Promise<GuardDecision> => {
-    const base = pausedOnlyWrites(plan);
-    if (base.allow) return base;
     const now = options.now?.() ?? new Date();
     const refuse = async (reason: GuardDenyReason, detail: string): Promise<GuardDecision> => {
       const result: GuardResult = { ...emptyFigures(options.config, now), allow: false, reason, detail: redactText(detail).slice(0, 300) };
       if (options.onDecision) await options.onDecision(result, plan);
       return { allow: false, reason: `spend_guard:${reason}: ${result.detail}` };
     };
+    const unmodelled = unmodelledBudgetKeys(plan.fields);
+    if (unmodelled.length > 0) return refuse("unsupported_write", `the spend guard does not model the fields ${unmodelled.join(", ")}`);
+    const base = pausedOnlyWrites(plan);
+    if (base.allow) return base;
     const classified = classifySpendWrite(plan, account);
     if (!classified.ok) return refuse("unsupported_write", classified.reason);
     const authorized = await authorize(plan, classified.change);

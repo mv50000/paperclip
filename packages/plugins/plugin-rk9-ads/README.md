@@ -117,7 +117,11 @@ the core chat-channels bot is never shared. See
   `spend_cap`, when Meta's headroom (`spend_cap - amount_spent`) is above the
   rest of the monthly cap (G2), when MTD + daily budgets x remaining local days
   (today included) + lifetime budgets exceeds `monthlyCapEur`, and when any
-  read fails or takes over 60 s. A budget cut is never blocked.
+  read fails or takes over 60 s, and when the ad account's time zone is not
+  `timeZone` (MTD would be off). The cap itself never blocks a budget cut, but
+  `authorizeSpend` is asked first, and its default refuses every budget write.
+  Fields that modify a budget in ways the projection does not model (e.g.
+  `budget_schedule_specs`) are refused on every write.
 - **Kill switch** (`killswitch.ts`). `pauseAll()` pauses every ad whose status
   is ACTIVE and then the campaign. The scope is `meta.campaignId`, or the whole
   ad account when it is not set. Triggers: the UI action `pause-all`

@@ -191,6 +191,16 @@ describe("checkSpend: fresh Meta reads, fail-closed", () => {
     expect(result).toMatchObject({ allow: false, reason: "meta_read_failed", mtdEur: null, projectedMonthEndEur: null });
   });
 
+  it("denies when the ad account's time zone is not the brand's (MTD would be off)", async () => {
+    const meta = ollolaMeta("10.00", "100");
+    meta.account = { ...meta.account, timezone_name: "Asia/Tokyo" };
+    expect(await checkSpend({ config: OLLOLA, client: metaClient(meta), now: OCT_21 })).toMatchObject({
+      allow: false,
+      reason: "account_timezone_mismatch",
+      mtdEur: null,
+    });
+  });
+
   it("denies when an insights row has no spend (missing spend never reads as zero)", async () => {
     const meta = ollolaMeta("10.00", "100");
     meta.spend = () => "";
@@ -323,6 +333,36 @@ describe("guardedWrite hook: every spend-raising write passes the guard", () => 
       "unsupported_write",
       "object_not_in_account",
     ]);
+  });
+
+  it("refuses to activate a campaign or ad set the account listing leaves out (e.g. archived)", async () => {
+    const meta = ollolaMeta("10.00", "100");
+    meta.campaigns.push({ id: "500", name: "archived", status: "PAUSED", daily_budget: "50000" });
+    meta.adsets.push({ id: "510", name: "archived set", status: "PAUSED", campaign_id: "100", daily_budget: "50000" });
+    meta.unlisted.add("500");
+    meta.unlisted.add("510");
+    const { client, decisions } = rig(meta, true);
+    await expect(setObjectStatus(client, "500", "ACTIVE")).rejects.toThrow(/meta_read_failed/);
+    await expect(setObjectStatus(client, "510", "ACTIVE")).rejects.toThrow(/meta_read_failed/);
+    await expect(client.post("500", { daily_budget: "100" })).rejects.toThrow(/unsupported_write/);
+    expect(meta.writes).toHaveLength(0);
+    expect(decisions.map((decision) => decision.reason)).toEqual(["meta_read_failed", "meta_read_failed", "unsupported_write"]);
+    // A listed ad still activates through the ad lookup.
+    await setObjectStatus(client, "300", "ACTIVE");
+    expect(meta.writes.map((call) => [call.path, call.body.status])).toEqual([["300", "ACTIVE"]]);
+  });
+
+  it("refuses budget fields the projection does not model, also on a PAUSED create", async () => {
+    const meta = ollolaMeta("10.00", "100");
+    const { client, decisions } = rig(meta, true);
+    const specs = JSON.stringify([{ budget_value: 100000, time_start: 1, time_end: 2 }]);
+    await expect(client.post(`${ACT}/adsets`, { name: "x", status: "PAUSED", daily_budget: "100", budget_schedule_specs: specs })).rejects.toThrow(
+      /unsupported_write: .*budget_schedule_specs/,
+    );
+    await expect(client.post(`${ACT}/campaigns`, { name: "x", status: "ACTIVE", adset_budgets: "[]" })).rejects.toThrow(/unsupported_write/);
+    await expect(client.post("200", { budget_schedule_specs: specs })).rejects.toThrow(/unsupported_write/);
+    expect(meta.writes).toHaveLength(0);
+    expect(decisions.every((decision) => decision.reason === "unsupported_write")).toBe(true);
   });
 
   it("refuses when a Meta read fails during the check", async () => {

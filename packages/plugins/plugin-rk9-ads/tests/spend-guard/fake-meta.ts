@@ -45,6 +45,8 @@ export class FakeMeta {
   ads: FakeObject[] = [];
   /** Object ids that belong to another ad account. */
   readonly foreign = new Set<string>();
+  /** Object ids the list edges leave out, like an archived campaign. */
+  readonly unlisted = new Set<string>();
   /** Objects per page of a list edge. */
   pageSize = 100;
   readonly calls: FakeCallRecord[] = [];
@@ -76,6 +78,7 @@ export class FakeMeta {
   }
 
   private page(path: string, params: Record<string, string>, rows: FakeObject[]): Response {
+    rows = rows.filter((row) => !this.unlisted.has(row.id));
     const offset = Number(params.after ?? "0");
     const slice = rows.slice(offset, offset + this.pageSize);
     const nextOffset = offset + this.pageSize;
@@ -113,7 +116,13 @@ export class FakeMeta {
       if (campaignAds) return this.page(path, params, this.ads.filter((ad) => ad.campaign_id === campaignAds[1]));
       const object = this.all().find((entry) => entry.id === path);
       if (!object) return json(400, { error: { message: "Unsupported get request", type: "GraphMethodException", code: 100 } });
-      if (params.fields === "account_id") return json(200, { id: object.id, account_id: this.foreign.has(object.id) ? "999" : this.accountId });
+      if (params.fields === "account_id,adset_id") {
+        // Graph has no adset_id field on a campaign or an ad set.
+        if (!this.ads.includes(object)) {
+          return json(400, { error: { message: "(#100) Tried accessing nonexisting field (adset_id)", type: "OAuthException", code: 100 } });
+        }
+        return json(200, { id: object.id, account_id: this.foreign.has(object.id) ? "999" : this.accountId, adset_id: object.adset_id ?? "200" });
+      }
       return json(200, withEffective(object));
     }
     if (method === "POST") {

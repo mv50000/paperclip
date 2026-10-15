@@ -256,12 +256,16 @@ export async function getAccountSpendCents(
   return rows.reduce((sum, row) => sum + parseDecimalMoney(row.spend, "spend"), 0);
 }
 
-/** The ad account (digits, no act_ prefix) that owns a campaign, ad set or ad. */
-export async function getObjectAccountId(client: MetaGraphClient, objectId: string): Promise<string> {
-  const raw = await client.get<{ account_id?: unknown }>(requireId(objectId, "objectId"), { fields: "account_id" });
+/**
+ * The ad account (digits, no act_ prefix) and the parent ad set of an ad.
+ * Graph has no `adset_id` field on a campaign or an ad set and answers that
+ * read with an error, so only an ad reads successfully.
+ */
+export async function getAdOwner(client: MetaGraphClient, adId: string): Promise<{ accountId: string; adsetId: string }> {
+  const raw = await client.get<{ account_id?: unknown; adset_id?: unknown }>(requireId(adId, "adId"), { fields: "account_id,adset_id" });
   const accountId = normaliseAdAccountId(requireString(raw.account_id, "account_id"));
   if (!accountId) throw new MetaResponseError("Graph field account_id is not an ad account id");
-  return accountId;
+  return { accountId, adsetId: requireString(raw.adset_id, "adset_id") };
 }
 
 /** Status of one campaign, ad set or ad. */
