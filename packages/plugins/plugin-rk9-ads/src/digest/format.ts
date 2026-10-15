@@ -29,7 +29,7 @@ export interface DigestInput {
   pacing: Pacing | null;
   /** Meta account spend_cap and its headroom (spend_cap − amount_spent), cents. */
   spendCap: { capCents: number | null; headroomCents: number | null } | null;
-  /** Ads with effective_status ACTIVE; null when unknown. */
+  /** Ads with effective_status ACTIVE; null when unknown (then the zero-day line is not used). */
   activeAds: number | null;
   fatigued: Array<{ adId: string; adName?: string | null; signals: FatigueSignal[] }>;
   ruleActions: RuleActionSummary[];
@@ -106,7 +106,8 @@ export function truncateForTelegram(text: string, limit = TELEGRAM_TEXT_UTF16_LI
 }
 
 function isZeroDay(input: DigestInput): boolean {
-  return input.yesterday.spendCents === 0 && (input.activeAds === null || input.activeAds === 0);
+  // An unknown ad count (Graph unreadable) is not "no active ads".
+  return input.yesterday.spendCents === 0 && input.activeAds === 0;
 }
 
 function hasNews(input: DigestInput): boolean {

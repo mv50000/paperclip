@@ -67,6 +67,12 @@ describe("formatDigest", () => {
     expect(text).toMatchSnapshot();
   });
 
+  it("does not claim 'no active ads' when the ad count is unknown", () => {
+    const text = formatDigest(normalDay({ yesterday: { spendCents: 0, impressions: 0, clicks: 0, inlineLinkClicks: 0 }, activeAds: null }))!;
+    expect(text).toContain("Eilen: 0,00 € · 0 näyttöä");
+    expect(text).not.toContain("ei aktiivisia mainoksia");
+  });
+
   it("returns null for a quiet zero-spend day in silent mode", () => {
     const input = normalDay({
       yesterday: { spendCents: 0, impressions: 0, clicks: 0, inlineLinkClicks: 0 },
