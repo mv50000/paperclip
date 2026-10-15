@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://paperclip.rk9.fi/schemas/rk9-ads/creative-manifest.v1.schema.json",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "1"
+    },
+    "brand": {
+      "type": "string",
+      "pattern": "^[A-Z0-9]{2,10}$",
+      "description": "Brand code; must equal the company config brandCode."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "image",
+        "video"
+      ]
+    },
+    "mediaUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "Public https URL of the finished media. Meta fetches it; the plugin does not."
+    },
+    "posterUrl": {
+      "description": "Video only: public https URL of the poster image.",
+      "type": "string",
+      "maxLength": 2048,
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lower-case hex sha256 of the media bytes. Dedupe key; the plugin does not download the media to verify it."
+    },
+    "aspectRatio": {
+      "type": "string",
+      "enum": [
+        "9:16",
+        "4:5",
+        "1:1",
+        "1.91:1",
+        "16:9"
+      ]
+    },
+    "copy": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "cta": {
+      "type": "string",
+      "enum": [
+        "LEARN_MORE",
+        "SHOP_NOW",
+        "BOOK_TRAVEL",
+        "SIGN_UP",
+        "CONTACT_US",
+        "GET_OFFER",
+        "GET_QUOTE",
+        "SUBSCRIBE",
+        "APPLY_NOW",
+        "ORDER_NOW",
+        "BUY_NOW",
+        "BUY_TICKETS",
+        "SEE_MORE",
+        "WATCH_MORE",
+        "DOWNLOAD",
+        "GET_DIRECTIONS",
+        "DONATE_NOW",
+        "NO_BUTTON"
+      ]
+    },
+    "landingUrlKey": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Key into the company config landing.urls. A manifest never carries a raw landing URL."
+    },
+    "utmCampaign": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}$"
+    },
+    "validUntil": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+      "description": "ISO 8601 instant with an offset; must be in the future."
+    },
+    "targetAdsetId": {
+      "type": "string",
+      "pattern": "^\\d{1,32}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "brand",
+    "kind",
+    "mediaUrl",
+    "sha256",
+    "aspectRatio",
+    "copy",
+    "cta",
+    "landingUrlKey",
+    "utmCampaign",
+    "validUntil",
+    "idempotencyKey"
+  ],
+  "additionalProperties": false,
+  "title": "RK9 Ads creative manifest v1",
+  "description": "A finished creative that a brand repo hands to the RK9 Ads plugin (rk9ads_stage_creative or POST /api/plugins/<pluginId>/api/creatives)."
+}
