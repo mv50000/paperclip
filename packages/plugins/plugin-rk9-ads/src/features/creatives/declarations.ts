@@ -44,11 +44,5 @@ export const creativesDeclarations: FeatureDeclarations = {
         },
       },
     },
-    {
-      name: "rk9ads_get_pacing",
-      displayName: "Get spend pacing",
-      description: "Read-only: month-to-date spend against the monthly cap.",
-      parametersSchema: { type: "object", properties: {} },
-    },
   ],
 };

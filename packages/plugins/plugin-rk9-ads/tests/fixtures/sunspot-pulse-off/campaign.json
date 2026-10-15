@@ -1,0 +1,9 @@
+{
+ "source": "Recorded 2026-10-15 read-only from the Sunspot ad account (G19): GET 120247250925830775?fields=id,name,status,effective_status",
+ "body": {
+  "id": "120247250925830775",
+  "name": "Aurinkopulssi",
+  "status": "PAUSED",
+  "effective_status": "PAUSED"
+ }
+}

@@ -1,0 +1,191 @@
+{
+ "source": "Recorded 2026-10-15 read-only from the Sunspot ad account (G19): GET 120247250925830775/ads (one page, paging removed)",
+ "body": {
+  "data": [
+   {
+    "id": "120248676310950775",
+    "name": "Aurinkopulssi reel 2026-09-15",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248499449520775",
+    "name": "Aurinkopulssi reel 2026-09-02",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248441720170775",
+    "name": "Aurinkopulssi reel 2026-08-28",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248358668610775",
+    "name": "Aurinkopulssi reel 2026-08-21",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248337384720775",
+    "name": "Aurinkopulssi reel 2026-08-19",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248334985050775",
+    "name": "Aurinkopulssi reel 2026-08-19",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248314118690775",
+    "name": "Aurinkopulssi reel 2026-08-18",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248287148830775",
+    "name": "Aurinkopulssi reel 2026-08-17",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248273533010775",
+    "name": "Aurinkopulssi reel 2026-08-16",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248256706830775",
+    "name": "Aurinkopulssi reel 2026-08-15",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248235617620775",
+    "name": "Aurinkopulssi reel 2026-08-14",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248219937960775",
+    "name": "Aurinkopulssi reel 2026-08-14",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248139644890775",
+    "name": "Aurinkopulssi reel 2026-08-11",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248135523680775",
+    "name": "Aurinkopulssi reel 2026-08-11",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248099301580775",
+    "name": "Aurinkopulssi reel 2026-08-09",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248096201310775",
+    "name": "Aurinkopulssi reel 2026-08-09",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120248075831570775",
+    "name": "Aurinkopulssi reel 2026-08-08",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120247993812690775",
+    "name": "Aurinkopulssi reel 2026-08-05",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120247918462700775",
+    "name": "Aurinkopulssi reel 2026-08-02",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120247903441870775",
+    "name": "Aurinkopulssi reel 2026-08-01",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120247876593440775",
+    "name": "Aurinkopulssi reel 2026-07-31",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120247861566570775",
+    "name": "Aurinkopulssi reel 2026-07-30",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   },
+   {
+    "id": "120247861081090775",
+    "name": "Aurinkopulssi reel 2026-07-30",
+    "status": "PAUSED",
+    "effective_status": "PAUSED",
+    "adset_id": "120247250925850775",
+    "campaign_id": "120247250925830775"
+   }
+  ]
+ }
+}

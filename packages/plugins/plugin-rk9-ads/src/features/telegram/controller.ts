@@ -214,6 +214,8 @@ export class TelegramController {
     validUntil: Date;
     card: GateCard & { mediaUrl?: string };
     payload?: Record<string, unknown>;
+    /** Button texts; default "✅ Hyväksy" / "❌ Hylkää". */
+    labels?: { approve?: string; deny?: string };
   }): Promise<{ id: string; messageId: number }> {
     const bot = this.botFor(input.companyId);
     if (!bot) throw new Error("Telegram is not configured or not ready for this company");
@@ -228,6 +230,7 @@ export class TelegramController {
       validUntil: input.validUntil,
       card: input.card,
       payload: input.payload,
+      labels: input.labels,
     });
   }
 

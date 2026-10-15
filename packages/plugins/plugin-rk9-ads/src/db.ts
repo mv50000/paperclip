@@ -181,6 +181,30 @@ export function createLedger(db: PluginDatabaseClient) {
     },
 
     /**
+     * Inserts one row unless it would break a unique constraint
+     * (`ON CONFLICT DO NOTHING`). `inserted` is false when the row already
+     * existed: a once-only claim, e.g. an alert_dedupe key.
+     */
+    async insertIfAbsent<T extends LedgerTable>(companyId: string, table: T, values: LedgerValues<T>): Promise<{ inserted: boolean }> {
+      assertCompanyId(companyId);
+      if ("company_id" in values) throw new Error("company_id comes from the companyId argument only");
+      const columns = ["company_id", "id"];
+      const params: unknown[] = [companyId, typeof (values as Record<string, unknown>).id === "string" ? String((values as Record<string, unknown>).id) : randomUUID()];
+      for (const [column, value] of Object.entries(values)) {
+        if (column === "id" || value === undefined) continue;
+        assertColumn(table, column);
+        columns.push(column);
+        params.push(toParam(column, value));
+      }
+      const placeholders = params.map((_, index) => `$${index + 1}`).join(", ");
+      const result = await db.execute(
+        `INSERT INTO ${qualified(table)} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`,
+        params,
+      );
+      return { inserted: result.rowCount === 1 };
+    },
+
+    /**
      * Updates rows of `companyId` that match every `where` column. Use it as a
      * compare-and-set: put the expected current status in `where` and check
      * `rowCount === 1`.

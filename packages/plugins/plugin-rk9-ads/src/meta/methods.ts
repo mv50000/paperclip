@@ -16,6 +16,7 @@ import {
   type AccountSummary,
   type Ad,
   type AdSet,
+  type BudgetObject,
   type Campaign,
   type InsightsLevel,
   type InsightsRow,
@@ -165,6 +166,106 @@ export async function listAds(client: MetaGraphClient, actId: string, options: L
     campaignId: optionalString(raw.campaign_id),
     creativeId: optionalString(raw.creative?.id),
   }));
+}
+
+/** Ads of one campaign (`<campaignId>/ads`), every page. */
+export async function listCampaignAds(client: MetaGraphClient, campaignId: string, options: ListOptions = {}): Promise<Ad[]> {
+  const path = `${requireId(campaignId, "campaignId")}/ads`;
+  const rows = complete(
+    await client.paginate<RawStatusRow>(path, listParams(`${STATUS_FIELDS},adset_id,campaign_id,creative{id}`, options), options),
+    path,
+  );
+  return rows.map((raw) => ({
+    ...toStatusRow(raw),
+    adsetId: optionalString(raw.adset_id),
+    campaignId: optionalString(raw.campaign_id),
+    creativeId: optionalString(raw.creative?.id),
+  }));
+}
+
+/** A budget field: "0", empty or absent means the object has no budget of that kind. */
+function parseBudget(value: unknown, field: string): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const cents = parseMinorUnits(value, field);
+  return cents === 0 ? null : cents;
+}
+
+interface RawBudgetRow extends RawStatusRow {
+  daily_budget?: unknown;
+  lifetime_budget?: unknown;
+}
+
+const BUDGET_FIELDS = `${STATUS_FIELDS},daily_budget,lifetime_budget`;
+
+/**
+ * Every campaign and ad set of an ad account with its daily and lifetime
+ * budget (spend guard projection, RK9-511). A truncated walk throws: a short
+ * list would make the projection low.
+ */
+export async function listBudgets(
+  client: MetaGraphClient,
+  actId: string,
+  options: ListOptions = {},
+): Promise<{ campaigns: BudgetObject[]; adsets: BudgetObject[] }> {
+  const account = adAccountPath(actId);
+  const campaignsPath = `${account}/campaigns`;
+  const adsetsPath = `${account}/adsets`;
+  const campaigns = complete(await client.paginate<RawBudgetRow>(campaignsPath, listParams(BUDGET_FIELDS, options), options), campaignsPath);
+  const adsets = complete(
+    await client.paginate<RawBudgetRow>(adsetsPath, listParams(`${BUDGET_FIELDS},campaign_id`, options), options),
+    adsetsPath,
+  );
+  const toBudget = (raw: RawBudgetRow, level: BudgetObject["level"]): BudgetObject => ({
+    ...toStatusRow(raw),
+    level,
+    campaignId: level === "adset" ? optionalString(raw.campaign_id) : null,
+    dailyBudgetCents: parseBudget(raw.daily_budget, "daily_budget"),
+    lifetimeBudgetCents: parseBudget(raw.lifetime_budget, "lifetime_budget"),
+  });
+  return { campaigns: campaigns.map((raw) => toBudget(raw, "campaign")), adsets: adsets.map((raw) => toBudget(raw, "adset")) };
+}
+
+/**
+ * Parses an insights money value (a decimal string in the account currency,
+ * e.g. "12.34") into minor units with integer math. Only 2-decimal currencies
+ * are supported; the spend guard refuses any currency other than EUR.
+ */
+export function parseDecimalMoney(value: unknown, field: string): number {
+  const text = typeof value === "number" && Number.isFinite(value) && value >= 0 ? value.toFixed(2) : value;
+  if (typeof text === "string") {
+    const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(text);
+    if (match) {
+      const cents = Number(match[1]) * 100 + Number((match[2] ?? "0").padEnd(2, "0"));
+      if (Number.isSafeInteger(cents)) return cents;
+    }
+  }
+  throw new MetaResponseError(`Insights field ${field} is not a non-negative amount with at most 2 decimals`);
+}
+
+/**
+ * Account spend in minor units over an inclusive local-date range (account
+ * time zone). No rows means no spend. Any row without a parsable `spend`
+ * throws: missing spend must not read as zero.
+ */
+export async function getAccountSpendCents(
+  client: MetaGraphClient,
+  actId: string,
+  timeRange: { since: string; until: string },
+): Promise<number> {
+  const rows = await getInsights(client, adAccountPath(actId), { level: "account", fields: ["spend"], timeRange });
+  return rows.reduce((sum, row) => sum + parseDecimalMoney(row.spend, "spend"), 0);
+}
+
+/**
+ * The ad account (digits, no act_ prefix) and the parent ad set of an ad.
+ * Graph has no `adset_id` field on a campaign or an ad set and answers that
+ * read with an error, so only an ad reads successfully.
+ */
+export async function getAdOwner(client: MetaGraphClient, adId: string): Promise<{ accountId: string; adsetId: string }> {
+  const raw = await client.get<{ account_id?: unknown; adset_id?: unknown }>(requireId(adId, "adId"), { fields: "account_id,adset_id" });
+  const accountId = normaliseAdAccountId(requireString(raw.account_id, "account_id"));
+  if (!accountId) throw new MetaResponseError("Graph field account_id is not an ad account id");
+  return { accountId, adsetId: requireString(raw.adset_id, "adset_id") };
 }
 
 /** Status of one campaign, ad set or ad. */

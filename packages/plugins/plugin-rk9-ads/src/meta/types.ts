@@ -77,6 +77,19 @@ export interface Ad extends StatusRow {
   creativeId: string | null;
 }
 
+/**
+ * A campaign or ad set with its budget, for the spend guard's projection.
+ * Budgets are minor units; null when the object has no budget of that kind
+ * (Graph "0" or absent: an ad set under a campaign budget has none).
+ */
+export interface BudgetObject extends StatusRow {
+  level: "campaign" | "adset";
+  /** The parent campaign of an ad set; null for a campaign. */
+  campaignId: string | null;
+  dailyBudgetCents: number | null;
+  lifetimeBudgetCents: number | null;
+}
+
 export type InsightsLevel = "account" | "campaign" | "adset" | "ad";
 
 /** One insights row as Graph returns it: numbers stay strings, the caller parses. */
