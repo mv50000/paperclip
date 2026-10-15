@@ -74,7 +74,11 @@ describe("paperclip issue update helper", () => {
     return { baseUrl: `http://127.0.0.1:${port}`, requests };
   }
 
-  function runHelper(apiUrl: string, args: string[], options: { helper?: string; cwd?: string; input?: string } = {}): Promise<HelperResult> {
+  function runHelper(
+    apiUrl: string,
+    args: string[],
+    options: { helper?: string; cwd?: string; input?: string; env?: Record<string, string | undefined> } = {},
+  ): Promise<HelperResult> {
     return new Promise((resolve, reject) => {
       const child = spawn("bash", [options.helper ?? HELPER_PATH, ...args], {
         cwd: options.cwd,
@@ -83,6 +87,7 @@ describe("paperclip issue update helper", () => {
           PAPERCLIP_API_URL: apiUrl,
           PAPERCLIP_API_KEY: "test-key",
           PAPERCLIP_RUN_ID: "test-run",
+          ...options.env,
         },
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -117,6 +122,28 @@ describe("paperclip issue update helper", () => {
     expect(requests[0]?.method).toBe("PATCH");
     expect(requests[0]?.url).toBe("/api/issues/issue-1");
     expect(JSON.parse(requests[0]?.body ?? "{}")).toEqual({ status: "done", comment: "closing note" });
+  });
+
+  it("sends no run id header when PAPERCLIP_RUN_ID is unset (interactive session)", async () => {
+    const { baseUrl, requests } = await startServer((request, _attempt, res) => {
+      const payload = JSON.parse(request.body) as { status?: string };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "issue-1", status: payload.status }));
+    });
+
+    const result = await runHelper(baseUrl, doneArgs, { env: { PAPERCLIP_RUN_ID: undefined } });
+
+    expect(result.code).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ method: "PATCH", authorization: "Bearer test-key" });
+    expect(requests[0]?.runId).toBeUndefined();
+  });
+
+  it("still requires the API URL and key", async () => {
+    const result = await runHelper("", doneArgs, { env: { PAPERCLIP_RUN_ID: undefined } });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("Missing PAPERCLIP_API_URL or PAPERCLIP_API_KEY.");
   });
 
   it.each([".claude/skills", "codex-home/skills"])(
