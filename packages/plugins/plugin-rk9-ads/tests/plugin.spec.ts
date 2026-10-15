@@ -78,7 +78,8 @@ describe("worker", () => {
         companyId: COMPANY_A,
         headers: {},
       });
-      expect(response.status).toBe(501);
+      // 501 from a placeholder; an implemented route refuses a body without a manifest.
+      expect([400, 501]).toContain(response.status);
     }
     // A webhook without verification fails the delivery instead of looking accepted.
     for (const webhook of manifest.webhooks ?? []) {

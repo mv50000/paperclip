@@ -4,9 +4,14 @@
   "type": "module",
   "private": true,
   "description": "RK9 Ads: brand-agnostic Meta ads engine with a plugin-owned Telegram spend gate.",
+  "exports": {
+    "./creative-manifest.v1.schema.json": "./schemas/creative-manifest.v1.schema.json",
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "migrations",
+    "schemas",
     "README.md"
   ],
   "scripts": {
@@ -14,7 +19,8 @@
     "build": "node ./esbuild.config.mjs",
     "dev": "node ./esbuild.config.mjs --watch",
     "test": "vitest run --config ./vitest.config.ts",
-    "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit"
+    "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
+    "schema:generate": "node ./scripts/generate-creative-manifest-schema.mjs"
   },
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
@@ -29,12 +35,17 @@
   ],
   "author": "RK9",
   "license": "MIT",
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
   "devDependencies": {
     "@paperclipai/db": "workspace:*",
     "@paperclipai/plugin-sdk": "workspace:*",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "drizzle-orm": "^0.45.2",
     "esbuild": "^0.28.2",
     "react-dom": "^19.2.8",

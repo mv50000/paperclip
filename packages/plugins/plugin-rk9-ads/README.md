@@ -90,6 +90,117 @@ new table uses its reserved number: A7 = 002, A10 = 003, A11 = 004, A9 = 005.
 `publications.idempotency_key` is unique across the whole table, so the code
 that builds the key (A8) must hash `company_id` into it.
 
+## Brand integration (creative manifest v1)
+
+A brand repo makes the media, hosts it at a public HTTPS URL and hands the
+plugin a creative manifest (RK9-513). The plugin never downloads the media:
+Meta fetches a video by `file_url`, and an image goes to Meta by URL when the
+ad creative is built. Why it works this way: `docs/adr/media-ingress.md`.
+
+The schema is `schemas/creative-manifest.v1.schema.json`, exported as
+`@paperclipai/plugin-rk9-ads/creative-manifest.v1.schema.json`. Its source is
+the zod schema in `src/creative-manifest/schema.ts`. After a schema change, run
+`pnpm --filter @paperclipai/plugin-rk9-ads schema:generate`; a test fails while
+the committed file is stale.
+
+Example manifest (a test validates this block against the schema):
+
+<!-- creative-manifest-example -->
+```json
+{
+  "schemaVersion": "1",
+  "brand": "OLL",
+  "kind": "video",
+  "mediaUrl": "https://media.ololla.fi/reels/2026-11-mokki.mp4",
+  "posterUrl": "https://media.ololla.fi/reels/2026-11-mokki.jpg",
+  "sha256": "9f2c4be0a8d1c37e5b6f0a4d2e8c1b7a3f5d9e0c6b2a8f4d1e7c3b9a5f0d2e6c",
+  "aspectRatio": "9:16",
+  "copy": {
+    "message": "Mökkiloma Forssan seudulla. Varaa marraskuun viikonloppu.",
+    "title": "Mökit vapaana marraskuussa",
+    "description": "Ololla"
+  },
+  "cta": "BOOK_TRAVEL",
+  "landingUrlKey": "home",
+  "utmCampaign": "oll-2026-11-mokki",
+  "validUntil": "2026-11-30T23:59:00+02:00",
+  "idempotencyKey": "oll-reel-2026-11-mokki-v1"
+}
+```
+
+Field rules the JSON Schema cannot check, enforced at ingress:
+
+- `brand` must equal the company's `brandCode`, and `landingUrlKey` must be a
+  key of the company's `landing.urls`.
+- `validUntil` must be in the future. `posterUrl` is allowed only for a video.
+- Each URL must use a public host name on the default port, with no IP address
+  and no credentials. One HEAD request (through the host fetch and its SSRF
+  guard) must answer 200 with `video/*` for a video, or `image/jpeg` or
+  `image/png` for an image or poster. Redirects are not followed. Size limits
+  from `content-length`: image 30 MB, video 1 GB.
+
+CI validation in a brand repo: copy the schema file into the repo and run this
+script on every manifest (`npm i -D ajv ajv-formats`):
+
+```js
+// scripts/validate-creatives.mjs: node scripts/validate-creatives.mjs creatives/*.json
+import { readFileSync } from "node:fs";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+
+const schema = JSON.parse(readFileSync(new URL("./creative-manifest.v1.schema.json", import.meta.url), "utf8"));
+const ajv = new Ajv({ allErrors: true, strict: true });
+addFormats(ajv);
+const validate = ajv.compile(schema);
+
+let failed = false;
+for (const file of process.argv.slice(2)) {
+  const manifest = JSON.parse(readFileSync(file, "utf8"));
+  if (validate(manifest)) continue;
+  failed = true;
+  for (const error of validate.errors ?? []) console.error(`${file} ${error.instancePath || "/"}: ${error.message}`);
+}
+process.exit(failed ? 1 : 0);
+```
+
+Hand the manifest to the plugin in one of two ways. Both call the same
+`stageCreative()` and return the same body.
+
+- An agent calls the tool `rk9ads_stage_creative` with `{ "manifest": { ... } }`.
+  The company is the agent run's own company.
+- A board user or an agent calls
+  `POST /api/plugins/<pluginId>/api/creatives` with
+  `{ "companyId": "<uuid>", "manifest": { ... } }`. The host checks that the
+  caller may act for that company; an agent key reaches only its own company.
+
+Responses:
+
+| Status | Body | When |
+|---|---|---|
+| 201 | `{ "created": true, "creative": {...} }` | New creative. A video is now `uploading` with `metaVideoId`; an image is `ready`. |
+| 200 | `{ "created": false, "creative": {...} }` | The same `idempotencyKey`, or the same media (`brand` + `sha256`), was staged before. Nothing is fetched or uploaded again. A `failed` video upload is retried, and so is an `uploading` row with no video id after 10 minutes (a worker died mid-upload). |
+| 400 | `{ "error": { "code", "message", "path" } }` | `invalid_manifest`, `url_not_https`, `url_forbidden`, `valid_until_past`, `invalid_request`. `path` is a JSON pointer into the manifest, e.g. `/copy/message`. |
+| 409 | same | `plugin_not_enabled` (no valid brand config), `idempotency_key_conflict` (the key names other media) |
+| 422 | same | `unknown_brand`, `unknown_landing_url_key`, `media_unreachable`, `media_type_mismatch`, `media_too_large` |
+| 502 | `{ "error": {...}, "creative": {...} }` | `meta_upload_failed`; the creative is `failed` and the next submit retries it |
+| 503 | `{ "error": {...} }` | `config_unavailable` |
+
+The tool returns the same body as `data`, and on an error also an `error` text
+that starts with the code. A staged creative holds at most a Meta video id:
+nothing in it can spend money. Publishing and activation belong to the publish
+pipeline and the Telegram gate.
+
+The read-only tools `rk9ads_list_ads` (optional `status` filter) and
+`rk9ads_get_insights` (optional `since`, `until`, `adId`; default the last
+seven full days, at most 90) read the company's own ad account with a client
+in `readOnly` mode. `tests/tool-safety.spec.ts` drives every tool in the
+manifest against a fake Graph and fails on any write that activates, changes a
+budget or cap, or creates a campaign, ad set or ad.
+
+The live media smoke `scripts/live-media-smoke.ts` uploads a reel by URL and a
+PNG by bytes to Sunspot's account and checks that no campaign, ad set or ad
+appeared. The operator runs it; tests and CI never do.
+
 ## Telegram transport and gate
 
 `src/features/telegram/` runs one Telegram consumer per distinct bot token
