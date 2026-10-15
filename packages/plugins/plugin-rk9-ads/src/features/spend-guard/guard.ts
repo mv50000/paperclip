@@ -140,7 +140,7 @@ export function evaluateGuard(numbers: GuardNumbers): GuardResult {
     dailyBudgetSumEur: eur(numbers.dailySumCents),
     lifetimeCommitEur: eur(numbers.lifetimeCommitCents),
     projectedMonthEndEur: eur(projected),
-    pctUsed: Math.floor((numbers.mtdCents * 1000) / cap) / 10,
+    pctUsed: cap > 0 ? Math.floor((numbers.mtdCents * 1000) / cap) / 10 : null,
   };
   const deny = (reason: GuardDenyReason, detail: string): GuardResult => ({ ...figures, allow: false, reason, detail });
 

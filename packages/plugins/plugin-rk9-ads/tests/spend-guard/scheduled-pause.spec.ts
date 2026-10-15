@@ -131,6 +131,52 @@ describe("scheduled pause job", () => {
   });
 });
 
+describe("pause side on an invalid or unavailable config (README ADR 3)", () => {
+  const UI = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "u" } };
+
+  it("pauses on the last valid config when the config turns invalid, and fails the run", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled() });
+    await r.harness.runJob("scheduled-pause"); // 12:00 local: remembers the valid config
+    r.harness.ctx.config.get = async () => ({ ...scheduled(), timeZone: "Europe/Helsinkii" });
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/OLL: the brand config is invalid; pause side ran on the last valid config/);
+    expect(pauses(r.meta)).toBe(2);
+    expect(r.ruleActions().find((row) => row.rule_type === "scheduled_pause")).toMatchObject({ applied: true });
+  });
+
+  it("pauses on the last valid config when the host refuses the config, also from the kill switch", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled() });
+    await r.harness.runJob("scheduled-pause");
+    r.harness.ctx.config.get = async () => {
+      throw new Error("company context is required");
+    };
+    const result = await r.harness.performAction<{ count: number }>("pause-all", { dryRun: false, confirm: true }, UI);
+    expect(result.count).toBe(2);
+    reactivate(r.meta);
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/the brand config is unavailable; pause side ran/);
+    expect(pauses(r.meta)).toBe(4);
+  });
+
+  it("fails the run loudly when there is no last valid config, and pauses nothing", async () => {
+    const r = rig({ meta: activeMeta(), config: { ...scheduled(), timeZone: "Europe/Helsinkii" } });
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/invalid and there is no last valid config to pause with; nothing paused/);
+    await expect(r.harness.performAction("pause-all", { dryRun: false, confirm: true }, UI)).rejects.toThrow(/no last valid config/);
+    expect(r.meta.writes).toHaveLength(0);
+  });
+
+  it("still pauses when the day marker cannot be read", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled() });
+    r.store.claimed = async () => {
+      throw new Error("db down");
+    };
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/marker read failed \(Error: db down\), paused anyway/);
+    expect(pauses(r.meta)).toBe(2);
+  });
+});
+
 describe("data gate", () => {
   const gate = { url: FEED, jsonPointer: "/stats/inSun", operator: "gte" as const, threshold: 8 };
 

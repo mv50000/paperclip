@@ -7,6 +7,7 @@ import { spendGuardDeclarations } from "./declarations.js";
 import { alertedThresholds } from "./alerts.js";
 import { checkSpend, type GuardResult } from "./guard.js";
 import { pauseAll, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
+import { loadPauseConfig } from "./pause-config.js";
 import { createScheduledPauseJob, SCHEDULED_PAUSE_JOB_KEY } from "./scheduled-pause.js";
 import {
   brandReadClient,
@@ -111,7 +112,8 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     if (!dryRun && params.confirm !== true) {
       throw new Error("A live pause needs confirm: true; preview it with dryRun first");
     }
-    const loaded = await loadEnabled(ctx, companyId);
+    // Stopping works on the last valid config too (pause-config.ts).
+    const loaded = await loadPauseConfig(ctx, companyId);
     if (!loaded.ok) throw new Error(loaded.error);
     const initiator: Initiator = {
       source: "ui",
@@ -132,7 +134,7 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     "rk9ads_pause_all",
     toolDeclaration("rk9ads_pause_all"),
     async (params, runCtx): Promise<ToolResult> => {
-      const loaded = await loadEnabled(ctx, runCtx.companyId);
+      const loaded = await loadPauseConfig(ctx, runCtx.companyId);
       if (!loaded.ok) return { error: loaded.error };
       const reason = reasonText((params as { reason?: unknown } | null)?.reason, "");
       if (!reason) return { error: "reason is required" };
@@ -170,7 +172,7 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
   );
 
   registerGateHandler("pause_all", async ({ request, tgUserId }) => {
-    const loaded = await loadEnabled(ctx, request.companyId);
+    const loaded = await loadPauseConfig(ctx, request.companyId);
     if (!loaded.ok) throw new Error(loaded.error);
     const result = await pauseAll(deps, request.companyId, loaded.config, {
       dryRun: false,

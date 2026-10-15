@@ -13,6 +13,9 @@
  *    (see data-gate.ts); when the predicate no longer holds it runs pauseAll,
  *    which is a no-op once everything is paused.
  *
+ * An invalid or unavailable config fails the run; the pause side (2 and 3)
+ * still runs on the brand's last valid config (pause-config.ts).
+ *
  * If a pause succeeded but its Telegram notice failed, the pauses stay, the
  * audit entry is written and the job throws at the end, so the host marks the
  * run failed (sunspot-pulse-off.sh exit 3). Other companies still run first.
@@ -27,6 +30,7 @@ import { evaluateSpendAlerts } from "./alerts.js";
 import { evaluateDataGate, type FeedFetch } from "./data-gate.js";
 import { checkSpend } from "./guard.js";
 import { pauseAll, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
+import { loadPauseConfig } from "./pause-config.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const SCHEDULED_PAUSE_JOB_KEY = "scheduled-pause";
@@ -60,15 +64,22 @@ function telegramFailure(label: string, result: PauseAllResult): string | null {
   return result.telegram === "failed" ? `${label}: paused ${result.count} but the Telegram notice failed (${result.telegramError})` : null;
 }
 
-async function runForCompany(deps: ScheduledPauseDeps, job: PluginJobContext, companyId: string, config: BrandConfig, now: Date): Promise<string[]> {
+async function runForCompany(
+  deps: ScheduledPauseDeps,
+  job: PluginJobContext,
+  companyId: string,
+  config: BrandConfig,
+  now: Date,
+  pauseOnly: boolean,
+): Promise<string[]> {
   const { ctx } = deps;
   const failures: string[] = [];
   const initiator: Initiator = { source: "job", jobRunId: job.runId };
   const brand = config.brandCode;
 
-  // 1. Alerts
+  // 1. Alerts (not on a fallback config: the pause side only)
   try {
-    if (await alertsDue(ctx, companyId, now)) {
+    if (!pauseOnly && (await alertsDue(ctx, companyId, now))) {
       const figures = await checkSpend({ config, client: brandReadClient(ctx, companyId, config), now });
       if (figures.pctUsed === null) {
         // Not marked as checked, so the next tick retries. The run fails, so an
@@ -89,7 +100,14 @@ async function runForCompany(deps: ScheduledPauseDeps, job: PluginJobContext, co
   if (pause.enabled && isLocalTimeAtOrAfter(now, pause.at, config.timeZone)) {
     const key = scheduledPauseKey(brand, localDate(now, config.timeZone));
     try {
-      if ((await deps.store.claimed(companyId, [key])).length === 0) {
+      // A marker read failure must not skip the pause; pausing is idempotent.
+      let done = false;
+      try {
+        done = (await deps.store.claimed(companyId, [key])).length > 0;
+      } catch (error) {
+        failures.push(`${brand} scheduled pause: marker read failed (${safeError(error)}), paused anyway`);
+      }
+      if (!done) {
         const result = await pauseAll(deps, companyId, config, {
           dryRun: false,
           rule: "scheduled_pause",
@@ -147,17 +165,18 @@ export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
     const failures: string[] = [];
     for (const { companyId, result } of await listCompanyConfigs(ctx)) {
       if (result.state === "absent") continue;
-      if (result.state !== "enabled") {
-        // README ADR 3: a pause must not be skipped silently. Without a readable
-        // config there is no token to pause with, so the job warns.
-        ctx.logger.warn("rk9-ads scheduled-pause: config not readable, company skipped this tick", {
-          companyId,
-          state: result.state,
-          ...(result.state === "unavailable" ? { error: result.error } : { errorCount: result.errors.length }),
-        });
+      // README ADR 3: a pause is never skipped silently. An invalid or
+      // unavailable config runs the pause side on the last valid config, and
+      // the run fails either way so the broken config is seen.
+      const loaded = await loadPauseConfig(ctx, companyId, result);
+      if (!loaded.ok) {
+        failures.push(`company ${companyId}: ${loaded.error}; nothing paused`);
         continue;
       }
-      failures.push(...(await runForCompany(deps, job, companyId, result.config, now)));
+      if (loaded.fallback) {
+        failures.push(`${loaded.config.brandCode}: the brand config is ${loaded.fallback.state}; pause side ran on the last valid config`);
+      }
+      failures.push(...(await runForCompany(deps, job, companyId, loaded.config, now, loaded.fallback !== null)));
     }
     if (failures.length > 0) {
       throw new Error(`scheduled-pause: ${failures.join("; ")}`.slice(0, 2000));

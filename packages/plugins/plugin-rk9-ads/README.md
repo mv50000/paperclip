@@ -122,6 +122,12 @@ the core chat-channels bot is never shared. See
   `authorizeSpend` is asked first, and its default refuses every budget write.
   Fields that modify a budget in ways the projection does not model (e.g.
   `budget_schedule_specs`) are refused on every write.
+- **Pause side on a broken config** (`pause-config.ts`, ADR 3). Every
+  successful read stores the brand's last valid config (secret refs only). When
+  the config turns `invalid` or `unavailable`, the scheduled pause, the data
+  gate and every kill-switch trigger pause with that config, and the job run
+  fails so the broken config is seen. With no stored config the run fails and
+  nothing is paused. An absent config never falls back.
 - **Kill switch** (`killswitch.ts`). `pauseAll()` pauses every ad whose status
   is ACTIVE and then the campaign. The scope is `meta.campaignId`, or the whole
   ad account when it is not set. Triggers: the UI action `pause-all`
