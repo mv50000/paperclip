@@ -369,31 +369,34 @@ export function createInsightsStore(db: PluginDatabaseClient) {
       companyId: string,
       digestDate: string,
       outcome:
-        | { status: "sent"; chatId: string; messageId: number; summary: Record<string, unknown> }
+        | { status: "sent"; chatId: string; messageId: number | null; summary: Record<string, unknown> }
         | { status: "skipped"; summary: Record<string, unknown> }
         | { status: "failed"; error: string },
-    ): Promise<void> {
+    ): Promise<number> {
       assertCompanyId(companyId);
       assertDate(digestDate, "digestDate");
       if (outcome.status === "sent") {
-        await db.execute(
+        const result = await db.execute(
           `UPDATE ${ns}.digest_runs SET status = 'sent', chat_id = $3, message_id = $4, summary = $5::jsonb, error = NULL, sent_at = now(), updated_at = now() ` +
             `WHERE company_id = $1 AND digest_date = $2::date AND status = 'pending'`,
           [companyId, digestDate, outcome.chatId, outcome.messageId, JSON.stringify(outcome.summary)],
         );
-      } else if (outcome.status === "skipped") {
-        await db.execute(
+        return result.rowCount;
+      }
+      if (outcome.status === "skipped") {
+        const result = await db.execute(
           `UPDATE ${ns}.digest_runs SET status = 'skipped', summary = $3::jsonb, updated_at = now() ` +
             `WHERE company_id = $1 AND digest_date = $2::date AND status = 'pending'`,
           [companyId, digestDate, JSON.stringify(outcome.summary)],
         );
-      } else {
-        await db.execute(
-          `UPDATE ${ns}.digest_runs SET status = 'failed', error = $3, updated_at = now() ` +
-            `WHERE company_id = $1 AND digest_date = $2::date AND status = 'pending'`,
-          [companyId, digestDate, outcome.error.slice(0, 500)],
-        );
+        return result.rowCount;
       }
+      const result = await db.execute(
+        `UPDATE ${ns}.digest_runs SET status = 'failed', error = $3, updated_at = now() ` +
+          `WHERE company_id = $1 AND digest_date = $2::date AND status = 'pending'`,
+        [companyId, digestDate, outcome.error.slice(0, 500)],
+      );
+      return result.rowCount;
     },
   };
 }

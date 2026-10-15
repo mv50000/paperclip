@@ -2,10 +2,12 @@
  * Morning digest (A10, RK9-512): collects the figures for one brand, formats
  * them (./format.ts) and sends them once per brand per local date.
  *
- * Once-only: `digest_runs` gets the day's row (INSERT ... ON CONFLICT DO
+ * At most once: `digest_runs` gets the day's row (INSERT ... ON CONFLICT DO
  * NOTHING) before anything is sent, and each attempt is claimed with a
  * compare-and-set. A sent or skipped day is never sent again; a failed send
- * is recorded and retried by a later tick (at most MAX_DIGEST_ATTEMPTS).
+ * is recorded and retried by a later tick (at most MAX_DIGEST_ATTEMPTS). A
+ * row left pending (worker restart, unrecorded send) is closed as failed and
+ * never resent, because its send state is unknown.
  * `digest.dryRun` builds the same text and writes nothing.
  *
  * Every query is scoped by the brand's company_id, so one brand's digest can
@@ -200,6 +202,7 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
 
   const existing = await deps.store.digestRun(companyId, digestDate);
   if (existing && (existing.status === "sent" || existing.status === "skipped")) return "done";
+  if (existing && existing.status === "failed" && existing.attempts >= MAX_DIGEST_ATTEMPTS) return "done";
   if (await deps.store.abandonStaleDigestRun(companyId, digestDate, MAX_DIGEST_ATTEMPTS, DIGEST_RETRY_AFTER_MINUTES)) {
     deps.ctx.logger.warn("rk9-ads digest: abandoned a send that never finished; not resent", { companyId, digestDate });
     return "abandoned";
@@ -213,15 +216,19 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
   await deps.store.ensureDigestRun(companyId, config.brandCode, digestDate);
   if (!(await deps.store.claimDigestRun(companyId, digestDate, MAX_DIGEST_ATTEMPTS, DIGEST_RETRY_AFTER_MINUTES))) return "busy";
 
-  let delivered: { messageId: number; summary: Record<string, unknown> } | null = null;
+  let delivered: { messageId: number | null; summary: Record<string, unknown> } | null = null;
   try {
     const built = await buildDigest(deps, companyId, config);
     if (built.text === null) {
       await deps.store.finishDigestRun(companyId, digestDate, { status: "skipped", summary: built.summary });
       return "skipped";
     }
+    // A slow build can outlive the claim: a later tick may have abandoned the row meanwhile.
+    const current = await deps.store.digestRun(companyId, digestDate);
+    if (current?.status !== "pending") return "abandoned";
     const message = await bot.api.sendMessage({ chat_id: bot.chatId, text: built.text });
-    delivered = { messageId: message.message_id, summary: built.summary };
+    // Nothing after the send may throw into the catch below: that would mark a delivered digest retryable.
+    delivered = { messageId: typeof message?.message_id === "number" ? message.message_id : null, summary: built.summary };
   } catch (error) {
     const message = error instanceof MetaGraphError ? error.message : errorText(error);
     deps.ctx.logger.warn("rk9-ads digest: send failed", { companyId, brandCode: config.brandCode, digestDate, error: message.slice(0, 200) });
@@ -238,7 +245,8 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
   // without a resend (abandonStaleDigestRun).
   for (let attempt = 1; attempt <= FINISH_SENT_ATTEMPTS; attempt += 1) {
     try {
-      await deps.store.finishDigestRun(companyId, digestDate, { status: "sent", chatId: bot.chatId, ...delivered });
+      const updated = await deps.store.finishDigestRun(companyId, digestDate, { status: "sent", chatId: bot.chatId, ...delivered });
+      if (updated === 0) deps.ctx.logger.warn("rk9-ads digest: sent, but the row was no longer pending", { companyId, digestDate });
       return "sent";
     } catch (error) {
       deps.ctx.logger.warn("rk9-ads digest: could not record a sent digest", { companyId, digestDate, attempt, error: errorText(error) });

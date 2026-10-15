@@ -380,7 +380,7 @@ describeDb("insights ingest and digest on real Postgres", () => {
         `UPDATE ${testDb.namespace}.digest_runs SET updated_at = now() - interval '30 minutes' WHERE company_id = $1`,
         [companyA],
       );
-      expect(await digestTickBrand(deps("2026-10-15T05:50:00Z", telegram), companyA, configA)).toBe("busy");
+      expect(await digestTickBrand(deps("2026-10-15T05:50:00Z", telegram), companyA, configA)).toBe("done");
       expect(sent).toHaveLength(0);
       const [run] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status, attempts, error FROM ${testDb.namespace}.digest_runs`);
       expect(run).toMatchObject({ status: "failed", attempts: 5 });
@@ -399,9 +399,23 @@ describeDb("insights ingest and digest on real Postgres", () => {
         );
         queueDigestGraph();
         const at = new Date(Date.parse(due) + minutes * 60_000).toISOString();
-        expect(["abandoned", "busy"]).toContain(await digestTickBrand(deps(at, telegram), companyA, configA));
+        expect(["abandoned", "busy", "done"]).toContain(await digestTickBrand(deps(at, telegram), companyA, configA));
       }
       expect(sent).toHaveLength(1);
+    });
+
+    it("does not send when a later tick abandoned the row during a slow build", async () => {
+      queueDigestGraph();
+      const slow = {
+        ...store,
+        // The row is abandoned between the claim and the send.
+        digestRun: async (companyId: string, date: string) => {
+          const row = await store.digestRun(companyId, date);
+          return row && row.attempts > 0 ? { status: "failed" as const, attempts: 5 } : row;
+        },
+      };
+      expect(await digestTickBrand({ ...deps(due, telegram), store: slow }, companyA, configA)).toBe("abandoned");
+      expect(sent).toHaveLength(0);
     });
 
     it("skips a quiet zero-spend day in silent mode and does not send", async () => {
