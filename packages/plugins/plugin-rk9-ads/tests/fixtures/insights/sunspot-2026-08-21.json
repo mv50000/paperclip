@@ -1,0 +1,33 @@
+{
+  "source": "recorded 2026-10-15 from Sunspot act_1336862981968191 with scripts/parity-sunspot-insights.ts --record (read-only)",
+  "date": "2026-08-21",
+  "accountTimeZone": "Europe/Helsinki",
+  "accountLevel": {
+    "data": [
+      {
+        "date_start": "2026-08-21",
+        "date_stop": "2026-08-21",
+        "impressions": "1565",
+        "inline_link_clicks": "39",
+        "spend": "11.75"
+      }
+    ]
+  },
+  "adLevel": {
+    "data": [
+      {
+        "date_start": "2026-08-21",
+        "date_stop": "2026-08-21",
+        "clicks": "62",
+        "frequency": "1.105226",
+        "impressions": "1565",
+        "inline_link_clicks": "39",
+        "reach": "1416",
+        "spend": "11.75",
+        "ad_id": "120248358668610775",
+        "adset_id": "120247250925850775",
+        "campaign_id": "120247250925830775"
+      }
+    ]
+  }
+}
