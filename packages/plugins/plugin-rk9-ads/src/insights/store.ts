@@ -329,9 +329,10 @@ export function createInsightsStore(db: PluginDatabaseClient) {
 
     /**
      * Claims one send attempt (compare-and-set). Succeeds for a fresh row, or
-     * for a failed or abandoned (pending, e.g. a worker restart mid-send) row
-     * whose last attempt is older than `retryAfterMinutes`, while attempts <
-     * maxAttempts. A sent or skipped row is never claimed.
+     * for a failed row whose last attempt is older than `retryAfterMinutes`,
+     * while attempts < maxAttempts. A sent or skipped row is never claimed,
+     * and neither is a pending row with attempts > 0: its send may already
+     * have reached Telegram (see abandonStaleDigestRun).
      */
     async claimDigestRun(companyId: string, digestDate: string, maxAttempts: number, retryAfterMinutes: number): Promise<boolean> {
       assertCompanyId(companyId);
@@ -339,8 +340,27 @@ export function createInsightsStore(db: PluginDatabaseClient) {
       const result = await db.execute(
         `UPDATE ${ns}.digest_runs SET attempts = attempts + 1, status = 'pending', updated_at = now() ` +
           `WHERE company_id = $1 AND digest_date = $2::date AND attempts < $3::int AND ` +
-          `((status = 'pending' AND attempts = 0) OR (status IN ('failed', 'pending') AND updated_at < now() - make_interval(mins => $4::int)))`,
+          `((status = 'pending' AND attempts = 0) OR (status = 'failed' AND updated_at < now() - make_interval(mins => $4::int)))`,
         [companyId, digestDate, Math.trunc(maxAttempts), Math.trunc(retryAfterMinutes)],
+      );
+      return result.rowCount === 1;
+    },
+
+    /**
+     * Closes a claimed row that never finished (worker restart, or a sent
+     * write that failed) once it is older than `staleMinutes`. The send state
+     * is unknown, so the row becomes failed with attempts at the cap and is
+     * never sent again: a missed digest is better than a duplicate.
+     */
+    async abandonStaleDigestRun(companyId: string, digestDate: string, maxAttempts: number, staleMinutes: number): Promise<boolean> {
+      assertCompanyId(companyId);
+      assertDate(digestDate, "digestDate");
+      const result = await db.execute(
+        `UPDATE ${ns}.digest_runs SET status = 'failed', attempts = GREATEST(attempts, $3::int), ` +
+          `error = 'Abandoned mid-send (worker restart or unrecorded send); not resent to avoid a duplicate', updated_at = now() ` +
+          `WHERE company_id = $1 AND digest_date = $2::date AND status = 'pending' AND attempts > 0 ` +
+          `AND updated_at < now() - make_interval(mins => $4::int)`,
+        [companyId, digestDate, Math.trunc(maxAttempts), Math.trunc(staleMinutes)],
       );
       return result.rowCount === 1;
     },

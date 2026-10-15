@@ -303,9 +303,11 @@ Digest config (`digest` block): `enabled` (default true), `time` (default
 `silent` sends nothing on such a day unless there is a warning, a gate card, a
 fatigued ad or a rule action). A day's row in `digest_runs` is inserted before
 the send and each attempt is claimed with a compare-and-set, so a day is sent
-at most once. A failed send, or a row left pending by a worker restart, is
-retried after 10 minutes, at most 5 attempts. A bot that is not ready yet
-uses no attempt.
+at most once. A failed send is retried after 10 minutes, at most 5 attempts.
+A row left pending (a worker restart mid-send, or a send whose "sent" write
+failed) is closed as failed after 10 minutes and never resent: its send state
+is unknown, and a missed digest is better than a duplicate. A bot that is not
+ready yet uses no attempt.
 MTD and pacing are computed in the ad-account time zone from `insights_daily`;
 the projection uses complete days only. Headroom is Meta `spend_cap −
 amount_spent`. The digest warns when `spend_cap` is missing or above the

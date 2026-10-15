@@ -366,28 +366,42 @@ describeDb("insights ingest and digest on real Postgres", () => {
       expect(await testDb.adminQuery(`SELECT 1 FROM ${testDb.namespace}.digest_runs`)).toHaveLength(0);
     });
 
-    it("re-claims a row left pending by a worker restart after the retry delay", async () => {
+    it("abandons a row left pending by a worker restart and never resends it", async () => {
       await store.ensureDigestRun(companyA, "OLL", "2026-10-15");
       expect(await store.claimDigestRun(companyA, "2026-10-15", 5, 10)).toBe(true);
-      // The worker died here: the row stays pending with attempts = 1.
+      // The worker died here: the send may or may not have reached Telegram.
       expect(await digestTickBrand(deps("2026-10-15T05:05:00Z", telegram), companyA, configA)).toBe("busy");
       await testDb.adminQuery(
         `UPDATE ${testDb.namespace}.digest_runs SET updated_at = now() - interval '11 minutes' WHERE company_id = $1`,
         [companyA],
       );
-      queueDigestGraph();
-      expect(await digestTickBrand(deps("2026-10-15T05:20:00Z", telegram), companyA, configA)).toBe("sent");
-      expect(sent).toHaveLength(1);
+      expect(await digestTickBrand(deps("2026-10-15T05:20:00Z", telegram), companyA, configA)).toBe("abandoned");
+      await testDb.adminQuery(
+        `UPDATE ${testDb.namespace}.digest_runs SET updated_at = now() - interval '30 minutes' WHERE company_id = $1`,
+        [companyA],
+      );
+      expect(await digestTickBrand(deps("2026-10-15T05:50:00Z", telegram), companyA, configA)).toBe("busy");
+      expect(sent).toHaveLength(0);
+      const [run] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status, attempts, error FROM ${testDb.namespace}.digest_runs`);
+      expect(run).toMatchObject({ status: "failed", attempts: 5 });
+      expect(String(run!.error)).toContain("not resent");
     });
 
-    it("keeps a delivered digest out of the retry path when the sent write fails", async () => {
+    it("never resends a delivered digest whose sent write failed", async () => {
       queueDigestGraph();
       const flaky = { ...store, finishDigestRun: async () => { throw new Error("db down"); } };
-      const result = await digestTickBrand({ ...deps(due, telegram), store: flaky }, companyA, configA);
-      expect(result).toBe("sent");
+      expect(await digestTickBrand({ ...deps(due, telegram), store: flaky }, companyA, configA)).toBe("sent");
       expect(sent).toHaveLength(1);
-      const [run] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status FROM ${testDb.namespace}.digest_runs`);
-      expect(run).toMatchObject({ status: "pending" });
+      for (const minutes of [15, 30, 45, 60, 75]) {
+        await testDb.adminQuery(
+          `UPDATE ${testDb.namespace}.digest_runs SET updated_at = now() - interval '11 minutes' WHERE company_id = $1`,
+          [companyA],
+        );
+        queueDigestGraph();
+        const at = new Date(Date.parse(due) + minutes * 60_000).toISOString();
+        expect(["abandoned", "busy"]).toContain(await digestTickBrand(deps(at, telegram), companyA, configA));
+      }
+      expect(sent).toHaveLength(1);
     });
 
     it("skips a quiet zero-spend day in silent mode and does not send", async () => {

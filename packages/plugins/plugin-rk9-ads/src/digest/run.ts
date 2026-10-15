@@ -174,9 +174,19 @@ export async function buildDigest(
   };
 }
 
-export type DigestTickOutcome = "not_due" | "done" | "busy" | "sent" | "skipped" | "failed" | "disabled" | "telegram_not_ready";
+export type DigestTickOutcome =
+  | "not_due"
+  | "done"
+  | "busy"
+  | "sent"
+  | "skipped"
+  | "failed"
+  | "abandoned"
+  | "disabled"
+  | "telegram_not_ready";
 
 const FINISH_SENT_ATTEMPTS = 3;
+const FINISH_SENT_BACKOFF_MS = 500;
 
 /**
  * One brand's tick: sends the digest once per local date at or after
@@ -190,9 +200,16 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
 
   const existing = await deps.store.digestRun(companyId, digestDate);
   if (existing && (existing.status === "sent" || existing.status === "skipped")) return "done";
+  if (await deps.store.abandonStaleDigestRun(companyId, digestDate, MAX_DIGEST_ATTEMPTS, DIGEST_RETRY_AFTER_MINUTES)) {
+    deps.ctx.logger.warn("rk9-ads digest: abandoned a send that never finished; not resent", { companyId, digestDate });
+    return "abandoned";
+  }
   // Checked before the claim, so a bot that is still starting does not use up attempts.
   const bot = deps.telegram(companyId);
-  if (!bot) return "telegram_not_ready";
+  if (!bot) {
+    deps.ctx.logger.warn("rk9-ads digest: Telegram is not ready; the digest waits", { companyId, digestDate });
+    return "telegram_not_ready";
+  }
   await deps.store.ensureDigestRun(companyId, config.brandCode, digestDate);
   if (!(await deps.store.claimDigestRun(companyId, digestDate, MAX_DIGEST_ATTEMPTS, DIGEST_RETRY_AFTER_MINUTES))) return "busy";
 
@@ -216,13 +233,16 @@ export async function digestTickBrand(deps: DigestDeps, companyId: string, confi
     return "failed";
   }
 
-  // Telegram has the message: never turn this row into "failed" (a retry would send it twice).
+  // Telegram has the message: never mark this row failed-and-retryable. If
+  // every write fails, the row stays pending and a later tick abandons it
+  // without a resend (abandonStaleDigestRun).
   for (let attempt = 1; attempt <= FINISH_SENT_ATTEMPTS; attempt += 1) {
     try {
       await deps.store.finishDigestRun(companyId, digestDate, { status: "sent", chatId: bot.chatId, ...delivered });
       return "sent";
     } catch (error) {
       deps.ctx.logger.warn("rk9-ads digest: could not record a sent digest", { companyId, digestDate, attempt, error: errorText(error) });
+      if (attempt < FINISH_SENT_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, FINISH_SENT_BACKOFF_MS * attempt));
     }
   }
   return "sent";
