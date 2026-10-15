@@ -76,6 +76,7 @@ async function runForCompany(
   const failures: string[] = [];
   const initiator: Initiator = { source: "job", jobRunId: job.runId };
   const brand = config.brandCode;
+  const fallbackMark = pauseOnly ? " [last valid config, whole ad account]" : "";
 
   // 1. Alerts (not on a fallback config: the pause side only)
   try {
@@ -111,7 +112,7 @@ async function runForCompany(
         const result = await pauseAll(deps, companyId, config, {
           dryRun: false,
           rule: "scheduled_pause",
-          reason: `scheduled pause at ${pause.at} ${config.timeZone}`,
+          reason: `scheduled pause at ${pause.at} ${config.timeZone}${fallbackMark}`,
           initiator,
           notify: true,
         });
@@ -142,7 +143,7 @@ async function runForCompany(
         const result = await pauseAll(deps, companyId, config, {
           dryRun: false,
           rule: "data_gate",
-          reason: `data gate ${gate.jsonPointer} = ${outcome.value}, needs ${gate.operator} ${gate.threshold}`,
+          reason: `data gate ${gate.jsonPointer} = ${outcome.value}, needs ${gate.operator} ${gate.threshold}${fallbackMark}`,
           initiator,
           notify: true,
           note,

@@ -7,7 +7,7 @@ import { spendGuardDeclarations } from "./declarations.js";
 import { alertedThresholds } from "./alerts.js";
 import { checkSpend, type GuardResult } from "./guard.js";
 import { pauseAll, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
-import { loadPauseConfig } from "./pause-config.js";
+import { loadPauseConfig, pauseReason } from "./pause-config.js";
 import { createScheduledPauseJob, SCHEDULED_PAUSE_JOB_KEY } from "./scheduled-pause.js";
 import {
   brandReadClient,
@@ -121,13 +121,14 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       agentId: context.actor.agentId,
       runId: context.actor.runId,
     };
-    return pauseAll(deps, companyId, loaded.config, {
+    const result = await pauseAll(deps, companyId, loaded.config, {
       dryRun,
       rule: "kill_switch",
-      reason: reasonText(params.reason, "Pysäytä kaikki (UI)"),
+      reason: pauseReason(loaded, reasonText(params.reason, "Pysäytä kaikki (UI)")),
       initiator,
       notify: true,
     });
+    return loaded.fallback ? { ...result, fallbackConfig: loaded.fallback.state } : result;
   });
 
   ctx.tools.register(
@@ -142,12 +143,15 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
         const result = await pauseAll(deps, runCtx.companyId, loaded.config, {
           dryRun: false,
           rule: "kill_switch",
-          reason,
+          reason: pauseReason(loaded, reason),
           initiator: { source: "agent", agentId: runCtx.agentId, runId: runCtx.runId },
           notify: true,
         });
-        if (result.errors.length > 0) return { error: pauseSummary(result), data: result };
-        return { content: pauseSummary(result), data: result };
+        const summary = loaded.fallback
+          ? `${pauseSummary(result)} The brand config is ${loaded.fallback.state}: paused the whole ad account on the last valid config. Fix the config.`
+          : pauseSummary(result);
+        if (result.errors.length > 0) return { error: summary, data: result };
+        return { content: summary, data: result };
       } catch (error) {
         return { error: `Pause failed before anything was paused: ${safeError(error)}` };
       }
@@ -177,7 +181,7 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     const result = await pauseAll(deps, request.companyId, loaded.config, {
       dryRun: false,
       rule: "kill_switch",
-      reason: "Pysäytä kaikki (Telegram)",
+      reason: pauseReason(loaded, "Pysäytä kaikki (Telegram)"),
       initiator: { source: "telegram", tgUserId },
       // The card itself shows the outcome.
       notify: false,
@@ -190,7 +194,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     };
     if (result.errors.length > 0) throw new Error(`${result.errors.length} pause(s) failed`);
     return {
-      statusText: result.count > 0 ? `⏸ Pysäytetty: ${result.pausedAds.length} mainosta, ${result.pausedCampaigns.length} kampanjaa` : "⏸ Ei aktiivisia mainoksia",
+      statusText:
+        (result.count > 0 ? `⏸ Pysäytetty: ${result.pausedAds.length} mainosta, ${result.pausedCampaigns.length} kampanjaa` : "⏸ Ei aktiivisia mainoksia") +
+        (loaded.fallback ? " (konfiguraatio ei luettavissa: koko mainostili, viimeisin kelvollinen konfiguraatio)" : ""),
       outcome,
     };
   });

@@ -7,7 +7,7 @@
  * config (it holds secret refs, never a secret value), and the pause paths
  * (scheduled pause, data gate, kill switch) fall back to it. Nothing that can
  * raise spend uses the fallback, and an absent config (removed on purpose)
- * never falls back.
+ * never falls back. A fallback always pauses the whole ad account.
  *
  * Instance scope on purpose, as with the config markers: in a job the host
  * refuses company-scoped state for exactly the companies whose config it
@@ -90,5 +90,13 @@ export async function loadPauseConfig(ctx: PluginContext, companyId: string, kno
   if (!fallback) {
     return { ok: false, state: result.state, error: `the brand config is ${result.state} and there is no last valid config to pause with` };
   }
-  return { ok: true, config: fallback, fallback: { state: result.state, detail } };
+  // The stored campaign scope may be stale (the broken save may have moved
+  // it), so a fallback pauses the whole ad account.
+  const { campaignId: _staleScope, ...meta } = fallback.meta;
+  return { ok: true, config: { ...fallback, meta }, fallback: { state: result.state, detail } };
+}
+
+/** The pause reason, marked when it runs on the fallback; the mark reaches the audit row and the notice. */
+export function pauseReason(loaded: Extract<PauseConfig, { ok: true }>, reason: string): string {
+  return loaded.fallback ? `${reason} [konfiguraatio ${loaded.fallback.state}: viimeisin kelvollinen, koko mainostili]` : reason;
 }

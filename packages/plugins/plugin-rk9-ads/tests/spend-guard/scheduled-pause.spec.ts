@@ -150,12 +150,28 @@ describe("pause side on an invalid or unavailable config (README ADR 3)", () => 
     r.harness.ctx.config.get = async () => {
       throw new Error("company context is required");
     };
-    const result = await r.harness.performAction<{ count: number }>("pause-all", { dryRun: false, confirm: true }, UI);
-    expect(result.count).toBe(2);
+    const result = await r.harness.performAction<{ count: number; fallbackConfig: string; scope: string }>("pause-all", { dryRun: false, confirm: true }, UI);
+    expect(result).toMatchObject({ count: 2, fallbackConfig: "unavailable", scope: "account" });
+    expect(r.ruleActions().at(-1)!.reason).toMatch(/konfiguraatio unavailable: viimeisin kelvollinen, koko mainostili/);
     reactivate(r.meta);
     r.clock.now = new Date("2026-10-21T18:31:00Z");
     await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/the brand config is unavailable; pause side ran/);
     expect(pauses(r.meta)).toBe(4);
+  });
+
+  it("pauses the whole ad account on a fallback, even when the stored config was scoped to a campaign", async () => {
+    const meta = activeMeta();
+    meta.campaigns.push({ id: "900", name: "uusi", status: "ACTIVE" });
+    meta.ads.push({ id: "902", name: "uusi ad", status: "ACTIVE", campaign_id: "900" });
+    const valid = { ...scheduled(), meta: { ...(scheduled().meta as Record<string, unknown>), campaignId: "100" } };
+    const r = rig({ meta, config: valid });
+    await r.harness.runJob("scheduled-pause");
+    // One broken save moves the campaign and breaks the time zone.
+    r.harness.ctx.config.get = async () => ({ ...valid, timeZone: "Europe/Helsinkii", meta: { ...valid.meta, campaignId: "900" } });
+    const tool = await r.harness.executeTool<{ content: string }>("rk9ads_pause_all", { reason: "hätä" }, { companyId: COMPANY_A });
+    expect(tool.content).toMatch(/The brand config is invalid: paused the whole ad account on the last valid config/);
+    expect(meta.ads.every((ad) => ad.status === "PAUSED")).toBe(true);
+    expect(meta.campaigns.every((campaign) => campaign.status === "PAUSED")).toBe(true);
   });
 
   it("fails the run loudly when there is no last valid config, and pauses nothing", async () => {
