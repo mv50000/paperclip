@@ -62,8 +62,9 @@ describe("worker", () => {
       await expect(harness.runJob(job.jobKey)).resolves.toBeUndefined();
     }
     for (const tool of manifest.tools ?? []) {
-      const result = await harness.executeTool<{ error?: string }>(tool.name, {});
-      expect(result.error).toMatch(/not implemented yet/);
+      // A handler answers (a placeholder says "not implemented yet"); a missing one throws.
+      const result = await harness.executeTool<{ error?: string; content?: string }>(tool.name, {});
+      expect(result.error ?? result.content).toEqual(expect.any(String));
     }
     for (const route of manifest.apiRoutes ?? []) {
       const response = await plugin.definition.onApiRequest!({

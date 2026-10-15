@@ -101,3 +101,35 @@ export function isLocalTimeAtOrAfter(instant: Date, hhmm: string, timeZone: stri
   const p = zonedParts(instant, timeZone);
   return p.hour * 60 + p.minute >= Number(match[1]) * 60 + Number(match[2]);
 }
+
+export interface LocalMonthBounds {
+  /** "YYYY-MM" */
+  month: string;
+  /** First local day of the month, "YYYY-MM-01". */
+  since: string;
+  /** The local date of `instant`, "YYYY-MM-DD". */
+  until: string;
+  daysInMonth: number;
+  /** 1-31 */
+  dayOfMonth: number;
+  /** Local days left in the month, today included (1 on the last day). */
+  remainingDays: number;
+}
+
+/**
+ * The local calendar month that contains `instant`, for month-to-date reads
+ * (an inclusive since/until range in local dates) and month-end projections.
+ */
+export function localMonthBounds(instant: Date, timeZone: string = DEFAULT_TIME_ZONE): LocalMonthBounds {
+  const p = zonedParts(instant, timeZone);
+  const daysInMonth = new Date(Date.UTC(p.year, p.month, 0)).getUTCDate();
+  const month = `${p.year}-${pad2(p.month)}`;
+  return {
+    month,
+    since: `${month}-01`,
+    until: `${month}-${pad2(p.day)}`,
+    daysInMonth,
+    dayOfMonth: p.day,
+    remainingDays: daysInMonth - p.day + 1,
+  };
+}
