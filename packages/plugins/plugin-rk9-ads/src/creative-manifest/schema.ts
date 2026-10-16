@@ -89,7 +89,8 @@ const HTTPS_URL_PATTERN = [
   "^https://",
   `(?!(?:[^/?#.]*\\.)*(?:[0-9]+|0[xX][0-9a-fA-F]*)\\.?${AUTHORITY_END})`,
   `(?!(?:[^/?#]*\\.)?(?:${PRIVATE_NAME_SUFFIXES.map(caseInsensitive).join("|")})\\.?${AUTHORITY_END})`,
-  `[^/?#@:\\[\\]\\s]+\\.[^/?#@:\\[\\]\\s]+${AUTHORITY_END}`,
+  // Dot-free labels keep the match linear (no nested quantifier over the same characters).
+  `[^/?#@:.\\[\\]\\s]+(?:\\.[^/?#@:.\\[\\]\\s]+)+\\.?${AUTHORITY_END}`,
 ].join("");
 
 export type UrlProblem = { code: "url_not_https" | "url_forbidden"; message: string };
@@ -118,7 +119,7 @@ export function checkMediaUrl(value: string): UrlProblem | null {
   if (host.startsWith("[") || IPV4_RE.test(host)) {
     return { code: "url_forbidden", message: "must use a host name, not an IP address" };
   }
-  if (!host.includes(".") || PRIVATE_NAME_RE.test(host.replace(/\.$/, ""))) {
+  if (!host.includes(".") || PRIVATE_NAME_RE.test(host.replace(/\.+$/, ""))) {
     return { code: "url_forbidden", message: "must use a public host name" };
   }
   return null;

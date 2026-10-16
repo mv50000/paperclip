@@ -139,6 +139,13 @@ export function isPrivateIP(ip: string): boolean {
   // Unwrap IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) and re-check as IPv4
   const v4MappedMatch = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
   if (v4MappedMatch && v4MappedMatch[1]) return isPrivateIP(v4MappedMatch[1]);
+  // The URL parser writes [::ffff:100.64.0.1] as ::ffff:6440:1, and dns.lookup
+  // returns an IP literal unchanged, so unwrap the hex form of ::ffff:0:0/96 too.
+  const hextets = lower.includes(":") ? expandIPv6(lower) : null;
+  if (hextets && hextets.slice(0, 5).every((hextet) => hextet === 0) && hextets[5] === 0xffff) {
+    const [high, low] = [hextets[6]!, hextets[7]!];
+    return isPrivateIP(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
+  }
 
   // IPv4 patterns
   if (ip.startsWith("10.")) return true;

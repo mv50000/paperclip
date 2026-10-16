@@ -15,6 +15,12 @@ describe("plugin fetch SSRF guard: isPrivateIP", () => {
     "100.103.149.19",
     "100.127.255.255",
     "::ffff:100.64.1.2",
+    // The hex form the URL parser produces for [::ffff:a.b.c.d] literals.
+    "::ffff:6440:1",
+    "::ffff:7f00:1",
+    "::ffff:a9fe:a9fe",
+    "::ffff:a00:1",
+    "0:0:0:0:0:ffff:c0a8:101",
     "::1",
     "::",
     "fd7a:115c:a1e0::1",
@@ -38,6 +44,7 @@ describe("plugin fetch SSRF guard: isPrivateIP", () => {
     // 64:ff9b:1::/48 is the local-use NAT64 prefix, outside the well-known /96.
     "64:ff9b:1::a00:1",
     "2001:db8::1",
+    "::ffff:808:808",
   ])("allows %s", (ip) => {
     expect(isPrivateIP(ip)).toBe(false);
   });

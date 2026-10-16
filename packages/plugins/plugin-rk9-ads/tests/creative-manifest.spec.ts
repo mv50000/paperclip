@@ -91,6 +91,14 @@ describe("creative manifest v1 schema", () => {
     }
   });
 
+  it("the URL pattern stays fast on a long hostile authority", () => {
+    const validate = compileLikeBrandRepoCi();
+    const hostile = `https://${"a.".repeat(10_000)}@`;
+    const started = performance.now();
+    validate({ ...readmeExample(), mediaUrl: hostile });
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("gives URL problems their own codes", () => {
     const parsed = parseCreativeManifest({ ...readmeExample(), mediaUrl: "http://media.ololla.fi/a.mp4", posterUrl: "https://10.0.0.5/p.jpg" });
     expect(parsed.ok).toBe(false);
@@ -122,6 +130,7 @@ describe("creative manifest v1 schema", () => {
       "https://vault.tail1234.ts.net/a",
       "https://host.beta.tailscale.net/a",
       "https://100.64.0.1/a",
+      "https://vault.tail1234.ts.net../a",
     ]) {
       expect(checkMediaUrl(url), url).not.toBeNull();
     }
