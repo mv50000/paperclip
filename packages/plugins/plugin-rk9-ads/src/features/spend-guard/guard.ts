@@ -371,8 +371,10 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
       (async () => {
         const summary = await getAccountSummary(client, account);
         if (summary.timezone !== config.timeZone) throw new TimezoneMismatchError(summary.timezone, config.timeZone);
-        const mtdCents = await getAccountSpendCents(client, account, { since: bounds.since, until: bounds.until });
+        // Today per ad set first, then MTD: spend only grows, so MTD read later
+        // holds at least the spend credited from the earlier read.
         const todaySpend = await getAdsetSpendForDay(client, account, bounds.until);
+        const mtdCents = await getAccountSpendCents(client, account, { since: bounds.since, until: bounds.until });
         const budgets = await listBudgets(client, account, { maxPages: LIST_MAX_PAGES });
         if (change?.objectId) {
           const known = [...budgets.campaigns, ...budgets.adsets].find((object) => object.id === change.objectId);

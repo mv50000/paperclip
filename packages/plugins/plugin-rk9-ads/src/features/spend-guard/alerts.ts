@@ -137,21 +137,25 @@ export async function evaluateSpendAlerts(
     }
     return failed;
   };
+  let claiming: string | null = null;
   try {
     for (const threshold of crossed) {
-      const key = alertKey(config.brandCode, figures.month, threshold);
-      if (await deps.store.claim(companyId, key, SPEND_ALERT_KIND, { pct, mtdEur: figures.mtdEur, month: figures.month })) {
+      claiming = alertKey(config.brandCode, figures.month, threshold);
+      if (await deps.store.claim(companyId, claiming, SPEND_ALERT_KIND, { pct, mtdEur: figures.mtdEur, month: figures.month })) {
         claimed.push(threshold);
       }
     }
     for (const risk of figures.risks) {
-      if (await deps.store.claim(companyId, riskKey(config.brandCode, day, risk), SPEND_RISK_KIND, { pct, mtdEur: figures.mtdEur, date: day })) {
+      claiming = riskKey(config.brandCode, day, risk);
+      if (await deps.store.claim(companyId, claiming, SPEND_RISK_KIND, { pct, mtdEur: figures.mtdEur, date: day })) {
         risks.push(risk);
       }
     }
   } catch (error) {
-    // A claim failed part-way: give back what this call claimed, so nothing is lost.
+    // A claim failed part-way: give back what this call claimed, and the key
+    // whose claim threw (it may have been written), so nothing is lost.
     await releaseAll();
+    if (claiming) await deps.store.release(companyId, claiming).catch(() => undefined);
     throw error;
   }
   if (claimed.length === 0 && risks.length === 0) return { claimed, risks, telegram: "skipped" };

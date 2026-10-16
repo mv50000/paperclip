@@ -131,8 +131,8 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
     options.rule === "scheduled_pause" ? "ajastettu pysäytys" : options.rule === "data_gate" ? "data-gate" : "hätäkatkaisin";
   const what = result.scope === "account" ? "koko mainostili pysäytetty" : "kampanja pysäytetty";
   const head = [
-    `⏸ ${config.displayName || config.brandCode}: ${what} (${when}, ${why})`,
-    ...(options.note ? [options.note] : []),
+    `⏸ ${config.displayName || config.brandCode}`.slice(0, 120) + `: ${what} (${when}, ${why})`,
+    ...(options.note ? [options.note.slice(0, 300)] : []),
     `Syy: ${options.reason}`.slice(0, 300),
     `${result.pausedCampaigns.length} kampanja(a) ja ${result.pausedAds.length} mainos(ta) → PAUSED:`,
   ];

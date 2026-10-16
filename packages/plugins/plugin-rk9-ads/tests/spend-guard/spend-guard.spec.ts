@@ -195,8 +195,8 @@ describe("Helsinki calendar month", () => {
     ] as const) {
       const meta = ollolaMeta("10.00", "100");
       await checkSpend({ config: OLLOLA, client: metaClient(meta), now: at(iso) });
-      expect(JSON.parse(meta.insightsCalls[0]!.params.time_range!)).toEqual({ since, until });
-      expect(meta.insightsCalls[0]!.params.level).toBe("account");
+      const mtd = meta.insightsCalls.find((call) => call.params.level === "account")!;
+      expect(JSON.parse(mtd.params.time_range!)).toEqual({ since, until });
     }
   });
 });
