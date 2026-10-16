@@ -24,6 +24,7 @@ export interface DigestInput {
   /** ISO 4217, e.g. EUR. */
   currency: string;
   yesterday: { spendCents: number; impressions: number; clicks: number; inlineLinkClicks: number };
+  /** CPC warning threshold in EUR; applied only when `currency` is EUR (no conversion). */
   cpcWarnEur: number;
   zeroSpendMode: "message" | "silent";
   pacing: Pacing | null;
@@ -83,7 +84,8 @@ export function formatMoney(cents: number, currency: string): string {
   return `${formatDecimal(cents / 100)} ${currencySymbol(currency)}`;
 }
 
-function formatDate(date: string): string {
+/** YYYY-MM-DD as 15.10.2026. */
+export function formatDate(date: string): string {
   const [y, m, d] = date.split("-");
   return `${Number(d)}.${Number(m)}.${y}`;
 }
@@ -138,19 +140,23 @@ export function formatDigest(input: DigestInput): string | null {
     let cpcText = "CPC – (ei linkkiklikkejä)";
     if (cpc !== null) {
       cpcText = `CPC ${formatDecimal(cpc)} ${currencySymbol(cur)}`;
-      if (cpc > input.cpcWarnEur) cpcText += ` ⚠️ yli ${formatDecimal(input.cpcWarnEur)} ${currencySymbol(cur)}`;
+      // cpcWarnEur is in EUR: another currency's CPC is not compared with it.
+      if (cur === "EUR" && cpc > input.cpcWarnEur) cpcText += ` ⚠️ yli ${formatDecimal(input.cpcWarnEur)} ${currencySymbol(cur)}`;
     }
     lines.push(`${ctrText} · ${cpcText}`);
   }
 
   if (input.pacing) {
     const p = input.pacing;
-    const pct = p.monthlyCapCents > 0 ? Math.round((p.mtdCents / p.monthlyCapCents) * 100) : 0;
-    lines.push(`Kuukausi: ${formatMoney(p.mtdCents, cur)} / ${formatMoney(p.monthlyCapCents, cur)} (${pct} %)`);
+    const pct = p.pctUsed === null ? "–" : formatDecimal(p.pctUsed, 1);
+    const left = p.remainingCents >= 0 ? `, jäljellä ${formatMoney(p.remainingCents, cur)}` : "";
+    lines.push(`Kuukausi: ${formatMoney(p.mtdCents, cur)} / ${formatMoney(p.monthlyCapCents, cur)} (${pct} %)${left}`);
     if (p.projectedCents !== null) {
       const over = p.projectedCents > p.monthlyCapCents;
+      // The guard's projection counts the current budgets; the fallback extrapolates the complete days.
+      const basis = p.source === "spend_guard" ? "nykyisillä budjeteilla" : "toteutuneella tahdilla";
       lines.push(
-        `Ennuste kuun loppuun: ${formatMoney(p.projectedCents, cur)}${over ? ` ⚠️ ylittää katon ${formatMoney(p.monthlyCapCents, cur)}` : ""}`,
+        `Ennuste kuun loppuun (${basis}): ${formatMoney(p.projectedCents, cur)}${over ? ` ⚠️ ylittää katon ${formatMoney(p.monthlyCapCents, cur)}` : ""}`,
       );
     }
     if (p.mtdCents > p.monthlyCapCents) lines.push(`⚠️ Kuukauden kulutus on jo yli katon`);

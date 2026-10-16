@@ -61,8 +61,7 @@ function riskLine(figures: GuardResult, risk: SpendRisk): string {
     case "no_spend_cap":
       return "⚠️ Metan spend_cap puuttuu: Meta ei pysäytä kulutusta katossa.";
     case "spend_cap_headroom_exceeds_remaining": {
-      const left = figures.mtdEur === null ? null : Math.round((figures.monthlyCapEur - figures.mtdEur) * 100) / 100;
-      return `⚠️ Metan spend_cap sallii vielä ${money(figures.headroomEur)}, mutta katosta on jäljellä ${money(left)}: Meta ei pysäytä ajoissa.`;
+      return `⚠️ Metan spend_cap sallii vielä ${money(figures.headroomEur)}, mutta katosta on jäljellä ${money(figures.remainingEur)}: Meta ei pysäytä ajoissa.`;
     }
     case "projection_exceeds_cap":
       return `⚠️ Nykyisillä budjeteilla kuun loppuun arvio ${money(figures.projectedMonthEndEur)} ylittää katon ${money(figures.monthlyCapEur)}.`;

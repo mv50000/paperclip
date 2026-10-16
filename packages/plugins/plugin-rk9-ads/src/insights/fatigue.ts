@@ -6,7 +6,9 @@
  * Signals:
  * - frequency: impressions-weighted daily frequency over the recent window
  *   above `maxFrequency`. Daily reach is not additive, so a lifetime
- *   frequency cannot be derived from daily rows.
+ *   frequency cannot be derived from daily rows, and the threshold is a daily
+ *   one (default 2): the usual 3.5 is a 7-day or lifetime norm that a daily
+ *   frequency (about 1.1 at 10 EUR a day) never reaches.
  * - ctr_decay: recent link CTR at least `ctrDropPct` % below the ad's own
  *   baseline. The baseline is the first `baselineDays` days of delivery,
  *   extended day by day (up to `baselineMaxDays`) until it reaches
@@ -55,7 +57,8 @@ export interface FatigueThresholds {
 /** Defaults; documented in the README. minImpressions, maxFrequency and ctrDropPct come from brand config `fatigue`. */
 export const DEFAULT_FATIGUE_THRESHOLDS: Readonly<FatigueThresholds> = Object.freeze({
   minImpressions: 1000,
-  maxFrequency: 3.5,
+  // Daily frequency (see the frequency signal); 3.5 is a 7-day norm (RK9-526).
+  maxFrequency: 2,
   ctrDropPct: 30,
   cpcRisePct: 40,
   cpmRisePct: 40,

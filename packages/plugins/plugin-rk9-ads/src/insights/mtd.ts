@@ -1,16 +1,20 @@
 /**
- * Month-to-date spend and pacing (A10, RK9-512).
+ * Month-to-date spend and pacing (A10, RK9-512; RK9-526).
+ *
+ * The digest's canonical MTD is the spend guard's Graph read: the digest
+ * takes it from a guard snapshot (features/spend-guard/position.ts), so the
+ * digest and the guard show the same MTD, headroom and remaining cap.
+ * insights_daily MTD (this module) cross-checks it and is the labelled
+ * fallback when the guard cannot read Meta.
  *
  * Insights dates are calendar days of the ad account time zone
  * (`timezone_name`, read from the account, never hardcoded), so the month is
  * that zone's month too. Ads Manager uses the same days, which is why MTD here
  * matches its "this month" figure. Graph `amount_spent` is not a calendar
  * month figure and is used only for the spend_cap headroom (G2).
- *
- * Follow-up: the spend guard (A6, RK9-511) computes its own MTD; joining the
- * two computations is a separate issue.
  */
 
+import { monthPosition } from "../features/spend-guard/position.js";
 import { localMonthBounds, type LocalMonthBounds } from "../kit/local-time.js";
 import type { InsightsStore } from "./store.js";
 
@@ -32,8 +36,18 @@ export interface Pacing {
   completeDays: number;
   daysInMonth: number;
   monthlyCapCents: number;
-  /** Projected month-end spend from the complete days; null on the 1st. */
+  /** Monthly cap - MTD, cents (negative when MTD is over the cap). */
+  remainingCents: number;
+  /** MTD as a share of the cap, one decimal, floored (as the guard's pctUsed). */
+  pctUsed: number | null;
+  /** Projected month-end spend, cents; null when there is none (run rate on the 1st). */
   projectedCents: number | null;
+  /**
+   * Where MTD and the projection come from: "spend_guard" = the guard's Graph
+   * read and its budget projection (canonical); "insights" = insights_daily
+   * and the run rate of the complete days (fallback).
+   */
+  source: "spend_guard" | "insights";
   /** True when MTD or the projection is above the monthly cap. */
   overCap: boolean;
 }
@@ -50,17 +64,32 @@ export function computePacing(input: {
   monthlyCapEur: number;
 }): Pacing {
   const completeDays = input.month.dayOfMonth - 1;
-  const daysInMonth = input.month.daysInMonth;
-  const monthlyCapCents = Math.round(input.monthlyCapEur * 100);
-  const projectedCents = completeDays > 0 ? Math.round((input.completeDaysCents / completeDays) * daysInMonth) : null;
+  const projectedCents = completeDays > 0 ? Math.round((input.completeDaysCents / completeDays) * input.month.daysInMonth) : null;
+  return pacingOf({ month: input.month, mtdCents: input.mtdCents, monthlyCapEur: input.monthlyCapEur, projectedCents, source: "insights" });
+}
+
+/** Pacing from an MTD and a projection already decided (the guard's, or the run rate). */
+export function pacingOf(input: {
+  month: Pick<LocalMonthBounds, "until" | "dayOfMonth" | "daysInMonth">;
+  mtdCents: number;
+  monthlyCapEur: number;
+  projectedCents: number | null;
+  source: Pacing["source"];
+}): Pacing {
+  // The position math is the guard's (RK9-526); spend_cap does not matter here.
+  const position = monthPosition({ monthlyCapEur: input.monthlyCapEur, mtdCents: input.mtdCents, spendCapCents: null, amountSpentCents: 0 });
+  const projectedCents = input.projectedCents;
   return {
     today: input.month.until,
     mtdCents: input.mtdCents,
-    completeDays,
-    daysInMonth,
-    monthlyCapCents,
+    completeDays: input.month.dayOfMonth - 1,
+    daysInMonth: input.month.daysInMonth,
+    monthlyCapCents: position.capCents,
+    remainingCents: position.remainingCents,
+    pctUsed: position.pctUsed,
     projectedCents,
-    overCap: input.mtdCents > monthlyCapCents || (projectedCents !== null && projectedCents > monthlyCapCents),
+    source: input.source,
+    overCap: input.mtdCents > position.capCents || (projectedCents !== null && projectedCents > position.capCents),
   };
 }
 

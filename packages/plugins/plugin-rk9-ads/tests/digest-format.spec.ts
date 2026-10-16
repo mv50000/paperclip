@@ -9,7 +9,7 @@ import {
   truncateForTelegram,
   type DigestInput,
 } from "../src/digest/format.js";
-import { computePacing } from "../src/insights/mtd.js";
+import { computePacing, pacingOf } from "../src/insights/mtd.js";
 import { localMonthBounds } from "../src/kit/local-time.js";
 
 /** Month bounds of a Helsinki date, at local noon. */
@@ -60,6 +60,25 @@ describe("formatDigest", () => {
     expect(text).not.toContain("⚠️ yli");
   });
 
+  it("compares CPC with cpcWarnEur only on a EUR account (no conversion)", () => {
+    const yesterday = { spendCents: 600, impressions: 900, clicks: 12, inlineLinkClicks: 10 };
+    expect(formatDigest(normalDay({ yesterday, currency: "SEK" }))).toContain("CPC 0,60 SEK\n");
+    expect(formatDigest(normalDay({ yesterday, currency: "SEK" }))).not.toContain("⚠️ yli");
+  });
+
+  it("shows the month position with what is left of the cap and the projection basis", () => {
+    const text = formatDigest(
+      normalDay({ pacing: pacingOf({ month: month("2026-10-15"), mtdCents: 4510, monthlyCapEur: 100, projectedCents: 9100, source: "spend_guard" }) }),
+    )!;
+    expect(text).toContain("Kuukausi: 45,10 € / 100,00 € (45,1 %), jäljellä 54,90 €");
+    expect(text).toContain("Ennuste kuun loppuun (nykyisillä budjeteilla): 91,00 €");
+    const over = formatDigest(
+      normalDay({ pacing: pacingOf({ month: month("2026-10-15"), mtdCents: 10_100, monthlyCapEur: 100, projectedCents: 10_100, source: "spend_guard" }) }),
+    )!;
+    expect(over).toContain("Kuukausi: 101,00 € / 100,00 € (101,0 %)\n");
+    expect(over).toContain("⚠️ Kuukauden kulutus on jo yli katon");
+  });
+
   it("formats a zero-spend day in message mode", () => {
     const input = normalDay({ yesterday: { spendCents: 0, impressions: 0, clicks: 0, inlineLinkClicks: 0 }, activeAds: 0 });
     const text = formatDigest(input);
@@ -98,7 +117,7 @@ describe("formatDigest", () => {
       spendCap: { capCents: 10000, headroomCents: 1800 },
     });
     const text = formatDigest(input)!;
-    expect(text).toContain("Ennuste kuun loppuun: 127,26 € ⚠️ ylittää katon 100,00 €");
+    expect(text).toContain("Ennuste kuun loppuun (toteutuneella tahdilla): 127,26 € ⚠️ ylittää katon 100,00 €");
     expect(text).toMatchSnapshot();
   });
 
@@ -157,7 +176,10 @@ describe("computePacing", () => {
       completeDays: 10,
       daysInMonth: 31,
       monthlyCapCents: 10000,
+      remainingCents: 6500,
+      pctUsed: 35,
       projectedCents: 9300,
+      source: "insights",
       overCap: false,
     });
   });

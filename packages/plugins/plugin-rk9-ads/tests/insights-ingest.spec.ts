@@ -15,6 +15,8 @@ import { createFatigueIssues, fatigueIssueKey } from "../src/insights/fatigue-is
 import { monthToDate } from "../src/insights/mtd.js";
 import { createInsightsStore, type InsightDayRow, type InsightsStore } from "../src/insights/store.js";
 import { useCompanySecrets } from "../src/kit/testing/harness.js";
+import { TelegramApiError } from "../src/kit/telegram/bot-api.js";
+import { PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
 import { GraphHealth, MetaGraphClient } from "../src/meta/graph.js";
 import { linkCpc } from "../src/metrics/cpc.js";
@@ -286,13 +288,14 @@ describeDb("insights ingest and digest on real Postgres", () => {
     const due = "2026-10-15T05:00:00Z"; // 08:00 Helsinki
     const sent: Array<{ chat_id: string | number; text: string }> = [];
     let failSends = 0;
+    let sendError: () => Error = () => new TelegramApiError("sendMessage", { status: 429, errorCode: 429, description: "Too Many Requests" });
     const telegram: DigestDeps["telegram"] = () => ({
       chatId: "-100111",
       api: {
         sendMessage: async (params) => {
           if (failSends > 0) {
             failSends -= 1;
-            throw new Error("Telegram 502");
+            throw sendError();
           }
           sent.push({ chat_id: params.chat_id, text: params.text });
           return { message_id: 900 + sent.length, chat: { id: -100111, type: "group" }, date: 0 } as never;
@@ -303,6 +306,7 @@ describeDb("insights ingest and digest on real Postgres", () => {
     beforeEach(async () => {
       sent.length = 0;
       failSends = 0;
+      sendError = () => new TelegramApiError("sendMessage", { status: 429, errorCode: 429, description: "Too Many Requests" });
       const day = (company: string, adId: string, spend: string, impressions: number, clicks: number, brand: string) =>
         store.upsertDays(company, [
           toDayRow(adDay(adId, "2026-10-14", spend, impressions, clicks), { brandCode: brand, currency: "EUR", withActions: false, finalBefore: "2026-10-01" })!,
@@ -311,9 +315,21 @@ describeDb("insights ingest and digest on real Postgres", () => {
       await day(companyB, AD_B, "50.00", 9999, 77, "AUR");
     });
 
-    function queueDigestGraph(names: Array<{ id: string; name: string }> = [{ id: AD_1, name: "Syysreel 1" }], amountSpent = "321") {
+    /** The spend guard snapshot's reads (RK9-526): account, today per ad set, MTD, campaigns, ad sets. */
+    function guardReads(amountSpent: string, mtd: string | null): FixtureResponse[] {
+      return [
+        account("Europe/Helsinki", amountSpent),
+        ok({ data: [] }),
+        ok({ data: mtd === null ? [] : [{ spend: mtd, date_start: "2026-10-01", date_stop: "2026-10-15" }] }),
+        ok({ data: [] }),
+        ok({ data: [] }),
+      ];
+    }
+
+    function queueDigestGraph(names: Array<{ id: string; name: string }> = [{ id: AD_1, name: "Syysreel 1" }], amountSpent = "321", mtd: string | null = "3.21") {
       fake.push(
         account("Europe/Helsinki", amountSpent),
+        ...guardReads(amountSpent, mtd),
         ok({ data: names.map((ad) => ({ id: ad.id, name: ad.name, status: "ACTIVE", effective_status: "ACTIVE", adset_id: "1", campaign_id: "2", creative: { id: "3" } })) }),
       );
     }
@@ -359,6 +375,22 @@ describeDb("insights ingest and digest on real Postgres", () => {
       expect(sent).toHaveLength(1);
       const [run] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status, attempts, error FROM ${testDb.namespace}.digest_runs`);
       expect(run).toMatchObject({ status: "sent", attempts: 2, error: null });
+    });
+
+    it("never resends when the send outcome is unknown (transport error after the request)", async () => {
+      failSends = 1;
+      sendError = () => new TelegramApiError("sendMessage", { status: 0, description: "socket hang up" });
+      queueDigestGraph();
+      expect(await digestTickBrand(deps(due, telegram), companyA, configA)).toBe("send_unknown");
+      const [pending] = await testDb.adminQuery<Record<string, unknown>>(`SELECT status, attempts FROM ${testDb.namespace}.digest_runs`);
+      expect(pending).toMatchObject({ status: "pending", attempts: 1 });
+      await testDb.adminQuery(
+        `UPDATE ${testDb.namespace}.digest_runs SET updated_at = now() - interval '11 minutes' WHERE company_id = $1`,
+        [companyA],
+      );
+      expect(await digestTickBrand(deps("2026-10-15T05:15:00Z", telegram), companyA, configA)).toBe("abandoned");
+      expect(await digestTickBrand(deps("2026-10-15T05:30:00Z", telegram), companyA, configA)).toBe("done");
+      expect(sent).toHaveLength(0);
     });
 
     it("does not claim an attempt while the bot is not ready", async () => {
@@ -422,7 +454,7 @@ describeDb("insights ingest and digest on real Postgres", () => {
       const silent = { ...configA, digest: { ...configA.digest, zeroSpendMode: "silent" as const } };
       await testDb.adminQuery(`DELETE FROM ${testDb.namespace}.insights_daily WHERE company_id = $1`, [companyA]);
       await store.markOnce(companyA, closeMarkerKey("2026-10-15"), "insights_close");
-      queueDigestGraph([], "0");
+      queueDigestGraph([], "0", null);
       expect(await digestTickBrand(deps(due, telegram), companyA, silent)).toBe("skipped");
       expect(sent).toHaveLength(0);
       expect(await digestTickBrand(deps("2026-10-15T06:00:00Z", telegram), companyA, silent)).toBe("done");
@@ -447,14 +479,47 @@ describeDb("insights ingest and digest on real Postgres", () => {
     it("buildDigest lists warnings: token, missing close and spend_cap reset", async () => {
       await store.markOnce(companyA, "insights-warning:2026-10-15:token", INSIGHTS_WARNING_KIND, { code: "token", message: "x" });
       // amount_spent 60 EUR vs MTD 3.21 EUR: the 1st-of-month reset looks missing.
-      fake.push(account("Europe/Helsinki", "6000"), ok({ data: [] }));
+      fake.push(account("Europe/Helsinki", "6000"), ...guardReads("6000", "3.21"), ok({ data: [] }));
       const built = await buildDigest(deps(due, telegram), companyA, configA);
       expect(built.input.warnings).toEqual([
         expect.stringContaining("nollaus näyttää puuttuvan"),
         "Meta-token ei kelpaa (190), insights-haku epäonnistui",
         "Eilisen luvut voivat olla vajaat: päivän sulkuajo ei ole vielä onnistunut",
       ]);
+      expect(built.summary).toMatchObject({ mtdSource: "spend_guard", mtdCents: 321, insightsMtdCents: 321, mtdGapCents: 0 });
     });
+
+    it("keeps showing a recurring warning with the day it began, and drops one over 24 h old", async () => {
+      for (const day of ["2026-10-13", "2026-10-14", "2026-10-15"]) {
+        await store.markOnce(companyA, `insights-warning:${day}:token`, INSIGHTS_WARNING_KIND, { code: "token", message: "x" });
+      }
+      // A rate limit two days ago that has not recurred since.
+      await store.markOnce(companyA, "insights-warning:2026-10-13:rate_limit", INSIGHTS_WARNING_KIND, { code: "rate_limit", message: "x" });
+      await testDb.adminQuery(
+        `UPDATE ${testDb.namespace}.alert_dedupe SET created_at = now() - interval '30 hours' WHERE company_id = $1 AND dedupe_key LIKE '%:2026-10-13:%'`,
+        [companyA],
+      );
+      await store.markOnce(companyA, closeMarkerKey("2026-10-15"), "insights_close");
+      queueDigestGraph();
+      const built = await buildDigest(deps(due, telegram), companyA, configA);
+      expect(built.input.warnings).toEqual(["Meta-token ei kelpaa (190), insights-haku epäonnistui (jatkunut 13.10.2026 alkaen)"]);
+    });
+  });
+
+  it("reads a fatigue series past one page of rows", async () => {
+    const rows: InsightDayRow[] = [];
+    for (let ad = 0; ad < 60; ad += 1) {
+      for (let offset = 0; offset < 90; offset += 1) {
+        const date = new Date(Date.UTC(2026, 9, 15 - offset)).toISOString().slice(0, 10);
+        rows.push(toDayRow(adDay(`9000${String(ad).padStart(4, "0")}`, date, "1.00", 100, 1), { brandCode: "OLL", currency: "EUR", withActions: false, finalBefore: "2026-01-01" })!);
+      }
+    }
+    await store.upsertDays(companyA, rows);
+    const series = await store.recentAdSeries(companyA, "2026-10-13", "2026-07-17");
+    expect(series).toHaveLength(5400);
+    expect(new Set(series.map((row) => `${row.adId}|${row.date}`)).size).toBe(5400);
+    // The newest day of the last ad is there: nothing was cut at a page edge.
+    expect(series.at(-1)).toMatchObject({ adId: "90000059", date: "2026-10-15" });
   });
 
   describe("fatigue issues", () => {
@@ -477,11 +542,27 @@ describeDb("insights ingest and digest on real Postgres", () => {
       expect(await store.hasMark(companyB, fatigueIssueKey(AD_1))).toBe(false);
     });
 
-    it("removes the marker when the create fails, so the next run retries", async () => {
+    it("removes the marker when the host refuses the create, so the next run retries", async () => {
       const on = { ...configA, fatigue: { ...configA.fatigue, issuesEnabled: true } };
-      const failing = { ...harness.ctx, issues: { ...harness.ctx.issues, create: async () => { throw new Error("boom"); } } };
+      const refused = Object.assign(new Error("denied"), { code: PLUGIN_RPC_ERROR_CODES.CAPABILITY_DENIED });
+      const failing = { ...harness.ctx, issues: { ...harness.ctx.issues, create: async () => { throw refused; } } };
       expect(await createFatigueIssues({ ctx: failing as never, store, pluginId: "rk9-ads" }, companyA, on, [fatiguedAd])).toEqual([]);
       expect(await store.hasMark(companyA, fatigueIssueKey(AD_1))).toBe(false);
+    });
+
+    it("keeps the marker when the create times out or fails after it may have run, so no duplicate issue is made", async () => {
+      const on = { ...configA, fatigue: { ...configA.fatigue, issuesEnabled: true } };
+      for (const error of [
+        Object.assign(new Error("Worker→host call timed out"), { code: PLUGIN_RPC_ERROR_CODES.TIMEOUT }),
+        // A generic host error: the issue row may exist and the activity log write failed.
+        Object.assign(new Error("activity log insert failed"), { code: -32603 }),
+        new Error("connection reset"),
+      ]) {
+        await store.unmark(companyA, fatigueIssueKey(AD_1));
+        const failing = { ...harness.ctx, issues: { ...harness.ctx.issues, create: async () => { throw error; } } };
+        expect(await createFatigueIssues({ ctx: failing as never, store, pluginId: "rk9-ads" }, companyA, on, [fatiguedAd])).toEqual([]);
+        expect(await store.hasMark(companyA, fatigueIssueKey(AD_1))).toBe(true);
+      }
     });
   });
 });

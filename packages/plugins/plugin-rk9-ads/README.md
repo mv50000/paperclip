@@ -307,13 +307,16 @@ Jobs (UTC cron; local time is computed in the job):
 | Job | Schedule | What it does |
 |---|---|---|
 | `insights-hourly` | `5 * * * *` | Yesterday's and today's ad-level rows (one `level=ad`, `time_increment=1` call per brand), so late reporting for yesterday is in before the digest. |
-| `insights-daily-close` | `20 * * * *` | First run of a new local date (`timeZone`, default Europe/Helsinki): re-pulls the last 7 days to yesterday, marks days older than 3 days final, then files fatigue issues if enabled. Marker `insights-close:<date>` in `alert_dedupe`. |
+| `insights-daily-close` | `20 * * * *` | First run of a new local date (`timeZone`, default Europe/Helsinki): re-pulls the last 7 days to yesterday, marks days older than 3 days final, then files fatigue issues if enabled. Marker `insights-close:<date>` in `alert_dedupe`, keyed by the ad-account-local date the digest checks. |
 | `digest-tick` | `*/15 * * * *` | Sends the digest once per local date at or after `digest.time`. |
 
 Rows are upserted by `(company_id, ad_id, date)`, so a re-run gives the same
 rows and values. Dates are ad-account-local (`timezone_name` from the account).
 Each brand runs in its own try/catch: a Graph error, token 190 or rate limit is
-logged and stored as an `insights_warning` marker, which the digest shows. When
+logged and stored as an `insights_warning` marker (one per account-local day
+and code), which the digest shows while it recurred in the last 24 h; a
+warning that has recurred day after day says since when ("jatkunut … alkaen").
+When
 Meta rejects a field (code 100), the core fields are fetched alone and each
 optional field (`reach`, `frequency`, `actions`) is tried on its own. `actions`
 is fetched only when the brand has `meta.datasetId`.
@@ -331,13 +334,26 @@ the send and each attempt is claimed with a compare-and-set, so a day is sent
 at most once. A failed send is retried after 10 minutes, at most 5 attempts.
 A row left pending (a worker restart mid-send, or a send whose "sent" write
 failed) is closed as failed after 10 minutes and never resent: its send state
-is unknown, and a missed digest is better than a duplicate. A bot that is not
-ready yet uses no attempt.
-MTD and pacing are computed in the ad-account time zone from `insights_daily`;
-the projection uses complete days only. Headroom is Meta `spend_cap −
-amount_spent`. The digest warns when `spend_cap` is missing or above the
-monthly cap, and when `amount_spent` is well above MTD after the 1st (the
-monthly reset looks missing, G2).
+is unknown, and a missed digest is better than a duplicate. The same holds for
+a send that ends in a transport error or an HTTP 5xx: only a 4xx answer from
+Telegram (the message was refused) or a request that never connected (DNS
+failure, connection refused) is retried. A bot that is not ready yet
+uses no attempt. The CPC warning (`cpcWarnEur`) applies to EUR accounts only.
+Month figures (RK9-526): MTD, Meta's headroom (`spend_cap − amount_spent`),
+what is left of the monthly cap and the projection come from a spend guard
+snapshot (`checkSpend`, fresh Graph reads) through `monthPosition`
+(`src/features/spend-guard/position.ts`), the same function the guard decides
+on. So the digest and the guard show the same figures for the same day. The
+Graph read is canonical: it is live and the guard is fail-closed on it.
+`insights_daily` MTD cross-checks it; a gap above 2 € or 5 % (the larger) is
+logged (`MTD sources differ`) and shown as a warning. When the guard cannot
+read Meta (or the account time zone is not `timeZone`), the digest says so and
+falls back to `insights_daily` MTD and the run rate of the complete days. The
+projection line names its basis ("nykyisillä budjeteilla" or "toteutuneella
+tahdilla"). The digest warns when `spend_cap` is missing or used up, when its
+headroom is above what is left of the cap (guard rule 4), and when
+`amount_spent` is well above MTD after the 1st (the monthly reset looks
+missing, G2).
 
 Fatigue (`computeFatigue(series, thresholds, asOf)`, pure): status
 `insufficient-data` below `minImpressions` total, `fatigued` with two or more
@@ -346,7 +362,7 @@ signals, `watch` with one, else `ok`. Fatigue never pauses or changes an ad.
 | Threshold | Default | Source |
 |---|---|---|
 | `minImpressions` | 1000 | config `fatigue.minImpressions` |
-| `maxFrequency` | 3.5 (impressions-weighted daily frequency, last 3 days) | config `fatigue.maxFrequency` |
+| `maxFrequency` | 2 (impressions-weighted **daily** frequency, last 3 days; 3.5 is a 7-day norm a daily figure never reaches) | config `fatigue.maxFrequency` |
 | `ctrDropPct` | 30 % below baseline link CTR | config `fatigue.ctrDropPct` |
 | `cpcRisePct` / `cpmRisePct` | 40 % above baseline | code default |
 | `maxAgeDays` | 28 days since first delivery | code default |
@@ -357,7 +373,11 @@ The baseline is derived from `insights_daily` on each run (no `ad_baselines`
 table). With `fatigue.issuesEnabled=true` (default false) a fatigued ad gets
 one Paperclip issue in its company (`originKind` `plugin:rk9-ads`), deduped by
 the `fatigue-issue:<adId>` marker. The plugin cannot read issues, so the marker
-stays after the issue closes: one issue per ad.
+stays after the issue closes: one issue per ad. A create the host refused
+before it ran (capability or scope denial) removes the marker for a retry;
+any other failure, also a timeout, keeps it, since the issue may exist.
+The fatigue series is read in pages of 5000 rows, so a large account is not
+cut short.
 
 Parity: `RK9_ADS_LIVE_SMOKE=1 pnpm exec tsx scripts/parity-sunspot-insights.ts
 [--date YYYY-MM-DD]` reads one Sunspot day both as the SOP does and through the
