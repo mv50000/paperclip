@@ -3,9 +3,15 @@
  * `rk9ads_stage_creative` and the API route `POST /creatives`.
  *
  * Steps: validate the manifest, check it against the company's brand config,
- * return an existing record on a dedupe hit, check the media with one HEAD
- * through the host fetch, insert the row (a unique constraint settles races),
- * and for a video start the Meta upload by `file_url`.
+ * return an existing record on a dedupe hit (or stage an expired or rejected
+ * one again), check the media with one HEAD through the host fetch, insert the
+ * row (a unique constraint settles races), and for a video start the Meta
+ * upload by `file_url`.
+ *
+ * A creative is a media resource. Its copy, cta, landingUrlKey and utmCampaign
+ * are defaults that a publication may override (RK9-525, A8 RK9-514). The same
+ * media with other text is therefore refused with 409 and the differing
+ * fields, never silently merged into the first row.
  *
  * Media travels as an HTTPS URL (G4). The plugin never reads media bytes: the
  * HEAD gives the type and size, Meta fetches the file itself. A staged
@@ -42,6 +48,8 @@ export type StageErrorCode =
   | "media_type_mismatch"
   | "media_too_large"
   | "idempotency_key_conflict"
+  | "creative_text_conflict"
+  | "creative_limit_reached"
   | "meta_upload_failed";
 
 const STATUS_BY_CODE: Record<StageErrorCode, number> = {
@@ -58,6 +66,8 @@ const STATUS_BY_CODE: Record<StageErrorCode, number> = {
   media_type_mismatch: 422,
   media_too_large: 422,
   idempotency_key_conflict: 409,
+  creative_text_conflict: 409,
+  creative_limit_reached: 429,
   meta_upload_failed: 502,
 };
 
@@ -88,6 +98,8 @@ export interface StageError {
   /** JSON pointer into the manifest when one field is at fault. */
   path?: string;
   issues?: ManifestIssue[];
+  /** For `creative_text_conflict`: the manifest fields that differ from the stored creative. */
+  fields?: CreativeTextField[];
 }
 
 export type StageResponseBody =
@@ -155,6 +167,51 @@ async function findExisting(ledger: Ledger, companyId: string, manifest: Creativ
   return bySha ? { row: bySha, matchedOn: "sha256" as const } : null;
 }
 
+/** Statuses whose creative may be staged again with a fresh manifest. */
+const RESTAGEABLE_STATUSES = new Set(["expired", "rejected"]);
+
+/** The text defaults a creative stores; a publication may override each one. */
+export const CREATIVE_TEXT_FIELDS = ["copy", "cta", "landingUrlKey", "utmCampaign"] as const;
+export type CreativeTextField = (typeof CREATIVE_TEXT_FIELDS)[number];
+
+const COPY_KEYS = ["message", "title", "description"] as const;
+
+function storedCopy(value: unknown): Record<string, unknown> | null {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+}
+
+/** The text fields of `manifest` that differ from the stored row. */
+function differingTextFields(row: LedgerRow, manifest: CreativeManifestV1): CreativeTextField[] {
+  const copy = storedCopy(row.ad_copy);
+  const differs: Record<CreativeTextField, boolean> = {
+    copy: !copy || COPY_KEYS.some((key) => (copy[key] ?? null) !== (manifest.copy[key] ?? null)),
+    cta: str(row.cta) !== manifest.cta,
+    landingUrlKey: str(row.landing_url_key) !== manifest.landingUrlKey,
+    utmCampaign: str(row.utm_campaign) !== manifest.utmCampaign,
+  };
+  return CREATIVE_TEXT_FIELDS.filter((field) => differs[field]);
+}
+
+/** New creative rows one company may create in 24 hours (a cap on invented sha256 values). */
+export const MAX_NEW_CREATIVES_PER_DAY = 200;
+
+async function newCreativesToday(deps: StageDeps, companyId: string): Promise<number> {
+  const rows = await deps.ctx.db.query<{ n: number | string }>(
+    `SELECT count(*)::int AS n FROM ${deps.ledger.qualified("creatives")}
+     WHERE company_id = $1 AND created_at > now() - interval '24 hours'`,
+    [companyId],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 async function loadRow(ledger: Ledger, companyId: string, id: string): Promise<LedgerRow> {
   const [row] = await ledger.select(companyId, "creatives", { where: { id }, limit: 1 });
   if (!row) throw new Error(`creative ${id} disappeared`);
@@ -194,6 +251,38 @@ async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, ma
     values.map(([, value]) => value),
   );
   return result.rowCount === 1;
+}
+
+/**
+ * Stages an expired or rejected creative again with the new manifest. The row
+ * keeps its id and idempotency key (its publications point at it), and the
+ * old Meta ids are cleared so a video uploads again from the new URL. The
+ * expected status in the WHERE clause lets exactly one caller restage.
+ */
+async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manifest: CreativeManifestV1): Promise<boolean> {
+  const changed = await deps.ledger.update(
+    companyId,
+    "creatives",
+    { id: String(row.id), status: String(row.status) },
+    {
+      kind: manifest.kind,
+      aspect_ratio: manifest.aspectRatio,
+      media_url: manifest.mediaUrl,
+      thumbnail_url: manifest.posterUrl ?? null,
+      ad_copy: manifest.copy,
+      cta: manifest.cta,
+      landing_url_key: manifest.landingUrlKey,
+      utm_campaign: manifest.utmCampaign,
+      target_adset_id: manifest.targetAdsetId ?? null,
+      valid_until: new Date(manifest.validUntil).toISOString(),
+      meta_video_id: null,
+      meta_image_hash: null,
+      error: null,
+      status: manifest.kind === "image" ? "ready" : "staged",
+      payload: { schemaVersion: manifest.schemaVersion },
+    },
+  );
+  return changed === 1;
 }
 
 function contentType(headers: Headers): string {
@@ -336,15 +425,49 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
     return fail("unknown_landing_url_key", `landing.urls has no key ${manifest.landingUrlKey}`, { path: "/landingUrlKey" });
   }
 
-  let existing = await findExisting(deps.ledger, companyId, manifest);
-  let created = false;
-  if (!existing) {
+  const checkMedia = async (): Promise<StageResult | null> => {
     const media = await checkRemoteMedia(deps.ctx.http.fetch, deps.ctx.logger, manifest.mediaUrl, manifest.kind, "/mediaUrl");
     if (media) return media;
     if (manifest.posterUrl) {
-      const poster = await checkRemoteMedia(deps.ctx.http.fetch, deps.ctx.logger, manifest.posterUrl, "image", "/posterUrl");
-      if (poster) return poster;
+      return checkRemoteMedia(deps.ctx.http.fetch, deps.ctx.logger, manifest.posterUrl, "image", "/posterUrl");
     }
+    return null;
+  };
+
+  let existing = await findExisting(deps.ledger, companyId, manifest);
+  let created = false;
+  if (existing && existing.matchedOn === "idempotencyKey" && (existing.row.sha256 !== manifest.sha256 || existing.row.brand_code !== manifest.brand)) {
+    return fail(
+      "idempotency_key_conflict",
+      "idempotencyKey is already used by a creative with other media",
+      { path: "/idempotencyKey" },
+      toCreativeView(existing.row),
+    );
+  }
+
+  if (existing && RESTAGEABLE_STATUSES.has(String(existing.row.status))) {
+    const media = await checkMedia();
+    if (media) return media;
+    const previousStatus = String(existing.row.status);
+    if (await restage(deps, companyId, existing.row, manifest)) {
+      await deps.ctx.activity.log({
+        companyId,
+        message: "rk9-ads creative restaged",
+        entityType: "rk9ads_creative",
+        entityId: String(existing.row.id),
+        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256, previousStatus },
+      });
+    }
+    // Restaged now or by a concurrent call: either way the row holds a manifest from this round.
+    existing = { row: await loadRow(deps.ledger, companyId, String(existing.row.id)), matchedOn: existing.matchedOn };
+  }
+
+  if (!existing) {
+    if ((await newCreativesToday(deps, companyId)) >= MAX_NEW_CREATIVES_PER_DAY) {
+      return fail("creative_limit_reached", "this company has staged too many new creatives in the last 24 hours; retry later");
+    }
+    const media = await checkMedia();
+    if (media) return media;
     const id = randomUUID();
     if (await insertIfAbsent(deps, companyId, id, manifest)) {
       created = true;
@@ -365,12 +488,24 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
 
   const { row, matchedOn } = existing;
   if (matchedOn === "idempotencyKey" && (row.sha256 !== manifest.sha256 || row.brand_code !== manifest.brand)) {
+    // A concurrent call took the key for other media after the first lookup.
     return fail(
       "idempotency_key_conflict",
       "idempotencyKey is already used by a creative with other media",
       { path: "/idempotencyKey" },
       toCreativeView(row),
     );
+  }
+  if (!created) {
+    const fields = differingTextFields(row, manifest);
+    if (fields.length > 0) {
+      return fail(
+        "creative_text_conflict",
+        `this media is already staged with other ${fields.join(", ")}; text variants belong to the publication, not the creative`,
+        { path: `/${fields[0]}`, fields },
+        toCreativeView(row),
+      );
+    }
   }
 
   if (needsUpload(row)) {

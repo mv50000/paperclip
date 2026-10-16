@@ -23,7 +23,7 @@
       "type": "string",
       "maxLength": 2048,
       "format": "uri",
-      "pattern": "^https://",
+      "pattern": "^https://(?!(?:[^/?#.]*\\.)*(?:[0-9]+|0[xX][0-9a-fA-F]*)\\.?(?::443)?(?:[/?#]|$))(?!(?:[^/?#]*\\.)?(?:[lL][oO][cC][aA][lL][hH][oO][sS][tT]|[lL][oO][cC][aA][lL]|[iI][nN][tT][eE][rR][nN][aA][lL]|[iI][nN][tT][rR][aA][nN][eE][tT]|[lL][aA][nN]|[hH][oO][mM][eE]|[cC][oO][rR][pP]|[hH][oO][mM][eE]\\.[aA][rR][pP][aA]|[tT][sS]\\.[nN][eE][tT]|[bB][eE][tT][aA]\\.[tT][aA][iI][lL][sS][cC][aA][lL][eE]\\.[nN][eE][tT])\\.?(?::443)?(?:[/?#]|$))[^/?#@:\\[\\]\\s]+\\.[^/?#@:\\[\\]\\s]+(?::443)?(?:[/?#]|$)",
       "description": "Public https URL of the finished media. Meta fetches it; the plugin does not."
     },
     "posterUrl": {
@@ -31,7 +31,7 @@
       "type": "string",
       "maxLength": 2048,
       "format": "uri",
-      "pattern": "^https://"
+      "pattern": "^https://(?!(?:[^/?#.]*\\.)*(?:[0-9]+|0[xX][0-9a-fA-F]*)\\.?(?::443)?(?:[/?#]|$))(?!(?:[^/?#]*\\.)?(?:[lL][oO][cC][aA][lL][hH][oO][sS][tT]|[lL][oO][cC][aA][lL]|[iI][nN][tT][eE][rR][nN][aA][lL]|[iI][nN][tT][rR][aA][nN][eE][tT]|[lL][aA][nN]|[hH][oO][mM][eE]|[cC][oO][rR][pP]|[hH][oO][mM][eE]\\.[aA][rR][pP][aA]|[tT][sS]\\.[nN][eE][tT]|[bB][eE][tT][aA]\\.[tT][aA][iI][lL][sS][cC][aA][lL][eE]\\.[nN][eE][tT])\\.?(?::443)?(?:[/?#]|$))[^/?#@:\\[\\]\\s]+\\.[^/?#@:\\[\\]\\s]+(?::443)?(?:[/?#]|$)"
     },
     "sha256": {
       "type": "string",
@@ -135,5 +135,20 @@
   ],
   "additionalProperties": false,
   "title": "RK9 Ads creative manifest v1",
-  "description": "A finished creative that a brand repo hands to the RK9 Ads plugin (rk9ads_stage_creative or POST /api/plugins/<pluginId>/api/creatives)."
+  "description": "A finished creative that a brand repo hands to the RK9 Ads plugin (rk9ads_stage_creative or POST /api/plugins/<pluginId>/api/creatives).",
+  "if": {
+    "properties": {
+      "kind": {
+        "const": "image"
+      }
+    },
+    "required": [
+      "kind"
+    ]
+  },
+  "then": {
+    "properties": {
+      "posterUrl": false
+    }
+  }
 }

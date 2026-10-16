@@ -169,13 +169,104 @@ describeDb("creative ingress (tool + route, real Postgres)", () => {
     const callsAfterFirst = fake.calls.length;
 
     const sameKey = await viaRoute(companyA, videoManifest());
-    const sameSha = await viaTool(companyA, videoManifest({ idempotencyKey: "oll-reel-kesa-1-variant", copy: { message: "Toinen teksti" } }));
+    const sameSha = await viaTool(companyA, videoManifest({ idempotencyKey: "oll-reel-kesa-1-variant" }));
 
     expect(sameKey.status).toBe(200);
     expect(sameKey.body).toMatchObject({ created: false, creative: { id: firstId } });
     expect(sameSha.data).toMatchObject({ created: false, creative: { id: firstId } });
     expect(fake.calls.length).toBe(callsAfterFirst);
     expect(await rows(companyA)).toHaveLength(1);
+  });
+
+  it("refuses the same media with other text fields with 409 and names them, instead of dropping them", async () => {
+    const first = await viaRoute(companyA, videoManifest());
+    const firstId = (first.body as { creative: { id: string } }).creative.id;
+    const callsAfterFirst = fake.calls.length;
+
+    const otherCopy = await viaRoute(companyA, videoManifest({ idempotencyKey: "oll-reel-kesa-1-variant", copy: { message: "Toinen teksti" } }));
+    expect(otherCopy.status).toBe(409);
+    expect(otherCopy.body).toMatchObject({
+      error: { code: "creative_text_conflict", path: "/copy", fields: ["copy"] },
+      creative: { id: firstId },
+    });
+
+    // A dropped optional copy key counts as a difference too.
+    const noTitle = await viaRoute(companyA, videoManifest({ idempotencyKey: "oll-reel-kesa-1-variant", copy: { message: "Mökkiloma Forssassa" } }));
+    expect(noTitle.body).toMatchObject({ error: { code: "creative_text_conflict", fields: ["copy"] } });
+
+    // The same key with other text is refused as well: a retry must carry the same manifest.
+    const several = await viaTool(companyA, videoManifest({ cta: "LEARN_MORE", utmCampaign: "oll-syksy-2027" }));
+    expect(several.error).toMatch(/^creative_text_conflict at \/cta/);
+    expect(several.data).toMatchObject({ error: { fields: ["cta", "utmCampaign"] } });
+
+    expect(fake.calls.length).toBe(callsAfterFirst);
+    const [row] = await rows(companyA);
+    expect(row).toMatchObject({ cta: "BOOK_TRAVEL", utm_campaign: "oll-kesa-2027", ad_copy: { message: "Mökkiloma Forssassa", title: "Varaa nyt" } });
+  });
+
+  it("stages an expired or rejected creative again with the new manifest, once, and re-uploads the video", async () => {
+    const first = await viaRoute(companyA, videoManifest());
+    const id = (first.body as { creative: { id: string } }).creative.id;
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET status = 'expired', error = 'old' WHERE id = $1`, [id]);
+
+    const newUrl = "https://media.ololla.fi/reels/kesa-1-v2.mp4";
+    fake.head(newUrl, { headers: { "content-type": "video/mp4", "content-length": "1000" } });
+    const restage = () =>
+      viaRoute(
+        companyA,
+        videoManifest({ idempotencyKey: "oll-reel-kesa-1-again", mediaUrl: newUrl, copy: { message: "Syysloma" }, utmCampaign: "oll-syksy-2027" }),
+      );
+    const results = await Promise.all([restage(), restage(), restage()]);
+    for (const result of results) {
+      expect(result.status).toBe(200);
+      expect(result.body).toMatchObject({ created: false, creative: { id, mediaUrl: newUrl, utmCampaign: "oll-syksy-2027", error: null } });
+    }
+    expect(fake.graphWrites).toHaveLength(2);
+    expect(fake.graphWrites[1]!.fields.file_url).toBe(newUrl);
+    const [row] = await rows(companyA);
+    expect(row).toMatchObject({ status: "uploading", meta_video_id: "900000000000002", ad_copy: { message: "Syysloma" }, idempotency_key: "oll-reel-kesa-1" });
+    expect(harness.activity.filter((entry) => entry.message === "rk9-ads creative restaged")).toHaveLength(1);
+
+    // An image rejected earlier comes back as ready.
+    await viaRoute(companyA, imageManifest());
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET status = 'rejected' WHERE sha256 = $1`, [SHA_IMAGE]);
+    const image = await viaTool(companyA, imageManifest({ cta: "LEARN_MORE" }));
+    expect(image.data).toMatchObject({ created: false, creative: { status: "ready", cta: "LEARN_MORE" } });
+  });
+
+  it("does not restage a live creative and does not restage on a failed HEAD", async () => {
+    const first = await viaRoute(companyA, videoManifest());
+    const id = (first.body as { creative: { id: string } }).creative.id;
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET status = 'published' WHERE id = $1`, [id]);
+    const live = await viaRoute(companyA, videoManifest({ copy: { message: "Toinen teksti" } }));
+    expect(live.body).toMatchObject({ error: { code: "creative_text_conflict" }, creative: { status: "published" } });
+
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET status = 'expired' WHERE id = $1`, [id]);
+    const missing = await viaRoute(companyA, videoManifest({ mediaUrl: "https://media.ololla.fi/gone.mp4" }));
+    expect(missing.body).toMatchObject({ error: { code: "media_unreachable", path: "/mediaUrl" } });
+    const [row] = await rows(companyA);
+    expect(row).toMatchObject({ status: "expired", media_url: VIDEO_URL });
+  });
+
+  it("caps new creative rows per company per 24 hours, but still answers dedupe hits", async () => {
+    await viaRoute(companyA, imageManifest());
+    await testDb.adminQuery(
+      `INSERT INTO ${testDb.namespace}.creatives (company_id, brand_code, sha256, idempotency_key, kind, media_url)
+       SELECT $1, 'OLL', lpad(to_hex(n), 64, '0'), 'bulk-' || n, 'image', 'https://media.ololla.fi/x.png'
+       FROM generate_series(1, 199) AS n`,
+      [companyA],
+    );
+    const capped = await viaRoute(companyA, videoManifest());
+    expect(capped.status).toBe(429);
+    expect(capped.body).toMatchObject({ error: { code: "creative_limit_reached" } });
+    expect(fake.calls.some((call) => call.url === VIDEO_URL)).toBe(false);
+
+    const dedupe = await viaRoute(companyA, imageManifest());
+    expect(dedupe.status).toBe(200);
+
+    // Another company has its own budget.
+    const other = await viaTool(companyB, videoManifest({ brand: "AUR" }));
+    expect(other.data).toMatchObject({ created: true });
   });
 
   it("holds under concurrency: N parallel stages make one row and one upload", async () => {
@@ -235,6 +326,8 @@ describeDb("creative ingress (tool + route, real Postgres)", () => {
     ["IPv6 literal", videoManifest({ mediaUrl: "https://[::1]/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
     ["localhost", videoManifest({ mediaUrl: "https://localhost/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
     ["internal name", videoManifest({ mediaUrl: "https://minio.internal/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
+    ["tailnet name", videoManifest({ mediaUrl: "https://vault.tail1234.ts.net/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
+    ["tailnet IP literal", videoManifest({ mediaUrl: "https://100.103.149.19/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
     ["credentials", videoManifest({ mediaUrl: "https://u:p@media.ololla.fi/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
     ["custom port", videoManifest({ mediaUrl: "https://media.ololla.fi:8443/a.mp4" }), 400, "url_forbidden", "/mediaUrl"],
     ["poster on an image", imageManifest({ posterUrl: POSTER_URL }), 400, "invalid_manifest", "/posterUrl"],
