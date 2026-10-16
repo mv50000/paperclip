@@ -90,6 +90,13 @@ export interface BudgetObject extends StatusRow {
   lifetimeBudgetCents: number | null;
 }
 
+/** One ad set's spend of one local day (spend guard, RK9-523). */
+export interface AdsetDaySpend {
+  adsetId: string | null;
+  campaignId: string | null;
+  cents: number;
+}
+
 export type InsightsLevel = "account" | "campaign" | "adset" | "ad";
 
 /** One insights row as Graph returns it: numbers stay strings, the caller parses. */

@@ -183,8 +183,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       rule: "kill_switch",
       reason: pauseReason(loaded, "Pysäytä kaikki (Telegram)"),
       initiator: { source: "telegram", tgUserId },
-      // The card itself shows the outcome.
-      notify: false,
+      // The card shows the counts; the notice lists every paused campaign for
+      // the restore (RK9-523).
+      notify: true,
     });
     const outcome = {
       count: result.count,

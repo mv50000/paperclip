@@ -229,12 +229,14 @@ the core chat-channels bot is never shared. See
   (Meta would not deliver), when the headroom is above the rest of the monthly
   cap (G2), when the projection exceeds `monthlyCapEur`, when any read fails or
   takes over 60 s, and when the ad account's time zone is not `timeZone` (MTD
-  would be off). Projection = MTD + max(0, daily budgets - today's spend) +
-  daily budgets x the remaining local days after today + lifetime budgets.
-  Today counts once, at least at the full daily budgets, so a provisioned
-  budget on pace passes its own guard (G3, RK9-523). The guard adds no margin
-  for the insights lag of earlier days; Meta's `spend_cap` (at most the monthly
-  cap, G2) is the real-time backstop. The cap itself never blocks a budget cut, but
+  would be off). Projection = MTD + what each counted daily budget still
+  allows today (budget minus its own spend today, read per ad set) + daily
+  budgets x the remaining local days after today + lifetime budgets. Today
+  counts once, and spend today of an object that no longer counts is never
+  credited to another, so a provisioned budget on pace passes its own guard
+  (G3, RK9-523). The guard adds no margin for the insights lag of earlier days
+  or for Meta's day-level overdelivery; Meta's `spend_cap` (at most the
+  monthly cap, G2) is the real-time backstop. The cap itself never blocks a budget cut, but
   `authorizeSpend` is asked first, and its default refuses every budget write.
   Fields that modify a budget in ways the projection does not model (e.g.
   `budget_schedule_specs`) are refused on every write.
@@ -248,11 +250,14 @@ the core chat-channels bot is never shared. See
   the controller drops the bot of an `invalid` brand, so use the UI or the
   tool. With no stored config the run fails and nothing is paused. An absent
   config never falls back.
-- **Kill switch** (`killswitch.ts`). `pauseAll()` pauses every ACTIVE ad and
-  then every ACTIVE campaign of the brand's whole ad account, also campaigns
-  made by hand in Meta's UI and also when `meta.campaignId` is set (operator
-  decision 15.10.2026, RK9-523). It never touches `spend_cap`. The audit row
-  and the Telegram notice list every paused campaign for the restore.
+- **Kill switch** (`killswitch.ts`). `pauseAll()` pauses every ACTIVE
+  campaign (that alone stops delivery) and then every ACTIVE ad. The kill
+  switch covers the brand's whole ad account, also campaigns made by hand in
+  Meta's UI and also when `meta.campaignId` is set (operator decision
+  15.10.2026, RK9-523). The scheduled pause and the data gate keep the
+  `meta.campaignId` scope when it is set. Nothing touches `spend_cap`. The
+  audit row lists every paused campaign and ad; the Telegram notice lists the
+  campaigns first and counts what does not fit, on every trigger.
   Triggers: the UI action `pause-all`
   (`dryRun` defaults to true; a live run needs `confirm: true`), the agent tool
   `rk9ads_pause_all`, and the `pause_all` gate card's "⏸ Pysäytä kaikki"

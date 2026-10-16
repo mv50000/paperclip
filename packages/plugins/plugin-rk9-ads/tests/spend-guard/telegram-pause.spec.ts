@@ -82,8 +82,8 @@ describe("Telegram pause_all button", () => {
     const { r, meta, fake, card, tap } = await setup();
     await tap(APPROVER);
     expect(meta.writes.map((call) => [call.path, call.body.status])).toEqual([
-      ["301", "PAUSED"],
       ["100", "PAUSED"],
+      ["301", "PAUSED"],
     ]);
     expect(fake.messages.get(card.messageId)?.text).toContain("⏸ Pysäytetty: 1 mainosta, 1 kampanjaa");
     expect(r.ruleActions()[0]).toMatchObject({ rule_type: "kill_switch", source: "telegram", applied: true });

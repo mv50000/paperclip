@@ -15,6 +15,7 @@ import {
   isDryRun,
   type AccountSummary,
   type Ad,
+  type AdsetDaySpend,
   type AdSet,
   type BudgetObject,
   type Campaign,
@@ -257,25 +258,22 @@ export async function getAccountSpendCents(
 }
 
 /**
- * Account spend over an inclusive local-date range in daily rows, in one
- * read: the total and the spend of the range's last day (`until`). A row that
- * spans more than the last day does not count as that day. The rules on
- * missing spend are those of getAccountSpendCents.
+ * Spend of one local date (account time zone) per ad set, with the parent
+ * campaign, for the spend guard's today share (RK9-523). A row without
+ * adset_id keeps a null id, so nothing is credited to it. The rules on missing
+ * spend are those of getAccountSpendCents; a truncated walk throws.
  */
-export async function getAccountSpendWithLastDay(
-  client: MetaGraphClient,
-  actId: string,
-  timeRange: { since: string; until: string },
-): Promise<{ totalCents: number; lastDayCents: number }> {
-  const rows = await getInsights(client, adAccountPath(actId), { level: "account", fields: ["spend"], timeRange, timeIncrement: 1 });
-  let totalCents = 0;
-  let lastDayCents = 0;
-  for (const row of rows) {
-    const cents = parseDecimalMoney(row.spend, "spend");
-    totalCents += cents;
-    if (row.date_start === timeRange.until && row.date_stop === timeRange.until) lastDayCents += cents;
-  }
-  return { totalCents, lastDayCents };
+export async function getAdsetSpendForDay(client: MetaGraphClient, actId: string, date: string): Promise<AdsetDaySpend[]> {
+  const rows = await getInsights(client, adAccountPath(actId), {
+    level: "adset",
+    fields: ["adset_id", "campaign_id", "spend"],
+    timeRange: { since: date, until: date },
+  });
+  return rows.map((row) => ({
+    adsetId: optionalString(row.adset_id),
+    campaignId: optionalString(row.campaign_id),
+    cents: parseDecimalMoney(row.spend, "spend"),
+  }));
 }
 
 /**

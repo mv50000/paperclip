@@ -2,15 +2,20 @@
  * Kill switch "Pysäytä kaikki" (A6, RK9-511), the plugin port of
  * sunspot-pulse-off.sh.
  *
- * pauseAll lists every ad and campaign of the brand's ad account whose
- * configured status is ACTIVE, pauses the ads, then the campaigns. The scope
- * is always the whole ad account, also when the config names
- * `meta.campaignId`, so campaigns created by hand in Meta's UI stop too
- * (operator decision 15.10.2026, RK9-523): the brand's ad account belongs to
- * that brand, and the guard's projection counts the whole account. spend_cap
- * is never touched (G2). Every paused campaign is in the audit row and the
- * Telegram notice, so a restore knows what to turn back on. Listing follows
- * every page; a list cut short throws instead of pausing part of it.
+ * pauseAll lists every campaign and ad whose configured status is ACTIVE and
+ * pauses the campaigns first (that alone stops delivery), then the ads.
+ *
+ * Scope (RK9-523): the kill switch (rule `kill_switch`) always covers the
+ * whole ad account, also when the config names `meta.campaignId`, so
+ * campaigns created by hand in Meta's UI stop too (operator decision
+ * 15.10.2026): the brand's ad account belongs to that brand, and the guard's
+ * projection counts the whole account. The scheduled pause and the data gate
+ * are the brand's pulse schedule, not the emergency brake: they keep the
+ * `meta.campaignId` scope when it is set (Sunspot parity), else the whole
+ * account. spend_cap is never touched (G2). Every paused campaign is in the
+ * audit row and the Telegram notice, so a restore knows what to turn back on.
+ * Listing follows every page; a list cut short throws instead of pausing part
+ * of it.
  *
  * It is idempotent: a second run finds nothing ACTIVE, returns count 0 and
  * sends no Telegram. A dry run lists the same objects, sends no Meta write
@@ -22,7 +27,7 @@ import type { BrandConfig } from "../../config.js";
 import type { Ledger } from "../../db.js";
 import { localDate, localTime } from "../../kit/local-time.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
-import { adAccountPath, listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
+import { adAccountPath, getObjectStatus, listAds, listCampaignAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import type { StatusRow } from "../../meta/types.js";
 import {
   brandClient,
@@ -35,6 +40,8 @@ import {
 
 /** 100 objects per page: up to 10 000 ads before a listing refuses as truncated. */
 const LIST_MAX_PAGES = 100;
+/** Telegram allows 4096 characters; the notice stays below this. */
+const NOTICE_MAX = 3900;
 
 export type PauseRule = "kill_switch" | "scheduled_pause" | "data_gate";
 
@@ -46,15 +53,15 @@ export interface PausedObject {
 export interface PauseAllResult {
   dryRun: boolean;
   rule: PauseRule;
-  /** Always the whole ad account (RK9-523). */
-  scope: "account";
+  /** "account" for the kill switch; "campaign" when meta.campaignId scopes a scheduled or data-gate pause. */
+  scope: "campaign" | "account";
   pausedAds: PausedObject[];
   pausedCampaigns: PausedObject[];
   /** True when at least one campaign was (or in a dry run, would be) paused. */
   campaignPaused: boolean;
   /** Ads plus campaigns paused (or planned in a dry run). */
   count: number;
-  /** One line per object, ads first, for messages and the UI. */
+  /** One line per object, campaigns first, for messages and the UI. */
   list: string[];
   /** Objects whose pause failed. The others are paused regardless. */
   errors: Array<{ id: string; error: string }>;
@@ -83,14 +90,30 @@ export interface PauseAllOptions {
   note?: string;
 }
 
-/** The ACTIVE ads and campaigns of the whole ad account. Exported for parity tests. */
+/** The scope of a pause: the kill switch always takes the whole ad account. */
+export function pauseScope(config: BrandConfig, rule: PauseRule): "campaign" | "account" {
+  return rule !== "kill_switch" && config.meta.campaignId ? "campaign" : "account";
+}
+
+/** The ACTIVE campaigns and ads the run would pause. Exported for parity tests. */
 export async function listPauseTargets(
   client: MetaGraphClient,
   config: BrandConfig,
-): Promise<{ scope: "account"; ads: StatusRow[]; campaigns: StatusRow[] }> {
+  rule: PauseRule,
+): Promise<{ scope: "campaign" | "account"; ads: StatusRow[]; campaigns: StatusRow[] }> {
+  const campaignId = config.meta.campaignId;
+  if (pauseScope(config, rule) === "campaign" && campaignId) {
+    const campaign = await getObjectStatus(client, campaignId);
+    const ads = await listCampaignAds(client, campaignId, { maxPages: LIST_MAX_PAGES });
+    return {
+      scope: "campaign",
+      ads: ads.filter((ad) => ad.status === "ACTIVE"),
+      campaigns: campaign.status === "ACTIVE" ? [campaign] : [],
+    };
+  }
   const account = adAccountPath(config.meta.adAccountId);
-  const ads = await listAds(client, account, { maxPages: LIST_MAX_PAGES });
   const campaigns = await listCampaigns(client, account, { maxPages: LIST_MAX_PAGES });
+  const ads = await listAds(client, account, { maxPages: LIST_MAX_PAGES });
   return {
     scope: "account",
     ads: ads.filter((ad) => ad.status === "ACTIVE"),
@@ -106,23 +129,38 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
   const when = `${localDate(at, config.timeZone)} ${localTime(at, config.timeZone)}`;
   const why =
     options.rule === "scheduled_pause" ? "ajastettu pysäytys" : options.rule === "data_gate" ? "data-gate" : "hätäkatkaisin";
-  // Every campaign is listed (a restore turns them back on); ads up to 40.
-  const ads = result.pausedAds.map((ad) => `• mainos ${label(ad)}`);
-  const lines = [
-    `⏸ ${config.displayName || config.brandCode}: koko mainostili pysäytetty (${when}, ${why})`,
+  const what = result.scope === "account" ? "koko mainostili pysäytetty" : "kampanja pysäytetty";
+  const head = [
+    `⏸ ${config.displayName || config.brandCode}: ${what} (${when}, ${why})`,
     ...(options.note ? [options.note] : []),
     `Syy: ${options.reason}`.slice(0, 300),
     `${result.pausedCampaigns.length} kampanja(a) ja ${result.pausedAds.length} mainos(ta) → PAUSED:`,
-    ...result.pausedCampaigns.map((campaign) => `• kampanja ${label(campaign)}`),
-    ...ads.slice(0, 40),
-    ...(ads.length > 40 ? [`… ja ${ads.length - 40} muuta mainosta (lista aktiviteettilokissa)`] : []),
-    ...(result.errors.length > 0 ? [`⚠️ ${result.errors.length} pysäytys epäonnistui, katso aktiviteettiloki.`] : []),
   ];
-  return lines.join("\n").slice(0, 4000);
+  const tail = result.errors.length > 0 ? [`⚠️ ${result.errors.length} pysäytys epäonnistui, katso aktiviteettiloki.`] : [];
+  // Campaigns first (a restore turns them back on), then ads. Whatever does
+  // not fit is counted on its own line, never cut silently; the audit row has
+  // every id.
+  const lines = [...head];
+  let length = [...head, ...tail].join("\n").length;
+  const fit = (items: PausedObject[], kind: string, rest: (n: number) => string) => {
+    for (const [index, item] of items.entries()) {
+      const line = `• ${kind} ${label(item)}`.slice(0, 200);
+      if (length + line.length + 1 > NOTICE_MAX - 120) {
+        lines.push(rest(items.length - index));
+        length += 80;
+        return;
+      }
+      lines.push(line);
+      length += line.length + 1;
+    }
+  };
+  fit(result.pausedCampaigns, "kampanja", (n) => `… ja ${n} muuta kampanjaa (kaikki id:t aktiviteettilokissa)`);
+  fit(result.pausedAds, "mainos", (n) => `… ja ${n} muuta mainosta (lista aktiviteettilokissa)`);
+  return [...lines, ...tail].join("\n");
 }
 
 /**
- * Pauses every ACTIVE ad, then the campaign(s). Meta errors on single objects
+ * Pauses every ACTIVE campaign, then the ads. Meta errors on single objects
  * are collected and the rest still run; a listing error throws (nothing was
  * paused). The audit row is written for every run that paused, planned or
  * failed something, and for every explicit (non-job) run.
@@ -141,7 +179,7 @@ export async function pauseAll(
 
   let targets: Awaited<ReturnType<typeof listPauseTargets>>;
   try {
-    targets = await listPauseTargets(client, config);
+    targets = await listPauseTargets(client, config, options.rule);
   } catch (error) {
     const message = safeError(error);
     await recordAction(deps, {
@@ -149,8 +187,8 @@ export async function pauseAll(
       config,
       ruleId: options.rule,
       ruleType: options.rule,
-      objectType: "account",
-      objectId: config.meta.adAccountId,
+      objectType: pauseScope(config, options.rule),
+      objectId: pauseScope(config, options.rule) === "campaign" ? config.meta.campaignId! : config.meta.adAccountId,
       action: "pause_all",
       dryRun: options.dryRun,
       applied: false,
@@ -175,7 +213,7 @@ export async function pauseAll(
     telegram: "skipped",
   };
 
-  for (const [kind, objects] of [["ad", targets.ads], ["campaign", targets.campaigns]] as const) {
+  for (const [kind, objects] of [["campaign", targets.campaigns], ["ad", targets.ads]] as const) {
     for (const object of objects) {
       try {
         await setObjectStatus(client, object.id, "PAUSED");
@@ -205,8 +243,8 @@ export async function pauseAll(
       config,
       ruleId: options.rule,
       ruleType: options.rule,
-      objectType: "account",
-      objectId: config.meta.adAccountId,
+      objectType: result.scope,
+      objectId: result.scope === "campaign" ? config.meta.campaignId! : config.meta.adAccountId,
       action: "pause_all",
       dryRun: options.dryRun,
       applied: !options.dryRun && result.count > 0,

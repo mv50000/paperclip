@@ -3,9 +3,9 @@
  * that can raise spend.
  *
  * Every check re-reads the ad account (spend_cap, amount_spent, currency),
- * the insights spend of the current local calendar month (in daily rows, so
- * today's share is known) and every campaign and ad set budget. Nothing is
- * cached. Any read error or timeout refuses.
+ * the insights spend of the current local calendar month, today's spend per
+ * ad set and every campaign and ad set budget. Nothing is cached. Any read
+ * error or timeout refuses.
  *
  * Rules, in order (each refusal has a machine-readable reason):
  * 1. currency_not_eur: the account currency is not EUR.
@@ -20,17 +20,23 @@
  * 5. projection_exceeds_cap: the projected month-end spend is above
  *    monthlyCapEur.
  *
- * Projection = MTD + max(0, daily budgets - today's spend) + daily budgets x
- * the remaining local days after today + lifetime budgets. Today counts once:
- * what is already spent today plus whatever the daily budgets still allow,
- * at least the full daily budgets (G3, RK9-523). A provisioned budget on pace
- * thus passes its own guard in 28-, 30- and 31-day months. The projection is
- * conservative (G3 and the epic's risk list):
+ * Projection = MTD + (daily budgets - today's covered spend) + daily budgets
+ * x the remaining local days after today + lifetime budgets. Today counts
+ * once (G3, RK9-523): what is already spent today is in MTD, and each counted
+ * daily-budget object adds only what its budget still allows today, i.e.
+ * budget - min(budget, its own spend today). Spend today of an object that
+ * no longer counts (paused, cut or archived earlier today) is never credited
+ * to another one. A provisioned budget on pace thus passes its own guard in
+ * 28-, 30- and 31-day months. The projection is conservative (G3 and the
+ * epic's risk list):
  * - every campaign and ad set whose configured status is ACTIVE counts, also
  *   an ad set under a paused campaign (it runs as soon as the campaign does);
- * - today counts at least the full daily budgets, which covers the insights
- *   lag of today;
+ * - an object with no spend today yet (or spend not yet in insights) counts
+ *   its full daily budget for today, which covers the insights lag of today;
  * - a lifetime budget counts in full, once.
+ * Meta may deliver up to 75 % above a daily budget on a single day (its
+ * weekly total stays within 7 daily budgets); the projection uses the budget
+ * itself for the days ahead and adds no overdelivery margin.
  *
  * Insights lag: Meta can report the spend of earlier days hours late, so MTD
  * may read a little low. The guard adds no margin for that. The backstop is
@@ -45,14 +51,15 @@ import type { GuardDecision, MetaGraphClient, WritePlan } from "../../meta/graph
 import { pausedOnlyWrites } from "../../meta/graph.js";
 import {
   adAccountPath,
-  getAccountSpendWithLastDay,
+  getAccountSpendCents,
   getAccountSummary,
+  getAdsetSpendForDay,
   getAdOwner,
   listBudgets,
   parseMinorUnits,
 } from "../../meta/methods.js";
 import { redactText } from "../../meta/redact.js";
-import type { BudgetObject } from "../../meta/types.js";
+import type { AdsetDaySpend, BudgetObject } from "../../meta/types.js";
 
 export const GUARD_DENY_REASONS = [
   "currency_not_eur",
@@ -96,8 +103,8 @@ export interface SpendFigures {
   /** spend_cap - amount_spent. */
   headroomEur: number | null;
   mtdEur: number | null;
-  /** Insights spend of the local day so far (part of MTD). */
-  todaySpendEur: number | null;
+  /** Today's spend credited to the counted daily budgets, each at most its own budget. */
+  todayCoveredEur: number | null;
   /** Sum of the counted daily budgets after the proposed change. */
   dailyBudgetSumEur: number | null;
   /** Lifetime budgets counted in full. */
@@ -138,8 +145,11 @@ export interface GuardNumbers {
   spendCapCents: number | null;
   amountSpentCents: number;
   mtdCents: number;
-  /** Insights spend of the local day so far, part of mtdCents. */
-  todaySpendCents: number;
+  /**
+   * Today's spend of the counted daily-budget objects, each at most its own
+   * budget (projectBudgets). Part of mtdCents.
+   */
+  todayCoveredCents: number;
   dailySumCents: number;
   lifetimeCommitCents: number;
   month: string;
@@ -153,13 +163,13 @@ export function capCents(monthlyCapEur: number): number {
 }
 
 /**
- * Month-end projection in cents: MTD, then today at least the full daily
- * budgets (never counting today's spend twice), then the remaining days after
- * today, then lifetime budgets once.
+ * Month-end projection in cents: MTD, then what the counted daily budgets
+ * still allow today, then the remaining days after today, then lifetime
+ * budgets once.
  */
-export function projectMonthEndCents(numbers: Pick<GuardNumbers, "mtdCents" | "todaySpendCents" | "dailySumCents" | "lifetimeCommitCents" | "remainingDays">): number {
-  const today = Math.min(Math.max(numbers.todaySpendCents, 0), numbers.mtdCents);
-  const todayLeft = Math.max(0, numbers.dailySumCents - today);
+export function projectMonthEndCents(numbers: Pick<GuardNumbers, "mtdCents" | "todayCoveredCents" | "dailySumCents" | "lifetimeCommitCents" | "remainingDays">): number {
+  const covered = Math.min(Math.max(numbers.todayCoveredCents, 0), numbers.mtdCents, numbers.dailySumCents);
+  const todayLeft = numbers.dailySumCents - covered;
   const laterDays = Math.max(0, numbers.remainingDays - 1);
   return numbers.mtdCents + todayLeft + numbers.dailySumCents * laterDays + numbers.lifetimeCommitCents;
 }
@@ -175,7 +185,8 @@ export function evaluateGuard(numbers: GuardNumbers): GuardResult {
     if (headroom === null) risks.push("no_spend_cap");
     // Headroom 0 or less: Meta delivers nothing more, so nothing can overrun.
     else if (headroom > 0 && headroom > remaining) risks.push("spend_cap_headroom_exceeds_remaining");
-    if (projected > cap) risks.push("projection_exceeds_cap");
+    // With the headroom used up Meta delivers nothing more: no overrun to warn about.
+    if (projected > cap && !(headroom !== null && headroom <= 0)) risks.push("projection_exceeds_cap");
   }
   const figures: SpendFigures = {
     month: numbers.month,
@@ -187,7 +198,7 @@ export function evaluateGuard(numbers: GuardNumbers): GuardResult {
     amountSpentEur: eur(numbers.amountSpentCents),
     headroomEur: headroom === null ? null : eur(headroom),
     mtdEur: eur(numbers.mtdCents),
-    todaySpendEur: eur(numbers.todaySpendCents),
+    todayCoveredEur: eur(numbers.todayCoveredCents),
     dailyBudgetSumEur: eur(numbers.dailySumCents),
     lifetimeCommitEur: eur(numbers.lifetimeCommitCents),
     projectedMonthEndEur: eur(projected),
@@ -226,13 +237,21 @@ export function evaluateGuard(numbers: GuardNumbers): GuardResult {
 /**
  * Daily and lifetime totals of the counted objects, with `change` applied.
  * Counted: configured status ACTIVE, or the object the change activates.
+ *
+ * `todayCoveredCents` is the spend today of the counted daily-budget objects,
+ * each at most its own daily budget: an ad set's own rows; a campaign
+ * (campaign budget) the rows of its ad sets that are not counted with a
+ * budget of their own. No row is credited twice, and a row of an object that
+ * does not count is never credited.
  */
 export function projectBudgets(
   budgets: { campaigns: BudgetObject[]; adsets: BudgetObject[] },
   change: ProposedChange | null,
-): { dailySumCents: number; lifetimeCommitCents: number } {
+  todaySpend: readonly AdsetDaySpend[] = [],
+): { dailySumCents: number; lifetimeCommitCents: number; todayCoveredCents: number } {
   let dailySumCents = 0;
   let lifetimeCommitCents = 0;
+  const countedDaily: Array<{ object: BudgetObject; daily: number }> = [];
   for (const object of [...budgets.campaigns, ...budgets.adsets]) {
     const changed = change !== null && change.objectId === object.id;
     const active = object.status === "ACTIVE" || (changed && change.activate);
@@ -241,13 +260,28 @@ export function projectBudgets(
     const lifetime = changed && change.lifetimeBudgetCents !== undefined ? change.lifetimeBudgetCents : object.lifetimeBudgetCents;
     dailySumCents += daily ?? 0;
     lifetimeCommitCents += lifetime ?? 0;
+    if (daily) countedDaily.push({ object, daily });
   }
   // A create of a campaign or ad set that will run adds its own budget.
   if (change && change.objectId === null && change.activate && (change.level === "campaign" || change.level === "adset")) {
     dailySumCents += change.dailyBudgetCents ?? 0;
     lifetimeCommitCents += change.lifetimeBudgetCents ?? 0;
   }
-  return { dailySumCents, lifetimeCommitCents };
+
+  const budgetAdsets = new Set(countedDaily.filter((entry) => entry.object.level === "adset").map((entry) => entry.object.id));
+  let todayCoveredCents = 0;
+  for (const { object, daily } of countedDaily) {
+    let spent = 0;
+    for (const row of todaySpend) {
+      const own =
+        object.level === "adset"
+          ? row.adsetId === object.id
+          : row.campaignId === object.id && !(row.adsetId !== null && budgetAdsets.has(row.adsetId));
+      if (own) spent += row.cents;
+    }
+    todayCoveredCents += Math.min(daily, spent);
+  }
+  return { dailySumCents, lifetimeCommitCents, todayCoveredCents };
 }
 
 class GuardTimeoutError extends Error {
@@ -282,7 +316,7 @@ function emptyFigures(config: BrandConfig, now: Date): SpendFigures {
     amountSpentEur: null,
     headroomEur: null,
     mtdEur: null,
-    todaySpendEur: null,
+    todayCoveredEur: null,
     dailyBudgetSumEur: null,
     lifetimeCommitEur: null,
     projectedMonthEndEur: null,
@@ -337,7 +371,8 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
       (async () => {
         const summary = await getAccountSummary(client, account);
         if (summary.timezone !== config.timeZone) throw new TimezoneMismatchError(summary.timezone, config.timeZone);
-        const spend = await getAccountSpendWithLastDay(client, account, { since: bounds.since, until: bounds.until });
+        const mtdCents = await getAccountSpendCents(client, account, { since: bounds.since, until: bounds.until });
+        const todaySpend = await getAdsetSpendForDay(client, account, bounds.until);
         const budgets = await listBudgets(client, account, { maxPages: LIST_MAX_PAGES });
         if (change?.objectId) {
           const known = [...budgets.campaigns, ...budgets.adsets].find((object) => object.id === change.objectId);
@@ -357,7 +392,7 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
           }
         }
         const before = projectBudgets(budgets, null);
-        const after = projectBudgets(budgets, change);
+        const after = projectBudgets(budgets, change, todaySpend);
         if (change && !change.activate) {
           raisesSpend = after.dailySumCents > before.dailySumCents || after.lifetimeCommitCents > before.lifetimeCommitCents;
         }
@@ -367,8 +402,8 @@ export async function checkSpend(input: GuardCheckInput): Promise<GuardResult> {
           accountTimeZone: summary.timezone,
           spendCapCents: summary.spendCapCents,
           amountSpentCents: summary.amountSpentCents,
-          mtdCents: spend.totalCents,
-          todaySpendCents: spend.lastDayCents,
+          mtdCents,
+          todayCoveredCents: after.todayCoveredCents,
           dailySumCents: after.dailySumCents,
           lifetimeCommitCents: after.lifetimeCommitCents,
           month: bounds.month,

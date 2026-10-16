@@ -70,6 +70,19 @@ describe("scheduled pause job", () => {
     expect(r.ruleActions().filter((row) => row.rule_type === "scheduled_pause")).toHaveLength(2);
   });
 
+  it("keeps the meta.campaignId scope (pulse schedule, not the kill switch)", async () => {
+    const meta = activeMeta();
+    meta.campaigns.push({ id: "777", name: "Käsin", status: "ACTIVE" });
+    meta.ads.push({ id: "999", name: "toinen", status: "ACTIVE", campaign_id: "777" });
+    const config = scheduled();
+    (config.meta as Record<string, unknown>).campaignId = "100";
+    const r = rig({ meta, config });
+    r.clock.now = new Date("2026-10-21T18:30:00Z"); // 21:30 EEST
+    await r.harness.runJob("scheduled-pause");
+    expect(meta.writes.map((call) => call.path).sort()).toEqual(["100", "301"]);
+    expect(r.ruleActions().find((row) => row.rule_type === "scheduled_pause")).toMatchObject({ object_type: "campaign", object_id: "100" });
+  });
+
   it("fires at 21:30 across the October change back to EET", async () => {
     const r = rig({ meta: activeMeta(), config: scheduled() });
     r.clock.now = new Date("2026-10-24T18:30:00Z"); // 21:30 EEST, Saturday
@@ -296,17 +309,14 @@ describe("MTD alerts", () => {
     expect(r.ruleActions().map((row) => row.rule_id)).toEqual(["spend-alert-80", "spend-alert-100", "spend-alert-80"]);
   });
 
-  it("sends one card for a jump straight past 100 % and claims both thresholds and the overrun", async () => {
+  it("sends one card for a jump straight past 100 % and claims both thresholds", async () => {
     const r = alertRig("120.00");
     await r.harness.runJob("scheduled-pause");
     expect(r.notifier.cards).toHaveLength(1);
     expect(r.notifier.cards[0]!.text).toMatch(/katto täynnä/);
-    expect(r.notifier.cards[0]!.text).toMatch(/arvio 120,00 € ylittää katon 100,00 €/);
-    expect(r.store.keys()).toEqual([
-      `${COMPANY_A}|${alertKey("OLL", "2026-10", 80)}`,
-      `${COMPANY_A}|${alertKey("OLL", "2026-10", 100)}`,
-      `${COMPANY_A}|${riskKey("OLL", "2026-10-21", "projection_exceeds_cap")}`,
-    ]);
+    // Meta's spend_cap is used up (headroom -20 EUR), so Meta delivers nothing more: no overrun risk.
+    expect(r.notifier.cards[0]!.text).not.toMatch(/ylittää katon/);
+    expect(r.store.keys()).toEqual([`${COMPANY_A}|${alertKey("OLL", "2026-10", 80)}`, `${COMPANY_A}|${alertKey("OLL", "2026-10", 100)}`]);
   });
 
   it("does not claim a threshold for a brand without Telegram", async () => {

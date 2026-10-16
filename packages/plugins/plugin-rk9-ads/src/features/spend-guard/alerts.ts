@@ -15,8 +15,10 @@
  * Markers are alert_dedupe rows (`spend-alert:<brand>:<YYYY-MM>:<pct>`,
  * `spend-risk:<brand>:<YYYY-MM-DD>:<risk>`), so they survive worker restarts.
  * A marker is claimed before the message is sent, so two runs never both send
- * it. When the send fails, the markers are given back and the next check
- * sends again: a failed send never loses an alert. One card carries every
+ * it. When the send (or a claim) fails, the markers are given back and the
+ * next check sends again: a failed send never loses an alert. A send that
+ * reached Telegram but still reported an error can arrive twice; that is the
+ * accepted side of not losing an alert. One card carries every
  * newly claimed alert; it is a pause_all gate card, so one tap on
  * "⏸ Pysäytä kaikki" runs the kill switch.
  */
@@ -120,16 +122,37 @@ export async function evaluateSpendAlerts(
   const day = localDate(now, config.timeZone);
   const claimed: AlertThreshold[] = [];
   const risks: SpendRisk[] = [];
-  for (const threshold of crossed) {
-    const key = alertKey(config.brandCode, figures.month, threshold);
-    if (await deps.store.claim(companyId, key, SPEND_ALERT_KIND, { pct, mtdEur: figures.mtdEur, month: figures.month })) {
-      claimed.push(threshold);
+  const claimedKeys = () => [
+    ...claimed.map((threshold) => alertKey(config.brandCode, figures.month, threshold)),
+    ...risks.map((risk) => riskKey(config.brandCode, day, risk)),
+  ];
+  const releaseAll = async (): Promise<string[]> => {
+    const failed: string[] = [];
+    for (const key of claimedKeys()) {
+      try {
+        await deps.store.release(companyId, key);
+      } catch (error) {
+        failed.push(`marker ${key} not released (${safeError(error)})`);
+      }
     }
-  }
-  for (const risk of figures.risks) {
-    if (await deps.store.claim(companyId, riskKey(config.brandCode, day, risk), SPEND_RISK_KIND, { pct, mtdEur: figures.mtdEur, date: day })) {
-      risks.push(risk);
+    return failed;
+  };
+  try {
+    for (const threshold of crossed) {
+      const key = alertKey(config.brandCode, figures.month, threshold);
+      if (await deps.store.claim(companyId, key, SPEND_ALERT_KIND, { pct, mtdEur: figures.mtdEur, month: figures.month })) {
+        claimed.push(threshold);
+      }
     }
+    for (const risk of figures.risks) {
+      if (await deps.store.claim(companyId, riskKey(config.brandCode, day, risk), SPEND_RISK_KIND, { pct, mtdEur: figures.mtdEur, date: day })) {
+        risks.push(risk);
+      }
+    }
+  } catch (error) {
+    // A claim failed part-way: give back what this call claimed, so nothing is lost.
+    await releaseAll();
+    throw error;
   }
   if (claimed.length === 0 && risks.length === 0) return { claimed, risks, telegram: "skipped" };
 
@@ -142,17 +165,8 @@ export async function evaluateSpendAlerts(
   } catch (error) {
     outcome = { claimed, risks, telegram: "failed", error: safeError(error) };
     // Give the markers back so the next check sends again.
-    const keys = [
-      ...claimed.map((threshold) => alertKey(config.brandCode, figures.month, threshold)),
-      ...risks.map((risk) => riskKey(config.brandCode, day, risk)),
-    ];
-    for (const key of keys) {
-      try {
-        await deps.store.release(companyId, key);
-      } catch (releaseError) {
-        outcome.error = `${outcome.error}; marker ${key} not released (${safeError(releaseError)})`;
-      }
-    }
+    const failed = await releaseAll();
+    if (failed.length > 0) outcome.error = `${outcome.error}; ${failed.join("; ")}`;
   }
 
   const audit = [

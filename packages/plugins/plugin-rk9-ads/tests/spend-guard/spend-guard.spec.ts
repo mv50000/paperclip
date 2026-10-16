@@ -27,7 +27,7 @@ function numbers(overrides: Partial<GuardNumbers> = {}): GuardNumbers {
     spendCapCents: 10_000,
     amountSpentCents: 7_000,
     mtdCents: 7_000,
-    todaySpendCents: 0,
+    todayCoveredCents: 0,
     dailySumCents: 0,
     lifetimeCommitCents: 0,
     month: "2026-10",
@@ -101,19 +101,17 @@ describe("evaluateGuard: the decision on read numbers", () => {
       "projection_exceeds_cap",
     ]);
     // Headroom used up: Meta delivers nothing more, so it is no overrun risk.
-    expect(evaluateGuard(numbers({ spendCapCents: 10_000, amountSpentCents: 10_000, mtdCents: 10_500 })).risks).toEqual([
-      "projection_exceeds_cap",
-    ]);
+    expect(evaluateGuard(numbers({ spendCapCents: 10_000, amountSpentCents: 10_000, mtdCents: 10_500 })).risks).toEqual([]);
     expect(evaluateGuard(numbers({ currency: "USD", spendCapCents: null })).risks).toEqual([]);
   });
 
-  it("counts today once: today's spend plus what the daily budgets still allow today", () => {
-    // 21.10.: MTD 70 EUR of which 2 EUR today, 3 EUR/day: 70 + (3 - 2) + 3 x 10 = 101.
-    expect(evaluateGuard(numbers({ todaySpendCents: 200, dailySumCents: 300 }))).toMatchObject({ projectedMonthEndEur: 101, todaySpendEur: 2 });
-    // Today already over the daily budgets: nothing more is added for today.
-    expect(evaluateGuard(numbers({ todaySpendCents: 450, dailySumCents: 300 }))).toMatchObject({ projectedMonthEndEur: 100, allow: true });
+  it("counts today once: the counted budgets' own spend today is in MTD, the rest of today is added", () => {
+    // 21.10.: MTD 70 EUR of which 2 EUR today from the counted budgets, 3 EUR/day: 70 + (3 - 2) + 3 x 10 = 101.
+    expect(evaluateGuard(numbers({ todayCoveredCents: 200, dailySumCents: 300 }))).toMatchObject({ projectedMonthEndEur: 101, todayCoveredEur: 2 });
+    // Covered is at most the daily budgets.
+    expect(evaluateGuard(numbers({ todayCoveredCents: 450, dailySumCents: 300 }))).toMatchObject({ projectedMonthEndEur: 100, allow: true });
     // No spend today yet: today counts the full daily budgets (covers today's insights lag).
-    expect(evaluateGuard(numbers({ todaySpendCents: 0, dailySumCents: 300 })).projectedMonthEndEur).toBe(103);
+    expect(evaluateGuard(numbers({ todayCoveredCents: 0, dailySumCents: 300 })).projectedMonthEndEur).toBe(103);
   });
 
   it.each([
@@ -146,14 +144,14 @@ describe("evaluateGuard: the decision on read numbers", () => {
       const pastDays = daily * (day - 1);
       for (const today of [0, 1, Math.floor(daily / 2), daily]) {
         const result = evaluateGuard(
-          numbers({ month, remainingDays, mtdCents: pastDays + today, todaySpendCents: today, amountSpentCents: pastDays + today, dailySumCents: daily }),
+          numbers({ month, remainingDays, mtdCents: pastDays + today, todayCoveredCents: today, amountSpentCents: pastDays + today, dailySumCents: daily }),
         );
         expect(result, `${month} day ${day}, today ${today} c`).toMatchObject({ allow: true, projectedMonthEndEur: (daily * days) / 100 });
       }
       // Real spend ahead of pace by more than the rounding slack: refused.
       const ahead = pastDays + slack + 1;
       expect(
-        evaluateGuard(numbers({ month, remainingDays, mtdCents: ahead, todaySpendCents: 0, amountSpentCents: ahead, dailySumCents: daily })).reason,
+        evaluateGuard(numbers({ month, remainingDays, mtdCents: ahead, todayCoveredCents: 0, amountSpentCents: ahead, dailySumCents: daily })).reason,
       ).toBe("projection_exceeds_cap");
     }
   });
@@ -221,14 +219,38 @@ describe("checkSpend: fresh Meta reads, fail-closed", () => {
     });
   });
 
-  it("reads today's spend from daily insights rows in the same read (G3)", async () => {
-    const meta = ollolaMeta("0.00", "322");
-    meta.dailySpend = { "2026-10-01": "3.22", "2026-10-20": "3.22", "2026-10-21": "1.50" };
+  it("reads today's spend per ad set and credits only the counted budgets (G3)", async () => {
+    const meta = ollolaMeta("7.94", "322");
     meta.account = { ...meta.account, amount_spent: "794" };
+    meta.adsetSpend = [{ adset_id: "200", campaign_id: "100", spend: "1.50" }];
     const result = await checkSpend({ config: OLLOLA, client: metaClient(meta), now: OCT_21 });
-    expect(result).toMatchObject({ mtdEur: 7.94, todaySpendEur: 1.5, projectedMonthEndEur: 41.86 });
-    expect(meta.insightsCalls).toHaveLength(1);
-    expect(meta.insightsCalls[0]!.params.time_increment).toBe("1");
+    // 7.94 + (3.22 - 1.50) + 3.22 x 10
+    expect(result).toMatchObject({ mtdEur: 7.94, todayCoveredEur: 1.5, projectedMonthEndEur: 41.86 });
+    const today = meta.insightsCalls.find((call) => call.params.level === "adset")!;
+    expect(JSON.parse(today.params.time_range!)).toEqual({ since: "2026-10-21", until: "2026-10-21" });
+  });
+
+  // The verifier's case (RK9-523 round 1): campaign A spent 40 EUR today and was
+  // paused; its spend must not make room for campaign B today.
+  it("never credits today's spend of a paused campaign to a newly activated one", async () => {
+    const meta = new FakeMeta();
+    meta.account = { ...meta.account, spend_cap: "10000", amount_spent: "6000" };
+    meta.spend = () => "60.00";
+    meta.campaigns = [
+      { id: "100", name: "A", status: "PAUSED", daily_budget: "5000" },
+      { id: "101", name: "B", status: "PAUSED", daily_budget: "400" },
+    ];
+    meta.adsetSpend = [{ adset_id: "201", campaign_id: "100", spend: "40.00" }];
+    const result = await checkSpend({ config: OLLOLA, client: metaClient(meta), now: OCT_21, change: { objectId: "101", level: null, activate: true } });
+    // 60 + 4 x 11 = 104: refused (the projection used to say 100 and allow).
+    expect(result).toMatchObject({ allow: false, reason: "projection_exceeds_cap", projectedMonthEndEur: 104, todayCoveredEur: 0 });
+
+    // The last day of the month: MTD 95 of which 40 today from the paused A; B at 40 EUR/day.
+    meta.spend = () => "95.00";
+    meta.account = { ...meta.account, amount_spent: "9500" };
+    meta.campaigns[1]!.daily_budget = "4000";
+    const last = await checkSpend({ config: OLLOLA, client: metaClient(meta), now: at("2026-10-31T10:00:00Z"), change: { objectId: "101", level: null, activate: true } });
+    expect(last).toMatchObject({ allow: false, projectedMonthEndEur: 135 });
   });
 
   it("refuses an activation when Meta's spend_cap is used up", async () => {
@@ -249,7 +271,7 @@ describe("checkSpend: fresh Meta reads, fail-closed", () => {
     const second = await checkSpend({ config: OLLOLA, client, now: OCT_21 });
     expect(second).toMatchObject({ allow: false, mtdEur: 95 });
     expect(meta.calls.filter((call) => call.path === ACT)).toHaveLength(2);
-    expect(meta.insightsCalls).toHaveLength(2);
+    expect(meta.insightsCalls).toHaveLength(4);
   });
 
   it("denies a missing or zero spend_cap", async () => {
@@ -322,14 +344,38 @@ describe("projection", () => {
   };
 
   it("counts ACTIVE objects conservatively and lifetime budgets in full", () => {
-    expect(projectBudgets(budgets, null)).toEqual({ dailySumCents: 200, lifetimeCommitCents: 5_000 });
+    expect(projectBudgets(budgets, null)).toEqual({ dailySumCents: 200, lifetimeCommitCents: 5_000, todayCoveredCents: 0 });
+  });
+
+  it("credits today's spend once, per counted daily budget, at most the budget", () => {
+    const today = [
+      { adsetId: "11", campaignId: "1", cents: 150 },
+      { adsetId: "12", campaignId: "2", cents: 700 },
+      { adsetId: "13", campaignId: "3", cents: 80 },
+      { adsetId: "14", campaignId: "3", cents: 50 },
+      { adsetId: null, campaignId: "3", cents: 999 },
+    ];
+    // Ad set 11 (ACTIVE, 200/day) spent 150; 12 is PAUSED and not credited.
+    expect(projectBudgets(budgets, null, today)).toEqual({ dailySumCents: 200, lifetimeCommitCents: 5_000, todayCoveredCents: 150 });
+    // Activating 12 (900/day): its own 700 counts, capped at the budget.
+    expect(projectBudgets(budgets, { objectId: "12", level: null, activate: true }, today).todayCoveredCents).toBe(850);
+    expect(projectBudgets(budgets, { objectId: "12", level: null, activate: true, dailyBudgetCents: 500 }, today).todayCoveredCents).toBe(650);
+    // A campaign budget (CBO) takes the rows of its campaign, capped at its budget.
+    const cbo = { campaigns: [{ ...budgets.campaigns[0]!, id: "3", status: "ACTIVE", dailyBudgetCents: 100 }], adsets: [] };
+    expect(projectBudgets(cbo, null, today)).toEqual({ dailySumCents: 100, lifetimeCommitCents: 0, todayCoveredCents: 100 });
+    expect(projectBudgets({ ...cbo, campaigns: [{ ...cbo.campaigns[0]!, dailyBudgetCents: 2_000 }] }, null, today).todayCoveredCents).toBe(1_129);
+    // An ad set with its own counted budget keeps its rows: the campaign does not take them again.
+    const both = { campaigns: cbo.campaigns, adsets: [{ ...budgets.adsets[0]!, id: "13", campaignId: "3", dailyBudgetCents: 60 }] };
+    expect(projectBudgets(both, null, today).todayCoveredCents).toBe(60 + 100);
+    // A create has no spend today.
+    expect(projectBudgets(budgets, { objectId: null, level: "adset", activate: true, dailyBudgetCents: 300 }, today).todayCoveredCents).toBe(150);
   });
 
   it("applies an activation, a budget change and a create", () => {
-    expect(projectBudgets(budgets, { objectId: "1", level: null, activate: true })).toEqual({ dailySumCents: 1_200, lifetimeCommitCents: 5_000 });
-    expect(projectBudgets(budgets, { objectId: "11", level: null, activate: false, dailyBudgetCents: 500 })).toEqual({ dailySumCents: 500, lifetimeCommitCents: 5_000 });
-    expect(projectBudgets(budgets, { objectId: null, level: "adset", activate: true, dailyBudgetCents: 300 })).toEqual({ dailySumCents: 500, lifetimeCommitCents: 5_000 });
-    expect(projectBudgets(budgets, { objectId: null, level: "ad", activate: true })).toEqual({ dailySumCents: 200, lifetimeCommitCents: 5_000 });
+    expect(projectBudgets(budgets, { objectId: "1", level: null, activate: true })).toEqual({ dailySumCents: 1_200, lifetimeCommitCents: 5_000, todayCoveredCents: 0 });
+    expect(projectBudgets(budgets, { objectId: "11", level: null, activate: false, dailyBudgetCents: 500 })).toEqual({ dailySumCents: 500, lifetimeCommitCents: 5_000, todayCoveredCents: 0 });
+    expect(projectBudgets(budgets, { objectId: null, level: "adset", activate: true, dailyBudgetCents: 300 })).toEqual({ dailySumCents: 500, lifetimeCommitCents: 5_000, todayCoveredCents: 0 });
+    expect(projectBudgets(budgets, { objectId: null, level: "ad", activate: true })).toEqual({ dailySumCents: 200, lifetimeCommitCents: 5_000, todayCoveredCents: 0 });
   });
 });
 

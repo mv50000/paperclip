@@ -30,7 +30,7 @@ describe("kill switch pauseAll", () => {
     expect(result).toMatchObject({ dryRun: true, scope: "account", count: 4, campaignPaused: true, telegram: "skipped" });
     expect(result.pausedAds.map((ad) => ad.id)).toEqual(["301", "302", "303"]);
     expect(result.pausedCampaigns.map((campaign) => campaign.id)).toEqual(["100"]);
-    expect(result.list).toEqual(["mainos Syksy 1 (301)", "mainos Syksy 2 (302)", "mainos Syksy 3 (303)", "kampanja OLL jatkuva (100)"]);
+    expect(result.list).toEqual(["kampanja OLL jatkuva (100)", "mainos Syksy 1 (301)", "mainos Syksy 2 (302)", "mainos Syksy 3 (303)"]);
     expect(r.meta.writes).toHaveLength(0);
     expect(r.notifier.messages).toHaveLength(0);
     expect(r.ruleActions()).toEqual([
@@ -48,15 +48,15 @@ describe("kill switch pauseAll", () => {
     expect(r.meta.writes).toHaveLength(0);
   });
 
-  it("pauses ads then the campaign, notifies once, and a second run is a no-op with count 0 and no Telegram", async () => {
+  it("pauses the campaign first (stops delivery), then the ads, notifies once, and a second run is a no-op with count 0 and no Telegram", async () => {
     const r = rig({ meta: accountMeta() });
     const first = await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true, reason: "testi" }, UI);
     expect(first).toMatchObject({ dryRun: false, count: 4, telegram: "sent", errors: [] });
     expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([
+      ["100", "PAUSED"],
       ["301", "PAUSED"],
       ["302", "PAUSED"],
       ["303", "PAUSED"],
-      ["100", "PAUSED"],
     ]);
     // The token travels only in the Authorization header.
     expect(JSON.stringify(r.meta.calls)).not.toContain(META_TOKEN);
@@ -135,15 +135,30 @@ describe("kill switch pauseAll", () => {
     expect(notice).toContain("• kampanja Käsin Metan UI:ssa (777)");
   });
 
-  it("lists every paused campaign in the notice even when the ads overflow the list", async () => {
+  it("lists every paused campaign in the notice even when the ads overflow it", async () => {
     const meta = new FakeMeta();
     meta.campaigns = Array.from({ length: 5 }, (_, index) => ({ id: String(700 + index), name: `k${index}`, status: "ACTIVE" }));
-    meta.ads = Array.from({ length: 60 }, (_, index) => ({ id: String(800 + index), name: `a${index}`, status: "ACTIVE", campaign_id: "700" }));
+    meta.ads = Array.from({ length: 300 }, (_, index) => ({ id: String(10_000 + index), name: `mainos numero ${index}`, status: "ACTIVE", campaign_id: "700" }));
     const r = rig({ meta });
     await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true }, UI);
     const notice = r.notifier.messages[0]!.text;
     for (let index = 0; index < 5; index += 1) expect(notice).toContain(`• kampanja k${index} (${700 + index})`);
-    expect(notice).toContain("… ja 20 muuta mainosta");
+    expect(notice).toMatch(/… ja \d+ muuta mainosta/);
+    expect(notice.length).toBeLessThanOrEqual(3900);
+  });
+
+  it("never cuts the campaign list silently: what does not fit is counted", async () => {
+    const meta = new FakeMeta();
+    meta.campaigns = Array.from({ length: 120 }, (_, index) => ({ id: String(120_247_250_925_830_000 + index), name: `Pitkä kampanjan nimi numero ${index} syksy`, status: "ACTIVE" }));
+    const r = rig({ meta });
+    const result = await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true }, UI);
+    const notice = r.notifier.messages[0]!.text;
+    const listed = notice.split("\n").filter((line) => line.startsWith("• kampanja")).length;
+    const rest = /… ja (\d+) muuta kampanjaa/.exec(notice);
+    expect(rest).not.toBeNull();
+    expect(listed + Number(rest![1])).toBe(120);
+    expect(notice.length).toBeLessThanOrEqual(3900);
+    expect((r.ruleActions()[0]!.metrics as { campaignIds: string[] }).campaignIds).toHaveLength(result.pausedCampaigns.length);
   });
 
   it("keeps pausing after a single failure and reports it", async () => {
@@ -181,8 +196,9 @@ describe("kill switch pauseAll", () => {
     const request = { id: "g1", companyId: COMPANY_A, brandCode: "OLL", kind: "pause_all", status: "approved" } as GateRequestRecord;
     const outcome = await handler!({ request, tgUserId: APPROVER });
     expect(outcome).toMatchObject({ statusText: "⏸ Pysäytetty: 3 mainosta, 1 kampanjaa", outcome: { count: 4 } });
-    // The card is the notice: no second Telegram message.
-    expect(r.notifier.messages).toHaveLength(0);
+    // The card shows the counts; the notice lists every paused campaign (RK9-523).
+    expect(r.notifier.messages).toHaveLength(1);
+    expect(r.notifier.messages[0]!.text).toContain("• kampanja OLL jatkuva (100)");
     expect(r.ruleActions()[0]!.metrics).toMatchObject({ initiator: { source: "telegram", tgUserId: APPROVER } });
     expect(await handler!({ request, tgUserId: APPROVER })).toMatchObject({ statusText: "⏸ Ei aktiivisia mainoksia" });
   });
