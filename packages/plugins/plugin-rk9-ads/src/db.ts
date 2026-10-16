@@ -231,6 +231,18 @@ export function createLedger(db: PluginDatabaseClient) {
       const result = await db.execute(`UPDATE ${qualified(table)} SET ${assignments.join(", ")} WHERE ${condition}`, params);
       return result.rowCount;
     },
+
+    /** Deletes rows of `companyId` that match every `where` column, e.g. a once-only claim to give back. */
+    async remove<T extends LedgerTable>(companyId: string, table: T, where: LedgerWhere<T>): Promise<number> {
+      assertCompanyId(companyId);
+      if (Object.values(where).every((value) => value === undefined)) {
+        throw new Error("remove needs at least one where column besides company_id");
+      }
+      const params: unknown[] = [];
+      const condition = whereClause(table, companyId, where, params);
+      const result = await db.execute(`DELETE FROM ${qualified(table)} WHERE ${condition}`, params);
+      return result.rowCount;
+    },
   };
 }
 

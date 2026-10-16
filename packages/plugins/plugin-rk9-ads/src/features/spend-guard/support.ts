@@ -72,6 +72,8 @@ export interface OnceStore {
   claim(companyId: string, key: string, kind: string, metadata?: Record<string, unknown>): Promise<boolean>;
   /** The keys of `keys` that already have a marker. */
   claimed(companyId: string, keys: readonly string[]): Promise<string[]>;
+  /** Gives back a marker this run claimed but could not follow through on. */
+  release(companyId: string, key: string): Promise<void>;
 }
 
 export function sqlOnceStore(ledger: Ledger): OnceStore {
@@ -87,6 +89,9 @@ export function sqlOnceStore(ledger: Ledger): OnceStore {
       }
       return out;
     },
+    async release(companyId, key) {
+      await ledger.remove(companyId, "alert_dedupe", { dedupe_key: key });
+    },
   };
 }
 
@@ -101,6 +106,9 @@ export function memoryOnceStore(): OnceStore & { keys(): string[] } {
     },
     async claimed(companyId, keys) {
       return keys.filter((key) => markers.has(`${companyId}|${key}`));
+    },
+    async release(companyId, key) {
+      markers.delete(`${companyId}|${key}`);
     },
     keys: () => [...markers],
   };

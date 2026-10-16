@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../../src/config.js";
-import { alertKey } from "../../src/features/spend-guard/alerts.js";
+import { alertKey, riskKey } from "../../src/features/spend-guard/alerts.js";
 import { evaluateDataGate, resolveJsonPointer } from "../../src/features/spend-guard/data-gate.js";
 import { ALERT_CHECK_INTERVAL_MS, scheduledPauseKey } from "../../src/features/spend-guard/scheduled-pause.js";
 import { brandConfig, COMPANY_A } from "../fixtures.js";
@@ -68,6 +68,19 @@ describe("scheduled pause job", () => {
     await tick("2026-03-29T18:30:00Z"); // 21:30 EEST
     expect(pauses(r.meta)).toBe(4);
     expect(r.ruleActions().filter((row) => row.rule_type === "scheduled_pause")).toHaveLength(2);
+  });
+
+  it("keeps the meta.campaignId scope (pulse schedule, not the kill switch)", async () => {
+    const meta = activeMeta();
+    meta.campaigns.push({ id: "777", name: "Käsin", status: "ACTIVE" });
+    meta.ads.push({ id: "999", name: "toinen", status: "ACTIVE", campaign_id: "777" });
+    const config = scheduled();
+    (config.meta as Record<string, unknown>).campaignId = "100";
+    const r = rig({ meta, config });
+    r.clock.now = new Date("2026-10-21T18:30:00Z"); // 21:30 EEST
+    await r.harness.runJob("scheduled-pause");
+    expect(meta.writes.map((call) => call.path).sort()).toEqual(["100", "301"]);
+    expect(r.ruleActions().find((row) => row.rule_type === "scheduled_pause")).toMatchObject({ object_type: "campaign", object_id: "100" });
   });
 
   it("fires at 21:30 across the October change back to EET", async () => {
@@ -226,9 +239,9 @@ describe("data gate", () => {
     ["HTTP 503", () => new Response("down", { status: 503 })],
     ["not JSON", () => new Response("<html>")],
     ["no number at the pointer", () => new Response(JSON.stringify({ stats: {} }))],
-  ])("fails open when the feed is %s: logs a warning, pauses nothing", async (_label, feed) => {
+  ])("fails open when the feed is %s: pauses nothing, warns and fails the run so it is seen", async (_label, feed) => {
     const r = gateRig(feed as () => Response);
-    await r.harness.runJob("scheduled-pause");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/OLL data gate: feed check failed \(feed_\w+|value_missing/);
     expect(pauses(r.meta)).toBe(0);
     expect(r.harness.logs.some((entry) => entry.level === "warn" && /fail-open/.test(entry.message))).toBe(true);
   });
@@ -246,10 +259,15 @@ describe("data gate", () => {
 });
 
 describe("MTD alerts", () => {
-  function alertRig(mtd: string, config = brandConfig({ telegram: telegramBlock() })) {
-    const meta = new FakeMeta();
+  /** MTD and Meta's amount_spent move together; spend_cap 100 EUR, so Meta stays the backstop. */
+  function setMtd(meta: FakeMeta, mtd: string): void {
     meta.spend = () => mtd;
     meta.account = { ...meta.account, amount_spent: String(Math.round(Number(mtd) * 100)) };
+  }
+
+  function alertRig(mtd: string, config = brandConfig({ telegram: telegramBlock() })) {
+    const meta = new FakeMeta();
+    setMtd(meta, mtd);
     return rig({ meta, config });
   }
 
@@ -266,20 +284,20 @@ describe("MTD alerts", () => {
     expect(r.meta.calls.length).toBe(reads);
 
     // Later the same month at 85 %: no repeat.
-    r.meta.spend = () => "85.00";
+    setMtd(r.meta, "85.00");
     r.clock.now = new Date(r.clock.now.getTime() + ALERT_CHECK_INTERVAL_MS);
     await r.harness.runJob("scheduled-pause");
     expect(r.notifier.cards).toHaveLength(1);
 
     // 100 %: the second threshold.
-    r.meta.spend = () => "100.00";
+    setMtd(r.meta, "100.00");
     r.clock.now = new Date(r.clock.now.getTime() + ALERT_CHECK_INTERVAL_MS);
     await r.harness.runJob("scheduled-pause");
     expect(r.notifier.cards).toHaveLength(2);
     expect(r.notifier.cards[1]!.text).toMatch(/katto täynnä/);
 
-    // A new Helsinki month resets the thresholds.
-    r.meta.spend = () => "80.00";
+    // A new Helsinki month resets the thresholds (Meta's cap reset too, G2).
+    setMtd(r.meta, "80.00");
     r.clock.now = new Date("2026-10-31T22:30:00Z"); // 00:30 on 1.11. in Helsinki
     await r.harness.runJob("scheduled-pause");
     expect(r.notifier.cards).toHaveLength(3);
@@ -295,7 +313,10 @@ describe("MTD alerts", () => {
     const r = alertRig("120.00");
     await r.harness.runJob("scheduled-pause");
     expect(r.notifier.cards).toHaveLength(1);
-    expect(r.store.keys()).toHaveLength(2);
+    expect(r.notifier.cards[0]!.text).toMatch(/katto täynnä/);
+    // Meta's spend_cap is used up (headroom -20 EUR), so Meta delivers nothing more: no overrun risk.
+    expect(r.notifier.cards[0]!.text).not.toMatch(/ylittää katon/);
+    expect(r.store.keys()).toEqual([`${COMPANY_A}|${alertKey("OLL", "2026-10", 80)}`, `${COMPANY_A}|${alertKey("OLL", "2026-10", 100)}`]);
   });
 
   it("does not claim a threshold for a brand without Telegram", async () => {
@@ -305,15 +326,70 @@ describe("MTD alerts", () => {
     expect(r.store.keys()).toHaveLength(0);
   });
 
-  it("fails the run when the alert cannot be sent, and never sends it twice", async () => {
+  it("fails the run when the alert cannot be sent, gives the marker back and sends on the next check", async () => {
     const r = alertRig("81.00");
     r.notifier.fail = new Error("Telegram 502");
-    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/alert 80 %: Telegram failed/);
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/alert 80 %: Telegram failed .*retrying next check/);
+    expect(r.store.keys()).toEqual([]);
+    expect(r.ruleActions()[0]).toMatchObject({ rule_id: "spend-alert-80", applied: false });
     r.notifier.fail = null;
     r.clock.now = new Date(r.clock.now.getTime() + ALERT_CHECK_INTERVAL_MS);
     await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(1);
+    expect(r.store.keys()).toEqual([`${COMPANY_A}|${alertKey("OLL", "2026-10", 80)}`]);
+    // Sent once: the next check does not repeat it.
+    r.clock.now = new Date(r.clock.now.getTime() + ALERT_CHECK_INTERVAL_MS);
+    await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(1);
+  });
+
+  it("alerts once per local day when Meta's spend_cap is no backstop (headroom above the rest of the cap)", async () => {
+    const r = alertRig("10.00");
+    // Meta would allow 200 - 10 = 190 EUR more, 90 EUR of the month is left.
+    r.meta.account = { ...r.meta.account, spend_cap: "20000" };
+    await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(1);
+    expect(r.notifier.cards[0]!.text).toMatch(/kulutusvahdin varoitus/);
+    expect(r.notifier.cards[0]!.text).toMatch(/spend_cap sallii vielä 190,00 €, mutta katosta on jäljellä 90,00 €/);
+    expect(r.ruleActions().map((row) => [row.rule_id, row.reason, row.applied])).toEqual([
+      ["spend-risk-spend_cap_headroom_exceeds_remaining", "spend_cap_headroom_exceeds_remaining", true],
+    ]);
+
+    // The same local day: no repeat.
+    r.clock.now = new Date(r.clock.now.getTime() + ALERT_CHECK_INTERVAL_MS);
+    await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(1);
+
+    // The next local day, still unresolved: alerted again.
+    r.clock.now = new Date("2026-10-22T05:00:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(2);
+  });
+
+  it("alerts when the account has no spend_cap", async () => {
+    const r = alertRig("10.00");
+    r.meta.account = { ...r.meta.account, spend_cap: "0" };
+    await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(1);
+    expect(r.notifier.cards[0]!.text).toMatch(/spend_cap puuttuu/);
+  });
+
+  it("alerts when the current budgets project above the cap, below 80 %", async () => {
+    const r = alertRig("50.00");
+    // 50 + 5 EUR/day x 11 days = 105 EUR on 21.10.
+    r.meta.adsets = [{ id: "200", name: "set", status: "ACTIVE", daily_budget: "500" }];
+    await r.harness.runJob("scheduled-pause");
+    expect(r.notifier.cards).toHaveLength(1);
+    expect(r.notifier.cards[0]!.text).toMatch(/arvio 105,00 € ylittää katon 100,00 €/);
+    expect(r.store.keys()).toEqual([`${COMPANY_A}|${riskKey("OLL", "2026-10-21", "projection_exceeds_cap")}`]);
+  });
+
+  it("sends nothing while Meta is the backstop and the budgets fit the cap", async () => {
+    const r = alertRig("50.00");
+    r.meta.adsets = [{ id: "200", name: "set", status: "ACTIVE", daily_budget: "300" }];
+    await r.harness.runJob("scheduled-pause");
     expect(r.notifier.cards).toHaveLength(0);
-    expect(r.ruleActions()[0]).toMatchObject({ rule_id: "spend-alert-80", applied: false });
+    expect(r.store.keys()).toEqual([]);
   });
 
   it("fails the run, skips alerts and retries next tick when the MTD read fails", async () => {

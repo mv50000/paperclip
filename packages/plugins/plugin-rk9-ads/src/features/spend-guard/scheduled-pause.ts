@@ -2,16 +2,18 @@
  * The `scheduled-pause` job (A6, RK9-511). The host cron is UTC only (G18),
  * so the job runs every 5 minutes and decides in the brand's local time:
  *
- * 1. MTD alerts, at most every ALERT_CHECK_INTERVAL_MS per company. A failed
- *    MTD read fails the run and is retried on the next tick.
+ * 1. Spend alerts (alerts.ts: 80 % / 100 % MTD and the standing risks), at
+ *    most every ALERT_CHECK_INTERVAL_MS per company. A failed MTD read or a
+ *    failed send fails the run and is retried on the next check.
  * 2. Scheduled pause: when `schedule.scheduledPause.enabled` and the local
  *    time is at or after `at` (21:30 is right in both EET and EEST), once per
  *    local day. The day's marker is written only after the Meta part
  *    succeeded, so a Meta failure is retried on the next tick (pauses are
  *    idempotent). Off by default.
  * 3. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
- *    (see data-gate.ts); when the predicate no longer holds it runs pauseAll,
- *    which is a no-op once everything is paused.
+ *    (see data-gate.ts): a feed that cannot be read pauses nothing, but it
+ *    fails the run so the broken feed is seen (RK9-523). When the predicate no
+ *    longer holds it runs pauseAll, which is a no-op once everything is paused.
  *
  * An invalid or unavailable config fails the run; the pause side (2 and 3)
  * still runs on the brand's last valid config (pause-config.ts).
@@ -89,7 +91,10 @@ async function runForCompany(
       } else {
         await ctx.state.set(alertCheckKey(companyId), now.toISOString());
         const outcome = await evaluateSpendAlerts(deps, companyId, config, figures, initiator);
-        if (outcome.telegram === "failed") failures.push(`${brand} alert ${outcome.claimed.join("/")} %: Telegram failed (${outcome.error})`);
+        if (outcome.telegram === "failed") {
+          const what = [...outcome.claimed.map((threshold) => `${threshold} %`), ...outcome.risks].join("/");
+          failures.push(`${brand} alert ${what}: Telegram failed (${outcome.error}), retrying next check`);
+        }
       }
     }
   } catch (error) {
@@ -137,6 +142,7 @@ async function runForCompany(
       if (outcome.action === "skip") {
         if (outcome.reason !== "predicate_holds") {
           ctx.logger.warn("rk9-ads data gate: feed check failed, nothing paused (fail-open)", { companyId, reason: outcome.reason, detail: outcome.detail });
+          failures.push(`${brand} data gate: feed check failed (${outcome.reason}: ${outcome.detail}), nothing paused (fail-open)`);
         }
       } else {
         const note = `data-gate: arvo ${outcome.value} (ehto ${gate.operator} ${gate.threshold} ei enää täyty)`;

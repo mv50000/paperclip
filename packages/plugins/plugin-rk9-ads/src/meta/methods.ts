@@ -15,6 +15,7 @@ import {
   isDryRun,
   type AccountSummary,
   type Ad,
+  type AdsetDaySpend,
   type AdSet,
   type BudgetObject,
   type Campaign,
@@ -254,6 +255,25 @@ export async function getAccountSpendCents(
 ): Promise<number> {
   const rows = await getInsights(client, adAccountPath(actId), { level: "account", fields: ["spend"], timeRange });
   return rows.reduce((sum, row) => sum + parseDecimalMoney(row.spend, "spend"), 0);
+}
+
+/**
+ * Spend of one local date (account time zone) per ad set, with the parent
+ * campaign, for the spend guard's today share (RK9-523). A row without
+ * adset_id keeps a null id, so nothing is credited to it. The rules on missing
+ * spend are those of getAccountSpendCents; a truncated walk throws.
+ */
+export async function getAdsetSpendForDay(client: MetaGraphClient, actId: string, date: string): Promise<AdsetDaySpend[]> {
+  const rows = await getInsights(client, adAccountPath(actId), {
+    level: "adset",
+    fields: ["adset_id", "campaign_id", "spend"],
+    timeRange: { since: date, until: date },
+  });
+  return rows.map((row) => ({
+    adsetId: optionalString(row.adset_id),
+    campaignId: optionalString(row.campaign_id),
+    cents: parseDecimalMoney(row.spend, "spend"),
+  }));
 }
 
 /**

@@ -183,8 +183,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       rule: "kill_switch",
       reason: pauseReason(loaded, "Pysäytä kaikki (Telegram)"),
       initiator: { source: "telegram", tgUserId },
-      // The card itself shows the outcome.
-      notify: false,
+      // The card shows the counts; the notice lists every paused campaign for
+      // the restore (RK9-523).
+      notify: true,
     });
     const outcome = {
       count: result.count,
@@ -196,7 +197,8 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     return {
       statusText:
         (result.count > 0 ? `⏸ Pysäytetty: ${result.pausedAds.length} mainosta, ${result.pausedCampaigns.length} kampanjaa` : "⏸ Ei aktiivisia mainoksia") +
-        (loaded.fallback ? " (konfiguraatio ei luettavissa: koko mainostili, viimeisin kelvollinen konfiguraatio)" : ""),
+        (loaded.fallback ? " (konfiguraatio ei luettavissa: koko mainostili, viimeisin kelvollinen konfiguraatio)" : "") +
+        (result.telegram === "failed" ? " (ilmoitus epäonnistui, kampanjalista aktiviteettilokissa)" : ""),
       outcome,
     };
   });
