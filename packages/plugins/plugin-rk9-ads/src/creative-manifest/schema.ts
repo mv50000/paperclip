@@ -47,10 +47,51 @@ export const META_CTA_TYPES = [
 ] as const;
 
 export const MAX_URL_LENGTH = 2048;
-const HTTPS_PREFIX_PATTERN = "^https://";
 const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
-/** Name suffixes that only resolve inside a private network. */
-const PRIVATE_NAME_RE = /(^|\.)(localhost|local|internal|intranet|lan|home|corp|home\.arpa)$/;
+/**
+ * Name suffixes that only resolve inside a private network. `ts.net` and
+ * `beta.tailscale.net` are Tailscale MagicDNS names: they resolve to the
+ * tailnet range 100.64.0.0/10 (RK9-525).
+ */
+const PRIVATE_NAME_SUFFIXES = [
+  "localhost",
+  "local",
+  "internal",
+  "intranet",
+  "lan",
+  "home",
+  "corp",
+  "home.arpa",
+  "ts.net",
+  "beta.tailscale.net",
+] as const;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const PRIVATE_NAME_RE = new RegExp(`(^|\\.)(${PRIVATE_NAME_SUFFIXES.map(escapeRegExp).join("|")})$`);
+
+/** A JSON Schema pattern is case-sensitive and takes no flags, so each letter becomes a class. */
+function caseInsensitive(value: string): string {
+  return escapeRegExp(value).replace(/[a-z]/g, (letter) => `[${letter}${letter.toUpperCase()}]`);
+}
+
+/**
+ * The JSON Schema form of `checkMediaUrl` for brand-repo CI. It decides on
+ * the authority (scheme to the first `/`, `?` or `#`): https, no credentials,
+ * no port but 443, a dotted name whose last label is not numeric (the URL
+ * parser reads such a name as an IPv4 address), and no private-only suffix.
+ * zod stays the authority at runtime.
+ */
+const AUTHORITY_END = "(?::443)?(?:[/?#]|$)";
+const HTTPS_URL_PATTERN = [
+  "^https://",
+  `(?!(?:[^/?#.]*\\.)*(?:[0-9]+|0[xX][0-9a-fA-F]*)\\.?${AUTHORITY_END})`,
+  `(?!(?:[^/?#]*\\.)?(?:${PRIVATE_NAME_SUFFIXES.map(caseInsensitive).join("|")})\\.?${AUTHORITY_END})`,
+  // Dot-free labels keep the match linear (no nested quantifier over the same characters).
+  `[^/?#@:.\\[\\]\\s]+(?:\\.[^/?#@:.\\[\\]\\s]+)+\\.?${AUTHORITY_END}`,
+].join("");
 
 export type UrlProblem = { code: "url_not_https" | "url_forbidden"; message: string };
 
@@ -58,10 +99,10 @@ export type UrlProblem = { code: "url_not_https" | "url_forbidden"; message: str
  * Checks a media URL before anything uses it. The plugin hands the URL to Meta
  * and sends one HEAD through the host fetch, whose SSRF guard resolves DNS and
  * refuses the private ranges it knows (RFC 1918, loopback, link-local, IPv6
- * ULA). It does not cover every internal range (for example 100.64.0.0/10), so
- * a HEAD failure returns no error detail. This check adds what can be decided from the URL
- * text alone: https only, no credentials, the default port, and no IP literal
- * or private-only host name.
+ * ULA, the tailnet range 100.64.0.0/10 and NAT64). A HEAD failure still returns
+ * no error detail. This check adds what can be decided from the URL text
+ * alone: https only, no credentials, the default port, and no IP literal or
+ * private-only host name (Tailscale MagicDNS names included).
  */
 export function checkMediaUrl(value: string): UrlProblem | null {
   let url: URL;
@@ -78,7 +119,7 @@ export function checkMediaUrl(value: string): UrlProblem | null {
   if (host.startsWith("[") || IPV4_RE.test(host)) {
     return { code: "url_forbidden", message: "must use a host name, not an IP address" };
   }
-  if (!host.includes(".") || PRIVATE_NAME_RE.test(host.replace(/\.$/, ""))) {
+  if (!host.includes(".") || PRIVATE_NAME_RE.test(host.replace(/\.+$/, ""))) {
     return { code: "url_forbidden", message: "must use a public host name" };
   }
   return null;
@@ -95,7 +136,7 @@ const httpsUrl = z
     const problem = checkMediaUrl(value);
     if (problem) ctx.addIssue({ code: "custom", message: problem.message, params: { code: problem.code } });
   })
-  .meta({ format: "uri", pattern: HTTPS_PREFIX_PATTERN });
+  .meta({ format: "uri", pattern: HTTPS_URL_PATTERN });
 
 const creativeManifestObject = z
   .object({
@@ -145,11 +186,21 @@ export const creativeManifestV1 = creativeManifestObject.superRefine((manifest, 
 
 export type CreativeManifestV1 = z.infer<typeof creativeManifestObject>;
 
-/** The JSON Schema export (draft-07, the Ajv default). */
+/**
+ * The JSON Schema export (draft-07, the Ajv default). zod does not export the
+ * cross-field refinement, so the "posterUrl only for a video" rule is added
+ * here as an if/then.
+ */
 export function creativeManifestJsonSchema(): Record<string, unknown> {
   const generated = z.toJSONSchema(creativeManifestObject, { target: "draft-07" }) as Record<string, unknown>;
   const { $schema, ...rest } = generated;
-  return { $schema, $id: CREATIVE_MANIFEST_SCHEMA_ID, ...rest };
+  return {
+    $schema,
+    $id: CREATIVE_MANIFEST_SCHEMA_ID,
+    ...rest,
+    if: { properties: { kind: { const: "image" } }, required: ["kind"] },
+    then: { properties: { posterUrl: false } },
+  };
 }
 
 export interface ManifestIssue {

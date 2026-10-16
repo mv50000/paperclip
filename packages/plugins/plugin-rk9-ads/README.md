@@ -128,13 +128,17 @@ Example manifest (a test validates this block against the schema):
 }
 ```
 
-Field rules the JSON Schema cannot check, enforced at ingress:
+The JSON Schema also checks the URL authority (https, no credentials, no port
+but 443, no IP address, no private-only name such as `localhost` or `*.ts.net`)
+and refuses `posterUrl` on an image. Field rules the JSON Schema cannot check,
+enforced at ingress:
 
 - `brand` must equal the company's `brandCode`, and `landingUrlKey` must be a
   key of the company's `landing.urls`.
 - `validUntil` must be in the future. `posterUrl` is allowed only for a video.
 - Each URL must use a public host name on the default port, with no IP address
-  and no credentials. One HEAD request (through the host fetch and its SSRF
+  and no credentials. Private-only names (`localhost`, `.local`, `.internal`,
+  Tailscale `.ts.net` and similar) are refused. One HEAD request (through the host fetch and its SSRF
   guard) must answer 200 with `video/*` for a video, or `image/jpeg` or
   `image/png` for an image or poster. Redirects are not followed. Size limits
   from `content-length`: image 30 MB, video 1 GB.
@@ -178,10 +182,11 @@ Responses:
 | Status | Body | When |
 |---|---|---|
 | 201 | `{ "created": true, "creative": {...} }` | New creative. A video is now `uploading` with `metaVideoId`; an image is `ready`. |
-| 200 | `{ "created": false, "creative": {...} }` | The same `idempotencyKey`, or the same media (`brand` + `sha256`), was staged before. Nothing is fetched or uploaded again. A `failed` video upload is retried, and so is an `uploading` row with no video id after 10 minutes (a worker died mid-upload). |
+| 200 | `{ "created": false, "creative": {...} }` | The same `idempotencyKey`, or the same media (`brand` + `sha256`), was staged before with the same text fields. Nothing is fetched or uploaded again. A `failed` video upload is retried, and so is an `uploading` row with no video id after 10 minutes (a worker died mid-upload). An `expired` or `rejected` creative is staged again: the media is checked, the row takes the new manifest (it keeps its id and `idempotencyKey`), and a video uploads again. |
 | 400 | `{ "error": { "code", "message", "path" } }` | `invalid_manifest`, `url_not_https`, `url_forbidden`, `valid_until_past`, `invalid_request`. `path` is a JSON pointer into the manifest, e.g. `/copy/message`. |
-| 409 | same | `plugin_not_enabled` (no valid brand config), `idempotency_key_conflict` (the key names other media) |
+| 409 | same, plus `creative` | `plugin_not_enabled` (no valid brand config), `idempotency_key_conflict` (the key names other media), `creative_text_conflict` (the media is staged with other `copy`, `cta`, `landingUrlKey` or `utmCampaign`; `error.fields` lists them). A creative is a media resource and its text fields are defaults: a text variant of the same media belongs to the publication. |
 | 422 | same | `unknown_brand`, `unknown_landing_url_key`, `media_unreachable`, `media_type_mismatch`, `media_too_large` |
+| 429 | `{ "error": {...} }` | `creative_limit_reached`: the company created 200 new creatives in the last 24 hours. Dedupe hits and restages still answer. |
 | 502 | `{ "error": {...}, "creative": {...} }` | `meta_upload_failed`; the creative is `failed` and the next submit retries it |
 | 503 | `{ "error": {...} }` | `config_unavailable` |
 

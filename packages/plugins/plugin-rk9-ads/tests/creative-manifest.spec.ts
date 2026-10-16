@@ -60,6 +60,14 @@ describe("creative manifest v1 schema", () => {
     ["copy.message", { copy: { message: "" } }, "/copy/message"],
     ["extra field", { landingUrl: "https://evil.example/" }, ""],
     ["validUntil without offset", { validUntil: "2026-11-30 23:59" }, "/validUntil"],
+    ["IP literal mediaUrl", { mediaUrl: "https://100.103.149.19/a.mp4" }, "/mediaUrl"],
+    ["hex IP mediaUrl", { mediaUrl: "https://0x7f000001/a.mp4" }, "/mediaUrl"],
+    ["IPv6 mediaUrl", { mediaUrl: "https://[fd00::1]/a.mp4" }, "/mediaUrl"],
+    ["mediaUrl port", { mediaUrl: "https://media.ololla.fi:8443/a.mp4" }, "/mediaUrl"],
+    ["mediaUrl credentials", { mediaUrl: "https://u:p@media.ololla.fi/a.mp4" }, "/mediaUrl"],
+    ["tailnet mediaUrl", { mediaUrl: "https://vault.tail1234.TS.net/a.mp4" }, "/mediaUrl"],
+    ["localhost mediaUrl", { mediaUrl: "https://localhost./a.mp4" }, "/mediaUrl"],
+    ["posterUrl on an image", { kind: "image", posterUrl: "https://media.ololla.fi/p.jpg" }, "/posterUrl"],
   ])("Ajv and zod both reject a bad %s, and zod names it with a JSON pointer", (_name, patch, pointer) => {
     const bad = { ...readmeExample(), ...patch };
     const validate = compileLikeBrandRepoCi();
@@ -67,6 +75,28 @@ describe("creative manifest v1 schema", () => {
     const parsed = parseCreativeManifest(bad);
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.issues.map((issue) => issue.path)).toContain(pointer);
+  });
+
+  it("Ajv accepts what zod accepts for URLs: default port 443, an @ in the path, a video poster", () => {
+    const validate = compileLikeBrandRepoCi();
+    for (const patch of [
+      { mediaUrl: "https://cdn.example.com:443/a.mp4" },
+      { mediaUrl: "https://cdn.example.com/u@2x.mp4?v=1#t" },
+      { mediaUrl: "https://cdn.example.com" },
+      { kind: "video", posterUrl: "https://media.ololla.fi/p.jpg" },
+    ]) {
+      const manifest = { ...readmeExample(), ...patch };
+      expect(validate(manifest), JSON.stringify(patch)).toBe(true);
+      expect(parseCreativeManifest(manifest), JSON.stringify(patch)).toMatchObject({ ok: true });
+    }
+  });
+
+  it("the URL pattern stays fast on a long hostile authority", () => {
+    const validate = compileLikeBrandRepoCi();
+    const hostile = `https://${"a.".repeat(10_000)}@`;
+    const started = performance.now();
+    validate({ ...readmeExample(), mediaUrl: hostile });
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   it("gives URL problems their own codes", () => {
@@ -97,6 +127,10 @@ describe("creative manifest v1 schema", () => {
       "https://intranet/a",
       "https://user@media.ololla.fi/a",
       "https://media.ololla.fi:8080/a",
+      "https://vault.tail1234.ts.net/a",
+      "https://host.beta.tailscale.net/a",
+      "https://100.64.0.1/a",
+      "https://vault.tail1234.ts.net../a",
     ]) {
       expect(checkMediaUrl(url), url).not.toBeNull();
     }
