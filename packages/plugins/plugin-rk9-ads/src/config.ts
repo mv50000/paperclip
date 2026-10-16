@@ -161,7 +161,10 @@ export const DEFAULT_CPC_WARN_EUR = 0.5;
 export const DEFAULT_FATIGUE = {
   enabled: true,
   minImpressions: 1000,
-  maxFrequency: 3.5,
+  // Compared with Meta's daily frequency (impressions-weighted, last 3 days),
+  // not a 7-day or lifetime one: 3.5 is a weekly norm and a day at 10 EUR is
+  // about 1.1 (RK9-526).
+  maxFrequency: 2,
   ctrDropPct: 30,
   issuesEnabled: false,
 } as const;

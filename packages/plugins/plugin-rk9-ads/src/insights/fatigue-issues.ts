@@ -5,13 +5,16 @@
  * The issue is off by default (`fatigue.issuesEnabled=false`). When it is on,
  * a fatigued ad gets at most one Paperclip issue in its own company. The
  * dedupe marker `fatigue-issue:<adId>` in alert_dedupe is inserted first
- * (ON CONFLICT DO NOTHING), so two overlapping runs cannot both create one;
- * a failed create removes the marker so the next run retries. The plugin has
+ * (ON CONFLICT DO NOTHING), so two overlapping runs cannot both create one.
+ * A create the host refused removes the marker so the next run retries; a
+ * timeout or any other unclear failure keeps it, because the issue may exist
+ * (RK9-526: a missed issue beats a duplicate, and the digest still lists the
+ * ad). The plugin has
  * no issues.read capability, so the marker is kept after the issue closes: an
  * ad gets one issue in its lifetime. Fatigue never pauses or changes an ad.
  */
 
-import type { PluginContext } from "@paperclipai/plugin-sdk";
+import { PLUGIN_RPC_ERROR_CODES, type PluginContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../config.js";
 import { computeFatigue, fatigueThresholdsFor, type FatigueResult } from "./fatigue.js";
 import { addDays } from "./mtd.js";
@@ -53,6 +56,16 @@ export async function evaluateFatigue(
     out.push({ adId, result: computeFatigue(series, thresholds, asOf) });
   }
   return out;
+}
+
+/**
+ * The host answered the create with an error, so no issue was made. A
+ * JSON-RPC error carries a numeric code; a timeout has one too but says
+ * nothing about the outcome.
+ */
+export function hostRefused(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "number" && code !== PLUGIN_RPC_ERROR_CODES.TIMEOUT;
 }
 
 export function fatigueIssueKey(adId: string): string {
@@ -107,12 +120,13 @@ export async function createFatigueIssues(
       });
       created.push(adId);
     } catch (error) {
-      deps.ctx.logger.warn("rk9-ads fatigue: issue create failed", {
+      const refused = hostRefused(error);
+      deps.ctx.logger.warn(refused ? "rk9-ads fatigue: issue create failed; retried next run" : "rk9-ads fatigue: issue create outcome unknown; not retried", {
         companyId,
         adId,
         error: error instanceof Error ? error.message.slice(0, 200) : "unknown",
       });
-      await deps.store.unmark(companyId, key);
+      if (refused) await deps.store.unmark(companyId, key);
     }
   }
   return created;

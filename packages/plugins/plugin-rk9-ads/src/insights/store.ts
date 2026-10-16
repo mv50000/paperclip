@@ -17,6 +17,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NAMESPACE_RE = /^[a-z_][a-z0-9_]{0,62}$/;
 const UPSERT_BATCH = 50;
+/** recentAdSeries page size and page bound (RK9-526: 5000 rows was about 55 ads x 90 days). */
+const SERIES_PAGE_ROWS = 5000;
+const SERIES_MAX_PAGES = 40;
 
 /** One ad-day as stored in insights_daily. Money in cents, rates computed by ../metrics/cpc.ts. */
 export interface InsightDayRow {
@@ -226,18 +229,31 @@ export function createInsightsStore(db: PluginDatabaseClient) {
     /**
      * Daily series of every ad that had impressions on or after `activeSince`,
      * from `horizonSince` on, ordered by ad and date. Feeds computeFatigue.
+     * Read in keyset pages of SERIES_PAGE_ROWS (RK9-526), so a large account
+     * gets every row; past SERIES_MAX_PAGES it throws rather than cut rows.
      */
     async recentAdSeries(companyId: string, activeSince: string, horizonSince: string): Promise<StoredInsightDay[]> {
       assertCompanyId(companyId);
       assertDate(activeSince, "activeSince");
       assertDate(horizonSince, "horizonSince");
-      const rows = await db.query<Record<string, unknown>>(
-        `SELECT ad_id, to_char(date, 'YYYY-MM-DD') AS day, round(spend * 100)::bigint AS cents, impressions, reach, frequency, clicks, inline_link_clicks ` +
-          `FROM ${ns}.insights_daily WHERE company_id = $1 AND date >= $3::date AND ad_id IN ` +
-          `(SELECT ad_id FROM ${ns}.insights_daily WHERE company_id = $1 AND date >= $2::date AND impressions > 0) ` +
-          `ORDER BY ad_id, date LIMIT 5000`,
-        [companyId, activeSince, horizonSince],
-      );
+      const rows: Record<string, unknown>[] = [];
+      let after: { adId: string; day: string } | null = null;
+      for (let page = 0; ; page += 1) {
+        if (page >= SERIES_MAX_PAGES) throw new Error(`recentAdSeries: more than ${SERIES_MAX_PAGES * SERIES_PAGE_ROWS} rows`);
+        const cursor = after ? `AND (ad_id, date) > ($4, $5::date) ` : "";
+        const batch: Record<string, unknown>[] = await db.query<Record<string, unknown>>(
+          `SELECT ad_id, to_char(date, 'YYYY-MM-DD') AS day, round(spend * 100)::bigint AS cents, impressions, reach, frequency, clicks, inline_link_clicks ` +
+            `FROM ${ns}.insights_daily WHERE company_id = $1 AND date >= $3::date AND ad_id IN ` +
+            `(SELECT ad_id FROM ${ns}.insights_daily WHERE company_id = $1 AND date >= $2::date AND impressions > 0) ` +
+            cursor +
+            `ORDER BY ad_id, date LIMIT ${SERIES_PAGE_ROWS}`,
+          after ? [companyId, activeSince, horizonSince, after.adId, after.day] : [companyId, activeSince, horizonSince],
+        );
+        rows.push(...batch);
+        if (batch.length < SERIES_PAGE_ROWS) break;
+        const last = batch[batch.length - 1]!;
+        after = { adId: String(last.ad_id), day: String(last.day) };
+      }
       return rows.map((row) => ({
         adId: String(row.ad_id),
         date: String(row.day),
@@ -301,17 +317,26 @@ export function createInsightsStore(db: PluginDatabaseClient) {
       await db.execute(`DELETE FROM ${ns}.alert_dedupe WHERE company_id = $1 AND dedupe_key = $2`, [companyId, dedupeKey]);
     },
 
-    /** Messages of markers of `kind` created in the last `hours` hours. */
-    async recentMarks(companyId: string, kind: string, hours = 24): Promise<Array<{ dedupeKey: string; metadata: Record<string, unknown> }>> {
+    /**
+     * Markers of `kind` created in the last `hours` hours, oldest first: the
+     * newest `limit` of them. `fresh` = created in the last 24 hours.
+     */
+    async recentMarks(
+      companyId: string,
+      kind: string,
+      hours = 24,
+      limit = 50,
+    ): Promise<Array<{ dedupeKey: string; metadata: Record<string, unknown>; fresh: boolean }>> {
       assertCompanyId(companyId);
       const rows = await db.query<Record<string, unknown>>(
-        `SELECT dedupe_key, metadata FROM ${ns}.alert_dedupe WHERE company_id = $1 AND kind = $2 ` +
-          `AND created_at > now() - make_interval(hours => $3::int) ORDER BY created_at LIMIT 50`,
+        `SELECT dedupe_key, metadata, created_at > now() - interval '24 hours' AS fresh FROM ${ns}.alert_dedupe WHERE company_id = $1 AND kind = $2 ` +
+          `AND created_at > now() - make_interval(hours => $3::int) ORDER BY created_at DESC LIMIT ${Math.min(Math.max(1, Math.trunc(limit)), 500)}`,
         [companyId, kind, Math.trunc(hours)],
       );
-      return rows.map((row) => ({
+      return rows.reverse().map((row) => ({
         dedupeKey: String(row.dedupe_key),
         metadata: (typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata ?? {}) as Record<string, unknown>,
+        fresh: row.fresh === true,
       }));
     },
 

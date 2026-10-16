@@ -60,6 +60,9 @@ import {
 } from "../../meta/methods.js";
 import { redactText } from "../../meta/redact.js";
 import type { AdsetDaySpend, BudgetObject } from "../../meta/types.js";
+import { capCents, monthPosition } from "./position.js";
+
+export { capCents };
 
 export const GUARD_DENY_REASONS = [
   "currency_not_eur",
@@ -103,6 +106,8 @@ export interface SpendFigures {
   /** spend_cap - amount_spent. */
   headroomEur: number | null;
   mtdEur: number | null;
+  /** What is left of the monthly cap: monthlyCapEur - MTD. */
+  remainingEur: number | null;
   /** Today's spend credited to the counted daily budgets, each at most its own budget. */
   todayCoveredEur: number | null;
   /** Sum of the counted daily budgets after the proposed change. */
@@ -158,10 +163,6 @@ export interface GuardNumbers {
 
 const eur = (cents: number): number => Math.round(cents) / 100;
 
-export function capCents(monthlyCapEur: number): number {
-  return Math.round(monthlyCapEur * 100);
-}
-
 /**
  * Month-end projection in cents: MTD, then what the counted daily budgets
  * still allow today, then the remaining days after today, then lifetime
@@ -176,15 +177,17 @@ export function projectMonthEndCents(numbers: Pick<GuardNumbers, "mtdCents" | "t
 
 /** The pure decision on numbers that were read successfully. */
 export function evaluateGuard(numbers: GuardNumbers): GuardResult {
-  const cap = capCents(numbers.monthlyCapEur);
+  // MTD, headroom and what is left of the cap: the computation the digest shares (RK9-526).
+  const position = monthPosition(numbers);
+  const cap = position.capCents;
   const projected = projectMonthEndCents(numbers);
-  const headroom = numbers.spendCapCents === null ? null : numbers.spendCapCents - numbers.amountSpentCents;
-  const remaining = cap - numbers.mtdCents;
+  const headroom = position.headroomCents;
+  const remaining = position.remainingCents;
   const risks: SpendRisk[] = [];
   if (numbers.currency === SPEND_CURRENCY) {
     if (headroom === null) risks.push("no_spend_cap");
     // Headroom 0 or less: Meta delivers nothing more, so nothing can overrun.
-    else if (headroom > 0 && headroom > remaining) risks.push("spend_cap_headroom_exceeds_remaining");
+    else if (position.headroomExceedsRemaining) risks.push("spend_cap_headroom_exceeds_remaining");
     // With the headroom used up Meta delivers nothing more: no overrun to warn about.
     if (projected > cap && !(headroom !== null && headroom <= 0)) risks.push("projection_exceeds_cap");
   }
@@ -198,11 +201,12 @@ export function evaluateGuard(numbers: GuardNumbers): GuardResult {
     amountSpentEur: eur(numbers.amountSpentCents),
     headroomEur: headroom === null ? null : eur(headroom),
     mtdEur: eur(numbers.mtdCents),
+    remainingEur: eur(remaining),
     todayCoveredEur: eur(numbers.todayCoveredCents),
     dailyBudgetSumEur: eur(numbers.dailySumCents),
     lifetimeCommitEur: eur(numbers.lifetimeCommitCents),
     projectedMonthEndEur: eur(projected),
-    pctUsed: cap > 0 ? Math.floor((numbers.mtdCents * 1000) / cap) / 10 : null,
+    pctUsed: position.pctUsed,
     risks,
   };
   const deny = (reason: GuardDenyReason, detail: string): GuardResult => ({ ...figures, allow: false, reason, detail });
@@ -316,6 +320,7 @@ function emptyFigures(config: BrandConfig, now: Date): SpendFigures {
     amountSpentEur: null,
     headroomEur: null,
     mtdEur: null,
+    remainingEur: null,
     todayCoveredEur: null,
     dailyBudgetSumEur: null,
     lifetimeCommitEur: null,

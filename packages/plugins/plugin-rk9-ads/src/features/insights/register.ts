@@ -28,7 +28,11 @@ import type { FeatureRuntime } from "../types.js";
  *   (config.timeZone, Europe/Helsinki by default) it re-pulls the last 7 days
  *   up to yesterday (finalises yesterday, fills gaps, takes Meta's late
  *   attribution), then evaluates fatigue and, behind the flag, files issues.
- *   Marker: alert_dedupe `insights-close:<local date>`, set only on success.
+ *   Marker: alert_dedupe `insights-close:<date>`, set only on success, keyed
+ *   by the ad-account-local date whose yesterday the run closed (the date the
+ *   digest checks). The skip check before the run uses the config.timeZone
+ *   date; the two differ only when the account zone does, which the spend
+ *   guard refuses and the digest warns about.
  * - digest-tick (every 15 min): ../../digest/run.ts.
  * Actions (no manifest entry needed; the company comes from the host context):
  * - digest.dryRun: the digest text; writes nothing.
@@ -61,11 +65,13 @@ export function register(runtime: FeatureRuntime): void {
       try {
         const key = closeMarkerKey(localDate(base.now(), config.timeZone));
         if (await base.store.hasMark(companyId, key)) continue;
+        let accountToday: string | null = null;
         const outcome = await runBrand(base, companyId, config, "close", async (ingested) => {
+          accountToday = ingested.today;
           await fileFatigueIssues(companyId, config, addDays(ingested.today, -1));
         });
-        if (!outcome.ok) continue;
-        await base.store.markOnce(companyId, key, INSIGHTS_CLOSE_KIND, { rows: outcome.rows, window: outcome.window });
+        if (!outcome.ok || accountToday === null) continue;
+        await base.store.markOnce(companyId, closeMarkerKey(accountToday), INSIGHTS_CLOSE_KIND, { rows: outcome.rows, window: outcome.window });
         closed += 1;
       } catch (error) {
         ctx.logger.warn("rk9-ads insights-daily-close: brand failed", {

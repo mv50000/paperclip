@@ -36,7 +36,7 @@ describe("computeFatigue", () => {
     expect(result.status).toBe("fatigued");
     expect(result.signals).toEqual(["frequency", "ctr_decay", "cpc_rise"]);
     expect(result.reasons).toEqual([
-      "frequency: 3.8 > 3.5",
+      "frequency: 3.8 > 2",
       "ctr_decay: CTR 1 % vs baseline 2.5 % (-60 %)",
       "cpc_rise: CPC 1 vs baseline 0.4 (+150 %)",
     ]);
