@@ -90,8 +90,8 @@ export async function loadPauseConfig(ctx: PluginContext, companyId: string, kno
   if (!fallback) {
     return { ok: false, state: result.state, error: `the brand config is ${result.state} and there is no last valid config to pause with` };
   }
-  // The stored campaign scope may be stale (the broken save may have moved
-  // it), so a fallback pauses the whole ad account.
+  // Every pause covers the whole ad account (RK9-523). The stored campaign id
+  // may be stale (the broken save may have moved it), so it is dropped.
   const { campaignId: _staleScope, ...meta } = fallback.meta;
   return { ok: true, config: { ...fallback, meta }, fallback: { state: result.state, detail } };
 }

@@ -225,11 +225,16 @@ the core chat-channels bot is never shared. See
   re-reads Meta with no cache: `spend_cap`, `amount_spent`, currency, the
   insights spend of the local calendar month and every campaign and ad set
   budget. It refuses when the currency is not EUR, when there is no
-  `spend_cap`, when Meta's headroom (`spend_cap - amount_spent`) is above the
-  rest of the monthly cap (G2), when MTD + daily budgets x remaining local days
-  (today included) + lifetime budgets exceeds `monthlyCapEur`, and when any
-  read fails or takes over 60 s, and when the ad account's time zone is not
-  `timeZone` (MTD would be off). The cap itself never blocks a budget cut, but
+  `spend_cap`, when Meta's headroom (`spend_cap - amount_spent`) is 0 or less
+  (Meta would not deliver), when the headroom is above the rest of the monthly
+  cap (G2), when the projection exceeds `monthlyCapEur`, when any read fails or
+  takes over 60 s, and when the ad account's time zone is not `timeZone` (MTD
+  would be off). Projection = MTD + max(0, daily budgets - today's spend) +
+  daily budgets x the remaining local days after today + lifetime budgets.
+  Today counts once, at least at the full daily budgets, so a provisioned
+  budget on pace passes its own guard (G3, RK9-523). The guard adds no margin
+  for the insights lag of earlier days; Meta's `spend_cap` (at most the monthly
+  cap, G2) is the real-time backstop. The cap itself never blocks a budget cut, but
   `authorizeSpend` is asked first, and its default refuses every budget write.
   Fields that modify a budget in ways the projection does not model (e.g.
   `budget_schedule_specs`) are refused on every write.
@@ -243,26 +248,36 @@ the core chat-channels bot is never shared. See
   the controller drops the bot of an `invalid` brand, so use the UI or the
   tool. With no stored config the run fails and nothing is paused. An absent
   config never falls back.
-- **Kill switch** (`killswitch.ts`). `pauseAll()` pauses every ad whose status
-  is ACTIVE and then the campaign. The scope is `meta.campaignId`, or the whole
-  ad account when it is not set. Triggers: the UI action `pause-all`
+- **Kill switch** (`killswitch.ts`). `pauseAll()` pauses every ACTIVE ad and
+  then every ACTIVE campaign of the brand's whole ad account, also campaigns
+  made by hand in Meta's UI and also when `meta.campaignId` is set (operator
+  decision 15.10.2026, RK9-523). It never touches `spend_cap`. The audit row
+  and the Telegram notice list every paused campaign for the restore.
+  Triggers: the UI action `pause-all`
   (`dryRun` defaults to true; a live run needs `confirm: true`), the agent tool
   `rk9ads_pause_all`, and the `pause_all` gate card's "⏸ Pysäytä kaikki"
   button (allowlisted user in the brand chat, no second step).
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
-  alerts (a pause card, once per brand, local month and threshold;
-  `alert_dedupe`). It runs the scheduled pause once per local day at or after
-  `schedule.scheduledPause.at` (off by default). It also runs the data gate
-  when `schedule.dataGate` is set. The gate's predicate `value <operator>
-  threshold` is the condition for the ads to keep running. A JSON pointer to an
-  array counts its items. An unreadable feed pauses nothing (fail-open). A
-  Telegram failure after a pause fails the run, and the pauses stay.
+  alerts (once per brand, local month and threshold) and the risk alerts
+  (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
+  the rest of the monthly cap, or a projection above the cap. One pause card
+  carries every new alert (`alert_dedupe`); a failed send gives its markers
+  back, fails the run and is sent on the next check. There is no automatic
+  pause at 100 %: the A6 spec asks for an alert, and Meta's `spend_cap` is the
+  hard stop (RK9-523). The job runs the scheduled pause once per local day at
+  or after `schedule.scheduledPause.at` (off by default). It also runs the
+  data gate when `schedule.dataGate` is set. The gate's predicate `value
+  <operator> threshold` is the condition for the ads to keep running. A JSON
+  pointer to an array counts its items. An unreadable feed pauses nothing
+  (fail-open), but it fails the run so the broken feed is seen. A Telegram
+  failure after a pause fails the run, and the pauses stay.
 - **Data** `spend-guard` (`getData`) and the tool `rk9ads_get_pacing` return
   the guard figures and the alerted thresholds. They never return a token.
 - Every pause, refusal and alert writes a `rule_actions` row and an activity
   entry. Refusals and alerts use `rule_type = pause_all_cap` with
   `action = none` (rule ids `spend-guard`, `spend-alert-80`,
-  `spend-alert-100`), because migration 001 has no other fitting type.
+  `spend-alert-100`, `spend-risk-<risk>`), because migration 001 has no other
+  fitting type.
 
 ## Insights, digest and fatigue (RK9-512)
 

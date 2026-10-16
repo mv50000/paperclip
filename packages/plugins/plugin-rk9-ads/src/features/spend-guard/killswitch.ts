@@ -2,11 +2,15 @@
  * Kill switch "Pysäytä kaikki" (A6, RK9-511), the plugin port of
  * sunspot-pulse-off.sh.
  *
- * pauseAll lists every ad whose configured status is ACTIVE, pauses them,
- * then pauses the campaign. The scope is `meta.campaignId` when the brand
- * config names one (the ads of that campaign, like the script), otherwise the
- * whole ad account (every ACTIVE ad, then every ACTIVE campaign). Listing
- * follows every page; a list cut short throws instead of pausing part of it.
+ * pauseAll lists every ad and campaign of the brand's ad account whose
+ * configured status is ACTIVE, pauses the ads, then the campaigns. The scope
+ * is always the whole ad account, also when the config names
+ * `meta.campaignId`, so campaigns created by hand in Meta's UI stop too
+ * (operator decision 15.10.2026, RK9-523): the brand's ad account belongs to
+ * that brand, and the guard's projection counts the whole account. spend_cap
+ * is never touched (G2). Every paused campaign is in the audit row and the
+ * Telegram notice, so a restore knows what to turn back on. Listing follows
+ * every page; a list cut short throws instead of pausing part of it.
  *
  * It is idempotent: a second run finds nothing ACTIVE, returns count 0 and
  * sends no Telegram. A dry run lists the same objects, sends no Meta write
@@ -18,7 +22,7 @@ import type { BrandConfig } from "../../config.js";
 import type { Ledger } from "../../db.js";
 import { localDate, localTime } from "../../kit/local-time.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
-import { adAccountPath, getObjectStatus, listAds, listCampaignAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
+import { adAccountPath, listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import type { StatusRow } from "../../meta/types.js";
 import {
   brandClient,
@@ -42,8 +46,8 @@ export interface PausedObject {
 export interface PauseAllResult {
   dryRun: boolean;
   rule: PauseRule;
-  /** "campaign" when meta.campaignId scopes the run, else "account". */
-  scope: "campaign" | "account";
+  /** Always the whole ad account (RK9-523). */
+  scope: "account";
   pausedAds: PausedObject[];
   pausedCampaigns: PausedObject[];
   /** True when at least one campaign was (or in a dry run, would be) paused. */
@@ -79,21 +83,11 @@ export interface PauseAllOptions {
   note?: string;
 }
 
-/** The ACTIVE ads and campaigns the run would pause. Exported for parity tests. */
+/** The ACTIVE ads and campaigns of the whole ad account. Exported for parity tests. */
 export async function listPauseTargets(
   client: MetaGraphClient,
   config: BrandConfig,
-): Promise<{ scope: "campaign" | "account"; ads: StatusRow[]; campaigns: StatusRow[] }> {
-  const campaignId = config.meta.campaignId;
-  if (campaignId) {
-    const campaign = await getObjectStatus(client, campaignId);
-    const ads = await listCampaignAds(client, campaignId, { maxPages: LIST_MAX_PAGES });
-    return {
-      scope: "campaign",
-      ads: ads.filter((ad) => ad.status === "ACTIVE"),
-      campaigns: campaign.status === "ACTIVE" ? [campaign] : [],
-    };
-  }
+): Promise<{ scope: "account"; ads: StatusRow[]; campaigns: StatusRow[] }> {
   const account = adAccountPath(config.meta.adAccountId);
   const ads = await listAds(client, account, { maxPages: LIST_MAX_PAGES });
   const campaigns = await listCampaigns(client, account, { maxPages: LIST_MAX_PAGES });
@@ -112,13 +106,16 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
   const when = `${localDate(at, config.timeZone)} ${localTime(at, config.timeZone)}`;
   const why =
     options.rule === "scheduled_pause" ? "ajastettu pysäytys" : options.rule === "data_gate" ? "data-gate" : "hätäkatkaisin";
+  // Every campaign is listed (a restore turns them back on); ads up to 40.
+  const ads = result.pausedAds.map((ad) => `• mainos ${label(ad)}`);
   const lines = [
-    `⏸ ${config.displayName || config.brandCode}: mainokset pysäytetty (${when}, ${why})`,
+    `⏸ ${config.displayName || config.brandCode}: koko mainostili pysäytetty (${when}, ${why})`,
     ...(options.note ? [options.note] : []),
     `Syy: ${options.reason}`.slice(0, 300),
-    `${result.pausedAds.length} mainos(ta) ja ${result.pausedCampaigns.length} kampanja(a) → PAUSED:`,
-    ...result.list.slice(0, 40).map((line) => `• ${line}`),
-    ...(result.list.length > 40 ? [`… ja ${result.list.length - 40} muuta`] : []),
+    `${result.pausedCampaigns.length} kampanja(a) ja ${result.pausedAds.length} mainos(ta) → PAUSED:`,
+    ...result.pausedCampaigns.map((campaign) => `• kampanja ${label(campaign)}`),
+    ...ads.slice(0, 40),
+    ...(ads.length > 40 ? [`… ja ${ads.length - 40} muuta mainosta (lista aktiviteettilokissa)`] : []),
     ...(result.errors.length > 0 ? [`⚠️ ${result.errors.length} pysäytys epäonnistui, katso aktiviteettiloki.`] : []),
   ];
   return lines.join("\n").slice(0, 4000);
@@ -152,8 +149,8 @@ export async function pauseAll(
       config,
       ruleId: options.rule,
       ruleType: options.rule,
-      objectType: config.meta.campaignId ? "campaign" : "account",
-      objectId: config.meta.campaignId ?? config.meta.adAccountId,
+      objectType: "account",
+      objectId: config.meta.adAccountId,
       action: "pause_all",
       dryRun: options.dryRun,
       applied: false,
@@ -203,14 +200,13 @@ export async function pauseAll(
   }
 
   if (result.count > 0 || result.errors.length > 0 || options.initiator.source !== "job") {
-    const campaignId = config.meta.campaignId;
     await recordAction(deps, {
       companyId,
       config,
       ruleId: options.rule,
       ruleType: options.rule,
-      objectType: campaignId ? "campaign" : "account",
-      objectId: campaignId ?? config.meta.adAccountId,
+      objectType: "account",
+      objectId: config.meta.adAccountId,
       action: "pause_all",
       dryRun: options.dryRun,
       applied: !options.dryRun && result.count > 0,
@@ -220,6 +216,7 @@ export async function pauseAll(
         scope: result.scope,
         adIds: result.pausedAds.map((ad) => ad.id),
         campaignIds: result.pausedCampaigns.map((campaign) => campaign.id),
+        campaigns: result.pausedCampaigns,
         failedIds: result.errors.map((entry) => entry.id),
         telegram: result.telegram,
         ...(options.note ? { note: options.note } : {}),

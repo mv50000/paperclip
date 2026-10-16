@@ -9,7 +9,9 @@
  *
  * The gate fails open: an unreachable feed, a non-2xx answer, a body that is
  * not JSON or a pointer that does not give a number pauses nothing and is
- * reported as a skip with a reason. A pointer to an array counts its items.
+ * reported as a skip with a reason. The job logs a warning and fails its run
+ * for such a skip, so a broken feed is seen (RK9-523). A pointer to an array
+ * counts its items.
  */
 
 import type { BrandConfig, RuleOperator } from "../../config.js";

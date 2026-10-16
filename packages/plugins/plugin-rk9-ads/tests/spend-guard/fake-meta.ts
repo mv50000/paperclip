@@ -40,6 +40,11 @@ export class FakeMeta {
   account: Record<string, unknown>;
   /** Insights spend for a time range, as Graph's decimal string; null = no rows. */
   spend: (since: string, until: string) => string | null = () => "0.00";
+  /**
+   * Daily insights spend by local date ("YYYY-MM-DD" -> decimal string). When
+   * set, a time_increment=1 read answers one row per listed date in range.
+   */
+  dailySpend: Record<string, string> | null = null;
   campaigns: FakeObject[] = [];
   adsets: FakeObject[] = [];
   ads: FakeObject[] = [];
@@ -106,6 +111,12 @@ export class FakeMeta {
       if (path === act) return json(200, this.account);
       if (path === `${act}/insights`) {
         const range = JSON.parse(params.time_range ?? "{}") as { since?: string; until?: string };
+        if (this.dailySpend && params.time_increment === "1") {
+          const days = Object.keys(this.dailySpend)
+            .filter((day) => day >= (range.since ?? "") && day <= (range.until ?? ""))
+            .sort();
+          return json(200, { data: days.map((day) => ({ spend: this.dailySpend![day], date_start: day, date_stop: day })) });
+        }
         const spend = this.spend(range.since ?? "", range.until ?? "");
         return json(200, { data: spend === null ? [] : [{ spend, date_start: range.since, date_stop: range.until }] });
       }

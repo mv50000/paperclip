@@ -27,6 +27,7 @@ function numbers(overrides: Partial<GuardNumbers> = {}): GuardNumbers {
     spendCapCents: 10_000,
     amountSpentCents: 7_000,
     mtdCents: 7_000,
+    todaySpendCents: 0,
     dailySumCents: 0,
     lifetimeCommitCents: 0,
     month: "2026-10",
@@ -78,6 +79,43 @@ describe("evaluateGuard: the decision on read numbers", () => {
     expect(evaluateGuard(numbers({ currency: "USD" }))).toMatchObject({ allow: false, reason: "currency_not_eur" });
   });
 
+  it("G2: denies when Meta's headroom is 0 or less (spend_cap used up, an activation would not deliver)", () => {
+    for (const amountSpentCents of [10_000, 10_500]) {
+      expect(evaluateGuard(numbers({ spendCapCents: 10_000, amountSpentCents, mtdCents: 7_000, dailySumCents: 100 }))).toMatchObject({
+        allow: false,
+        reason: "spend_cap_reached",
+      });
+    }
+    // One cent of headroom is still a backstop that delivers.
+    expect(evaluateGuard(numbers({ spendCapCents: 10_000, amountSpentCents: 9_999, mtdCents: 9_999, remainingDays: 1 }))).toMatchObject({
+      allow: true,
+      headroomEur: 0.01,
+    });
+  });
+
+  it("lists the standing risks independent of the rule order", () => {
+    expect(evaluateGuard(numbers({ dailySumCents: 200 })).risks).toEqual([]);
+    expect(evaluateGuard(numbers({ spendCapCents: null, dailySumCents: 300 })).risks).toEqual(["no_spend_cap", "projection_exceeds_cap"]);
+    expect(evaluateGuard(numbers({ spendCapCents: 20_000, amountSpentCents: 0, dailySumCents: 300 })).risks).toEqual([
+      "spend_cap_headroom_exceeds_remaining",
+      "projection_exceeds_cap",
+    ]);
+    // Headroom used up: Meta delivers nothing more, so it is no overrun risk.
+    expect(evaluateGuard(numbers({ spendCapCents: 10_000, amountSpentCents: 10_000, mtdCents: 10_500 })).risks).toEqual([
+      "projection_exceeds_cap",
+    ]);
+    expect(evaluateGuard(numbers({ currency: "USD", spendCapCents: null })).risks).toEqual([]);
+  });
+
+  it("counts today once: today's spend plus what the daily budgets still allow today", () => {
+    // 21.10.: MTD 70 EUR of which 2 EUR today, 3 EUR/day: 70 + (3 - 2) + 3 x 10 = 101.
+    expect(evaluateGuard(numbers({ todaySpendCents: 200, dailySumCents: 300 }))).toMatchObject({ projectedMonthEndEur: 101, todaySpendEur: 2 });
+    // Today already over the daily budgets: nothing more is added for today.
+    expect(evaluateGuard(numbers({ todaySpendCents: 450, dailySumCents: 300 }))).toMatchObject({ projectedMonthEndEur: 100, allow: true });
+    // No spend today yet: today counts the full daily budgets (covers today's insights lag).
+    expect(evaluateGuard(numbers({ todaySpendCents: 0, dailySumCents: 300 })).projectedMonthEndEur).toBe(103);
+  });
+
   it.each([
     ["2026-02-01T00:00:00+02:00", 28],
     ["2026-04-01T00:00:00+03:00", 30],
@@ -90,6 +128,34 @@ describe("evaluateGuard: the decision on read numbers", () => {
     const base = { mtdCents: 0, amountSpentCents: 0, month: bounds.month, remainingDays: bounds.remainingDays };
     expect(evaluateGuard(numbers({ ...base, dailySumCents: daily })).allow).toBe(true);
     expect(evaluateGuard(numbers({ ...base, dailySumCents: daily + 1 })).allow).toBe(false);
+  });
+
+  // G3 (RK9-523): a provisioned budget on pace passes its own guard on every
+  // day of the month, also with part of today already spent; it used to count
+  // today twice and refuse once MTD ran 18 cents over pace in a 31-day month.
+  it.each([
+    ["2026-02", 28],
+    ["2026-04", 30],
+    ["2026-01", 31],
+    ["2026-10", 31],
+  ])("G3: the provisioned daily budget on pace passes its own guard every day of %s (%i days)", (month, days) => {
+    const daily = dailyBudgetCents(100, days);
+    const slack = 10_000 - daily * days;
+    for (let day = 1; day <= days; day += 1) {
+      const remainingDays = days - day + 1;
+      const pastDays = daily * (day - 1);
+      for (const today of [0, 1, Math.floor(daily / 2), daily]) {
+        const result = evaluateGuard(
+          numbers({ month, remainingDays, mtdCents: pastDays + today, todaySpendCents: today, amountSpentCents: pastDays + today, dailySumCents: daily }),
+        );
+        expect(result, `${month} day ${day}, today ${today} c`).toMatchObject({ allow: true, projectedMonthEndEur: (daily * days) / 100 });
+      }
+      // Real spend ahead of pace by more than the rounding slack: refused.
+      const ahead = pastDays + slack + 1;
+      expect(
+        evaluateGuard(numbers({ month, remainingDays, mtdCents: ahead, todaySpendCents: 0, amountSpentCents: ahead, dailySumCents: daily })).reason,
+      ).toBe("projection_exceeds_cap");
+    }
   });
 
   it("converts cents to EUR without float drift", () => {
@@ -152,6 +218,25 @@ describe("checkSpend: fresh Meta reads, fail-closed", () => {
       allow: true,
       projectedMonthEndEur: 92,
       remainingDays: 11,
+    });
+  });
+
+  it("reads today's spend from daily insights rows in the same read (G3)", async () => {
+    const meta = ollolaMeta("0.00", "322");
+    meta.dailySpend = { "2026-10-01": "3.22", "2026-10-20": "3.22", "2026-10-21": "1.50" };
+    meta.account = { ...meta.account, amount_spent: "794" };
+    const result = await checkSpend({ config: OLLOLA, client: metaClient(meta), now: OCT_21 });
+    expect(result).toMatchObject({ mtdEur: 7.94, todaySpendEur: 1.5, projectedMonthEndEur: 41.86 });
+    expect(meta.insightsCalls).toHaveLength(1);
+    expect(meta.insightsCalls[0]!.params.time_increment).toBe("1");
+  });
+
+  it("refuses an activation when Meta's spend_cap is used up", async () => {
+    const meta = ollolaMeta("70.00", "100");
+    meta.account = { ...meta.account, spend_cap: "10000", amount_spent: "10000" };
+    expect(await checkSpend({ config: OLLOLA, client: metaClient(meta), now: OCT_21, change: { objectId: "200", level: null, activate: true } })).toMatchObject({
+      allow: false,
+      reason: "spend_cap_reached",
     });
   });
 

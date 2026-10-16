@@ -257,6 +257,28 @@ export async function getAccountSpendCents(
 }
 
 /**
+ * Account spend over an inclusive local-date range in daily rows, in one
+ * read: the total and the spend of the range's last day (`until`). A row that
+ * spans more than the last day does not count as that day. The rules on
+ * missing spend are those of getAccountSpendCents.
+ */
+export async function getAccountSpendWithLastDay(
+  client: MetaGraphClient,
+  actId: string,
+  timeRange: { since: string; until: string },
+): Promise<{ totalCents: number; lastDayCents: number }> {
+  const rows = await getInsights(client, adAccountPath(actId), { level: "account", fields: ["spend"], timeRange, timeIncrement: 1 });
+  let totalCents = 0;
+  let lastDayCents = 0;
+  for (const row of rows) {
+    const cents = parseDecimalMoney(row.spend, "spend");
+    totalCents += cents;
+    if (row.date_start === timeRange.until && row.date_stop === timeRange.until) lastDayCents += cents;
+  }
+  return { totalCents, lastDayCents };
+}
+
+/**
  * The ad account (digits, no act_ prefix) and the parent ad set of an ad.
  * Graph has no `adset_id` field on a campaign or an ad set and answers that
  * read with an error, so only an ad reads successfully.

@@ -61,7 +61,7 @@ describe("kill switch pauseAll", () => {
     // The token travels only in the Authorization header.
     expect(JSON.stringify(r.meta.calls)).not.toContain(META_TOKEN);
     expect(r.notifier.messages).toHaveLength(1);
-    expect(r.notifier.messages[0]!.text).toContain("3 mainos(ta) ja 1 kampanja(a)");
+    expect(r.notifier.messages[0]!.text).toContain("1 kampanja(a) ja 3 mainos(ta)");
 
     const second = await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true }, UI);
     expect(second).toMatchObject({ count: 0, telegram: "skipped", pausedAds: [], pausedCampaigns: [] });
@@ -74,7 +74,7 @@ describe("kill switch pauseAll", () => {
     expect(r.harness.activity.some((entry) => /kill_switch paused 4/.test(entry.message))).toBe(true);
   });
 
-  it("pages through every ACTIVE ad of meta.campaignId (no 50-item limit)", async () => {
+  it("pages through every ACTIVE ad of the ad account (no 50-item limit)", async () => {
     const meta = new FakeMeta();
     meta.pageSize = 25;
     meta.campaigns = [{ id: "120247250925830775", name: "Aurinkopulssi", status: "ACTIVE" }];
@@ -84,14 +84,66 @@ describe("kill switch pauseAll", () => {
       status: index % 10 === 0 ? "PAUSED" : "ACTIVE",
       campaign_id: "120247250925830775",
     }));
-    meta.ads.push({ id: "999", name: "toisen kampanjan", status: "ACTIVE", campaign_id: "777" });
+    const r = rig({ meta });
+    const result = await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true }, UI);
+    expect(result).toMatchObject({ scope: "account", count: 118, campaignPaused: true });
+    expect(meta.calls.filter((call) => call.path === "act_29231592883113369/ads")).toHaveLength(6);
+  });
+
+  it("pauses every ACTIVE campaign of the ad account, also one outside meta.campaignId (RK9-523)", async () => {
+    const meta = new FakeMeta();
+    meta.campaigns = [
+      { id: "120247250925830775", name: "Configissa", status: "ACTIVE" },
+      { id: "777", name: "Käsin Metan UI:ssa", status: "ACTIVE" },
+      { id: "778", name: "Vanha", status: "PAUSED" },
+    ];
+    meta.ads = [
+      { id: "501", name: "configin mainos", status: "ACTIVE", campaign_id: "120247250925830775" },
+      { id: "999", name: "toisen kampanjan", status: "ACTIVE", campaign_id: "777" },
+    ];
     const config = brandConfig({ telegram: telegramBlock() });
     (config.meta as Record<string, unknown>).campaignId = "120247250925830775";
     const r = rig({ meta, config });
-    const result = await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true }, UI);
-    expect(result).toMatchObject({ scope: "campaign", count: 118, campaignPaused: true });
-    expect(meta.writes.map((call) => call.path)).not.toContain("999");
-    expect(meta.calls.filter((call) => call.path === "120247250925830775/ads")).toHaveLength(6);
+    const result = await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true, reason: "hätä" }, UI);
+
+    expect(result).toMatchObject({ scope: "account", count: 4, errors: [], telegram: "sent" });
+    expect(result.pausedCampaigns.map((campaign) => campaign.id)).toEqual(["120247250925830775", "777"]);
+    expect(meta.campaigns.map((campaign) => [campaign.id, campaign.status])).toEqual([
+      ["120247250925830775", "PAUSED"],
+      ["777", "PAUSED"],
+      ["778", "PAUSED"],
+    ]);
+    expect(meta.ads.every((ad) => ad.status === "PAUSED")).toBe(true);
+    // spend_cap is never written (G2): only status writes.
+    expect(meta.writes.every((call) => Object.keys(call.body).join() === "status" && call.body.status === "PAUSED")).toBe(true);
+    expect(meta.writes.some((call) => call.path.startsWith("act_"))).toBe(false);
+
+    // Every paused campaign is in the ledger and in the Telegram notice, for the restore.
+    const row = r.ruleActions()[0]!;
+    expect(row).toMatchObject({ object_type: "account", object_id: "29231592883113369", applied: true });
+    expect(row.metrics).toMatchObject({
+      scope: "account",
+      campaignIds: ["120247250925830775", "777"],
+      campaigns: [
+        { id: "120247250925830775", name: "Configissa" },
+        { id: "777", name: "Käsin Metan UI:ssa" },
+      ],
+    });
+    const notice = r.notifier.messages[0]!.text;
+    expect(notice).toContain("koko mainostili pysäytetty");
+    expect(notice).toContain("• kampanja Configissa (120247250925830775)");
+    expect(notice).toContain("• kampanja Käsin Metan UI:ssa (777)");
+  });
+
+  it("lists every paused campaign in the notice even when the ads overflow the list", async () => {
+    const meta = new FakeMeta();
+    meta.campaigns = Array.from({ length: 5 }, (_, index) => ({ id: String(700 + index), name: `k${index}`, status: "ACTIVE" }));
+    meta.ads = Array.from({ length: 60 }, (_, index) => ({ id: String(800 + index), name: `a${index}`, status: "ACTIVE", campaign_id: "700" }));
+    const r = rig({ meta });
+    await r.harness.performAction<PauseAllResult>("pause-all", { dryRun: false, confirm: true }, UI);
+    const notice = r.notifier.messages[0]!.text;
+    for (let index = 0; index < 5; index += 1) expect(notice).toContain(`• kampanja k${index} (${700 + index})`);
+    expect(notice).toContain("… ja 20 muuta mainosta");
   });
 
   it("keeps pausing after a single failure and reports it", async () => {
