@@ -331,7 +331,7 @@ export function createInsightsStore(db: PluginDatabaseClient) {
       const rows = await db.query<Record<string, unknown>>(
         `SELECT dedupe_key, metadata, created_at > now() - interval '24 hours' AS fresh FROM ${ns}.alert_dedupe WHERE company_id = $1 AND kind = $2 ` +
           `AND created_at > now() - make_interval(hours => $3::int) ORDER BY created_at DESC LIMIT ${Number.isFinite(limit) ? Math.min(Math.max(1, Math.trunc(limit)), 500) : 50}`,
-        [companyId, kind, Math.trunc(hours)],
+        [companyId, kind, Number.isFinite(hours) ? Math.trunc(hours) : 24],
       );
       return rows.reverse().map((row) => ({
         dedupeKey: String(row.dedupe_key),

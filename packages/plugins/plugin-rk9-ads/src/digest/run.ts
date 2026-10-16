@@ -164,9 +164,9 @@ export async function buildDigest(
     account = await getAccountSummary(client, config.meta.adAccountId);
   } catch (error) {
     warnings.push(
-      error instanceof TokenInvalidError
-        ? "Meta-token ei kelpaa (190): tilin tietoja ei saatu"
-        : `Meta-tilin tietoja ei saatu: ${errorText(error)}`,
+      `${
+        error instanceof TokenInvalidError ? "Meta-token ei kelpaa (190): tilin tietoja ei saatu" : `Meta-tilin tietoja ei saatu: ${errorText(error)}`
+      }; kuukauden luvut on laskettu tallennetuista insighteista`,
     );
   }
   const accountTimeZone = account?.timezone ?? config.timeZone;
@@ -204,17 +204,16 @@ export async function buildDigest(
   }
 
   let spendCap: DigestInput["spendCap"] = null;
-  if (!account) warnings.push("Kuukauden luvut on laskettu tallennetuista insighteista, koska Meta-tilin tietoja ei saatu");
-  if (position) spendCap = { capCents: position.spendCapCents, headroomCents: position.headroomCents };
-  // The cap comparisons need EUR on both sides; a non-EUR account has its own warning above.
-  if (position && currency === "EUR") {
+  if (position) {
+    spendCap = { capCents: position.spendCapCents, headroomCents: position.headroomCents };
     if (position.spendCapCents === null || position.headroomCents === null) {
       warnings.push("Metan tilillä ei ole kulutusrajaa (spend_cap)");
     } else {
       if (position.headroomCents <= 0) {
         warnings.push("Metan kulutusraja on käytetty: Meta ei toimita mainoksia, ennen kuin rajaa nostetaan tai se nollataan");
-      } else if (position.headroomExceedsRemaining) {
+      } else if (position.headroomExceedsRemaining && currency === "EUR") {
         // The guard's rule 4: it refuses every spend-raising write in this state.
+        // It compares with the EUR cap, so only a EUR account is checked.
         warnings.push(
           `Metan kulutusrajaa on jäljellä ${formatMoney(position.headroomCents, currency)}, mutta kuukausikattoa vain ${formatMoney(position.remainingCents, currency)}: Meta ei pysäytä kulutusta ajoissa`,
         );
@@ -245,8 +244,9 @@ export async function buildDigest(
   try {
     fatigue = await evaluateFatigue(deps.store, companyId, config, reportDate);
   } catch (error) {
-    // Fatigue is advisory: it must not cost the day's digest.
-    warnings.push(`Mainosten väsymistä ei saatu arvioitua: ${errorText(error)}`);
+    // Fatigue is advisory: it must not cost the day's digest. The store error stays in the log.
+    deps.ctx.logger.warn("rk9-ads digest: fatigue evaluation failed", { companyId, error: errorText(error) });
+    warnings.push("Mainosten väsymistä ei saatu arvioitua");
   }
   const fatigued = fatigue
     .filter((ad) => ad.result.status === "fatigued")

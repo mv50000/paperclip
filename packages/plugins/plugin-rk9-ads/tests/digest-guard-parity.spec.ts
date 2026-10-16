@@ -137,15 +137,19 @@ describe("digest and spend guard: one month position (RK9-526)", () => {
     d.store = { ...d.store, recentAdSeries: async () => { throw new Error("recentAdSeries: more than 200000 rows"); } } as InsightsStore;
     const built = await buildDigest(d, COMPANY_A, OLLOLA);
     expect(built.text).not.toBeNull();
-    expect(built.input.warnings).toEqual(["Mainosten väsymistä ei saatu arvioitua: recentAdSeries: more than 200000 rows"]);
+    expect(built.input.warnings).toEqual(["Mainosten väsymistä ei saatu arvioitua"]);
+    expect(built.text).not.toContain("200000");
   });
 
-  it("does not compare a non-EUR account's spend_cap with the EUR cap", async () => {
+  it("does not compare a non-EUR account's spend_cap with the EUR cap, but still warns on its own cap", async () => {
     const meta = ollolaMeta("42.17", 2000);
     meta.account = { ...meta.account, currency: "SEK" };
     const built = await buildDigest(deps(meta, 4217), COMPANY_A, OLLOLA);
     expect(built.input.warnings).toEqual(["Mainostilin valuutta on SEK: spend guard estää kaikki kulutusta nostavat muutokset"]);
     expect(built.input.spendCap).toEqual({ capCents: 10_000, headroomCents: 8_000 });
+    meta.account = { ...meta.account, amount_spent: "10000" };
+    const usedUp = await buildDigest(deps(meta, 4217), COMPANY_A, OLLOLA);
+    expect(usedUp.input.warnings).toContain("Metan kulutusraja on käytetty: Meta ei toimita mainoksia, ennen kuin rajaa nostetaan tai se nollataan");
   });
 
   it("evaluateGuard and monthPosition agree on the figures", () => {
