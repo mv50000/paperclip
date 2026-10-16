@@ -46,7 +46,7 @@ export const MAX_BACKFILL_DAYS = 31;
 export const INSIGHTS_WARNING_KIND = "insights_warning";
 export const INSIGHTS_CLOSE_KIND = "insights_close";
 
-/** Marker of a finished daily close, per brand-local (config.timeZone) date. */
+/** Marker of a finished daily close, per ad-account-local date (the date whose yesterday it closed). */
 export function closeMarkerKey(localDay: string): string {
   return `insights-close:${localDay}`;
 }

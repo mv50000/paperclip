@@ -204,8 +204,10 @@ export async function buildDigest(
   }
 
   let spendCap: DigestInput["spendCap"] = null;
-  if (position) {
-    spendCap = { capCents: position.spendCapCents, headroomCents: position.headroomCents };
+  if (!account) warnings.push("Kuukauden luvut on laskettu tallennetuista insighteista, koska Meta-tilin tietoja ei saatu");
+  if (position) spendCap = { capCents: position.spendCapCents, headroomCents: position.headroomCents };
+  // The cap comparisons need EUR on both sides; a non-EUR account has its own warning above.
+  if (position && currency === "EUR") {
     if (position.spendCapCents === null || position.headroomCents === null) {
       warnings.push("Metan tilillä ei ole kulutusrajaa (spend_cap)");
     } else {
@@ -239,7 +241,13 @@ export async function buildDigest(
     }
   }
 
-  const fatigue = await evaluateFatigue(deps.store, companyId, config, reportDate);
+  let fatigue: Awaited<ReturnType<typeof evaluateFatigue>> = [];
+  try {
+    fatigue = await evaluateFatigue(deps.store, companyId, config, reportDate);
+  } catch (error) {
+    // Fatigue is advisory: it must not cost the day's digest.
+    warnings.push(`Mainosten väsymistä ei saatu arvioitua: ${errorText(error)}`);
+  }
   const fatigued = fatigue
     .filter((ad) => ad.result.status === "fatigued")
     .map((ad) => ({ adId: ad.adId, adName: names.get(ad.adId) ?? null, signals: ad.result.signals }));
@@ -313,13 +321,19 @@ export type DigestTickOutcome =
   | "disabled"
   | "telegram_not_ready";
 
+/** Transport errors raised before a connection exists: nothing reached Telegram. */
+const NEVER_CONNECTED_RE = /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH)\b/;
+
 /**
- * True only when Telegram answered and refused the message (HTTP 4xx), so it
- * was not delivered. A transport error (status 0), a 5xx or any other error
- * during the send leaves the delivery unknown.
+ * True only when the message certainly was not delivered: Telegram answered
+ * and refused it (HTTP 4xx), or the request never connected (DNS failure,
+ * connection refused). Any other transport error (status 0), a 5xx or any
+ * other error during the send leaves the delivery unknown.
  */
-function sendRefused(error: unknown): boolean {
-  return error instanceof TelegramApiError && error.status >= 400 && error.status < 500;
+export function sendRefused(error: unknown): boolean {
+  if (!(error instanceof TelegramApiError)) return false;
+  if (error.status >= 400 && error.status < 500) return true;
+  return error.status === 0 && NEVER_CONNECTED_RE.test(error.description);
 }
 
 const FINISH_SENT_ATTEMPTS = 3;

@@ -6,7 +6,8 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
-import { buildDigest, MTD_SOURCE_GAP_MIN_CENTS, type DigestDeps } from "../src/digest/run.js";
+import { buildDigest, MTD_SOURCE_GAP_MIN_CENTS, sendRefused, type DigestDeps } from "../src/digest/run.js";
+import { TelegramApiError } from "../src/kit/telegram/bot-api.js";
 import { checkSpend, evaluateGuard } from "../src/features/spend-guard/guard.js";
 import { monthPosition } from "../src/features/spend-guard/position.js";
 import type { InsightsStore } from "../src/insights/store.js";
@@ -130,6 +131,23 @@ describe("digest and spend guard: one month position (RK9-526)", () => {
     expect(built.text).toContain("(toteutuneella tahdilla)");
   });
 
+  it("keeps the digest when the fatigue read fails, with a warning", async () => {
+    const meta = ollolaMeta("42.17", 4217);
+    const d = deps(meta, 4217);
+    d.store = { ...d.store, recentAdSeries: async () => { throw new Error("recentAdSeries: more than 200000 rows"); } } as InsightsStore;
+    const built = await buildDigest(d, COMPANY_A, OLLOLA);
+    expect(built.text).not.toBeNull();
+    expect(built.input.warnings).toEqual(["Mainosten väsymistä ei saatu arvioitua: recentAdSeries: more than 200000 rows"]);
+  });
+
+  it("does not compare a non-EUR account's spend_cap with the EUR cap", async () => {
+    const meta = ollolaMeta("42.17", 2000);
+    meta.account = { ...meta.account, currency: "SEK" };
+    const built = await buildDigest(deps(meta, 4217), COMPANY_A, OLLOLA);
+    expect(built.input.warnings).toEqual(["Mainostilin valuutta on SEK: spend guard estää kaikki kulutusta nostavat muutokset"]);
+    expect(built.input.spendCap).toEqual({ capCents: 10_000, headroomCents: 8_000 });
+  });
+
   it("evaluateGuard and monthPosition agree on the figures", () => {
     const input = { monthlyCapEur: 100, mtdCents: 7_001, spendCapCents: 10_000, amountSpentCents: 6_500 };
     const position = monthPosition(input);
@@ -148,5 +166,20 @@ describe("digest and spend guard: one month position (RK9-526)", () => {
     expect(cents(guard.remainingEur)).toBe(position.remainingCents);
     expect(guard.pctUsed).toBe(position.pctUsed);
     expect(guard.reason).toBe("spend_cap_headroom_exceeds_remaining");
+  });
+});
+
+describe("digest send outcome (RK9-526)", () => {
+  const error = (status: number, description: string) => new TelegramApiError("sendMessage", { status, description });
+
+  it("retries only when the message certainly did not reach Telegram", () => {
+    expect(sendRefused(error(400, "Bad Request: chat not found"))).toBe(true);
+    expect(sendRefused(error(429, "Too Many Requests"))).toBe(true);
+    expect(sendRefused(error(0, "getaddrinfo ENOTFOUND api.telegram.org"))).toBe(true);
+    expect(sendRefused(error(0, "connect ECONNREFUSED 149.154.167.220:443"))).toBe(true);
+    expect(sendRefused(error(0, "socket hang up"))).toBe(false);
+    expect(sendRefused(error(0, "The operation was aborted due to timeout"))).toBe(false);
+    expect(sendRefused(error(502, "Bad Gateway"))).toBe(false);
+    expect(sendRefused(new Error("ENOTFOUND"))).toBe(false);
   });
 });

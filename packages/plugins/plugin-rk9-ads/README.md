@@ -331,7 +331,8 @@ A row left pending (a worker restart mid-send, or a send whose "sent" write
 failed) is closed as failed after 10 minutes and never resent: its send state
 is unknown, and a missed digest is better than a duplicate. The same holds for
 a send that ends in a transport error or an HTTP 5xx: only a 4xx answer from
-Telegram (the message was refused) is retried. A bot that is not ready yet
+Telegram (the message was refused) or a request that never connected (DNS
+failure, connection refused) is retried. A bot that is not ready yet
 uses no attempt. The CPC warning (`cpcWarnEur`) applies to EUR accounts only.
 Month figures (RK9-526): MTD, Meta's headroom (`spend_cap − amount_spent`),
 what is left of the monthly cap and the projection come from a spend guard
@@ -368,7 +369,8 @@ table). With `fatigue.issuesEnabled=true` (default false) a fatigued ad gets
 one Paperclip issue in its company (`originKind` `plugin:rk9-ads`), deduped by
 the `fatigue-issue:<adId>` marker. The plugin cannot read issues, so the marker
 stays after the issue closes: one issue per ad. A create the host refused
-removes the marker for a retry; a timeout keeps it, since the issue may exist.
+before it ran (capability or scope denial) removes the marker for a retry;
+any other failure, also a timeout, keeps it, since the issue may exist.
 The fatigue series is read in pages of 5000 rows, so a large account is not
 cut short.
 

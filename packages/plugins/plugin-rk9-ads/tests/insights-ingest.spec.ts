@@ -544,16 +544,18 @@ describeDb("insights ingest and digest on real Postgres", () => {
 
     it("removes the marker when the host refuses the create, so the next run retries", async () => {
       const on = { ...configA, fatigue: { ...configA.fatigue, issuesEnabled: true } };
-      const refused = Object.assign(new Error("boom"), { code: PLUGIN_RPC_ERROR_CODES.WORKER_ERROR });
+      const refused = Object.assign(new Error("denied"), { code: PLUGIN_RPC_ERROR_CODES.CAPABILITY_DENIED });
       const failing = { ...harness.ctx, issues: { ...harness.ctx.issues, create: async () => { throw refused; } } };
       expect(await createFatigueIssues({ ctx: failing as never, store, pluginId: "rk9-ads" }, companyA, on, [fatiguedAd])).toEqual([]);
       expect(await store.hasMark(companyA, fatigueIssueKey(AD_1))).toBe(false);
     });
 
-    it("keeps the marker when the create times out, so no duplicate issue is made", async () => {
+    it("keeps the marker when the create times out or fails after it may have run, so no duplicate issue is made", async () => {
       const on = { ...configA, fatigue: { ...configA.fatigue, issuesEnabled: true } };
       for (const error of [
         Object.assign(new Error("Worker→host call timed out"), { code: PLUGIN_RPC_ERROR_CODES.TIMEOUT }),
+        // A generic host error: the issue row may exist and the activity log write failed.
+        Object.assign(new Error("activity log insert failed"), { code: -32603 }),
         new Error("connection reset"),
       ]) {
         await store.unmark(companyA, fatigueIssueKey(AD_1));

@@ -32,7 +32,8 @@ import type { FeatureRuntime } from "../types.js";
  *   by the ad-account-local date whose yesterday the run closed (the date the
  *   digest checks). The skip check before the run uses the config.timeZone
  *   date; the two differ only when the account zone does, which the spend
- *   guard refuses and the digest warns about.
+ *   guard refuses and the digest warns about. In that state the close re-runs
+ *   hourly while the dates differ (idempotent upserts, deduped issues).
  * - digest-tick (every 15 min): ../../digest/run.ts.
  * Actions (no manifest entry needed; the company comes from the host context):
  * - digest.dryRun: the digest text; writes nothing.

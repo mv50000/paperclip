@@ -6,8 +6,9 @@
  * a fatigued ad gets at most one Paperclip issue in its own company. The
  * dedupe marker `fatigue-issue:<adId>` in alert_dedupe is inserted first
  * (ON CONFLICT DO NOTHING), so two overlapping runs cannot both create one.
- * A create the host refused removes the marker so the next run retries; a
- * timeout or any other unclear failure keeps it, because the issue may exist
+ * A create the host refused before it ran (capability or scope denial)
+ * removes the marker so the next run retries; any other failure keeps it,
+ * because the issue may exist
  * (RK9-526: a missed issue beats a duplicate, and the digest still lists the
  * ad). The plugin has
  * no issues.read capability, so the marker is kept after the issue closes: an
@@ -59,13 +60,19 @@ export async function evaluateFatigue(
 }
 
 /**
- * The host answered the create with an error, so no issue was made. A
- * JSON-RPC error carries a numeric code; a timeout has one too but says
- * nothing about the outcome.
+ * The host refused the create before it ran, so no issue was made: only a
+ * capability or invocation-scope denial says that. Any other error, also a
+ * generic host error (-32603), can come after the insert (e.g. its activity
+ * log write failed), and a timeout says nothing about the outcome.
  */
+const REFUSED_BEFORE_RUN: ReadonlySet<number> = new Set([
+  PLUGIN_RPC_ERROR_CODES.CAPABILITY_DENIED,
+  PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+]);
+
 export function hostRefused(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
-  return typeof code === "number" && code !== PLUGIN_RPC_ERROR_CODES.TIMEOUT;
+  return typeof code === "number" && REFUSED_BEFORE_RUN.has(code);
 }
 
 export function fatigueIssueKey(adId: string): string {
