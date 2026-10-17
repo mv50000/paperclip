@@ -45,7 +45,7 @@ import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import type { MetaClientMode, MetaGraphClient } from "../../meta/graph.js";
 import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
-import { pauseAll } from "../spend-guard/killswitch.js";
+import { pauseAll, type PauseAllDeps } from "../spend-guard/killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, safeError, type Initiator, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { evaluateRules, type RuleAdDay, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
@@ -70,6 +70,8 @@ export interface RulesDeps {
   fatigue?: (companyId: string, config: BrandConfig, asOf: string) => Promise<AdFatigue[]>;
   /** Tests: replaces the brand's Meta client (readOnly for reads). */
   clientFor?: (companyId: string, config: BrandConfig, mode: MetaClientMode, initiator: Initiator) => MetaGraphClient;
+  /** Tests: replaces the running gate's card closer of the cap pause. */
+  closeCards?: PauseAllDeps["closeCards"];
 }
 
 export interface AppliedDecision extends RuleDecision {
@@ -318,6 +320,7 @@ export async function runRulesForBrand(
             notifier: deps.notifier,
             now: deps.now,
             ...(deps.clientFor ? { clientFor: (id, brandConfig, mode, initiator) => deps.clientFor!(id, brandConfig, mode, initiator) } : {}),
+            ...(deps.closeCards ? { closeCards: deps.closeCards } : {}),
           },
           companyId,
           config,
@@ -336,6 +339,9 @@ export async function runRulesForBrand(
         outcome.decisions.push({ ...decision, applied: !shadow && result.count > 0, error });
         if (error) failures.push(`${config.brandCode} ${decision.ruleId}: ${error}`);
         if (result.auditError) failures.push(`${config.brandCode} ${decision.ruleId}: rule_actions insert failed (${result.auditError})`);
+        // The pause stands either way, but open activation cards or a missing halt must not go unnoticed (RK9-561).
+        if (result.cardsError) failures.push(`${config.brandCode} ${decision.ruleId}: open activation cards were not closed (${result.cardsError})`);
+        if (result.haltError) failures.push(`${config.brandCode} ${decision.ruleId}: the standing halt was not stored (${result.haltError})`);
         if (result.telegram === "failed") failures.push(`${config.brandCode} ${decision.ruleId}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
       } catch (error) {
         // pauseAll audited the failed listing itself.
