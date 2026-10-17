@@ -383,6 +383,53 @@ Parity: `RK9_ADS_LIVE_SMOKE=1 pnpm exec tsx scripts/parity-sunspot-insights.ts
 [--date YYYY-MM-DD]` reads one Sunspot day both as the SOP does and through the
 ingest, read-only, and compares spend, impressions, link clicks and CPC.
 
+## Rule engine (RK9-515)
+
+`src/features/rules/`: pause-only rules per brand, shadow mode first.
+
+- **Config** `rules: { liveMode, list }`, validated by a zod discriminated
+  union in `schema.ts` (config.ts calls `parseRules()`). Rule types:
+  - `threshold_pause`: `metric` (`cpc`, `ctr`, `cpm`, `frequency`, `spend`)
+    `operator` `threshold` on `days` consecutive completed Helsinki days,
+    behind `minImpressions` and `minClicks` (window totals, both required;
+    equal fires). CPC and CTR are link metrics (G18). A day with spend and no
+    link click counts as an infinite CPC.
+  - `pause_all_cap`: built in. Pauses the whole ad account (A6's `pauseAll`)
+    when month-to-date spend is at 90 % of `monthlyCapEur` or more. MTD is the
+    spend guard's (RK9-526) and must be in EUR. A list entry
+    `{ type: "pause_all_cap", mode }` only sets its mode and cooldown (at most
+    24 h); it cannot be disabled or removed.
+  - `pause_valid_until`: pauses an ad whose creative `validUntil` has passed.
+  - `pause_fatigued`: opt-in; pauses an ad that A10 calls `fatigued`.
+  - `propose_scale`: schema only, must stay `enabled: false` (G9).
+- **Defaults:** without `rules.list` the brand gets `cpc-ceiling` (CPC > 0.50
+  EUR on 2 days, ≥ 500 impressions, ≥ 10 link clicks) and the built-in cap
+  rule. Every rule starts in `mode: "shadow"`. A Meta write needs the rule's
+  `mode: "live"` and the brand's `rules.liveMode: true`.
+- **Job** `rules-evaluate` (`0 * * * *`): reads ad and campaign status, the
+  guard's MTD, `insights_daily`, creative `validUntil` and earlier
+  `rule_actions`, then calls the pure `evaluateRules()`. Today's partial day
+  never counts, and threshold rules wait until `insights-daily-close` has
+  finalised yesterday. Only ACTIVE ads get a decision, account-wide like the
+  kill switch (RK9-523: the ad account belongs to the brand). A failed status read pauses
+  nothing (fail-open) and fails the run; one brand's failure does not stop
+  the others.
+- **Cooldown** `cooldownHours` (default 24, 1–720): a rule does not decide on
+  the same object again inside the window. Shadow counts shadow decisions;
+  live counts only applied live pauses, so a failed pause is retried.
+- **Audit:** every decision writes `rule_actions` (shadow: `dry_run=true`) and
+  an activity entry with the rule id and the metrics (spend, link clicks,
+  impressions, CPC, CTR, days). Shadow hits reach Telegram through the morning
+  digest. A live run sends one Telegram message when at least one ad changed
+  state; the cap rule's `pauseAll` sends its own notice.
+- **Save check:** the manifest schema carries the per-type rules
+  (`RULE_ITEM_JSON_CONDITIONS`), so the host refuses on save what
+  `parseRules()` would refuse. Duplicate rule ids are caught only by
+  `parseRules()` (onValidateConfig).
+- **Data** `rules` and **action** `rules.dryRun` (A12's editor, G13): the
+  effective rules, and the decisions the rules would make now without any
+  write.
+
 ## Architecture decisions
 
 ### ADR 1: The core/plugin boundary

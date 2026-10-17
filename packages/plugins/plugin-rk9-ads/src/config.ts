@@ -11,6 +11,20 @@
  * defaults and the cross-field rules that JSON Schema cannot express.
  */
 
+import {
+  DEFAULT_RULE_COOLDOWN_HOURS,
+  MAX_RULE_COOLDOWN_HOURS,
+  MAX_RULE_DAYS,
+  MAX_SCALE_INCREASE_PCT,
+  parseRules,
+  RULE_METRICS,
+  RULE_MODES,
+  RULE_OPERATORS,
+  RULE_ITEM_JSON_CONDITIONS,
+  RULE_TYPES,
+  type RuleOperator,
+  type RuleSet,
+} from "./features/rules/schema.js";
 import { DEFAULT_TIME_ZONE, isValidHhMm } from "./kit/local-time.js";
 
 // ---------------------------------------------------------------------------
@@ -41,39 +55,20 @@ export type TelegramMode = (typeof TELEGRAM_MODES)[number];
 export const ZERO_SPEND_MODES = ["message", "silent"] as const;
 export type ZeroSpendMode = (typeof ZERO_SPEND_MODES)[number];
 
-/**
- * Configurable rule types. `pause_all_cap` is built in (BUILTIN_PAUSE_ALL_CAP_PCT)
- * and cannot be configured or removed. `propose_scale` exists in the schema but
- * must stay disabled (G9).
- */
-export const RULE_TYPES = ["threshold_pause", "pause_valid_until", "pause_fatigued", "propose_scale"] as const;
-export type RuleType = (typeof RULE_TYPES)[number];
-
-export const RULE_MODES = ["shadow", "live"] as const;
-export type RuleMode = (typeof RULE_MODES)[number];
-
-export const RULE_METRICS = ["cpc", "ctr", "cpm", "frequency", "spend"] as const;
-export type RuleMetric = (typeof RULE_METRICS)[number];
-
-export const RULE_OPERATORS = ["gt", "gte", "lt", "lte"] as const;
-export type RuleOperator = (typeof RULE_OPERATORS)[number];
-
-export const BUILTIN_PAUSE_ALL_CAP_PCT = 90;
-export const MAX_SCALE_INCREASE_PCT = 20;
-
-export interface RuleConfig {
-  ruleId: string;
-  type: RuleType;
-  enabled: boolean;
-  mode: RuleMode;
-  metric?: RuleMetric;
-  operator?: RuleOperator;
-  threshold?: number;
-  minImpressions: number;
-  minClicks: number;
-  cooldownHours: number;
-  maxIncreasePct?: number;
-}
+export {
+  BUILTIN_PAUSE_ALL_CAP_PCT,
+  MAX_SCALE_INCREASE_PCT,
+  RULE_METRICS,
+  RULE_MODES,
+  RULE_OPERATORS,
+  RULE_TYPES,
+  type RuleConfig,
+  type RuleMetric,
+  type RuleMode,
+  type RuleOperator,
+  type RuleSet,
+  type RuleType,
+} from "./features/rules/schema.js";
 
 export interface BrandConfig {
   /** Upper-case brand code used in names and logs, e.g. "OLL". */
@@ -137,11 +132,8 @@ export interface BrandConfig {
     ctrDropPct: number;
     issuesEnabled: boolean;
   };
-  rules: {
-    /** Global switch for live rule actions. Off means every rule runs in shadow. */
-    liveMode: boolean;
-    list: RuleConfig[];
-  };
+  /** Rule engine (A11): features/rules/schema.ts. */
+  rules: RuleSet;
 }
 
 export type BrandConfigParseResult =
@@ -168,9 +160,6 @@ export const DEFAULT_FATIGUE = {
   ctrDropPct: 30,
   issuesEnabled: false,
 } as const;
-export const DEFAULT_RULE_MIN_IMPRESSIONS = 500;
-export const DEFAULT_RULE_MIN_CLICKS = 10;
-export const DEFAULT_RULE_COOLDOWN_HOURS = 24;
 
 // ---------------------------------------------------------------------------
 // JSON Schema (host settings form + host-side save validation)
@@ -316,18 +305,21 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
           items: {
             type: "object",
             additionalProperties: false,
+            required: ["type"],
+            allOf: RULE_ITEM_JSON_CONDITIONS,
             properties: {
-              ruleId: { type: "string" },
+              ruleId: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,63}$" },
               type: { type: "string", enum: [...RULE_TYPES] },
-              enabled: { type: "boolean", default: true },
+              enabled: { type: "boolean" },
               mode: { type: "string", enum: [...RULE_MODES], default: "shadow" },
               metric: { type: "string", enum: [...RULE_METRICS] },
               operator: { type: "string", enum: [...RULE_OPERATORS] },
-              threshold: { type: "number" },
-              minImpressions: { type: "integer", default: DEFAULT_RULE_MIN_IMPRESSIONS },
-              minClicks: { type: "integer", default: DEFAULT_RULE_MIN_CLICKS },
-              cooldownHours: { type: "number", minimum: 1, default: DEFAULT_RULE_COOLDOWN_HOURS },
-              maxIncreasePct: { type: "number", maximum: MAX_SCALE_INCREASE_PCT },
+              threshold: { type: "number", exclusiveMinimum: 0 },
+              days: { type: "integer", minimum: 1, maximum: MAX_RULE_DAYS },
+              minImpressions: { type: "integer", minimum: 0 },
+              minClicks: { type: "integer", minimum: 0 },
+              cooldownHours: { type: "number", minimum: 1, maximum: MAX_RULE_COOLDOWN_HOURS, default: DEFAULT_RULE_COOLDOWN_HOURS },
+              maxIncreasePct: { type: "number", exclusiveMinimum: 0, maximum: MAX_SCALE_INCREASE_PCT },
             },
           },
         },
@@ -528,55 +520,6 @@ export function isEmptyConfig(raw: unknown): boolean {
   return isRecord(raw) && Object.keys(raw).length === 0;
 }
 
-function parseRule(c: Collector, raw: unknown, index: number, seenIds: Set<string>): RuleConfig | undefined {
-  const path = `rules.list[${index}]`;
-  if (!isRecord(raw)) {
-    c.add(path, "must be an object");
-    return undefined;
-  }
-  c.known(raw, ["ruleId", "type", "enabled", "mode", "metric", "operator", "threshold", "minImpressions", "minClicks", "cooldownHours", "maxIncreasePct"], path);
-  const ruleId = c.string(raw, "ruleId", path, { required: true, pattern: /^[a-z0-9][a-z0-9_-]{0,63}$/ });
-  if (ruleId) {
-    if (seenIds.has(ruleId)) c.add(`${path}.ruleId`, `duplicate rule id ${ruleId}`);
-    seenIds.add(ruleId);
-  }
-  const type = c.enumValue(raw, "type", path, RULE_TYPES);
-  const enabled = c.boolean(raw, "enabled", path, true);
-  const mode = c.enumValue(raw, "mode", path, RULE_MODES, "shadow");
-  const metric = raw.metric === undefined ? undefined : c.enumValue(raw, "metric", path, RULE_METRICS);
-  const operator = raw.operator === undefined ? undefined : c.enumValue(raw, "operator", path, RULE_OPERATORS);
-  const threshold = raw.threshold === undefined ? undefined : c.number(raw, "threshold", path);
-  const minImpressions = c.number(raw, "minImpressions", path, { fallback: DEFAULT_RULE_MIN_IMPRESSIONS, min: 0, integer: true });
-  const minClicks = c.number(raw, "minClicks", path, { fallback: DEFAULT_RULE_MIN_CLICKS, min: 0, integer: true });
-  const cooldownHours = c.number(raw, "cooldownHours", path, { fallback: DEFAULT_RULE_COOLDOWN_HOURS, min: 1 });
-  const maxIncreasePct = raw.maxIncreasePct === undefined
-    ? undefined
-    : c.number(raw, "maxIncreasePct", path, { min: 0, max: MAX_SCALE_INCREASE_PCT, exclusiveMin: true });
-
-  if (type === "threshold_pause" && (metric === undefined || operator === undefined || threshold === undefined)) {
-    c.add(path, "threshold_pause needs metric, operator and threshold");
-  }
-  if (type === "propose_scale" && enabled) {
-    c.add(`${path}.enabled`, "propose_scale must stay disabled (budget scaling is deferred, G9)");
-  }
-  if (!ruleId || !type || !mode || minImpressions === undefined || minClicks === undefined || cooldownHours === undefined) {
-    return undefined;
-  }
-  return {
-    ruleId,
-    type,
-    enabled,
-    mode,
-    ...(metric !== undefined ? { metric } : {}),
-    ...(operator !== undefined ? { operator } : {}),
-    ...(threshold !== undefined ? { threshold } : {}),
-    minImpressions,
-    minClicks,
-    cooldownHours,
-    ...(maxIncreasePct !== undefined ? { maxIncreasePct } : {}),
-  };
-}
-
 /**
  * Parses one company's raw plugin config. Pure and offline: it never resolves
  * secrets or calls Meta. Live checks belong to the preflight (A4).
@@ -736,22 +679,9 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
     issuesEnabled: c.boolean(fatigueRaw, "issuesEnabled", "fatigue", DEFAULT_FATIGUE.issuesEnabled),
   };
 
-  // rules
-  const rulesRaw = c.record(raw, "rules", root, false) ?? {};
-  c.known(rulesRaw, ["liveMode", "list"], "rules");
-  const liveMode = c.boolean(rulesRaw, "liveMode", "rules", false);
-  const ruleList: RuleConfig[] = [];
-  if (rulesRaw.list !== undefined) {
-    if (!Array.isArray(rulesRaw.list)) {
-      c.add("rules.list", "must be an array");
-    } else {
-      const seenIds = new Set<string>();
-      rulesRaw.list.forEach((rule, index) => {
-        const parsed = parseRule(c, rule, index, seenIds);
-        if (parsed) ruleList.push(parsed);
-      });
-    }
-  }
+  // rules (A11: features/rules/schema.ts)
+  const { rules, errors: ruleErrors } = parseRules(raw.rules);
+  c.errors.push(...ruleErrors);
 
   if (c.errors.length > 0 || !brandCode || monthlyCapEur === undefined || !adAccountId || !pageId || !accessTokenRef) {
     return { state: "invalid", errors: c.errors.length > 0 ? c.errors : ["config: incomplete"] };
@@ -780,7 +710,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
       schedule: { scheduledPause, ...(dataGate ? { dataGate } : {}) },
       digest,
       fatigue,
-      rules: { liveMode, list: ruleList },
+      rules,
     },
   };
 }
