@@ -9,12 +9,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import manifest from "../../src/manifest.js";
 import { sqlActivationGateRepo, withActivationColumns } from "../../src/gate/gate-requests.js";
 import { createSqlGateStore, gateTokenHash, newGateToken, type GateStore } from "../../src/kit/gate/state-machine.js";
-import { EMBEDDED_PG_TIMEOUT_MS, embeddedPostgresSupport, startPluginTestDatabase, type PluginTestDatabase } from "../helpers/embedded-pg.js";
+import { EMBEDDED_PG_TIMEOUT_MS, describeEmbeddedPostgres, startPluginTestDatabase, type PluginTestDatabase } from "../helpers/embedded-pg.js";
 import { PACKAGE_ROOT } from "../fixtures.js";
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
-if (!support.supported) console.warn(`Skipping embedded Postgres activation gate tests: ${support.reason ?? "unsupported environment"}`);
+const describeDb = await describeEmbeddedPostgres("activation gate");
 
 const AD = "120200000000000301";
 const ADSET = "120200000000000201";

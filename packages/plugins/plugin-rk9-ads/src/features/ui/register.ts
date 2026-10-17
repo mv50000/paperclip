@@ -1,8 +1,10 @@
 import type { BrandConfig } from "../../config.js";
+import type { PauseCardClose } from "../../gate/staging-card.js";
 import { getAdOwner, getObjectStatus, setObjectStatus } from "../../meta/methods.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { loadPauseConfig, pauseReason } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, recordAction, safeError, sqlOnceStore, type Initiator, type OnceStore } from "../spend-guard/support.js";
+import { getActivationCards } from "../gate/runtime.js";
 import type { FeatureRuntime } from "../types.js";
 import type { UiPauseAdResult } from "./dto.js";
 import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type ViewDeps } from "./views.js";
@@ -17,7 +19,9 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   (./dto.ts), never the raw config, a secret_ref or a resolved secret;
  * - action `pause-ad`: pauses one ad of the brand's ad account. Dry run by
  *   default; a real pause needs `confirm: true` and a board user (an agent may
- *   only preview it). It writes rule_actions and the activity log.
+ *   only preview it). It writes rule_actions and the activity log. Before the
+ *   Meta write it closes the ad's open activation cards, so an old card
+ *   cannot activate the ad again (RK9-562); a failed close is `cardsError`.
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
@@ -39,6 +43,8 @@ export interface UiOverrides {
   now?: () => Date;
   /** Tests: replaces the brand's Meta clients. */
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "readOnly", initiator: Initiator | null) => MetaGraphClient;
+  /** Tests: replaces the running gate's card closer. */
+  closeAdCards?: (companyId: string, adId: string, input: { reason: string }) => Promise<PauseCardClose>;
 }
 
 function reasonText(value: unknown, fallback: string): string {
@@ -109,6 +115,26 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       agentId: context.actor.agentId,
       runId: context.actor.runId,
     };
+    const reason = pauseReason(loaded, reasonText(params.reason, "Pysäytä mainos (UI)"));
+    // The ad's open cards close first, so no tap after this point activates it again.
+    let closedCardIds: string[] = [];
+    let cardsError: string | undefined;
+    let announce: () => Promise<void> = async () => undefined;
+    const close = overrides.closeAdCards ?? getActivationCards()?.closeCardsForAdPause;
+    if (!close) {
+      cardsError = "the activation gate is not running; open cards were not closed";
+    } else {
+      try {
+        const closed = await close(companyId, adId, { reason });
+        closedCardIds = closed.ids;
+        cardsError = closed.error;
+        announce = closed.announce;
+      } catch (cause) {
+        cardsError = safeError(cause);
+      }
+    }
+    if (cardsError) ctx.logger.error("rk9-ads ui: open activation cards of the ad not closed", { companyId, adId, detail: cardsError });
+
     let paused = false;
     let error: string | null = null;
     try {
@@ -130,14 +156,22 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
         action: "pause",
         dryRun: false,
         applied: paused,
-        reason: pauseReason(loaded, reasonText(params.reason, "Pysäytä mainos (UI)")),
-        metrics: { previousStatus: before.status, name: before.name },
+        reason,
+        metrics: { previousStatus: before.status, name: before.name, closedCardIds, ...(cardsError ? { cardsError } : {}) },
         initiator,
         error,
         message: `ui ${paused ? "paused" : "could not pause"} ad ${adId}`,
       },
     );
-    if (!paused) throw new Error(`The pause of ad ${adId} failed: ${error}`);
+    try {
+      await announce();
+    } catch (cause) {
+      ctx.logger.warn("rk9-ads ui: closed activation cards not edited", { companyId, adId, detail: safeError(cause) });
+    }
+    if (!paused) {
+      const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}`;
+      throw new Error(`The pause of ad ${adId} failed: ${error}. ${cards}`);
+    }
     return sanitize({
       dryRun: false,
       adId,
@@ -145,6 +179,8 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       previousStatus: before.status,
       status: "PAUSED",
       paused: true,
+      closedCardIds,
+      ...(cardsError ? { cardsError } : {}),
       ...(auditError ? { auditError } : {}),
     });
   });

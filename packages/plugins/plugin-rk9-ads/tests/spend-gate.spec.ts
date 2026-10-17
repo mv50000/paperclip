@@ -11,11 +11,13 @@ import type { Company } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
 import { createLedger } from "../src/db.js";
 import { registerGate, type GateOverrides } from "../src/features/gate/register.js";
-import { getActivationCards } from "../src/features/gate/runtime.js";
+import { PAUSE_AD_ACTION_KEY, registerUi } from "../src/features/ui/register.js";
+import type { UiPauseAdResult } from "../src/features/ui/dto.js";
+import { getActivationCards, setActivationCards } from "../src/features/gate/runtime.js";
 import { TelegramController } from "../src/features/telegram/controller.js";
 import { gateRegistry, resetGateRegistry } from "../src/features/telegram/gates.js";
 import type { FeatureRuntime } from "../src/features/types.js";
-import { stagingCardText, type StagingCards } from "../src/gate/staging-card.js";
+import { AD_PAUSE_CLOSE_TEXT, stagingCardText, type StagingCards } from "../src/gate/staging-card.js";
 import { GATE_TEXT } from "../src/kit/gate/callback-router.js";
 import { createMemoryGateStore, type MemoryGateStore } from "../src/kit/testing/memory-gate-store.js";
 import { recordedOutput, useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
@@ -87,6 +89,7 @@ function publication(overrides: Partial<PublishedPublication> = {}): PublishedPu
 
 interface Rig {
   harness: TestHarness;
+  runtime: FeatureRuntime;
   meta: FakeMeta;
   fake: FakeTelegram;
   store: MemoryGateStore;
@@ -182,7 +185,7 @@ async function rig(input: { config?: Record<string, unknown>; meta?: FakeMeta; o
   await controller.replan();
   const config = input.config ?? brandConfig({ telegram: telegramBlock() });
   if (config.telegram) await waitFor(() => controller.summary()[0]?.loop === "running");
-  const out = { harness, meta, fake, store, repo, controller, cards, clock, preflights, publications };
+  const out = { harness, runtime, meta, fake, store, repo, controller, cards, clock, preflights, publications };
   rigs.push(out);
   return out;
 }
@@ -610,5 +613,86 @@ describe("skip, expiry, partial failure, resend", () => {
     await expect(r.harness.performAction("resend_gate_card", { gateRequestId: sent.id }, { companyId: COMPANY_A })).rejects.toThrow(
       /only a pending, unexpired card/,
     );
+  });
+});
+
+describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
+  const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-user-1" } };
+
+  async function pauseAd(r: Rig): Promise<UiPauseAdResult> {
+    return (await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD, dryRun: false, confirm: true }, BOARD)) as UiPauseAdResult;
+  }
+
+  it("an old card tapped after pause-ad makes no ACTIVE write, and the card says why", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const sent = await r.cards.openActivationCard(publication());
+    const oldData = r.fake.buttons(sent.messageId)[0]!;
+
+    const result = await pauseAd(r);
+    expect(result).toMatchObject({ paused: true, status: "PAUSED", closedCardIds: [sent.id] });
+    expect(result.cardsError).toBeUndefined();
+    expect(r.store.rows.get(sent.id)!.status).toBe("expired");
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ reason: "ad_paused", handler: "not_run" });
+    expect(caption(r, sent.messageId)).toContain(AD_PAUSE_CLOSE_TEXT);
+    expect(r.fake.buttons(sent.messageId)).toEqual([]);
+    expect(statusWrites(r.meta, "PAUSED").map((call) => call.path)).toEqual([expect.stringContaining(AD)]);
+
+    // A stale client still showing the old buttons.
+    r.fake.tap(BOT, { messageId: sent.messageId, data: oldData, fromId: APPROVER });
+    await waitFor(() => r.fake.callsOf("answerCallbackQuery").length === 1);
+    await r.controller.idle();
+    expect(lastAnswer(r)).toBe(GATE_TEXT.expired);
+    expect(statusWrites(r.meta, "ACTIVE")).toHaveLength(0);
+  });
+
+  it("a dry run closes no card", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const sent = await r.cards.openActivationCard(publication());
+    await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD }, BOARD);
+    expect(r.store.rows.get(sent.id)!.status).toBe("pending");
+    expect(r.meta.writes).toHaveLength(0);
+  });
+
+  it("pauses the ad even when a card does not close, and reports cardsError", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const sent = await r.cards.openActivationCard(publication());
+    r.repo.close = async () => {
+      throw new Error("row locked");
+    };
+    const result = await pauseAd(r);
+    expect(result).toMatchObject({ paused: true, closedCardIds: [] });
+    expect(result.cardsError).toMatch(new RegExp(`1 card\\(s\\) not closed \\(${sent.id}\\): .*row locked`));
+    expect(statusWrites(r.meta, "PAUSED")).toHaveLength(1);
+  });
+
+  it("a failed Meta pause still closes the cards, and the error says so", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const sent = await r.cards.openActivationCard(publication());
+    r.meta.fail = (call) => (call.body.status === "PAUSED" ? new Error("Meta 500") : null);
+    await expect(pauseAd(r)).rejects.toThrow(/The pause of ad .* failed: .*1 activation card\(s\) of the ad closed/);
+    expect(r.store.rows.get(sent.id)!.status).toBe("expired");
+    expect(caption(r, sent.messageId)).toContain(AD_PAUSE_CLOSE_TEXT);
+  });
+
+  it("reports an approved activation that may still run", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    r.repo.activationInFlight = async () => true;
+    const result = await pauseAd(r);
+    expect(result).toMatchObject({ paused: true, closedCardIds: [] });
+    expect(result.cardsError).toMatch(/approved activation of ad .* is running/);
+  });
+
+  it("reports cardsError when the activation gate is not running", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    setActivationCards(null);
+    const result = await pauseAd(r);
+    expect(result).toMatchObject({ paused: true });
+    expect(result.cardsError).toMatch(/activation gate is not running/);
   });
 });

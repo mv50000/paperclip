@@ -12,6 +12,9 @@
  *   wait for `announce`, so Telegram never holds back the Meta pauses. A row
  *   whose close fails does not stop the others: the result names the error
  *   and the rows that did close (RK9-561).
+ * - `closeCardsForAdPause`: a pause of one ad from the UI closes that ad's
+ *   open cards the same way, so an old card cannot activate it again
+ *   (RK9-562).
  * - `expireDueCards`: the gate-expiry job. Cards past valid_until move to
  *   `expired` and lose their buttons. A tap re-checks valid_until itself, so
  *   the job's cadence never stretches a card's life.
@@ -62,6 +65,8 @@ const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
   pause_all_cap: "⛔ Kulutuskatto 90 % ylittyi: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty kuun loppuun, ellei board poista pysäytystilaa.",
   scheduled_pause: "⛔ Ajastettu pysäytys: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty aamuun asti.",
 };
+/** The card status after a pause of the ad from the UI (RK9-562). */
+export const AD_PAUSE_CLOSE_TEXT = "⛔ Mainos pysäytetään käyttöliittymästä: kortti mitätöity. Aktivointi vaatii uuden kortin.";
 const COPY_MAX_CHARS = 400;
 
 /** The part of the Telegram controller the card life cycle uses. */
@@ -378,6 +383,31 @@ export function createStagingCards(deps: StagingCardDeps) {
         ids: closed.map((request) => request.id),
         ...(error ? { error } : {}),
         announce: () => announceClosed(companyId, closed, outcome, status),
+      };
+    },
+
+    /**
+     * The pause-ad hook (RK9-562): closes the open card rows of one ad now;
+     * `announce` edits the cards later. A tap that approved a card before
+     * this close is not stopped here: `error` then says that an approved
+     * activation of the ad may still be running. Throws only when the open
+     * cards cannot be listed.
+     */
+    async closeCardsForAdPause(companyId: string, adId: string, input: { reason: string }): Promise<PauseCardClose> {
+      const outcome = { reason: "ad_paused", pauseReason: input.reason.slice(0, 300) };
+      const { closed, error } = await closeRows(companyId, await deps.repo.openForAd(companyId, adId), outcome, AD_PAUSE_CLOSE_TEXT);
+      const errors = error ? [error] : [];
+      try {
+        if (await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
+          errors.push(`an approved activation of ad ${adId} is running; check the ad's status after it has finished`);
+        }
+      } catch (cause) {
+        errors.push(`running activations could not be read: ${safeError(cause)}`);
+      }
+      return {
+        ids: closed.map((request) => request.id),
+        ...(errors.length > 0 ? { error: errors.join("; ").slice(0, 500) } : {}),
+        announce: () => announceClosed(companyId, closed, outcome, AD_PAUSE_CLOSE_TEXT),
       };
     },
 

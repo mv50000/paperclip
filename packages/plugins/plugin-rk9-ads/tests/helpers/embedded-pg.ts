@@ -14,6 +14,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { describe } from "vitest";
 import type { PaperclipPluginManifestV1, PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 
 const DB_MODULE_ID = "@paperclipai/db";
@@ -89,6 +90,21 @@ export async function embeddedPostgresSupport(): Promise<{ supported: boolean; r
   } catch (error) {
     return { supported: false, reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * `describe` when embedded Postgres can start here. Otherwise a local run
+ * skips the suite with a warning, and a CI run (process.env.CI set) throws:
+ * the money-protection tests on real Postgres must not skip silently in CI
+ * (RK9-562).
+ */
+export async function describeEmbeddedPostgres(suite: string): Promise<typeof describe | typeof describe.skip> {
+  const support = await embeddedPostgresSupport();
+  if (support.supported) return describe;
+  const reason = support.reason ?? "unsupported environment";
+  if (process.env.CI && process.env.CI !== "false") throw new Error(`Embedded Postgres is required in CI for the ${suite} tests: ${reason}`);
+  console.warn(`Skipping embedded Postgres ${suite} tests: ${reason}`);
+  return describe.skip;
 }
 
 export async function startPluginTestDatabase(input: {

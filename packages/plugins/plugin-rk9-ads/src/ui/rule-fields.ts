@@ -80,3 +80,42 @@ export function fromEditor(rule: EditorRule): Record<string, unknown> {
   }
   return out;
 }
+
+export type RulesBlock = { liveMode: boolean; list: ReadonlyArray<Record<string, unknown>> };
+
+/** The rule's identity across saves: the built-in cap by its type, the others by ruleId. */
+function ruleKey(rule: Record<string, unknown>): string {
+  return rule.type === "pause_all_cap" ? BUILTIN_CAP_RULE_ID : String(rule.ruleId ?? "");
+}
+
+function ruleLabel(rule: Record<string, unknown>): string {
+  const type = String(rule.type);
+  return type === "pause_all_cap" ? (RULE_TYPE_LABEL[type] ?? type) : `${RULE_TYPE_LABEL[type] ?? type} ${String(rule.ruleId ?? "")}`;
+}
+
+/**
+ * The changes from the saved rules to the prepared ones that weaken the
+ * automatic spend protection (RK9-562): live mode off, a live rule to
+ * shadow, an enabled rule removed or disabled. Each needs a typed
+ * confirmation.
+ * propose_scale is not edited here and is always off. Defaults follow
+ * features/rules/schema.ts: mode "shadow", enabled true.
+ */
+export function weakeningChanges(saved: RulesBlock, next: RulesBlock): string[] {
+  const out: string[] = [];
+  if (saved.liveMode && !next.liveMode) out.push("Live-tila pois: yksikään sääntö ei enää pysäytä mainoksia Metassa.");
+  const nextByKey = new Map(next.list.map((rule) => [ruleKey(rule), rule]));
+  for (const rule of saved.list) {
+    // A disabled rule protects nothing: removing it weakens nothing.
+    if (rule.type === "propose_scale" || rule.enabled === false) continue;
+    const label = ruleLabel(rule);
+    const after = nextByKey.get(ruleKey(rule));
+    if (!after || after.type !== rule.type) {
+      out.push(`${label}: poistetaan.`);
+      continue;
+    }
+    if (after.enabled === false) out.push(`${label}: kytketään pois päältä.`);
+    else if (rule.mode === "live" && after.mode !== "live") out.push(`${label}: live-tilasta varjotilaan.`);
+  }
+  return out;
+}

@@ -253,7 +253,7 @@ export function KillSwitchResult(props: { result: KillSwitchOutcome }) {
   );
 }
 
-function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void; onPaused: () => void }) {
+function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void; onPaused: (result: UiPauseAdResult) => void }) {
   const pauseAd = usePluginAction(ACTION.pauseAd);
   const toast = usePluginToast();
   const [preview, setPreview] = useState<UiPauseAdResult | null>(null);
@@ -278,9 +278,10 @@ function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void;
     setError(null);
     try {
       const result = (await pauseAd({ adId, dryRun: false, confirm: true })) as UiPauseAdResult;
-      toast({ title: `Mainos ${result.name ?? adId} pysäytetty`, tone: "success" });
+      const closed = result.closedCardIds?.length ?? 0;
+      toast({ title: `Mainos ${result.name ?? adId} pysäytetty${closed > 0 ? `, ${closed} aktivointikorttia suljettu` : ""}`, tone: "success" });
       if (result.auditError) toast({ title: "Kirjanpitoriviä ei tallennettu", body: result.auditError, tone: "warn" });
-      props.onPaused();
+      props.onPaused(result);
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -397,6 +398,8 @@ export function AdsPage(props: PluginPageProps) {
   const companyId = props.context.companyId;
   const overview = usePluginData<UiOverview>(DATA.overview, { companyId });
   const [pausing, setPausing] = useState<UiPublication | null>(null);
+  // A pause whose card close failed: the error stays on the page after the panel closes (RK9-562).
+  const [pauseCardsError, setPauseCardsError] = useState<{ adId: string; error: string } | null>(null);
 
   if (overview.loading && !overview.data) return <Spinner label="Ladataan mainontaa" />;
   if (overview.error) return <ErrorText>Mainonnan tietoja ei voitu ladata: {overview.error.message}</ErrorText>;
@@ -443,11 +446,17 @@ export function AdsPage(props: PluginPageProps) {
           <PauseAdPanel
             publication={pausing}
             onCancel={() => setPausing(null)}
-            onPaused={() => {
+            onPaused={(result) => {
               setPausing(null);
+              setPauseCardsError(result.cardsError ? { adId: result.adId, error: result.cardsError } : null);
               overview.refresh();
             }}
           />
+        ) : null}
+        {pauseCardsError ? (
+          <ErrorText>
+            Mainos {pauseCardsError.adId} pysäytettiin, mutta sen aktivointikortteja EI saatu varmasti suljettua: {pauseCardsError.error}. Mainos voi aktivoitua uudelleen: tarkista sen tila.
+          </ErrorText>
         ) : null}
         {data.publications.length === 0 && !data.publicationsError ? (
           <EmptyState title="Ei vielä julkaisuja." detail="Julkaisut ilmestyvät tähän, kun ensimmäinen mainos on julkaistu." />

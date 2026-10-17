@@ -22,7 +22,7 @@ import { TELEGRAM_SECRET_HEADER, verifyWebhookSecret, webhookSecretDigest } from
 import { createMemoryGateStore } from "../src/kit/testing/memory-gate-store.js";
 import { recordedOutput, useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
 import { FakeTelegram } from "./helpers/fake-telegram.js";
-import { EMBEDDED_PG_TIMEOUT_MS, embeddedPostgresSupport, startPluginTestDatabase, type PluginTestDatabase } from "./helpers/embedded-pg.js";
+import { EMBEDDED_PG_TIMEOUT_MS, describeEmbeddedPostgres, startPluginTestDatabase, type PluginTestDatabase } from "./helpers/embedded-pg.js";
 import { brandConfig, COMPANY_A, COMPANY_B, COMPANY_UNCONFIGURED, PACKAGE_ROOT, SECRET_A_BOT, secretRef } from "./fixtures.js";
 
 const TOKEN_A = "1234567:AAE-company-a-fake-bot-token-0123456789";
@@ -809,11 +809,7 @@ async function assertSingleWinner(store: GateStore, companyId = COMPANY_A, n = 2
 // Real Postgres: the SQL store through the host's runtime validators
 // ---------------------------------------------------------------------------
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
-if (!support.supported) {
-  console.warn(`Skipping embedded Postgres gate tests: ${support.reason ?? "unsupported environment"}`);
-}
+const describeDb = await describeEmbeddedPostgres("gate");
 
 describeDb("gate on real Postgres (migration 001, host SQL validators)", () => {
   let testDb: PluginTestDatabase;

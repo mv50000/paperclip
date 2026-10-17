@@ -4,7 +4,7 @@ import { createLedger, LEDGER_COLUMNS, LEDGER_TABLES, type Ledger } from "../src
 import manifest from "../src/manifest.js";
 import {
   EMBEDDED_PG_TIMEOUT_MS,
-  embeddedPostgresSupport,
+  describeEmbeddedPostgres,
   startPluginTestDatabase,
   type PluginTestDatabase,
 } from "./helpers/embedded-pg.js";
@@ -64,11 +64,7 @@ describe("ledger helpers (captured SQL)", () => {
   });
 });
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
-if (!support.supported) {
-  console.warn(`Skipping embedded Postgres ledger tests: ${support.reason ?? "unsupported environment"}`);
-}
+const describeDb = await describeEmbeddedPostgres("ledger");
 
 describeDb("ledger on real Postgres (migration 001)", () => {
   let testDb: PluginTestDatabase;

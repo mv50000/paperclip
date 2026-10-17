@@ -178,5 +178,9 @@ export interface UiPauseAdResult {
   /** Status after the call; equals previousStatus in a dry run. */
   status: string;
   paused: boolean;
+  /** Activation cards of the ad a live pause closed (RK9-562). */
+  closedCardIds?: string[];
+  /** The ad's open cards could not be listed or closed (all or some), or an approved activation may still run; the pause itself stands. */
+  cardsError?: string;
   auditError?: string;
 }
