@@ -4,8 +4,10 @@
  * The kit's GateStore (src/kit/gate/state-machine.ts) owns the card life
  * cycle: insert, the pending -> decided compare-and-set, settle. This file
  * adds what only activate_ad cards need, over the same table:
- * - the ad columns (publication_id, ad_id, adset_id), written with the
- *   pending row, before the card is sent;
+ * - the ad columns (publication_id, ad_id, adset_id), written right after
+ *   the pending insert (a second statement) and before the card is sent. A
+ *   swap that lists the ad's cards between the two misses that card; the
+ *   creative check at tap time still refuses it;
  * - open cards of one ad (a creative swap closes them);
  * - whether an approved activation of an ad may still be running;
  * - cards past valid_until for the expiry job;
@@ -35,9 +37,9 @@ export interface ActivationBinding {
   creativeId: string;
   contentHash: string;
   adName: string;
-  /** For a re-send. */
-  media: "photo" | "video";
-  mediaUrl: string;
+  /** What the card shows, for a re-send. */
+  media: "photo" | "video" | "text";
+  mediaUrl: string | null;
 }
 
 const ID_RE = /^\d+$/;
@@ -53,8 +55,8 @@ export function activationOf(request: Pick<GateRequestRecord, "kind" | "payload"
   if (!str(raw.adId) || !ID_RE.test(raw.adId) || !str(raw.adsetId) || !ID_RE.test(raw.adsetId)) return null;
   if (!str(raw.creativeId) || !ID_RE.test(raw.creativeId) || !str(raw.contentHash) || !str(raw.adName)) return null;
   if (raw.campaignId !== null && raw.campaignId !== undefined && !(str(raw.campaignId) && ID_RE.test(raw.campaignId))) return null;
-  if (raw.media !== "photo" && raw.media !== "video") return null;
-  if (!str(raw.mediaUrl)) return null;
+  if (raw.media !== "photo" && raw.media !== "video" && raw.media !== "text") return null;
+  if (raw.media !== "text" && !str(raw.mediaUrl)) return null;
   return {
     publicationId: raw.publicationId,
     adId: raw.adId,
@@ -64,7 +66,7 @@ export function activationOf(request: Pick<GateRequestRecord, "kind" | "payload"
     contentHash: raw.contentHash,
     adName: raw.adName,
     media: raw.media,
-    mediaUrl: raw.mediaUrl,
+    mediaUrl: raw.media === "text" ? null : (raw.mediaUrl as string),
   };
 }
 
@@ -102,9 +104,9 @@ function gateTable(db: PluginDatabaseClient): string {
 }
 
 /**
- * Wraps the kit's SQL store so an activate_ad row gets its ad columns in the
- * same step as the insert, before the card goes out: a swap that closes the
- * ad's cards then always sees it.
+ * Wraps the kit's SQL store so an activate_ad row gets its ad columns right
+ * after the insert, before the card goes out, so a swap that closes the ad's
+ * cards sees it.
  */
 export function withActivationColumns(store: GateStore, db: PluginDatabaseClient): GateStore {
   const gate = gateTable(db);

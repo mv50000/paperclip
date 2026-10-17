@@ -365,7 +365,9 @@ describe("swap mode", () => {
     expect(formOf(swapCall)).toEqual({ creative: { creative_id: "7001" }, status: "PAUSED" });
     expect(swap).toMatchObject({ mode: "swap", status: "swapped", metaAdId: "5001", replacesPublicationId: original.id });
     expect(adPosts(routes.calls)).toHaveLength(1);
-    expect(handoffs).toHaveLength(1);
+    // The swapped creative gets its own approval card (A9).
+    expect(handoffs).toHaveLength(2);
+    expect(handoffs[1]).toMatchObject({ publicationId: swap.id, adId: "5001", creativeId: "7001" });
   });
 
   it("closes the ad's open activation cards before the swap write, and does not swap when the gate refuses (A9)", async () => {

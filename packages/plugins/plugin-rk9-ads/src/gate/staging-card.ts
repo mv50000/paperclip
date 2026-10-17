@@ -67,6 +67,15 @@ export interface StagingCardDeps {
   now?: () => Date;
 }
 
+/** What a card can show, best first: the media itself, a video's poster, then text only. */
+export function previewCandidates(preview: PublishedPublication["preview"]): Array<{ media: CardMedia; mediaUrl: string | null }> {
+  const out: Array<{ media: CardMedia; mediaUrl: string | null }> = [];
+  out.push({ media: preview.kind === "video" ? "video" : "photo", mediaUrl: preview.mediaUrl });
+  if (preview.kind === "video" && preview.posterUrl) out.push({ media: "photo", mediaUrl: preview.posterUrl });
+  out.push({ media: "text", mediaUrl: null });
+  return out;
+}
+
 function eur(value: number | null | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)} €` : "?";
 }
@@ -172,8 +181,7 @@ export function createStagingCards(deps: StagingCardDeps) {
       const guard = await check({ config, client: read, now: now(), change: { objectId: publication.adsetId, level: "adset", activate: true } });
 
       const validUntil = new Date(now().getTime() + (config.telegram.gateTtlHours ?? DEFAULT_GATE_TTL_HOURS) * 3_600_000);
-      const media = publication.preview.kind === "video" ? "video" : "photo";
-      const binding: ActivationBinding = {
+      const binding: Omit<ActivationBinding, "media" | "mediaUrl"> = {
         publicationId: publication.publicationId,
         adId: publication.adId,
         adsetId: publication.adsetId,
@@ -181,8 +189,6 @@ export function createStagingCards(deps: StagingCardDeps) {
         creativeId: publication.creativeId,
         contentHash: publication.contentHash,
         adName: publication.adName,
-        media,
-        mediaUrl: publication.preview.mediaUrl,
       };
       const text = stagingCardText({
         brandCode: config.brandCode,
@@ -200,15 +206,43 @@ export function createStagingCards(deps: StagingCardDeps) {
 
       // Newest card wins: an older open card of the same ad stops working.
       await closeOpen(companyId, publication.adId, { reason: "superseded", byPublicationId: publication.publicationId }, "↪️ Korvattu uudella kortilla");
-      const sent = await transport.sendGateCard({
-        companyId,
-        kind: ACTIVATE_AD_KIND,
-        validUntil,
-        card: { media, mediaUrl: publication.preview.mediaUrl, text },
-        payload: { activation: binding },
-        labels: ACTIVATION_LABELS,
-        denyDecision: ACTIVATION_DENY_DECISION,
-      });
+      // Telegram fetches media by URL with size limits (about 5 MB photo, 20 MB video):
+      // fall back to the poster, then to a text card. Each failed send leaves a `failed` row.
+      const previews = previewCandidates(publication.preview);
+      let sent: { id: string; messageId: number } | null = null;
+      let lastError: unknown = null;
+      for (const preview of previews) {
+        try {
+          sent = await transport.sendGateCard({
+            companyId,
+            kind: ACTIVATE_AD_KIND,
+            validUntil,
+            card: { media: preview.media, ...(preview.mediaUrl ? { mediaUrl: preview.mediaUrl } : {}), text },
+            payload: { activation: { ...binding, media: preview.media, mediaUrl: preview.mediaUrl } },
+            labels: ACTIVATION_LABELS,
+            denyDecision: ACTIVATION_DENY_DECISION,
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+          deps.ctx.logger.warn("rk9-ads gate: card send failed, trying the next preview", { companyId, media: preview.media, detail: safeError(error) });
+        }
+      }
+      if (!sent) {
+        deps.ctx.logger.error("rk9-ads gate: activation card not sent; the ad stays PAUSED", { companyId, adId: publication.adId, detail: safeError(lastError) });
+        try {
+          await deps.ctx.activity.log({
+            companyId,
+            message: `${GATE_CARD_ACTIVITY} send failed`,
+            entityType: "rk9_ads_publication",
+            entityId: publication.publicationId,
+            metadata: { adId: publication.adId, error: safeError(lastError) },
+          });
+        } catch {
+          // The thrown error below is what the caller needs.
+        }
+        throw lastError instanceof Error ? lastError : new Error("activation card not sent");
+      }
       await audit(companyId, sent.id, "sent", {
         publicationId: publication.publicationId,
         adId: publication.adId,
@@ -219,17 +253,25 @@ export function createStagingCards(deps: StagingCardDeps) {
       return sent;
     },
 
-    /** The swap hook: throws while an approved activation of the ad may be running. */
+    /**
+     * The swap hook. Closes the ad's open cards first, so no new approval can
+     * start; then throws when an approval won before the close and its
+     * activation may still be running, or when a card is still open.
+     */
     async closeCardsForSwap(swap: CreativeSwap): Promise<string[]> {
-      if (await deps.repo.activationInFlight(swap.companyId, swap.adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
-        throw new Error(`an approved activation of ad ${swap.adId} is running; swap the creative after it has finished`);
-      }
-      return closeOpen(
+      const closed = await closeOpen(
         swap.companyId,
         swap.adId,
         { reason: "creative_swapped", swapPublicationId: swap.publicationId },
         "⚠️ Creative vaihdettu: kortti mitätöity. Uusi kortti lähetetään uudesta creativesta.",
       );
+      if (await deps.repo.activationInFlight(swap.companyId, swap.adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
+        throw new Error(`an approved activation of ad ${swap.adId} is running; swap the creative after it has finished`);
+      }
+      if ((await deps.repo.openForAd(swap.companyId, swap.adId)).length > 0) {
+        throw new Error(`an activation card of ad ${swap.adId} is still open; swap again`);
+      }
+      return closed;
     },
 
     /** The gate-expiry job. Returns the number of cards this run expired. */
@@ -260,14 +302,20 @@ export function createStagingCards(deps: StagingCardDeps) {
       if (request.status !== "pending" || !request.live) throw new Error(`the activation card is ${request.live ? request.status : "expired"}; only a pending, unexpired card can be re-sent`);
       const transport = deps.transport();
       if (!transport) throw new Error("the Telegram controller is not running");
-      const sent = await transport.resendGateCard({
-        request,
-        mediaUrl: binding.mediaUrl,
-        labels: ACTIVATION_LABELS,
-        denyDecision: ACTIVATION_DENY_DECISION,
-      });
-      // The old message: its token no longer matches; drop its buttons too.
-      await editClosed(request, "↪️ Lähetetty uudelleen");
+      let sent: { messageId: number };
+      try {
+        sent = await transport.resendGateCard({
+          request,
+          ...(binding.mediaUrl ? { mediaUrl: binding.mediaUrl } : {}),
+          labels: ACTIVATION_LABELS,
+          denyDecision: ACTIVATION_DENY_DECISION,
+        });
+      } finally {
+        // The old message: once the token is rotated its buttons no longer match; drop them.
+        if ((await deps.store.findById(companyId, request.id))?.messageId !== request.messageId) {
+          await editClosed(request, "↪️ Lähetetty uudelleen");
+        }
+      }
       await audit(companyId, request.id, "resent", { adId: binding.adId, previousMessageId: request.messageId, messageId: sent.messageId });
       return { gateRequestId: request.id, messageId: sent.messageId };
     },

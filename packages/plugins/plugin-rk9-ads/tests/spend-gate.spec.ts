@@ -400,6 +400,21 @@ describe("approval bound to the creative (RK9-514 verifier)", () => {
     expect(r.meta.writes).toHaveLength(0);
   });
 
+  it("refuses a swap when a tap approved the card between the swap's listing and its close", async () => {
+    const r = await rig();
+    const sent = await r.cards.openActivationCard(publication());
+    const close = r.repo.close;
+    r.repo.close = async (companyId, id, outcome) => {
+      // The approver's tap wins the race: pending -> approved just before the close.
+      const row = r.store.rows.get(id)!;
+      row.status = "approved";
+      row.decidedAt = r.clock.now;
+      return close(companyId, id, outcome);
+    };
+    await expect(r.cards.closeCardsForSwap({ companyId: COMPANY_A, adId: AD, publicationId: PUBLICATION_ID })).rejects.toThrow(/activation of ad .* is running/);
+    expect(r.store.rows.get(sent.id)!.status).toBe("approved");
+  });
+
   it("refuses a swap while an approved activation of the ad is running", async () => {
     const r = await rig();
     const sent = await r.cards.openActivationCard(publication());
@@ -512,6 +527,43 @@ describe("skip, expiry, partial failure, resend", () => {
     await tap(r, resent.messageId, 0);
     expect(r.store.rows.get(sent.id)!.status).toBe("approved");
     expect(statusWrites(r.meta, "ACTIVE").filter((call) => call.path === AD)).toHaveLength(1);
+  });
+
+  it("a resend whose send fails still removes the old card's buttons", async () => {
+    const r = await rig();
+    const sent = await r.cards.openActivationCard(publication());
+    r.fake.failNext.set("sendPhoto", { status: 400, description: "Bad Request: wrong file identifier/HTTP URL specified" });
+    await expect(r.harness.performAction("resend_gate_card", { gateRequestId: sent.id }, { companyId: COMPANY_A })).rejects.toThrow();
+    expect(r.fake.buttons(sent.messageId)).toEqual([]);
+    expect(r.store.rows.get(sent.id)!).toMatchObject({ status: "pending", messageId: null });
+  });
+
+  it("falls back to the poster, then to a text card, when Telegram cannot fetch the media", async () => {
+    const r = await rig();
+    r.fake.failNext.set("sendVideo", { status: 400, description: "Bad Request: failed to get HTTP URL content" });
+    const sent = await r.cards.openActivationCard(
+      publication({ preview: { kind: "video", mediaUrl: "https://media.ololla.fi/big.mp4", posterUrl: "https://media.ololla.fi/p.jpg", copy: { message: "Video" } } }),
+    );
+    expect(r.fake.callsOf("sendPhoto").at(-1)!.params.photo).toBe("https://media.ololla.fi/p.jpg");
+    expect(r.store.rows.get(sent.id)!.payload.activation).toMatchObject({ media: "photo", mediaUrl: "https://media.ololla.fi/p.jpg" });
+
+    r.fake.failNext.set("sendPhoto", { status: 400, description: "Bad Request: failed to get HTTP URL content" });
+    const text = await r.cards.openActivationCard(publication());
+    expect(r.fake.messages.get(text.messageId)!.text).toContain("OLL syksy 1");
+    expect(r.store.rows.get(text.id)!.payload.activation).toMatchObject({ media: "text", mediaUrl: null });
+    await tap(r, text.messageId, 0);
+    expect(r.store.rows.get(text.id)!.status).toBe("approved");
+  });
+
+  it("pauses the ad again when the creative cannot be read after activation", async () => {
+    const meta = freshMeta();
+    const r = await rig({ meta });
+    const sent = await r.cards.openActivationCard(publication());
+    let listings = 0;
+    meta.fail = (call) => (call.method === "GET" && call.path === `${ADSET}/ads` && ++listings === 2 ? new Error("socket hang up") : null);
+    await tap(r, sent.messageId, 0);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "failed", step: "verify_creative" });
+    expect(meta.ads[1]!.status).toBe("PAUSED");
   });
 
   it("resend refuses a decided or expired card and another company's card", async () => {

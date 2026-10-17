@@ -528,8 +528,10 @@ export function createPublishService(deps: PublishServiceDeps) {
     return { payload };
   }
 
+  /** A published ad, or a swapped one (its new creative needs its own approval card). */
   async function ensureHandoff(companyId: string, record: PublicationRecord): Promise<void> {
-    if (record.status !== "published" || !record.metaAdId || !record.metaCreativeId || !record.adsetId || !record.adName) return;
+    if (record.status !== "published" && record.status !== "swapped") return;
+    if (!record.metaAdId || !record.metaCreativeId || !record.adsetId || !record.adName) return;
     const key = `publication-handoff:${record.id}`;
     if (!(await deps.once.claim(companyId, key, HANDOFF_ONCE_KIND, { publicationId: record.id }))) return;
     try {
@@ -632,6 +634,8 @@ export function createPublishService(deps: PublishServiceDeps) {
         createdCreativeId = null;
         await logActivity(companyId, id, "ad creative swapped", { metaObjectId: target, creativeId, step: "ads_update" });
         await save(companyId, id, { status: "swapped", error: null, publishedAt: now(), ...(await clearedCleanup(companyId, id)) });
+        const swappedRecord = await deps.store.get(companyId, id);
+        if (swappedRecord) await ensureHandoff(companyId, swappedRecord);
         return;
       }
 
@@ -736,7 +740,10 @@ export function createPublishService(deps: PublishServiceDeps) {
       await ensureHandoff(companyId, record);
       return { created, started: false, publication: toPublicationView(record) };
     }
-    if (record.status === "swapped") return { created, started: false, publication: toPublicationView(record) };
+    if (record.status === "swapped") {
+      await ensureHandoff(companyId, record);
+      return { created, started: false, publication: toPublicationView(record) };
+    }
     if (record.status === "failed") {
       // A re-run resumes from the stored Meta ids.
       await deps.store.update(companyId, record.id, "failed", { status: "pending", error: null });

@@ -18,7 +18,7 @@
  *    Each write passes the spend guard hook again, and the hook lets
  *    through only ACTIVE writes on the objects this run named;
  * 6. a last read: the ad must still carry the approved creative, otherwise
- *    it is paused again and the card fails.
+ *    (or when the read fails) it is paused again and the card fails.
  *
  * A refusal in 1-4 makes no Meta write and ends the card `denied`. A failed
  * write ends it `failed` with the step reached; nothing is retried. Meta's
@@ -303,7 +303,18 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
         done.push("campaign_active");
       }
       step = "verify_creative";
-      creativeAfter = (await listAdSetAds(read, binding.adsetId)).find((ad) => ad.id === target.id)?.creativeId;
+      try {
+        creativeAfter = (await listAdSetAds(read, binding.adsetId)).find((ad) => ad.id === target.id)?.creativeId;
+      } catch (error) {
+        // The approved content cannot be confirmed: stop the ad rather than leave it running unchecked.
+        let paused = "it was paused again";
+        try {
+          await setStatus(target.id, "PAUSED");
+        } catch (pauseError) {
+          paused = `pausing it failed too (${safeError(pauseError)})`;
+        }
+        throw new Error(`the creative of ad ${target.id} could not be read after activation (${safeError(error)}); ${paused}`);
+      }
       if (creativeAfter !== binding.creativeId) {
         // A swap raced the activation: the approved content is not what runs. Stop it.
         await setStatus(target.id, "PAUSED");
