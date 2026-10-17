@@ -29,6 +29,7 @@ import {
   ReadOnlyViolationError,
   TOKEN_INVALID_CODE,
   TokenInvalidError,
+  TokenResolveError,
   WriteRefusedError,
   type MetaGraphErrorDetails,
 } from "./errors.js";
@@ -518,7 +519,7 @@ export class MetaGraphClient {
       });
     } catch (error) {
       const reason = error instanceof Error ? `${error.name}: ${redactText(error.message)}` : "unknown error";
-      throw new MetaGraphError(`Could not resolve the Meta access token (${reason})`);
+      throw new TokenResolveError(`Could not resolve the Meta access token (${reason})`);
     }
     if (typeof token !== "string" || token.trim().length === 0) {
       throw new TokenInvalidError("The Meta access token resolved to an empty value");

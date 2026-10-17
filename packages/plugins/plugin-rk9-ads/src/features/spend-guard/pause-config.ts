@@ -2,7 +2,8 @@
  * The config the pause side runs on (A6, RK9-511, README ADR 3).
  *
  * A live brand can turn `invalid` after an edit (the host checks only the
- * JSON schema) or `unavailable` when the host refuses its config. Stopping
+ * JSON schema), `disabled` when its monthly cap is cleared, or `unavailable`
+ * when the host refuses its config. Stopping
  * must still work then. Every successful read stores the brand's last valid
  * config (it holds secret refs, never a secret value), and the pause paths
  * (scheduled pause, data gate, kill switch) fall back to it. Nothing that can
@@ -20,7 +21,7 @@ import type { BrandConfig } from "../../config.js";
 
 export type PauseConfig =
   | { ok: true; config: BrandConfig; fallback: null }
-  | { ok: true; config: BrandConfig; fallback: { state: "invalid" | "unavailable"; detail: string } }
+  | { ok: true; config: BrandConfig; fallback: { state: "invalid" | "disabled" | "unavailable"; detail: string } }
   | { ok: false; state: string; error: string };
 
 function lastValidKey(companyId: string) {
@@ -79,7 +80,8 @@ export async function loadPauseConfig(ctx: PluginContext, companyId: string, kno
     return { ok: true, config: result.config, fallback: null };
   }
   if (result.state === "absent") return { ok: false, state: "absent", error: "RK9 Ads is not configured for this company" };
-  const detail = result.state === "invalid" ? result.errors.join("; ").slice(0, 300) : result.error;
+  const detail =
+    result.state === "invalid" ? result.errors.join("; ").slice(0, 300) : result.state === "disabled" ? result.reason : result.error;
   let fallback: BrandConfig | null;
   try {
     fallback = await lastValidConfig(ctx, companyId);

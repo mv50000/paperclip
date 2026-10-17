@@ -48,6 +48,7 @@ async function loadEnabled(ctx: PluginContext, companyId: string): Promise<Loade
   if (result.state === "enabled") return { ok: true, config: result.config };
   if (result.state === "absent") return { ok: false, state: "absent", error: "RK9 Ads is not configured for this company" };
   if (result.state === "invalid") return { ok: false, state: "invalid", error: "the brand config is invalid" };
+  if (result.state === "disabled") return { ok: false, state: "disabled", error: `the brand is disabled: ${result.reason}` };
   return { ok: false, state: "unavailable", error: `the brand config could not be read: ${result.error}` };
 }
 

@@ -71,7 +71,7 @@ describe("parseBrandConfig", () => {
   it("requires the core fields", () => {
     const errors = errorsOf({ brandCode: "oll" }).join("\n");
     expect(errors).toMatch(/config\.brandCode/);
-    expect(errors).toMatch(/config\.monthlyCapEur: is required/);
+    expect(errors).not.toMatch(/monthlyCapEur/);
     expect(errors).toMatch(/config\.meta: is required/);
     expect(errors).toMatch(/config\.landing: is required/);
   });
@@ -165,6 +165,46 @@ describe("parseBrandConfig", () => {
       "meta.accessTokenRef",
       "telegram.botTokenRef",
     ]);
+  });
+});
+
+describe("brand validation (A4, RK9-510)", () => {
+  it("accepts monthlyCapEur null (the default) but marks the brand disabled", () => {
+    for (const raw of [brandConfig({ monthlyCapEur: null }), (({ monthlyCapEur: _cap, ...rest }) => rest)(brandConfig())]) {
+      const result = parseBrandConfig(raw);
+      expect(result.state).toBe("disabled");
+      if (result.state !== "disabled") continue;
+      expect(result.config.monthlyCapEur).toBeNull();
+      expect(result.config.meta.adAccountId).toBe("29231592883113369");
+      expect(result.reason).toMatch(/monthlyCapEur is not set/);
+    }
+  });
+
+  it("rejects each malformed field the spec names, offline", () => {
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [brandConfig({ meta: { adAccountId: "act_12a", pageId: "1", accessTokenRef: secretRef(SECRET_A_META) } }), /meta\.adAccountId: must be numeric/],
+      [brandConfig({ meta: { adAccountId: "act_12", pageId: "1" } }), /meta\.accessTokenRef: is required/],
+      [brandConfig({ monthlyCapEur: -5 }), /monthlyCapEur: must be > 0/],
+      [brandConfig({ monthlyCapEur: "100" }), /monthlyCapEur: must be a finite number/],
+      [brandConfig({ landing: { allowedDomains: ["ololla.fi"], urls: { home: "http://www.ololla.fi/" } } }), /landing\.urls\.home: must be an https URL/],
+      [brandConfig({ landing: { allowedDomains: ["ololla.fi"], urls: { home: "https://ololla.fi.evil.example/" } } }), /is not in landing\.allowedDomains/],
+      [brandConfig({ telegram: { botTokenRef: secretRef(SECRET_A_BOT), chatId: "-5540940287", allowedUserIds: [] } }), /telegram\.allowedUserIds: must list at least one approver/],
+    ];
+    for (const [raw, expected] of cases) expect(errorsOf(raw).join("\n")).toMatch(expected);
+  });
+
+  it("normalises an act_ prefix and stores secrets only as secret_ref objects", () => {
+    const config = enabled(brandConfig({ meta: { adAccountId: "act_29231592883113369", pageId: "1", accessTokenRef: { ...secretRef(SECRET_A_META), extra: "x" } } }));
+    expect(config.meta.adAccountId).toBe("29231592883113369");
+    expect(config.meta.accessTokenRef).toEqual({ type: "secret_ref", secretId: SECRET_A_META, version: "latest" });
+  });
+
+  it("validates the Ololla and Sunspot fixtures", async () => {
+    const { loadFixtureConfig } = await import("./brand/fake-routes.js");
+    const ololla = enabled(loadFixtureConfig("ololla"));
+    expect(ololla).toMatchObject({ brandCode: "OLL", monthlyCapEur: 100, telegram: { chatId: "-5540940287", allowedUserIds: ["440715827"] } });
+    const sunspot = enabled(loadFixtureConfig("sunspot"));
+    expect(sunspot.meta).toMatchObject({ adAccountId: "1336862981968191", campaignId: "120247250925830775", adSetId: "120247250925850775" });
   });
 });
 

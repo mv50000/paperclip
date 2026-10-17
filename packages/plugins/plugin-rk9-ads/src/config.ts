@@ -4,7 +4,9 @@
  * Paperclip stores plugin config per company (`plugin_config`), so one company
  * config is one brand. There is no enable switch: an absent or empty config
  * means the plugin is off for that company, and a valid config means it is on.
- * An invalid config is reported and treated as off.
+ * An invalid config is reported and treated as off. A valid config without
+ * `monthlyCapEur` (null, the default) is `disabled`: it is stored and the
+ * preflight can check it, but every feature treats the brand as off (A4).
  *
  * `BRAND_CONFIG_JSON_SCHEMA` drives the host settings form and the host-side
  * Ajv check on save. `parseBrandConfig()` is the authority at runtime: it applies
@@ -136,10 +138,19 @@ export interface BrandConfig {
   rules: RuleSet;
 }
 
+/**
+ * A valid config whose `monthlyCapEur` is not set yet (null, the default). It
+ * marks the brand disabled: nothing may spend, but the preflight can run.
+ */
+export type BrandConfigDraft = Omit<BrandConfig, "monthlyCapEur"> & { monthlyCapEur: number | null };
+
 export type BrandConfigParseResult =
   | { state: "absent" }
   | { state: "invalid"; errors: string[] }
+  | { state: "disabled"; config: BrandConfigDraft; reason: string }
   | { state: "enabled"; config: BrandConfig };
+
+export const MONTHLY_CAP_UNSET_REASON = "monthlyCapEur is not set: the brand stays disabled until it is";
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -192,7 +203,14 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
     brandCode: { type: "string", title: "Brand code", pattern: "^[A-Z0-9]{2,10}$" },
     displayName: { type: "string", title: "Display name" },
     timeZone: { type: "string", title: "Time zone", default: DEFAULT_TIME_ZONE },
-    monthlyCapEur: { type: "number", title: "Monthly cap (EUR)", exclusiveMinimum: 0, maximum: 100_000 },
+    monthlyCapEur: {
+      type: ["number", "null"],
+      title: "Monthly cap (EUR)",
+      description: "Empty (null) keeps the brand disabled. Must agree with the Meta account spend_cap (G2).",
+      exclusiveMinimum: 0,
+      maximum: 100_000,
+      default: null,
+    },
     namingPrefix: { type: "string", title: "Naming prefix" },
     meta: {
       type: "object",
@@ -536,7 +554,11 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
   const displayName = c.string(raw, "displayName", root) ?? brandCode ?? "";
   const timeZone = c.string(raw, "timeZone", root) ?? DEFAULT_TIME_ZONE;
   if (!isValidTimeZone(timeZone)) c.add(`${root}.timeZone`, `unknown time zone ${timeZone}`);
-  const monthlyCapEur = c.number(raw, "monthlyCapEur", root, { min: 0, exclusiveMin: true, max: 100_000 });
+  // null (the default) is valid and marks the brand disabled.
+  const monthlyCapEur =
+    raw.monthlyCapEur === undefined || raw.monthlyCapEur === null
+      ? null
+      : c.number(raw, "monthlyCapEur", root, { min: 0, exclusiveMin: true, max: 100_000 });
   const namingPrefix = c.string(raw, "namingPrefix", root, { pattern: /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/ }) ?? brandCode ?? "";
 
   // meta
@@ -687,39 +709,38 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
     return { state: "invalid", errors: c.errors.length > 0 ? c.errors : ["config: incomplete"] };
   }
 
-  return {
-    state: "enabled",
-    config: {
-      brandCode,
-      displayName,
-      timeZone,
-      monthlyCapEur,
-      namingPrefix,
-      meta: {
-        adAccountId,
-        pageId,
-        ...(igUserId ? { igUserId } : {}),
-        ...(datasetId ? { datasetId } : {}),
-        accessTokenRef,
-        specialAdCategories: specialAdCategories as SpecialAdCategory[],
-        ...(campaignId ? { campaignId } : {}),
-        ...(adSetId ? { adSetId } : {}),
-      },
-      landing: { allowedDomains, urls, defaultUrlKey, utmTemplate },
-      ...(telegram ? { telegram } : {}),
-      schedule: { scheduledPause, ...(dataGate ? { dataGate } : {}) },
-      digest,
-      fatigue,
-      rules,
+  const config: BrandConfigDraft = {
+    brandCode,
+    displayName,
+    timeZone,
+    monthlyCapEur,
+    namingPrefix,
+    meta: {
+      adAccountId,
+      pageId,
+      ...(igUserId ? { igUserId } : {}),
+      ...(datasetId ? { datasetId } : {}),
+      accessTokenRef,
+      specialAdCategories: specialAdCategories as SpecialAdCategory[],
+      ...(campaignId ? { campaignId } : {}),
+      ...(adSetId ? { adSetId } : {}),
     },
+    landing: { allowedDomains, urls, defaultUrlKey, utmTemplate },
+    ...(telegram ? { telegram } : {}),
+    schedule: { scheduledPause, ...(dataGate ? { dataGate } : {}) },
+    digest,
+    fatigue,
+    rules,
   };
+  if (config.monthlyCapEur === null) return { state: "disabled", config, reason: MONTHLY_CAP_UNSET_REASON };
+  return { state: "enabled", config: { ...config, monthlyCapEur: config.monthlyCapEur } };
 }
 
 /**
  * Secret references in a parsed config, keyed by the dot path the host uses
  * for `ctx.secrets.resolve(ref, { configPath })`.
  */
-export function configSecretRefs(config: BrandConfig): Array<{ configPath: string; ref: SecretRef }> {
+export function configSecretRefs(config: BrandConfigDraft): Array<{ configPath: string; ref: SecretRef }> {
   const refs: Array<{ configPath: string; ref: SecretRef }> = [
     { configPath: "meta.accessTokenRef", ref: config.meta.accessTokenRef },
   ];

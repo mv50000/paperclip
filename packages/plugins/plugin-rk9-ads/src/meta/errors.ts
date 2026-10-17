@@ -82,6 +82,31 @@ export class TokenInvalidError extends MetaGraphError {
 }
 
 /**
+ * The host could not resolve the token's secret_ref (missing binding, wrong
+ * company, deleted secret). Nothing was sent to Meta.
+ */
+export class TokenResolveError extends MetaGraphError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TokenResolveError";
+  }
+}
+
+/**
+ * Error classes that need an operator, not a retry (A4, RK9-510). The class
+ * is part of the dedupe key of the alert and the issue
+ * (`rk9-ads:<brand>:<class>`), so one incident gives one of each. Every code
+ * 190 is one class: the subcodes (460 password change, 463 expired, 467
+ * invalidated) all need the same fix, a new system user token.
+ */
+export const TOKEN_INVALID_ERROR_CLASS = "token_invalid";
+export type OperatorErrorClass = typeof TOKEN_INVALID_ERROR_CLASS;
+
+export function operatorErrorClass(error: unknown): OperatorErrorClass | null {
+  return error instanceof TokenInvalidError ? TOKEN_INVALID_ERROR_CLASS : null;
+}
+
+/**
  * Codes 4/17/613/80004: throttled. `retryAfterMs` is Meta's own estimate
  * (`estimated_time_to_regain_access`) when it sent one. `attempts` is how many
  * requests the client made before it gave up.

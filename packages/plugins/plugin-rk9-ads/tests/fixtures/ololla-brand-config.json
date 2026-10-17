@@ -1,0 +1,29 @@
+{
+  "source": "Ololla (OLL) brand config as it goes into the OLL company's plugin config (RK9-510). The secret ids are placeholders; the real OLL ids (meta.ads_access_token, telegram.rk9ads_bot_token_prod) are in the README.",
+  "config": {
+    "brandCode": "OLL",
+    "displayName": "Ololla",
+    "timeZone": "Europe/Helsinki",
+    "monthlyCapEur": 100,
+    "namingPrefix": "OLL",
+    "meta": {
+      "adAccountId": "act_29231592883113369",
+      "pageId": "1284777064729996",
+      "datasetId": "1473972751305488",
+      "accessTokenRef": { "type": "secret_ref", "secretId": "aaaaaaaa-0000-4000-8000-00000000000a", "version": "latest" },
+      "specialAdCategories": ["NONE"]
+    },
+    "landing": {
+      "allowedDomains": ["ololla.fi"],
+      "urls": { "home": "https://www.ololla.fi/" },
+      "defaultUrlKey": "home",
+      "utmTemplate": "utm_source=facebook&utm_medium=paid_social&utm_campaign={campaign}&utm_content={ad}"
+    },
+    "telegram": {
+      "botTokenRef": { "type": "secret_ref", "secretId": "aaaaaaaa-0000-4000-8000-00000000000b", "version": "latest" },
+      "chatId": "-5540940287",
+      "allowedUserIds": ["440715827"],
+      "mode": "poll"
+    }
+  }
+}
