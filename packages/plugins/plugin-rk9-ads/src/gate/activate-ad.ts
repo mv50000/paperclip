@@ -32,6 +32,8 @@
  *    ACTIVE already is not this run's, RK9-565). When Meta refuses one of
  *    those PAUSED writes, the object is stored for the scheduled-pause job's
  *    retry and one Telegram alert goes out (spend-guard/pending-undo.ts).
+ *    The retry goes on after the halt ends, until Meta confirms, a newer
+ *    activation supersedes it or a board user acknowledges it.
  *
  * A refusal in 1-4 makes no Meta write and ends the card `denied`. A failed
  * write ends it `failed` with the step reached; nothing is retried, except a
@@ -484,7 +486,7 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
           : [
               `⚠️ Peruutus epäonnistui, voi olla yhä ACTIVE: ${undoFailed.map((entry) => entry.objectId).join(", ")}`,
               undoReport?.stored
-                ? "Peruutusta yritetään uudelleen 5 minuutin välein niin kauan kuin pysäytystila on päällä. Tarkista tila Metassa."
+                ? "Peruutusta yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen. Tarkista tila Metassa."
                 : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
             ];
       return {

@@ -15,9 +15,9 @@ import type { Company } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
 import { createLedger } from "../src/db.js";
 import { registerGate, type GateOverrides } from "../src/features/gate/register.js";
-import { readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
+import { HALT_NAMESPACE, readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
 import { pauseAll, type PauseAllResult, type PauseRule } from "../src/features/spend-guard/killswitch.js";
-import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_DATA_KEY } from "../src/features/spend-guard/register.js";
+import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_DATA_KEY, UNDO_ACKNOWLEDGED_ACTIVITY } from "../src/features/spend-guard/register.js";
 import { addPendingUndos, readPendingUndos, reportUndoFailure, type PendingUndo } from "../src/features/spend-guard/pending-undo.js";
 import { memoryOnceStore } from "../src/features/spend-guard/support.js";
 import { TelegramController } from "../src/features/telegram/controller.js";
@@ -187,7 +187,7 @@ async function rig(input: { meta?: FakeMeta; gate?: GateOverrides } = {}): Promi
   const notifier = new FakeNotifier();
   // One marker store for the spend guard's job and the gate's undo alert, as in the worker (alert_dedupe).
   const once = memoryOnceStore();
-  registerSpendGuard(runtime, { store: once, notifier });
+  registerSpendGuard(runtime, { store: once, notifier, newerActivation: (companyId, query) => repo.newerActivation(companyId, query) });
   const publications = memoryPublicationStore();
   publications.rows.push(publicationRow());
   const { cards } = registerGate(runtime, {
@@ -542,11 +542,11 @@ describe("a real pause during an approved activation wins (RK9-561)", () => {
 
 describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
   /** The pause lists before Meta applies the ad's ACTIVE, so only the handler's undo can stop the ad; Meta then refuses that PAUSED write. */
-  async function lostUndo(r: Rig) {
+  async function lostUndo(r: Rig, rule: PauseRule = "kill_switch") {
     let refuse = true;
     r.meta.fail = (call) => (refuse && call.method === "POST" && call.path === AD && call.body.status === "PAUSED" ? new Response(JSON.stringify({ error: { message: "rate limited", code: 17 } }), { status: 400 }) : null);
     const sent = await r.cards.openActivationCard(publication());
-    pauseDuringWrite(r, AD, "before", () => runPause(r, "kill_switch"));
+    pauseDuringWrite(r, AD, "before", () => runPause(r, rule));
     await tap(r, sent.messageId);
     return { sent, allow: () => (refuse = false) };
   }
@@ -584,18 +584,82 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     expect(r.meta.writes).toHaveLength(writes);
   });
 
-  it("a board user's clear of the halt acknowledges the undo: the next tick drops it with one alert and pauses nothing", async () => {
+  it("a scheduled halt that ends at 06:00 with no newer activation keeps the retry: the next tick writes PAUSED", async () => {
     const r = await rig();
-    await lostUndo(r);
-    const preview = await r.harness.performAction<{ halt: HaltState; pendingUndo?: unknown[] }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
-    expect(preview.pendingUndo).toMatchObject([{ objectId: AD }]);
-    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
-    const writes = r.meta.writes.length;
-    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/activation undo: the halt ended first, 1 object\(s\) may still be ACTIVE/);
-    expect(r.meta.writes).toHaveLength(writes);
-    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
-    expect(r.notifier.messages.filter((message) => message.text.includes("pysäytystila päättyi ennen kuin aktivoinnin peruutus onnistui"))).toHaveLength(1);
+    const { allow } = await lostUndo(r, "scheduled_pause");
+    // 06:00 passed: the stored scheduled halt is no longer in force.
+    const key = { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `halt:${COMPANY_A}:scheduled_pause` };
+    const stored = (await r.harness.ctx.state.get(key)) as HaltState;
+    await r.harness.ctx.state.set(key, { ...stored, until: new Date(Date.now() - 60_000).toISOString() });
+    expect(await haltOf(r)).toBeNull();
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`activation undo: pausing ad ${AD} failed again`));
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toHaveLength(1);
+    allow();
     await r.harness.runJob("scheduled-pause");
+    expect(r.meta.writes.at(-1)).toMatchObject({ path: AD, body: { status: "PAUSED" } });
+    expect(statusOf(r.meta, AD)).toBe("PAUSED");
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+  });
+
+  it("a newer approved activation of the ad ends the retry with an audit row and one alert, and pauses nothing", async () => {
+    const r = await rig();
+    const { sent } = await lostUndo(r);
+    const failed = r.store.rows.get(sent.id)!;
+    // The board cleared the halt and approved a new card of the same publication, which activated the ad.
+    r.store.rows.set("gate-newer", { ...failed, id: "gate-newer", status: "approved", outcome: { result: "activated" }, decidedAt: new Date(Date.now() + 1_000) });
+    const writes = r.meta.writes.length;
+    await r.harness.runJob("scheduled-pause");
+    expect(r.meta.writes).toHaveLength(writes);
+    expect(statusOf(r.meta, AD)).toBe("ACTIVE");
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+    const dropped = r.notifier.messages.filter((message) => message.text.includes("uudelleenyritys lopetettiin, koska uudempi aktivointi hyväksyttiin"));
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.text).toContain(`mainos ${AD}`);
+    // The audit row's activity entry (the harness has no rule_actions table).
+    expect(r.harness.activity.filter((entry) => entry.message.includes(`activation undo of ad ${AD} ended: superseded by gate-newer`))).toMatchObject([
+      { metadata: { applied: false, gateRequestId: sent.id, supersededBy: "gate-newer" } },
+    ]);
+  });
+
+  it("a newer activation of another ad does not end the retry", async () => {
+    const r = await rig();
+    const { sent, allow } = await lostUndo(r);
+    const failed = r.store.rows.get(sent.id)!;
+    const payload = failed.payload as { activation: Record<string, unknown> };
+    r.store.rows.set("gate-other", {
+      ...failed,
+      id: "gate-other",
+      status: "approved",
+      outcome: { result: "activated" },
+      decidedAt: new Date(Date.now() + 1_000),
+      payload: { ...payload, activation: { ...payload.activation, adId: OLD_AD, adsetId: "other-adset", campaignId: "other-campaign", publicationId: "other-publication" } },
+    });
+    allow();
+    await r.harness.runJob("scheduled-pause");
+    expect(statusOf(r.meta, AD)).toBe("PAUSED");
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+  });
+
+  it("clearing the halt alone keeps the retry; the board's acknowledgement of the previewed entries ends it", async () => {
+    const r = await rig();
+    const { sent } = await lostUndo(r);
+    const preview = await r.harness.performAction<{ halt: HaltState; pendingUndo?: Array<{ objectId: string; key: string }> }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    expect(preview.pendingUndo).toMatchObject([{ objectId: AD, key: `${AD}|${sent.id}` }]);
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toHaveLength(1);
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`activation undo: pausing ad ${AD} failed again`));
+
+    // An agent may not acknowledge.
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, acknowledgeUndos: [`${AD}|${sent.id}`] }, AGENT)).rejects.toThrow(/board-only/);
+    const result = await r.harness.performAction<{ acknowledgedUndos?: number }>(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, acknowledgeUndos: [`${AD}|${sent.id}`, "unknown|key"] }, BOARD);
+    expect(result).toMatchObject({ cleared: false, acknowledgedUndos: 1 });
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+    expect(r.harness.activity.filter((entry) => entry.message === UNDO_ACKNOWLEDGED_ACTIVITY)).toMatchObject([
+      { metadata: { acknowledged: [{ objectId: AD, gateRequestId: sent.id }], acknowledgedBy: { userId: expect.any(String) } } },
+    ]);
+    const writes = r.meta.writes.length;
+    await r.harness.runJob("scheduled-pause");
+    expect(r.meta.writes).toHaveLength(writes);
   });
 
   it("concurrent writes of the list keep every entry", async () => {

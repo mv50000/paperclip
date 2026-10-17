@@ -12,6 +12,8 @@
  *   company (the kill switch, the cap pause and the scheduled pause close
  *   them, RK9-557);
  * - whether an approved activation of an ad may still be running;
+ * - a newer completed activation of an object or a publication, which ends
+ *   the retry of a failed undo (RK9-565);
  * - cards past valid_until for the expiry job;
  * - paused_ad_ids of a decided card.
  *
@@ -93,6 +95,13 @@ export interface ActivationGateRepo {
   activationInFlight(companyId: string, adId: string, withinMinutes: number): Promise<boolean>;
   /** pending -> expired with an outcome (superseded, creative swapped, paused). True when this call won. */
   close(companyId: string, id: string, outcome: Record<string, unknown>): Promise<boolean>;
+  /**
+   * The id of an activate_ad card other than `gateRequestId` that activated
+   * (status approved, outcome.result activated) after `since` and names the
+   * object (as its ad, ad set or campaign) or the publication of
+   * `gateRequestId`'s card. Null when there is none.
+   */
+  newerActivation(companyId: string, input: { objectId: string; gateRequestId: string; since: Date }): Promise<string | null>;
   /** Pending cards of every company whose valid_until has passed, oldest first. */
   dueForExpiry(limit: number): Promise<DueCard[]>;
   /** The pending activate_ad card of a publication, newest first. */
@@ -161,6 +170,19 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateR
         [companyId, adId, Math.max(1, Math.trunc(withinMinutes))],
       );
       return Number(rows[0]?.n ?? 0) > 0;
+    },
+
+    async newerActivation(companyId, input) {
+      const rows = await db.query<{ id: unknown }>(
+        `SELECT g.id FROM ${gate} g
+          WHERE g.company_id = $1 AND g.kind = 'activate_ad' AND g.status = 'approved'
+            AND g.outcome->>'result' = 'activated' AND g.decided_at > $3 AND g.id::text <> $2
+            AND (g.ad_id = $4 OR g.adset_id = $4 OR g.payload->'activation'->>'campaignId' = $4
+              OR g.publication_id = (SELECT o.publication_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2))
+          ORDER BY g.decided_at DESC LIMIT 1`,
+        [companyId, input.gateRequestId, input.since.toISOString(), input.objectId],
+      );
+      return rows[0] ? String(rows[0].id) : null;
     },
 
     async close(companyId, id, outcome) {

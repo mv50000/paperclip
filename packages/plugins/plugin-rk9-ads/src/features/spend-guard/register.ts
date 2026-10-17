@@ -10,7 +10,8 @@ import { DEFAULT_TIME_ZONE } from "../../kit/local-time.js";
 import { clearHalt, readHalt, type HaltState } from "./halt.js";
 import { pauseAll, PauseListError, stopActivations, type PauseAllDeps, type PauseAllResult, type Stopped } from "./killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "./pause-config.js";
-import { readPendingUndos } from "./pending-undo.js";
+import { sqlActivationGateRepo } from "../../gate/gate-requests.js";
+import { acknowledgePendingUndos, readPendingUndos, undoEntryKey, type UndoRetryDeps } from "./pending-undo.js";
 import { createScheduledPauseJob, SCHEDULED_PAUSE_JOB_KEY } from "./scheduled-pause.js";
 import {
   brandReadClient,
@@ -34,9 +35,10 @@ import {
  *   or the system may only preview it) and `since` from the preview: it
  *   clears only the halt with that `since`, so a newer kill switch or pause
  *   that set the halt again is not lifted blind. No Telegram button clears it.
- *   The preview names the open activation undos (pending-undo.ts): when no
- *   halt is left in force, the clear acknowledges them and the next tick
- *   stops retrying them (RK9-565).
+ *   The preview names the open activation undos (pending-undo.ts). A real
+ *   call acknowledges those named in `acknowledgeUndos` (keys from the
+ *   preview), and their retry stops (RK9-565); with no halt to clear, `since`
+ *   may be left out to only acknowledge them.
  *
  * Every live kill switch (action, tool, Telegram button) leaves its halt and
  * closes the open cards also when no brand config can be loaded; then it
@@ -49,6 +51,7 @@ export const SPEND_GUARD_DATA_KEY = "spend-guard";
 export const PAUSE_ALL_ACTION_KEY = "pause-all";
 export const CLEAR_HALT_ACTION_KEY = "clear-halt";
 export const HALT_CLEARED_ACTIVITY = "rk9-ads spend guard: halt cleared";
+export const UNDO_ACKNOWLEDGED_ACTIVITY = "rk9-ads spend guard: activation undo acknowledged";
 const REASON_MAX = 300;
 
 export interface SpendGuardOverrides {
@@ -58,6 +61,7 @@ export interface SpendGuardOverrides {
   clientFor?: PauseAllDeps["clientFor"];
   feedFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   closeCards?: PauseAllDeps["closeCards"];
+  newerActivation?: UndoRetryDeps["newerActivation"];
 }
 
 type Loaded = { ok: true; config: BrandConfig } | { ok: false; state: string; error: string };
@@ -140,7 +144,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
   const store = overrides.store ?? sqlOnceStore(ledger);
   const notifier = overrides.notifier ?? controllerNotifier;
   const now = overrides.now ?? (() => new Date());
-  const deps = { ctx, ledger, store, notifier, now, clientFor: overrides.clientFor, feedFetch: overrides.feedFetch, closeCards: overrides.closeCards };
+  const newerActivation: UndoRetryDeps["newerActivation"] =
+    overrides.newerActivation ?? ((companyId, input) => sqlActivationGateRepo(ctx.db).newerActivation(companyId, input));
+  const deps = { ctx, ledger, store, notifier, now, clientFor: overrides.clientFor, feedFetch: overrides.feedFetch, closeCards: overrides.closeCards, newerActivation };
 
   /**
    * The kill switch. A live run leaves the halt and closes the open cards
@@ -201,7 +207,32 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       } catch (error) {
         return { dryRun, cleared: false, halt, pendingUndoError: safeError(error) };
       }
-      return { dryRun, cleared: false, halt, ...(pendingUndo.length > 0 ? { pendingUndo } : {}) };
+      return { dryRun, cleared: false, halt, ...(pendingUndo.length > 0 ? { pendingUndo: pendingUndo.map((entry) => ({ ...entry, key: undoEntryKey(entry) })) } : {}) };
+    }
+    const reason = reasonText(params.reason, "");
+    const ackKeys = Array.isArray(params.acknowledgeUndos) ? params.acknowledgeUndos.filter((key): key is string => typeof key === "string") : [];
+    /** The open undos the board saw in the preview: their retry stops. */
+    const acknowledge = async (): Promise<number> => {
+      if (ackKeys.length === 0) return 0;
+      const acknowledged = await acknowledgePendingUndos(ctx, companyId, ackKeys);
+      if (acknowledged.length === 0) return 0;
+      const by = { userId: context.actor.userId ?? null, runId: context.actor.runId ?? null };
+      try {
+        await ctx.activity.log({
+          companyId,
+          message: UNDO_ACKNOWLEDGED_ACTIVITY,
+          entityType: "rk9_ads_brand",
+          entityId: acknowledged[0]!.brandCode,
+          metadata: { acknowledged, acknowledgedBy: by, ...(reason ? { reason } : {}) },
+        });
+      } catch (error) {
+        ctx.logger.warn("rk9-ads spend guard: undo acknowledgement not logged", { companyId, detail: safeError(error) });
+      }
+      return acknowledged.length;
+    };
+    // Only an acknowledgement: there was no halt to clear in the preview.
+    if ((typeof params.since !== "string" || params.since === "") && ackKeys.length > 0) {
+      return { dryRun: false, cleared: false, halt: null, acknowledgedUndos: await acknowledge() };
     }
     // `since` from the preview names the halt to clear: a kill switch or pause that ran after the preview stored a newer halt, which stays.
     if (typeof params.since !== "string" || params.since === "") {
@@ -210,10 +241,11 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     const { cleared, current } = await clearHalt(ctx, companyId, params.since, now());
     if (!cleared) {
       if (current) throw new Error("A newer kill switch or pause set the halt after the preview; preview it again and clear the current one");
-      return { dryRun: false, cleared: false, halt: null };
+      const acknowledgedUndos = await acknowledge();
+      return { dryRun: false, cleared: false, halt: null, ...(acknowledgedUndos > 0 ? { acknowledgedUndos } : {}) };
     }
     const halt = cleared;
-    const reason = reasonText(params.reason, "");
+    const acknowledgedUndos = await acknowledge();
     const metadata = {
       halt,
       clearedBy: { userId: context.actor.userId ?? null, runId: context.actor.runId ?? null },
@@ -226,7 +258,7 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     }
     ctx.logger.info("rk9-ads spend guard: halt cleared", { companyId, brandCode: halt.brandCode, rule: halt.rule, since: halt.since });
     // `remaining`: another halt (e.g. a scheduled pause's under a cleared kill switch) still in force.
-    return { dryRun: false, cleared: true, halt, ...(current ? { remaining: current } : {}) };
+    return { dryRun: false, cleared: true, halt, ...(current ? { remaining: current } : {}), ...(acknowledgedUndos > 0 ? { acknowledgedUndos } : {}) };
   });
 
   ctx.actions.register(PAUSE_ALL_ACTION_KEY, async (params, context) => {

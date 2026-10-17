@@ -38,6 +38,23 @@ export function memoryActivationRepo(store: MemoryGateStore, now: () => Date): A
           (row.decidedAt?.getTime() ?? 0) > since,
       );
     },
+    async newerActivation(companyId, input) {
+      const original = store.rows.get(input.gateRequestId);
+      const publicationId = original && original.companyId === companyId ? activationOf(original)?.publicationId : undefined;
+      const hit = [...store.rows.values()].find((row) => {
+        const binding = activationOf(row);
+        return (
+          row.companyId === companyId &&
+          row.id !== input.gateRequestId &&
+          row.status === "approved" &&
+          row.outcome?.result === "activated" &&
+          (row.decidedAt?.getTime() ?? 0) > input.since.getTime() &&
+          binding !== null &&
+          (binding.adId === input.objectId || binding.adsetId === input.objectId || binding.campaignId === input.objectId || binding.publicationId === publicationId)
+        );
+      });
+      return hit?.id ?? null;
+    },
     async close(companyId, id, outcome) {
       const row = store.rows.get(id);
       if (!row || row.companyId !== companyId || row.status !== "pending") return false;

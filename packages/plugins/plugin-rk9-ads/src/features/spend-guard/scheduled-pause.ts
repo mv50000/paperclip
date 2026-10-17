@@ -19,7 +19,8 @@
  * 3. Re-checks and activation undos (RK9-565), on every tick: the second
  *    listing of a kill switch or scheduled pause about a minute after it
  *    (recheck.ts), and the PAUSED writes of an activation undo that Meta
- *    refused (pending-undo.ts).
+ *    refused (pending-undo.ts), until Meta confirms, a newer activation
+ *    supersedes it or a board user acknowledges it.
  * 4. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
  *    (see data-gate.ts): a feed that cannot be read pauses nothing, but it
  *    fails the run so the broken feed is seen (RK9-523). When the predicate no
@@ -47,7 +48,7 @@ import { checkSpend } from "./guard.js";
 import { haltIdentity, readRuleHalt, storedRuleHalt } from "./halt.js";
 import { haltUntil, pauseAll, PauseListError, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
-import { retryPendingUndos } from "./pending-undo.js";
+import { retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
 import { dropRecheck, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS } from "./recheck.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
@@ -88,6 +89,8 @@ async function dayHalt(ctx: PluginContext, companyId: string, config: BrandConfi
 }
 
 export interface ScheduledPauseDeps extends PauseAllDeps {
+  /** Ends a failed undo's retry (pending-undo.ts). */
+  newerActivation?: UndoRetryDeps["newerActivation"];
   ctx: PluginContext;
   ledger: Ledger;
   store: OnceStore;

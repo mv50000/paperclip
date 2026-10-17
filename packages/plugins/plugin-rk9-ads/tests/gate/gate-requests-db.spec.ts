@@ -129,6 +129,32 @@ describeDb("activation gate SQL on real Postgres", () => {
     expect(row).toEqual({ paused_ad_ids: ["1", "2"], status: "denied" });
   });
 
+  it("finds a newer completed activation of the object or the card's publication, per company (RK9-565)", async () => {
+    const repo = sqlActivationGateRepo(testDb.client);
+    const ad = "120200000000000313";
+    const failed = await card({ adId: ad });
+    const since = new Date(Date.now() - 60_000);
+    const query = { objectId: ad, gateRequestId: failed.id, since };
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+
+    // Approved but not activated: the retry goes on.
+    const newer = await card({ adId: ad });
+    expect(await store.decide(companyA, newer.tokenHash, "approved", 4242)).toBe(true);
+    expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { result: "failed" } })).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+    expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { result: "activated" } })).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toBe(newer.id);
+    // The same publication's card also names the ad set and the campaign the undo failed on.
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000999" })).toBe(newer.id);
+    // Decided before the failure: not newer.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = $2 WHERE id = $1`, [newer.id, new Date(since.getTime() - 1_000).toISOString()]);
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = now() WHERE id = $1`, [newer.id]);
+    // The failed card itself never counts, and another company sees nothing.
+    expect(await repo.newerActivation(companyA, { ...query, gateRequestId: newer.id })).toBeNull();
+    expect(await repo.newerActivation(companyB, query)).toBeNull();
+  });
+
   it("sweeps only cards past valid_until, and the kit's expire moves each one once", async () => {
     const repo = sqlActivationGateRepo(testDb.client);
     const live = await card({ adId: "120200000000000313" });

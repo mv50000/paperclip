@@ -7,18 +7,24 @@
  * scheduled pause already marked done do not run again. So the handler
  * stores the object here and sends one Telegram alert, and the
  * scheduled-pause job (every 5 min) pauses it again on each tick until Meta
- * confirms.
+ * confirms, whether a halt is still in force or not: a scheduled halt that
+ * ends at 06:00, or the cap halt at the month's end, must not leave the
+ * object spending.
  *
- * The retry runs only while a halt is in force. Once none is (a board user
- * cleared it, which acknowledges the open undos, or a timed halt ended), the
- * entry is dropped with one audit row and one alert: activations are allowed
- * again, and a pause then could stop a newer, approved activation.
+ * An entry ends only when:
+ * - Meta confirms the PAUSED write (one audit row);
+ * - a newer activation of the same object or of the card's publication
+ *   completed after the failure (an approved card, outcome `activated`):
+ *   the operator wants it running, so the retry stops (one audit row, one
+ *   alert);
+ * - a board user acknowledges it with `clear-halt` (`acknowledgeUndos`, the
+ *   entries the preview listed; activity log).
  *
  * Alerts use alert_dedupe markers (`undo-failed:<brand>:<gateRequestId>`,
  * `undo-dropped:<brand>:<gateRequestId>`) like the spend alerts (alerts.ts):
  * claimed before the send and given back when the send fails, so the next
  * tick sends again. A failed retry writes no audit row (the job run fails
- * instead); a successful retry and a drop write one each.
+ * instead).
  *
  * Stored in plugin_state (no migration, G11), one key per company. The gate
  * handlers and the job run in one worker process, so a per-company lock
@@ -33,7 +39,7 @@ import type { Ledger } from "../../db.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { setObjectStatus } from "../../meta/methods.js";
 import { isDryRun } from "../../meta/types.js";
-import { HALT_NAMESPACE, readHalt, type HaltRule } from "./halt.js";
+import { HALT_NAMESPACE, type HaltRule } from "./halt.js";
 import { brandClient, recordAction, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const UNDO_FAILED_KIND = "undo_failed";
@@ -57,6 +63,10 @@ type StateCtx = Pick<PluginContext, "state">;
 
 function undoKey(companyId: string) {
   return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `pending-undo:${companyId}` };
+}
+
+export function undoEntryKey(entry: Pick<PendingUndo, "objectId" | "gateRequestId">): string {
+  return `${entry.objectId}|${entry.gateRequestId}`;
 }
 
 export function undoAlertKey(kind: "failed" | "dropped", brandCode: string, gateRequestId: string): string {
@@ -105,11 +115,23 @@ export async function addPendingUndos(ctx: StateCtx, companyId: string, entries:
 async function removePendingUndos(ctx: StateCtx, companyId: string, entries: readonly Pick<PendingUndo, "objectId" | "gateRequestId">[]): Promise<void> {
   if (entries.length === 0) return;
   await withLock(companyId, async () => {
-    const ids = new Set(entries.map((entry) => `${entry.objectId}|${entry.gateRequestId}`));
-    const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(`${entry.objectId}|${entry.gateRequestId}`));
+    const ids = new Set(entries.map(undoEntryKey));
+    const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(undoEntryKey(entry)));
     if (rest.length === 0) await ctx.state.delete(undoKey(companyId));
     else await ctx.state.set(undoKey(companyId), rest);
   });
+}
+
+/**
+ * A board user's acknowledgement (clear-halt): removes the entries named by
+ * `keys` (undoEntryKey of the entries the preview listed) and returns them.
+ * An entry added after the preview is not named and stays.
+ */
+export async function acknowledgePendingUndos(ctx: StateCtx, companyId: string, keys: readonly string[]): Promise<PendingUndo[]> {
+  const wanted = new Set(keys);
+  const named = (await readPendingUndos(ctx, companyId)).filter((entry) => wanted.has(undoEntryKey(entry)));
+  await removePendingUndos(ctx, companyId, named);
+  return named;
 }
 
 const KIND_TEXT: Record<UndoObjectKind, string> = { campaign: "kampanja", adset: "ad set", ad: "mainos" };
@@ -131,13 +153,12 @@ export function undoAlertText(
           `⚠️ ${name}: aktivoinnin peruutus epäonnistui pysäytyksen aikana`,
           `Voi olla yhä ACTIVE-tilassa: ${objectList(entries)}`,
           stored
-            ? "Peruutusta yritetään uudelleen 5 minuutin välein niin kauan kuin pysäytystila on päällä. Tarkista tila Metassa."
+            ? "Peruutusta yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen. Tarkista tila Metassa."
             : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
         ]
       : [
-          `⚠️ ${name}: pysäytystila päättyi ennen kuin aktivoinnin peruutus onnistui`,
-          `Voi olla yhä ACTIVE-tilassa: ${objectList(entries)}`,
-          "Uudelleenyritykset lopetettiin. Tarkista tila Metassa ja pysäytä tarvittaessa käsin.",
+          `ℹ️ ${name}: aktivoinnin peruutuksen uudelleenyritys lopetettiin, koska uudempi aktivointi hyväksyttiin`,
+          `Jää ACTIVE-tilaan: ${objectList(entries)}`,
         ];
   return lines.join("\n").slice(0, 3900);
 }
@@ -224,6 +245,8 @@ export interface UndoRetryDeps extends AlertDeps {
   ctx: PluginContext;
   ledger: Ledger;
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "dryRun", initiator: Initiator) => MetaGraphClient;
+  /** The newer completed activation that ends an entry's retry (gate-requests.ts newerActivation); none when not wired. */
+  newerActivation?: (companyId: string, input: { objectId: string; gateRequestId: string; since: Date }) => Promise<string | null>;
 }
 
 function byRequest(entries: readonly PendingUndo[]): Map<string, PendingUndo[]> {
@@ -233,22 +256,22 @@ function byRequest(entries: readonly PendingUndo[]): Map<string, PendingUndo[]> 
 }
 
 /**
- * The scheduled-pause job's tick: pauses every open undo again while a halt
- * is in force, or drops them all when none is. Returns the failure lines of
- * the run; throws only when the record or the halt cannot be read.
+ * The scheduled-pause job's tick: ends each open undo that a newer
+ * activation superseded and pauses every other one again. Returns the
+ * failure lines of the run; throws only when the record cannot be read.
  */
 export async function retryPendingUndos(
   deps: UndoRetryDeps,
   companyId: string,
   config: BrandConfig,
   initiator: Initiator,
-  now: Date,
+  _now: Date,
 ): Promise<string[]> {
   const entries = await readPendingUndos(deps.ctx, companyId);
   if (entries.length === 0) return [];
   const brand = config.brandCode;
   const failures: string[] = [];
-  const audit = (entry: PendingUndo, applied: boolean, error: string | null, message: string) =>
+  const audit = (entry: PendingUndo, applied: boolean, reason: string, error: string | null, message: string, extra: Record<string, unknown> = {}) =>
     recordAction(deps, {
       companyId,
       config,
@@ -259,39 +282,48 @@ export async function retryPendingUndos(
       action: "pause",
       dryRun: false,
       applied,
-      reason: applied ? "activation undo retried after a failed pause" : "the halt ended before the activation undo succeeded",
-      metrics: { gateRequestId: entry.gateRequestId, failedSince: entry.since, firstError: entry.error },
+      reason,
+      metrics: { gateRequestId: entry.gateRequestId, failedSince: entry.since, firstError: entry.error, ...extra },
       initiator,
       error,
       message,
     });
 
-  if (!(await readHalt(deps.ctx, companyId, now))) {
-    for (const [gateRequestId, group] of byRequest(entries)) {
-      for (const entry of group) await audit(entry, false, entry.error, `activation undo dropped for ${entry.kind} ${entry.objectId}: no halt in force`);
-      const alert = await sendUndoAlert(deps, companyId, config, "dropped", gateRequestId, group);
-      if (alert.error) failures.push(`${brand} activation undo: drop alert failed (${alert.error})`);
-    }
-    await removePendingUndos(deps.ctx, companyId, entries);
-    failures.push(`${brand} activation undo: the halt ended first, ${entries.length} object(s) may still be ACTIVE (${objectList(entries)})`);
-    return failures;
-  }
-
   const client = deps.clientFor ? deps.clientFor(companyId, config, "live", initiator) : brandClient(deps, companyId, config, "live", { initiator });
   const done: PendingUndo[] = [];
+  const superseded: Array<{ entry: PendingUndo; by: string }> = [];
   const stillFailing: PendingUndo[] = [];
   for (const entry of entries) {
+    let by: string | null;
+    try {
+      const since = new Date(entry.since);
+      by = deps.newerActivation && Number.isFinite(since.getTime()) ? await deps.newerActivation(companyId, { objectId: entry.objectId, gateRequestId: entry.gateRequestId, since }) : null;
+    } catch (error) {
+      // Unknown whether a newer approval wants it running: neither pause nor drop on this tick.
+      stillFailing.push(entry);
+      failures.push(`${brand} activation undo: newer activations of ${entry.kind} ${entry.objectId} not read (${safeError(error)}), retrying next tick`);
+      continue;
+    }
+    if (by) {
+      superseded.push({ entry, by });
+      await audit(entry, false, "a newer activation was approved after the failed undo", null, `activation undo of ${entry.kind} ${entry.objectId} ended: superseded by ${by}`, { supersededBy: by });
+      continue;
+    }
     try {
       const result = await setObjectStatus(client, entry.objectId, "PAUSED");
       if (isDryRun(result) || !result.success) throw new Error(`Meta did not confirm status PAUSED on ${entry.objectId}`);
       done.push(entry);
-      await audit(entry, true, null, `activation undo paused ${entry.kind} ${entry.objectId} on retry`);
+      await audit(entry, true, "activation undo retried after a failed pause", null, `activation undo paused ${entry.kind} ${entry.objectId} on retry`);
     } catch (error) {
       stillFailing.push(entry);
       failures.push(`${brand} activation undo: pausing ${entry.kind} ${entry.objectId} failed again (${safeError(error)}), retrying next tick`);
     }
   }
-  await removePendingUndos(deps.ctx, companyId, done);
+  await removePendingUndos(deps.ctx, companyId, [...done, ...superseded.map((item) => item.entry)]);
+  for (const [gateRequestId, group] of byRequest(superseded.map((item) => item.entry))) {
+    const alert = await sendUndoAlert(deps, companyId, config, "dropped", gateRequestId, group);
+    if (alert.error) failures.push(`${brand} activation undo: alert failed (${alert.error})`);
+  }
   // The first alert may not have gone out: the marker makes this a no-op once it has.
   for (const [gateRequestId, group] of byRequest(stillFailing)) {
     const alert = await sendUndoAlert(deps, companyId, config, "failed", gateRequestId, group);

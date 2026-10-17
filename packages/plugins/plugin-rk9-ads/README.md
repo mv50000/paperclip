@@ -310,10 +310,16 @@ the core chat-channels bot is never shared. See
   that lost the race to a pause cannot pause again what it set ACTIVE (Meta
   refuses the PAUSED write), it stores the objects, fails the card and sends
   one Telegram alert (`alert_dedupe`). Each `scheduled-pause` tick pauses them
-  again while a halt is in force and fails its run until Meta confirms; once
-  no halt is in force (a board user's clear acknowledges them, or a timed
-  halt ended) they are dropped with one audit row and one alert. The
-  `clear-halt` preview and the Ads page list them.
+  again and fails its run until Meta confirms, whether a halt is still in
+  force or not: a scheduled halt that ends at 06:00 or a cap halt that ends
+  with the month must not leave the object spending. An entry ends only when
+  Meta confirms (one audit row), when a newer card of the same object or
+  publication was approved and activated after the failure (one audit row,
+  one alert), or when a board user acknowledges it: the `clear-halt` preview
+  lists the entries with their keys, and a real call with
+  `acknowledgeUndos` (no `since` needed) removes those (activity log). The
+  Ads page shows them with a typed "KUITTAA" confirmation; clearing a halt
+  does not acknowledge them.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
