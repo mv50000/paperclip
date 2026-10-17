@@ -7,6 +7,8 @@
  * can carry the request. `details` holds only whitelisted Graph fields.
  */
 
+import { redactText } from "./redact.js";
+
 /** Graph `error_subcode` for "the ad account has not accepted the policy terms". */
 export const POLICY_ACCEPTANCE_SUBCODE = 2859024;
 
@@ -196,4 +198,93 @@ export class MetaResponseError extends MetaGraphError {
     super(message, details);
     this.name = "MetaResponseError";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Operator-readable messages (A8, RK9-514)
+// ---------------------------------------------------------------------------
+
+/** Graph `error_subcode`: the app that creates the creative is in development mode. */
+export const APP_IN_DEVELOPMENT_SUBCODE = 1885183;
+
+/** What an operator reads for a known Meta error: what happened and what to do. */
+export interface KnownMetaError {
+  summary: string;
+  fix: string;
+}
+
+/** Known `error_subcode` values. A subcode wins over the error class and the code. */
+export const KNOWN_META_SUBCODES: Readonly<Record<number, KnownMetaError>> = {
+  [POLICY_ACCEPTANCE_SUBCODE]: {
+    summary: "the ad account has not accepted Meta's policy terms",
+    fix:
+      "Open Ads Manager (or Business settings > Ad accounts) as an admin of this ad account, accept the pending terms " +
+      "(for example the non-discrimination policy), then retry.",
+  },
+  [APP_IN_DEVELOPMENT_SUBCODE]: {
+    summary: "the Meta app is in development mode, so its creatives cannot run as ads",
+    fix: "Switch the Meta app (Sunspot Ads) to Live mode in the App Dashboard, then retry.",
+  },
+};
+
+/** Known `code` values, used when the subcode is not known. */
+export const KNOWN_META_CODES: Readonly<Record<number, KnownMetaError>> = {
+  [TOKEN_INVALID_CODE]: {
+    summary: "the Meta access token is expired or revoked",
+    fix: "Generate a new system user token for this brand and update the company secret.",
+  },
+  10: {
+    summary: "the token lacks a permission for this object",
+    fix: "Give the system user ads_management on the ad account and the page, then run Verify connection.",
+  },
+  200: {
+    summary: "the token lacks a permission for this object",
+    fix: "Give the system user ads_management on the ad account and the page, then run Verify connection.",
+  },
+  368: {
+    summary: "Meta has temporarily blocked this account from posting",
+    fix: "Check Account Quality in Business settings and wait for the block to lift.",
+  },
+};
+
+function oneLine(text: string, max = 400): string {
+  const flat = redactText(text).replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function known(error: MetaGraphError): KnownMetaError | null {
+  if (error.subcode !== null && Object.hasOwn(KNOWN_META_SUBCODES, error.subcode)) return KNOWN_META_SUBCODES[error.subcode]!;
+  if (error instanceof TokenInvalidError) return KNOWN_META_CODES[TOKEN_INVALID_CODE]!;
+  if (error.code !== null && Object.hasOwn(KNOWN_META_CODES, error.code)) return KNOWN_META_CODES[error.code]!;
+  return null;
+}
+
+/**
+ * One line an operator can act on: what failed, the Meta code, and the fix.
+ * No stack trace and no token: every MetaGraphError message is redacted
+ * already, and any other error contributes only its first line.
+ */
+export function operatorMessage(error: unknown): string {
+  if (error instanceof MetaGraphError) {
+    const codes = [error.code !== null ? `code ${error.code}` : null, error.subcode !== null ? `subcode ${error.subcode}` : null]
+      .filter(Boolean)
+      .join(", ");
+    const entry = known(error);
+    if (entry) return oneLine(`Meta refused the request: ${entry.summary}${codes ? ` (${codes})` : ""}. Fix: ${entry.fix}`);
+    if (error instanceof RateLimitError) {
+      return oneLine(`Meta rate limit hit${codes ? ` (${codes})` : ""}. Fix: wait a few minutes and run the publish again; it resumes where it stopped.`);
+    }
+    if (error instanceof MediaProcessingError) {
+      return oneLine(`${error.message}. Fix: re-encode the video (H.264/AAC MP4) and stage it again.`);
+    }
+    if (error instanceof MediaTimeoutError) {
+      return oneLine(`${error.message}. Fix: run the publish again later; it keeps the uploaded video and polls again.`);
+    }
+    if (error instanceof WriteRefusedError) return oneLine(`${error.message}. Nothing was sent to Meta.`);
+    if (error instanceof TokenResolveError) return oneLine(`${error.message}. Fix: check the brand's meta.accessTokenRef secret binding.`);
+    const user = error.userMessage ? ` Meta says: ${error.userMessage}` : "";
+    return oneLine(`${error.message}.${user}`);
+  }
+  const first = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return oneLine(first.split("\n")[0] ?? "unknown error");
 }

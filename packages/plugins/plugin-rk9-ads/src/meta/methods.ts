@@ -643,3 +643,47 @@ export async function createAdSet(client: MetaGraphClient, actId: string, input:
   if (isDryRun(result)) return result;
   return { adSetId: requireString(result.id, "id") };
 }
+
+// ---------------------------------------------------------------------------
+// Publishing (A8, RK9-514)
+// ---------------------------------------------------------------------------
+
+/** Ads of one ad set (`<adSetId>/ads`), every page. */
+export async function listAdSetAds(client: MetaGraphClient, adSetId: string, options: ListOptions = {}): Promise<Ad[]> {
+  const path = `${requireId(adSetId, "adSetId")}/ads`;
+  const rows = complete(
+    await client.paginate<RawStatusRow>(path, listParams(`${STATUS_FIELDS},adset_id,campaign_id,creative{id}`, options), options),
+    path,
+  );
+  return rows.map((raw) => ({
+    ...toStatusRow(raw),
+    adsetId: optionalString(raw.adset_id),
+    campaignId: optionalString(raw.campaign_id),
+    creativeId: optionalString(raw.creative?.id),
+  }));
+}
+
+/**
+ * Points an existing ad at another creative and pauses it. Only `creative`
+ * and `status: "PAUSED"` are sent: the budget and ad set stay as they are.
+ */
+export async function swapAdCreative(
+  client: MetaGraphClient,
+  adId: string,
+  creativeId: string,
+): Promise<WriteResult<{ success: boolean }>> {
+  // status PAUSED travels with the swap: new content never goes live without the gate (A9).
+  const result = await client.post<{ success?: unknown }>(requireId(adId, "adId"), {
+    creative: { creative_id: requireId(creativeId, "creativeId") },
+    status: "PAUSED",
+  });
+  if (isDryRun(result)) return result;
+  return { success: result.success === true };
+}
+
+/** Deletes an object by id, e.g. an ad creative no ad uses (orphan cleanup). */
+export async function deleteObject(client: MetaGraphClient, objectId: string): Promise<WriteResult<{ success: boolean }>> {
+  const result = await client.delete<{ success?: unknown }>(requireId(objectId, "objectId"));
+  if (isDryRun(result)) return result;
+  return { success: result.success === true };
+}
