@@ -64,9 +64,9 @@ describe("operatorMessage", () => {
   });
 
   it("keeps any other error to its first line and redacts tokens", () => {
-    const error = new Error("boom access_token=EAAGsecretvalue123456789\n    at file.ts:1:1");
+    const error = new Error("boom access_token=EAAGsentinelvalue123456789\n    at file.ts:1:1");
     const message = operatorMessage(error);
-    expect(message).not.toContain("EAAGsecretvalue123456789");
+    expect(message).not.toContain("EAAGsentinelvalue123456789");
     expect(message).not.toContain("file.ts");
   });
 });
