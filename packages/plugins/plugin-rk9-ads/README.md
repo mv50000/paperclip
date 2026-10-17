@@ -270,22 +270,30 @@ the core chat-channels bot is never shared. See
   (`dryRun` defaults to true; a live run needs `confirm: true`), the agent tool
   `rk9ads_pause_all`, and the `pause_all` gate card's "⏸ Pysäytä kaikki"
   button (allowlisted user in the brand chat, no second step).
-- **Open cards and the standing halt** (RK9-557, `halt.ts`). Before its
+- **Open cards and the halts** (RK9-557, RK9-561, `halt.ts`). Before its
   first Meta call a live kill switch, 90 % cap pause or scheduled pause
-  closes every open `activate_ad` card row of the company (`expired`), so a
-  tap cannot undo the pause. The cards are edited with the reason after the
-  Meta pauses, so a slow Telegram does not delay them. The data gate
-  leaves the cards open. The kill switch also leaves a standing halt in the
-  plugin state (`spend-guard` namespace, no migration). While it is set,
-  `activate_ad` refuses (also a card sent later), and it reads the halt again
-  before every ACTIVE write and after the last write; a halt seen during or
-  after the writes pauses again what the run set ACTIVE. The halt has no expiry.
-  Only a board user clears it, with the action `clear-halt` (`dryRun`
-  defaults to true; a real clear needs `confirm: true`; an agent may only
-  preview it; pass the preview's `since` to refuse a clear when a newer kill
-  switch has set the halt again). There is no Telegram button for it. A failed halt write or
-  card close does not stop the pause: the result (`haltError`,
-  `cardsError`) and the audit row name it.
+  leaves its halt in the plugin state (`spend-guard` namespace, one key per
+  rule, no migration) and closes every open `activate_ad` card row of the
+  company (`expired`), so a tap cannot undo the pause. The cards are edited
+  with the reason after the Meta pauses, so a slow Telegram does not delay
+  them. A row whose close fails does not stop the others. The data gate
+  leaves the cards open and sets no halt. While a halt is in force,
+  `activate_ad` refuses (also a card sent later, which says so), and it reads
+  the halt again before every ACTIVE write and after the last write; a halt
+  seen during or after the writes pauses again what the run set ACTIVE. So an
+  activation approved just before a pause cannot undo it. The kill switch's
+  halt has no expiry; the scheduled pause's lasts until 06:00 local time the
+  next morning; the cap pause's until the next local month. A live kill
+  switch stores its halt and closes the cards also when no brand config can
+  be loaded, then fails with nothing paused in Meta.
+  Only a board user clears a halt early, with the action `clear-halt`
+  (`dryRun` defaults to true; a real clear needs `confirm: true` and the
+  preview's `since`; an agent or the system may only preview it). The clear
+  lifts only the halt with that `since`: it stores a marker with that halt's
+  id, so a newer kill switch or pause that set the halt again stays. There is
+  no Telegram button for it. A failed halt write or card close does not stop
+  the pause: the result (`haltError`, `cardsError`) and the audit row name
+  it.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
@@ -294,14 +302,17 @@ the core chat-channels bot is never shared. See
   back, fails the run and is sent on the next check. There is no automatic
   pause at 100 %: the A6 spec asks for an alert, and Meta's `spend_cap` is the
   hard stop (RK9-523). The job runs the scheduled pause once per local day at
-  or after `schedule.scheduledPause.at` (off by default). It also runs the
+  or after `schedule.scheduledPause.at` (off by default). The day is marked
+  once the Meta pauses succeeded; a failed card close or halt write fails the
+  run once and is not retried, so ads activated on purpose later that evening
+  stay on. It also runs the
   data gate when `schedule.dataGate` is set. The gate's predicate `value
   <operator> threshold` is the condition for the ads to keep running. A JSON
   pointer to an array counts its items. An unreadable feed pauses nothing
   (fail-open), but it fails the run so the broken feed is seen. A Telegram
   failure after a pause fails the run, and the pauses stay.
 - **Data** `spend-guard` (`getData`) and the tool `rk9ads_get_pacing` return
-  the guard figures, the alerted thresholds and `halt` (the standing halt or
+  the guard figures, the alerted thresholds and `halt` (the halt in force or
   null; `haltError` when it cannot be read). They never return a token.
 - Every pause, refusal and alert writes a `rule_actions` row and an activity
   entry. Refusals and alerts use `rule_type = pause_all_cap` with
@@ -567,7 +578,7 @@ The plugin's own spend gate (G1): `src/gate/` and `src/features/gate/`. No
    creative, RK9-557), refuses ⚠ states
    (ARCHIVED, DELETED, effective_status such as DISAPPROVED or WITH_ISSUES),
    and runs the spend guard for each object it will activate. Last it reads
-   the kill switch's standing halt. Any refusal ends the card `denied` with
+   the halt in force (kill switch, scheduled pause or cap pause). Any refusal ends the card `denied` with
    the reason and no Meta write.
 3. **Writes.** The ad ACTIVE, every other ACTIVE ad of the ad set PAUSED
    (newest wins), then the ad set and the campaign ACTIVE only if PAUSED.
