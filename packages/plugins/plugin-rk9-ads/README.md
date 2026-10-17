@@ -463,6 +463,12 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
 - **Data** `rules` and **action** `rules.dryRun` (A12's editor, G13): the
   effective rules, and the decisions the rules would make now without any
   write.
+- **Action** `rules.prepareSave` (A12, RK9-518): validates an edited
+  `{ liveMode, list }` with `parseRules()`. It refuses `propose_scale` and
+  keeps the stored `propose_scale` entries. It writes nothing: the UI saves
+  the returned block through the host config route (instance admin).
+- A live cap pause whose card close or halt write failed fails the run
+  (`cardsError`, `haltError`), the same as a failed audit row.
 
 ## Publishing pipeline (RK9-514)
 
@@ -591,6 +597,33 @@ anything ACTIVE.
 |---|---|---|
 | `resend_gate_card` | action | `{ gateRequestId \| publicationId }`: posts a pending, unexpired activation card again |
 | `gate-expiry` | job | Expires pending cards past `valid_until` and removes their buttons |
+
+## Operator UI (RK9-518)
+
+`src/ui/` (slots in the manifest) and `src/features/ui/` (worker views).
+
+- **Mainonta page** (`/ads`): MTD spend against `monthlyCapEur` with the
+  projection and the `spend_cap` status, the standing halt (when, who, why)
+  with a board-only clear, the kill switch, the publications with their Meta
+  status, CTR, CPC and fatigue, the pending activation cards (resend), the
+  rule log of 7 days, 14 days of spend, and a digest preview.
+- **Settings** (company settings, `ads`): a redacted config summary with a
+  link to the host config form, the preflight checks with a re-run, the
+  provision dry run, and the rule editor (pause rules only).
+- **Dashboard widget**: MTD against the cap, pending cards, and the halt.
+- **Data** `ads-overview`, `ads-widget`, `ads-settings`: allowlist DTOs
+  (`dto.ts`). They never carry raw config, secret refs or tokens; every value
+  goes through `sanitize()`. The company comes from the host context only.
+- **Action** `pause-ad` `{ adId, dryRun?, confirm? }`: pauses one ad of the
+  brand's ad account. `dryRun` defaults to true. A real pause needs
+  `confirm: true` and a board user. It writes a `rule_actions` row
+  (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
+  activity entry. There is no activate, resume or scale action (G1, G9).
+- **Money actions in the UI** (the kill switch, pause-ad, the halt clear,
+  provision, switching the rules to live) need a dry-run preview and a typed
+  word before the live call.
+- The kill switch stays on the page when the config is invalid or
+  unavailable; `pause-all` then runs on the last valid config.
 
 ## Brand config, preflight and provisioning (RK9-510)
 

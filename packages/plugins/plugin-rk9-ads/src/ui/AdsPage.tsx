@@ -207,7 +207,8 @@ type KillSwitchOutcome = PauseAllResult & { fallbackConfig?: string };
 
 function FallbackNote(props: { state?: string }) {
   if (!props.state) return null;
-  return <ErrorText>Nykyiset asetukset ovat {props.state === "invalid" ? "virheelliset" : "lukukelvottomat"}: hätäkatkaisin käyttää viimeisintä toimivaa konfiguraatiota.</ErrorText>;
+  const label = props.state === "invalid" ? "virheelliset" : props.state === "disabled" ? "pois päältä" : "lukukelvottomat";
+  return <ErrorText>Nykyiset asetukset ovat {label}: hätäkatkaisin käyttää viimeisintä toimivaa konfiguraatiota.</ErrorText>;
 }
 
 /** The live result; every partial failure shows as an error, not as a footnote (RK9-561). */
@@ -392,7 +393,7 @@ export function AdsPage(props: PluginPageProps) {
         {data.halt || data.haltError ? <HaltBanner halt={data.halt} haltError={data.haltError} onChanged={overview.refresh} /> : null}
         {data.state !== "absent" ? (
           <Section title="Hätäkatkaisin">
-            <Muted>Mainokset voivat olla yhä käynnissä. Hätäkatkaisin toimii viimeisimmällä toimivalla konfiguraatiolla.</Muted>
+            <Muted>Mainokset voivat olla yhä käynnissä. Hätäkatkaisin käyttää viimeisintä toimivaa konfiguraatiota, jos sellainen on tallessa.</Muted>
             <KillSwitchButton onDone={overview.refresh} />
           </Section>
         ) : null}
