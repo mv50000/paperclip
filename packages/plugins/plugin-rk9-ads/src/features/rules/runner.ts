@@ -1,6 +1,6 @@
 /**
  * The `rules-evaluate` job body (A11, RK9-515). Hourly, per company with a
- * valid brand config:
+ * brand config:
  *
  * 1. Read the live status of the brand's ads and campaigns (read-only client).
  *    A failed read pauses nothing (fail-open) and fails the run.
@@ -8,7 +8,12 @@
  *    as the digest, RK9-526). Unreadable: the cap rule makes no decision.
  * 3. Read completed ad-days from insights_daily, creative validUntil, A10's
  *    fatigue (only when a pause_fatigued rule is on) and the earlier
- *    rule_actions the cooldowns need.
+ *    rule_actions the cooldowns need. Each read is isolated (RK9-536): a
+ *    failed one fails the run and switches off only the rules that need it,
+ *    never the built-in cap rule. Without the earlier rule_actions only the
+ *    cap rule runs, without its cooldown (its pause is idempotent).
+ *    Threshold rules wait for insights-daily-close; still waiting at 06:00
+ *    local time fails the run, so a broken close is seen.
  * 4. evaluateRules() decides.
  * 5. Every decision goes to rule_actions and the activity log:
  *    - shadow: dry_run=true, no Meta write. The morning digest lists the
@@ -19,6 +24,11 @@
  *    - pause_all (the built-in cap rule): A6's pauseAll, dry run in shadow.
  *      It pauses only ACTIVE objects, audits itself and notifies only when
  *      it paused something.
+ *
+ * A brand whose config is invalid, unavailable or disabled (monthlyCapEur
+ * cleared) runs only the built-in cap rule, on the last valid config (A6's
+ * loadPauseConfig, README ADR 3), and fails the run so the broken config is
+ * seen. A brand saved disabled and never enabled is skipped quietly.
  *
  * One brand's failure does not stop the others. The run throws at the end
  * when anything failed, so the host shows it.
@@ -31,14 +41,15 @@ import type { Ledger } from "../../db.js";
 import { evaluateFatigue, type AdFatigue } from "../../insights/fatigue-issues.js";
 import { addDays } from "../../insights/mtd.js";
 import { createInsightsStore } from "../../insights/store.js";
-import { localDate } from "../../kit/local-time.js";
+import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import type { MetaClientMode, MetaGraphClient } from "../../meta/graph.js";
 import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
 import { pauseAll } from "../spend-guard/killswitch.js";
+import { loadPauseConfig, pauseReason, type PauseConfig } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, safeError, type Initiator, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { evaluateRules, type RuleAdDay, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
-import type { RuleSet, ThresholdPauseRule } from "./schema.js";
+import { BUILTIN_PAUSE_ALL_CAP_RULE_ID, builtinPauseAllCap, type RuleSet, type ThresholdPauseRule } from "./schema.js";
 import type { RulesStore } from "./store.js";
 
 export const RULES_JOB_KEY = "rules-evaluate";
@@ -46,6 +57,8 @@ export const RULES_ACTIVITY_PREFIX = "rk9-ads rules";
 const LIST_MAX_PAGES = 100;
 /** Telegram allows 4096 characters; the notice stays below this. */
 const NOTICE_MAX = 3900;
+/** Local time by which insights-daily-close must have finalised yesterday. */
+const CLOSE_DEADLINE = "06:00";
 
 export interface RulesDeps {
   ctx: PluginContext;
@@ -157,7 +170,11 @@ export function liveNoticeText(config: BrandConfig, paused: readonly AppliedDeci
   return lines.join("\n");
 }
 
-/** The snapshots evaluateRules needs. A status read failure throws (fail-open: nothing is decided). */
+/**
+ * The snapshots evaluateRules needs, and the rules that can run on them. A
+ * status read failure throws (fail-open: nothing is decided). Any other read
+ * failure is a failure line, and its rules get no input, so they decide nothing.
+ */
 async function readInputs(
   deps: RulesDeps,
   companyId: string,
@@ -166,7 +183,7 @@ async function readInputs(
   now: Date,
   initiator: Initiator,
   failures: string[],
-): Promise<{ snapshots: RuleSnapshots; status: RuleStatus }> {
+): Promise<{ snapshots: RuleSnapshots; status: RuleStatus; rules: RuleSet }> {
   const brand = config.brandCode;
   const enabled = rules.list.filter((rule) => rule.enabled);
   const readClient = clientFor(deps, companyId, config, "readOnly", initiator);
@@ -184,30 +201,48 @@ async function readInputs(
 
   let spend: RuleSnapshots["spend"] = null;
   if (enabled.some((rule) => rule.type === "pause_all_cap")) {
-    const figures = await checkSpend({ config, client: readClient, now });
-    // The cap is in EUR: a figure in another currency is no basis for a pause.
-    if (figures.pctUsed === null || figures.mtdEur === null || figures.currency !== "EUR") {
-      failures.push(`${brand}: month-to-date not read (${figures.reason}: ${figures.detail}), pause_all_cap skipped (fail-open)`);
-    } else {
-      spend = { month: figures.month, mtdEur: figures.mtdEur, monthlyCapEur: figures.monthlyCapEur, pctUsed: figures.pctUsed };
+    try {
+      const figures = await checkSpend({ config, client: readClient, now });
+      // The cap is in EUR: a figure in another currency is no basis for a pause.
+      if (figures.pctUsed === null || figures.mtdEur === null || figures.currency !== "EUR") {
+        failures.push(`${brand}: month-to-date not read (${figures.reason}: ${figures.detail}), pause_all_cap skipped (fail-open)`);
+      } else {
+        spend = { month: figures.month, mtdEur: figures.mtdEur, monthlyCapEur: figures.monthlyCapEur, pctUsed: figures.pctUsed };
+      }
+    } catch (error) {
+      failures.push(`${brand}: month-to-date not read (${safeError(error)}), pause_all_cap skipped (fail-open)`);
     }
   }
 
-  const yesterday = addDays(localDate(now, config.timeZone), -1);
+  const today = localDate(now, config.timeZone);
+  const yesterday = addDays(today, -1);
   const thresholdRules = enabled.filter((rule): rule is ThresholdPauseRule => rule.type === "threshold_pause");
   const maxDays = Math.max(0, ...thresholdRules.map((rule) => rule.days));
   // Yesterday's rows are partial until insights-daily-close finalised them
   // (shortly after local midnight); until then threshold rules wait.
   let days: RuleAdDay[] = [];
   if (maxDays > 0) {
-    if (await deps.store.dayClosed(companyId, localDate(now, config.timeZone))) {
-      days = await deps.store.adDays(companyId, addDays(yesterday, -(maxDays - 1)), yesterday);
-    } else {
-      deps.ctx.logger.info("rk9-ads rules: yesterday's insights are not closed yet, threshold rules wait", { companyId, yesterday });
+    try {
+      if (await deps.store.dayClosed(companyId, today)) {
+        days = await deps.store.adDays(companyId, addDays(yesterday, -(maxDays - 1)), yesterday);
+      } else if (isLocalTimeAtOrAfter(now, CLOSE_DEADLINE, config.timeZone)) {
+        failures.push(`${brand}: insights-daily-close has not finalised ${yesterday} by ${CLOSE_DEADLINE}, threshold rules wait`);
+      } else {
+        deps.ctx.logger.info("rk9-ads rules: yesterday's insights are not closed yet, threshold rules wait", { companyId, yesterday });
+      }
+    } catch (error) {
+      failures.push(`${brand}: insights not read (${safeError(error)}), threshold rules skipped (fail-open)`);
     }
   }
 
-  const creatives = enabled.some((rule) => rule.type === "pause_valid_until") ? await deps.store.creativeValidity(companyId) : [];
+  let creatives: RuleSnapshots["creatives"] = [];
+  if (enabled.some((rule) => rule.type === "pause_valid_until")) {
+    try {
+      creatives = await deps.store.creativeValidity(companyId);
+    } catch (error) {
+      failures.push(`${brand}: creative validity not read (${safeError(error)}), pause_valid_until skipped (fail-open)`);
+    }
+  }
 
   let fatigue: RuleSnapshots["fatigue"] = [];
   if (enabled.some((rule) => rule.type === "pause_fatigued") && config.fatigue.enabled) {
@@ -220,11 +255,31 @@ async function readInputs(
   }
 
   const maxCooldownHours = Math.max(0, ...enabled.map((rule) => rule.cooldownHours));
-  const priorActions = maxCooldownHours > 0
-    ? await deps.store.priorActions(companyId, enabled.map((rule) => rule.ruleId), new Date(now.getTime() - maxCooldownHours * 3_600_000))
-    : [];
+  let priorActions: RuleSnapshots["priorActions"] = [];
+  let runnable = rules;
+  if (maxCooldownHours > 0) {
+    try {
+      priorActions = await deps.store.priorActions(companyId, enabled.map((rule) => rule.ruleId), new Date(now.getTime() - maxCooldownHours * 3_600_000));
+    } catch (error) {
+      // Without their cooldowns the other rules would decide again every
+      // hour. The cap rule still runs: pauseAll pauses only what is ACTIVE.
+      runnable = { ...rules, list: rules.list.filter((rule) => rule.type === "pause_all_cap") };
+      failures.push(`${brand}: earlier rule actions not read (${safeError(error)}), only pause_all_cap ran`);
+    }
+  }
 
-  return { snapshots: { timeZone: config.timeZone, days, creatives, fatigue, spend, priorActions }, status };
+  return { snapshots: { timeZone: config.timeZone, days, creatives, fatigue, spend, priorActions }, status, rules: runnable };
+}
+
+/**
+ * The rules of a brand whose config is invalid, unavailable or disabled: only
+ * the built-in cap rule, with the mode and cooldown of the last valid config.
+ */
+export function capOnlyRules(lastValid: BrandConfig): RuleSet {
+  // A config stored before the rule engine has no rules block.
+  const stored = (lastValid as Partial<BrandConfig>).rules;
+  const cap = (Array.isArray(stored?.list) ? stored.list : []).find((rule) => rule.type === "pause_all_cap" && rule.ruleId === BUILTIN_PAUSE_ALL_CAP_RULE_ID);
+  return { liveMode: stored?.liveMode === true, list: [cap ?? builtinPauseAllCap()] };
 }
 
 /**
@@ -236,13 +291,13 @@ export async function runRulesForBrand(
   deps: RulesDeps,
   companyId: string,
   config: BrandConfig,
-  options: { initiator: Initiator; persist: boolean },
+  options: { initiator: Initiator; persist: boolean; fallback?: Extract<PauseConfig, { ok: true }>["fallback"] },
 ): Promise<BrandRulesOutcome> {
   const now = deps.now();
   const failures: string[] = [];
   const outcome: BrandRulesOutcome = { brandCode: config.brandCode, decisions: [], changed: 0, telegram: "skipped", failures };
-  const { snapshots, status } = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
-  const decisions = evaluateRules(snapshots, status, config.rules, now);
+  const { snapshots, status, rules } = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
+  const decisions = evaluateRules(snapshots, status, rules, now);
   if (!options.persist) {
     outcome.decisions = decisions.map((decision) => ({ ...decision, applied: false, error: null }));
     return outcome;
@@ -269,7 +324,8 @@ export async function runRulesForBrand(
           {
             dryRun: shadow,
             rule: "pause_all_cap",
-            reason: `${decision.ruleId}: ${decision.reason}`,
+            // A fallback run is marked in the audit row and the notice.
+            reason: pauseReason({ ok: true, config, fallback: options.fallback ?? null }, `${decision.ruleId}: ${decision.reason}`),
             initiator: options.initiator,
             notify: true,
             note: `Kulutus ${decision.metrics.pctUsed} % kuukauden katosta (${decision.metrics.mtdEur} / ${decision.metrics.monthlyCapEur} €)`,
@@ -279,6 +335,7 @@ export async function runRulesForBrand(
         const error = result.errors.length > 0 ? `${result.errors.length} pause(s) failed` : null;
         outcome.decisions.push({ ...decision, applied: !shadow && result.count > 0, error });
         if (error) failures.push(`${config.brandCode} ${decision.ruleId}: ${error}`);
+        if (result.auditError) failures.push(`${config.brandCode} ${decision.ruleId}: rule_actions insert failed (${result.auditError})`);
         if (result.telegram === "failed") failures.push(`${config.brandCode} ${decision.ruleId}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
       } catch (error) {
         // pauseAll audited the failed listing itself.
@@ -325,24 +382,31 @@ export function createRulesJob(deps: RulesDeps) {
     let brands = 0;
     for (const { companyId, result } of await listCompanyConfigs(ctx)) {
       if (result.state === "absent") continue;
-      if (result.state === "disabled") {
-        // monthlyCapEur unset (RK9-510): nothing may spend, so no rule runs.
-        // The scheduled pause still covers a brand that was enabled before.
-        ctx.logger.info("rk9-ads rules: brand disabled; skipped", { companyId });
+      // README ADR 3, RK9-536: the cap rule is a pause, so a config that
+      // cannot be read (invalid, unavailable) or was disabled by clearing
+      // monthlyCapEur still runs it, on the last valid config.
+      const loaded = await loadPauseConfig(ctx, companyId, result);
+      if (!loaded.ok && loaded.neverEnabled) {
+        // Saved disabled and never enabled (e.g. the AUR read-only config): nothing has spent.
+        ctx.logger.info("rk9-ads rules: brand disabled and never enabled; skipped", { companyId });
         continue;
       }
-      if (result.state !== "enabled") {
-        // No rule acts on a config it cannot read. The spend guard's pause side still runs (A6).
-        failures.push(`company ${companyId}: brand config is ${result.state}, rules not evaluated`);
+      if (!loaded.ok) {
+        failures.push(`company ${companyId}: ${loaded.error}; rules not evaluated`);
         continue;
+      }
+      let config = loaded.config;
+      if (loaded.fallback) {
+        failures.push(`${config.brandCode}: the brand config is ${loaded.fallback.state}; only pause_all_cap ran, on the last valid config`);
+        config = { ...config, rules: capOnlyRules(config) };
       }
       brands += 1;
       try {
-        const outcome = await runRulesForBrand(deps, companyId, result.config, { initiator: { source: "job", jobRunId: job.runId }, persist: true });
+        const outcome = await runRulesForBrand(deps, companyId, config, { initiator: { source: "job", jobRunId: job.runId }, persist: true, fallback: loaded.fallback });
         failures.push(...outcome.failures);
       } catch (error) {
         ctx.logger.warn("rk9-ads rules: brand failed", { companyId, error: safeError(error) });
-        failures.push(`${result.config.brandCode}: ${safeError(error)}`);
+        failures.push(`${config.brandCode}: ${safeError(error)}`);
       }
     }
     ctx.logger.info("rk9-ads rules-evaluate done", { runId: job.runId, brands, failures: failures.length });

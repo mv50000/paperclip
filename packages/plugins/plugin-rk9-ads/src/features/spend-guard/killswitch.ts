@@ -69,6 +69,8 @@ export interface PauseAllResult {
   /** "skipped": dry run, nothing paused or not asked to notify. */
   telegram: NoticeResult | "skipped" | "failed";
   telegramError?: string;
+  /** The rule_actions insert of this run failed (the pause itself stands). */
+  auditError?: string;
 }
 
 export interface PauseAllDeps {
@@ -250,7 +252,7 @@ export async function pauseAll(
   }
 
   if (result.count > 0 || result.errors.length > 0 || options.initiator.source !== "job") {
-    await recordAction(deps, {
+    const auditError = await recordAction(deps, {
       companyId,
       config,
       ruleId: options.rule,
@@ -279,6 +281,7 @@ export async function pauseAll(
         .slice(0, 1000) || null,
       message: `${options.rule}${options.dryRun ? " dry-run" : ""} ${options.dryRun ? "would pause" : "paused"} ${result.count} (source ${options.initiator.source})`,
     });
+    if (auditError) result.auditError = auditError;
   }
   return result;
 }

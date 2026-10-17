@@ -84,6 +84,64 @@ describe("evaluateRules (A11)", () => {
     });
   });
 
+  describe("the default CPC ceiling gates on spend over a 7-day window total (RK9-536)", () => {
+    const WEEK = ["2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"];
+    // Ololla: 100 EUR cap, G3 daily budget floor(100 * 100 / 31) = 322 cents.
+    const DAILY_CENTS = 322;
+
+    it("pauses an ad at 0.90 EUR per link click on Ololla's budget, which the old click gate never could", () => {
+      // 3 or 4 link clicks a day: 25 clicks for 22.54 EUR, 0.90 EUR per click.
+      const clicks = [4, 3, 4, 3, 4, 3, 4];
+      const days = WEEK.map((date, index) => ({ adId: "1", date, spendCents: DAILY_CENTS, impressions: 400, inlineLinkClicks: clicks[index]!, frequency: 1.2 }));
+      const decisions = evaluateRules(snapshots({ days }), status(), parseRules({}).rules, NOW);
+      expect(decisions).toEqual([
+        expect.objectContaining({
+          ruleId: "cpc-ceiling",
+          objectId: "1",
+          mode: "shadow",
+          metrics: expect.objectContaining({ spendEur: 22.54, clicks: 25, cpc: 0.9016, windowValue: 0.9016, aggregate: "window_total", days: 7, daysWithData: 7, from: "2026-10-14", to: "2026-10-20" }),
+          reason: "cpc > 0.5 over the 7-day window 2026-10-14..2026-10-20 (total 0.9); 22.54 EUR spend, 2800 impressions, 25 link clicks",
+        }),
+      ]);
+      // The old default (2 days, >= 10 link clicks): 2 days hold 6.44 EUR and 7 clicks, so it never fired.
+      const old = { ruleId: "old", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.5, days: 2, minImpressions: 500, minClicks: 10 };
+      expect(evaluateRules(snapshots({ days }), status(), ruleSet([old]), NOW)).toEqual([]);
+    });
+
+    it("pauses an ad with no link click once it has spent 3 EUR, and not before", () => {
+      const spent = (cents: number) => [{ adId: "1", date: "2026-10-18", spendCents: cents, impressions: 900, inlineLinkClicks: 0, frequency: 1.1 }];
+      const hit = evaluateRules(snapshots({ days: spent(300) }), status(), parseRules({}).rules, NOW);
+      expect(hit).toEqual([
+        expect.objectContaining({
+          objectId: "1",
+          metrics: expect.objectContaining({ spendEur: 3, clicks: 0, cpc: null, windowValue: null, daysWithData: 1 }),
+          reason: expect.stringMatching(/\(total no link clicks\); 3\.00 EUR spend/),
+        }),
+      ]);
+      expect(evaluateRules(snapshots({ days: spent(299) }), status(), parseRules({}).rules, NOW)).toEqual([]);
+    });
+
+    it("judges the window total, not each day: one cheap day does not save an expensive week", () => {
+      const rule = { ...CPC, days: 3, aggregate: "window_total", minImpressions: 0, minClicks: 0, minSpendEur: 3 };
+      const days = [day("1", "2026-10-18", 2, 300, 1), day("1", "2026-10-19", 1, 300, 5), day("1", "2026-10-20", 2, 300, 2)];
+      // Day 2 is 0.20 per click, the window is 5 EUR / 8 clicks = 0.625.
+      expect(evaluateRules(snapshots({ days }), status(), ruleSet([rule]), NOW)).toEqual([expect.objectContaining({ objectId: "1", metrics: expect.objectContaining({ windowValue: 0.625 }) })]);
+      // A cheap window total does not fire, whatever a single day did.
+      const cheap = [day("1", "2026-10-18", 2, 300, 1), day("1", "2026-10-19", 2, 300, 10)];
+      expect(evaluateRules(snapshots({ days: cheap }), status(), ruleSet([rule]), NOW)).toEqual([]);
+      // Days outside the window (today, or before it) do not count.
+      const outside = [day("1", "2026-10-17", 10, 300, 0), day("1", "2026-10-21", 10, 300, 0)];
+      expect(evaluateRules(snapshots({ days: outside }), status(), ruleSet([rule]), NOW)).toEqual([]);
+    });
+
+    it.each([
+      ["spend == minSpendEur fires", 6.5, 1],
+      ["spend below minSpendEur does not", 6.51, 0],
+    ])("each_day honours minSpendEur too: %s", (_label, minSpendEur, expected) => {
+      expect(evaluateRules(snapshots({ days: badCpcDays() }), status(), ruleSet([{ ...CPC, minSpendEur }]), NOW)).toHaveLength(expected);
+    });
+  });
+
   describe("N consecutive Helsinki calendar days", () => {
     it("ignores today's partial day and needs every day of the window", () => {
       const rules = ruleSet([CPC]);

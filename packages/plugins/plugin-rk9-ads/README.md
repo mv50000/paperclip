@@ -249,7 +249,8 @@ the core chat-channels bot is never shared. See
 - **Pause side on a broken config** (`pause-config.ts`, ADR 3). Every
   successful read stores the brand's last valid config (secret refs only). When
   the config turns `invalid` or `unavailable`, the scheduled pause, the data
-  gate, the UI action and the agent tool pause with that config, always on the
+  gate, the rule engine's cap rule, the UI action and the agent tool pause
+  with that config, always on the
   whole ad account (a stored `campaignId` may be stale). Results, the audit
   reason and the notice say so, and the job run fails so the broken config is
   seen. The Telegram `pause_all` card works this way only for `unavailable`:
@@ -391,10 +392,13 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
 - **Config** `rules: { liveMode, list }`, validated by a zod discriminated
   union in `schema.ts` (config.ts calls `parseRules()`). Rule types:
   - `threshold_pause`: `metric` (`cpc`, `ctr`, `cpm`, `frequency`, `spend`)
-    `operator` `threshold` on `days` consecutive completed Helsinki days,
-    behind `minImpressions` and `minClicks` (window totals, both required;
-    equal fires). CPC and CTR are link metrics (G18). A day with spend and no
-    link click counts as an infinite CPC.
+    `operator` `threshold` over the `days` completed Helsinki days that end
+    yesterday. `aggregate: "each_day"` (default) needs every day to break the
+    threshold; `"window_total"` computes the metric once from the window's
+    summed spend, impressions and link clicks (not for `frequency`). Gates:
+    `minImpressions` and `minClicks` (required) and `minSpendEur` (default 0),
+    all window totals; equal fires. CPC and CTR are link metrics (G18). Spend
+    with no link click counts as an infinite CPC.
   - `pause_all_cap`: built in. Pauses the whole ad account (A6's `pauseAll`)
     when month-to-date spend is at 90 % of `monthlyCapEur` or more. MTD is the
     spend guard's (RK9-526) and must be in EUR. A list entry
@@ -404,20 +408,31 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   - `pause_fatigued`: opt-in; pauses an ad that A10 calls `fatigued`.
   - `propose_scale`: schema only, must stay `enabled: false` (G9).
 - **Defaults:** without `rules.list` the brand gets `cpc-ceiling` (CPC > 0.50
-  EUR on 2 days, ≥ 500 impressions, ≥ 10 link clicks) and the built-in cap
-  rule. Every rule starts in `mode: "shadow"`. A Meta write needs the rule's
+  EUR over a 7-day window total, ≥ 3 EUR spend, no click or impression gate)
+  and the built-in cap rule. The gate is on spend because a click gate cannot
+  be met on a small budget (RK9-536): at a 100 EUR cap the daily budget is
+  3.22 EUR, so 10 clicks in 2 days are out of reach above about 0.64 EUR per
+  click, and the worst ads escaped the rule. Every rule starts in `mode: "shadow"`. A Meta write needs the rule's
   `mode: "live"` and the brand's `rules.liveMode: true`.
 - **Job** `rules-evaluate` (`0 * * * *`): reads ad and campaign status, the
   guard's MTD, `insights_daily`, creative `validUntil` and earlier
   `rule_actions`, then calls the pure `evaluateRules()`. Today's partial day
   never counts, and threshold rules wait until `insights-daily-close` has
-  finalised yesterday. Only ACTIVE ads get a decision, account-wide like the
+  finalised yesterday; still waiting at 06:00 local time fails the run. Only ACTIVE ads get a decision, account-wide like the
   kill switch (RK9-523: the ad account belongs to the brand). A failed status read pauses
   nothing (fail-open) and fails the run; one brand's failure does not stop
   the others.
+- **Cap rule isolation (RK9-536):** every other input is read in its own
+  `try`: a failed read fails the run and switches off only the rules that
+  need it. Without the earlier `rule_actions` only the cap rule runs. A
+  config that turns invalid, unavailable or disabled (`monthlyCapEur`
+  cleared) runs only the cap rule, on the last valid config (ADR 3, A6's
+  `loadPauseConfig`), and fails the run. A brand saved disabled and never
+  enabled is skipped quietly.
 - **Cooldown** `cooldownHours` (default 24, 1–720): a rule does not decide on
   the same object again inside the window. Shadow counts shadow decisions;
-  live counts only applied live pauses, so a failed pause is retried.
+  live counts only applied live pauses without an error, so a failed pause,
+  or a cap pause that left an object ACTIVE, is retried.
 - **Audit:** every decision writes `rule_actions` (shadow: `dry_run=true`) and
   an activity entry with the rule id and the metrics (spend, link clicks,
   impressions, CPC, CTR, days). Shadow hits reach Telegram through the morning
@@ -583,7 +598,8 @@ Not installed in prod by RK9-510.
    the cap is unset (`monthly_cap_unset`). The account, page and spend_cap
    checks should pass. Do not run `provision`.
 
-A disabled brand that was never enabled is skipped by `scheduled-pause`. A
+A disabled brand that was never enabled is skipped by `scheduled-pause` and
+`rules-evaluate`. A
 brand that was enabled before and is then saved disabled keeps the ADR 3
 fallback: the pause side runs on its last valid config and the run fails.
 

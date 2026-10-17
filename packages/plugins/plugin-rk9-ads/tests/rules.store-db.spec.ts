@@ -103,6 +103,20 @@ describeDb("rules store on real Postgres", () => {
     expect(rows[0]).toMatchObject({ source: "job", dry_run: true, metrics: { cpc: 0.65 } });
   });
 
+  it("counts a live row that recorded an error as not applied, so a partial pause_all is retried (RK9-536)", async () => {
+    const store = createRulesStore(testDb.client);
+    const company = await testDb.createCompany("Partial");
+    const cap = { ruleId: "pause_all_cap", ruleType: "pause_all_cap", objectType: "account" as const, objectId: "1", action: "pause_all" as const, mode: "live" as const, dryRun: false };
+    // Campaign A paused, campaign B failed: the row says applied with an error.
+    await store.insertAction(company, action({ ...cap, applied: true, error: "200: (#100) failed" }));
+    await store.insertAction(company, action({ mode: "live", dryRun: false, applied: true }));
+    const prior = await store.priorActions(company, ["cpc-ceiling", "pause_all_cap"], new Date("2026-10-20T09:00:00Z"));
+    expect(prior.sort((a, b) => a.ruleId.localeCompare(b.ruleId))).toEqual([
+      { ruleId: "cpc-ceiling", objectId: "301", mode: "live", applied: true, decidedAt: "2026-10-21T08:00:00.000Z" },
+      { ruleId: "pause_all_cap", objectId: "1", mode: "live", applied: false, decidedAt: "2026-10-21T08:00:00.000Z" },
+    ]);
+  });
+
   it("reads the creative validUntil of each ad's latest published publication, per company", async () => {
     const ledger = createLedger(testDb.client);
     async function creative(companyId: string, key: string, validUntil: string | null) {

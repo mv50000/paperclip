@@ -198,13 +198,16 @@ export interface RuleActionInput {
 /**
  * Writes the rule_actions row and the activity entry of one decision. An
  * audit failure is logged, never thrown: it must not undo or block a pause.
+ * A failed rule_actions insert is returned, so a caller whose cooldown reads
+ * that row can fail its run (RK9-536).
  */
 export async function recordAction(
   deps: { ctx: PluginContext; ledger: Ledger },
   input: RuleActionInput,
-): Promise<void> {
+): Promise<string | null> {
   const { ctx, ledger } = deps;
   const initiator = { ...input.initiator };
+  let insertError: string | null = null;
   try {
     await ledger.insert(input.companyId, "rule_actions", {
       brand_code: input.config.brandCode,
@@ -222,6 +225,7 @@ export async function recordAction(
       error: input.error ?? null,
     });
   } catch (error) {
+    insertError = safeError(error);
     logError(ctx.logger, "rule_actions insert failed", input.companyId, error);
   }
   try {
@@ -244,6 +248,7 @@ export async function recordAction(
   } catch (error) {
     logError(ctx.logger, "activity log failed", input.companyId, error);
   }
+  return insertError;
 }
 
 function logError(logger: PluginLogger, what: string, companyId: string, error: unknown): void {
