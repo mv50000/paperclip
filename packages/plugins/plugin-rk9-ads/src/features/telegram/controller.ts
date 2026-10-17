@@ -26,7 +26,14 @@ import { listCompanyConfigs, loadCompanyConfig } from "../../company-configs.js"
 import type { TelegramMode } from "../../config.js";
 import { createCallbackRouter, type CallbackRouter, type GateAuditEvent, type GateBrand } from "../../kit/gate/callback-router.js";
 import type { GateRegistry } from "../../kit/gate/registry.js";
-import { createGateCard, type GateCard, type GateStore } from "../../kit/gate/state-machine.js";
+import {
+  createGateCard,
+  resendGateCard,
+  type GateCard,
+  type GateDenyDecision,
+  type GateRequestRecord,
+  type GateStore,
+} from "../../kit/gate/state-machine.js";
 import { createBotApi, redactSecrets, telegramBotKey, type BotApi, type TelegramFetch } from "../../kit/telegram/bot-api.js";
 import {
   createPollLoop,
@@ -216,6 +223,8 @@ export class TelegramController {
     payload?: Record<string, unknown>;
     /** Button texts; default "✅ Hyväksy" / "❌ Hylkää". */
     labels?: { approve?: string; deny?: string };
+    /** What the second button records; default "denied". */
+    denyDecision?: GateDenyDecision;
   }): Promise<{ id: string; messageId: number }> {
     const bot = this.botFor(input.companyId);
     if (!bot) throw new Error("Telegram is not configured or not ready for this company");
@@ -231,7 +240,29 @@ export class TelegramController {
       card: input.card,
       payload: input.payload,
       labels: input.labels,
+      denyDecision: input.denyDecision,
     });
+  }
+
+  /** Posts a pending card again to the company's current chat. See kit/gate/state-machine resendGateCard. */
+  async resendGateCard(input: {
+    request: GateRequestRecord;
+    mediaUrl?: string;
+    labels?: { approve?: string; deny?: string };
+    denyDecision?: GateDenyDecision;
+  }): Promise<{ messageId: number; chatId: string }> {
+    const bot = this.botFor(input.request.companyId);
+    if (!bot) throw new Error("Telegram is not configured or not ready for this company");
+    const { messageId } = await resendGateCard({
+      store: this.options.store,
+      api: bot.api,
+      request: input.request,
+      chatId: bot.chatId,
+      mediaUrl: input.mediaUrl,
+      labels: input.labels,
+      denyDecision: input.denyDecision,
+    });
+    return { messageId, chatId: bot.chatId };
   }
 
   async handleWebhook(input: PluginWebhookInput): Promise<void> {

@@ -17,7 +17,9 @@
  * `{ handler: "started" }`), run the kind handler and edit the final outcome
  * into the card. `idle()` waits for those handler runs.
  *
- * Only an approval runs the kind handler. A denial is final at step 5.
+ * Only an approval runs the kind handler. A denial or a skip is final at
+ * step 5. A handler may end the card `denied` (it refused before it acted)
+ * or `failed` (it stopped part way) instead of `approved`.
  *
  * The handler runs at most once. A worker that dies during the handler leaves
  * the card `approved` with outcome `{ handler: "started" }`: the handler may
@@ -73,6 +75,7 @@ export const GATE_TEXT = {
   processing: "⏳ Käsitellään…",
   approved: "✅ Hyväksytty",
   denied: "❌ Hylätty",
+  skipped: "🗑 Ohitettu",
   failed: "⚠️ Epäonnistui",
 } as const;
 
@@ -185,12 +188,18 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       return;
     }
     // The handler has acted: a later storage error must not show the card as failed.
+    const to = result.status === "denied" || result.status === "failed" ? result.status : "approved";
     try {
-      await store.settle(request.companyId, request.id, { from: "approved", to: "approved", outcome: result.outcome ?? { handler: "done" } });
+      await store.settle(request.companyId, request.id, {
+        from: "approved",
+        to,
+        outcome: result.outcome ?? { handler: "done" },
+        error: to === "approved" ? null : (result.error ?? null),
+      });
     } catch (error) {
       logger.error("gate: handler succeeded but its outcome was not stored", { gateRequestId: request.id, detail: safe(error) });
     }
-    await edit(request, query, result.statusText ?? GATE_TEXT.approved);
+    await edit(request, query, result.statusText ?? (to === "approved" ? GATE_TEXT.approved : GATE_TEXT[to]));
   }
 
   async function handleCallback(update: TelegramUpdate, query: TelegramCallbackQuery): Promise<void> {
@@ -264,9 +273,9 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       return;
     }
 
-    if (parsed.decision === "denied") {
-      await answer(query, GATE_TEXT.denied);
-      await edit(request, query, GATE_TEXT.denied);
+    if (parsed.decision !== "approved") {
+      await answer(query, GATE_TEXT[parsed.decision]);
+      await edit(request, query, GATE_TEXT[parsed.decision]);
     } else {
       await answer(query, GATE_TEXT.processing);
       await edit(request, query, GATE_TEXT.processing);

@@ -103,7 +103,15 @@ describe("parseBrandConfig", () => {
       chatId: "-100123",
       allowedUserIds: ["12345"],
       mode: "poll",
+      gateTtlHours: 24,
     });
+    expect(
+      enabled(brandConfig({ telegram: { botTokenRef: secretRef(SECRET_A_BOT), chatId: "-1", allowedUserIds: ["1"], gateTtlHours: 6 } })).telegram
+        ?.gateTtlHours,
+    ).toBe(6);
+    expect(
+      errorsOf(brandConfig({ telegram: { botTokenRef: secretRef(SECRET_A_BOT), chatId: "-1", allowedUserIds: ["1"], gateTtlHours: 0 } })).join("\n"),
+    ).toMatch(/telegram\.gateTtlHours/);
     const errors = errorsOf(brandConfig({
       telegram: { botTokenRef: secretRef(SECRET_A_BOT), chatId: "-100123", allowedUserIds: [], mode: "webhook" },
     })).join("\n");
@@ -118,7 +126,7 @@ describe("parseBrandConfig", () => {
   });
 
   it("treats an untouched telegram block from the settings form as no telegram", () => {
-    const config = enabled(brandConfig({ telegram: { allowedUserIds: [], mode: "poll" } }));
+    const config = enabled(brandConfig({ telegram: { allowedUserIds: [], mode: "poll", gateTtlHours: 24 } }));
     expect(config.telegram).toBeUndefined();
     expect(errorsOf(brandConfig({ telegram: { chatId: "-1" } })).join("\n")).toMatch(/telegram\.botTokenRef: is required/);
   });

@@ -19,6 +19,14 @@ export interface GateHandlerResult {
   statusText?: string;
   /** Stored in gate_requests.outcome. Keep it free of secrets. */
   outcome?: Record<string, unknown>;
+  /**
+   * Final status when it is not `approved`: `denied` when the handler refused
+   * before it acted (e.g. a fresh check failed), `failed` when it stopped part
+   * way. Default `approved`.
+   */
+  status?: "denied" | "failed";
+  /** Stored in gate_requests.error with a `denied` or `failed` status. Redacted by the handler. */
+  error?: string;
 }
 
 /**

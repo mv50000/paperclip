@@ -365,7 +365,42 @@ describe("swap mode", () => {
     expect(formOf(swapCall)).toEqual({ creative: { creative_id: "7001" }, status: "PAUSED" });
     expect(swap).toMatchObject({ mode: "swap", status: "swapped", metaAdId: "5001", replacesPublicationId: original.id });
     expect(adPosts(routes.calls)).toHaveLength(1);
-    expect(handoffs).toHaveLength(1);
+    // The swapped creative gets its own approval card (A9).
+    expect(handoffs).toHaveLength(2);
+    expect(handoffs[1]).toMatchObject({ publicationId: swap.id, adId: "5001", creativeId: "7001" });
+  });
+
+  it("closes the ad's open activation cards before the swap write, and does not swap when the gate refuses (A9)", async () => {
+    const order: string[] = [];
+    let refuse = false;
+    const { service, routes, store, handoffs } = serviceRig({
+      deps: {
+        onCreativeSwap: async (swap) => {
+          order.push(`gate ${swap.adId}`);
+          if (refuse) throw new Error("an approved activation of ad 5001 is running");
+        },
+      },
+    });
+    routes.on("GET 5001", { body: { id: "5001", account_id: "29231592883113369", adset_id: ADSET, status: "PAUSED", effective_status: "PAUSED" } });
+    routes.on("POST 5001", () => {
+      order.push("POST 5001");
+      return { body: { success: true } };
+    });
+    await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await service.settled();
+    expect(handoffs[0]).toMatchObject({ contentHash: store.rows[0]!.contentHash, preview: { kind: "image", copy: { message: expect.any(String) } } });
+
+    await service.swap(COMPANY, { creativeId: CREATIVE_IMAGE, adId: "5001", text: { copy: { message: "Uusi teksti" } } }, UI);
+    await service.settled();
+    expect(order).toEqual(["gate 5001", "POST 5001"]);
+
+    refuse = true;
+    const refused = await service.swap(COMPANY, { creativeId: CREATIVE_IMAGE, adId: "5001", text: { copy: { message: "Kolmas teksti" } } }, UI);
+    await service.settled();
+    expect(order).toEqual(["gate 5001", "POST 5001", "gate 5001"]);
+    const row = store.rows.find((entry) => entry.id === refused.publication.id)!;
+    expect(row.status).toBe("failed");
+    expect(row.error).toMatch(/activation of ad 5001 is running/);
   });
 
   it("previews the exact swap body, and fails (keeping the creative) when Meta does not confirm the swap", async () => {
