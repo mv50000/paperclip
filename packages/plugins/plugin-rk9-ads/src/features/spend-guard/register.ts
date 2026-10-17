@@ -230,7 +230,14 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       agentId: context.actor.agentId,
       runId: context.actor.runId,
     };
-    const run = await killSwitch(companyId, { dryRun, reason: reasonText(params.reason, "Pysäytä kaikki (UI)"), initiator });
+    let run: KillSwitchRun;
+    try {
+      run = await killSwitch(companyId, { dryRun, reason: reasonText(params.reason, "Pysäytä kaikki (UI)"), initiator });
+    } catch (error) {
+      // The halt and the card close ran before the failed listing: the UI must say so.
+      if (error instanceof PauseListError) throw new Error([`Pause failed before anything was paused: ${error.message}.`, ...stopSummary(error.stopped)].join(" "));
+      throw error;
+    }
     if (!run.ok) throw new Error(dryRun ? run.error : noConfigText(run));
     return run.loaded.fallback ? { ...run.result, fallbackConfig: run.loaded.fallback.state } : run.result;
   });

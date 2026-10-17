@@ -82,6 +82,17 @@ function identity(halt: HaltState): string {
   return halt.id ?? halt.since;
 }
 
+/** A damaged record's id is its own content, so a clear of one damaged record never clears a later, different one. */
+function damagedId(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? String(value);
+  } catch {
+    text = String(value);
+  }
+  return `damaged:${text.slice(0, 500)}`;
+}
+
 /**
  * The rule's halt, or null when none is set, it was cleared, or it has
  * ended. Any stored value that is not a valid halt still counts as one, with
@@ -93,7 +104,7 @@ async function readRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule, no
   if (value === null || value === undefined) return null;
   const halt: HaltState = isHalt(value)
     ? { ...value, rule }
-    : { brandCode: "?", rule, since: "?", reason: "unreadable halt record", initiator: { source: "job" } };
+    : { brandCode: "?", rule, id: damagedId(value), since: "?", reason: "unreadable halt record", initiator: { source: "job" } };
   if (typeof cleared === "string" && cleared === identity(halt)) return null;
   if (halt.until !== undefined) {
     const end = Date.parse(halt.until);

@@ -138,8 +138,8 @@ export function spendView(snapshot: Awaited<ReturnType<typeof spendSnapshot>>): 
   };
 }
 
-async function readHaltSection(ctx: PluginContext, companyId: string): Promise<{ halt: UiHalt | null; haltError?: string }> {
-  const halt = await section(() => readHalt(ctx, companyId));
+async function readHaltSection(ctx: PluginContext, companyId: string, now: Date): Promise<{ halt: UiHalt | null; haltError?: string }> {
+  const halt = await section(() => readHalt(ctx, companyId, now));
   return halt.ok ? { halt: halt.value ? haltView(halt.value) : null } : { halt: null, haltError: halt.error };
 }
 
@@ -225,7 +225,7 @@ export async function buildOverview(deps: ViewDeps, companyId: string): Promise<
     preflightCheckedAt: null,
     preflightFresh: false,
     spend: null,
-    ...(await readHaltSection(ctx, companyId)),
+    ...(await readHaltSection(ctx, companyId, now())),
     publications: [],
     pendingGates: [],
     ruleLog: [],
@@ -302,7 +302,7 @@ export async function buildWidget(deps: ViewDeps, companyId: string): Promise<Ui
   const { ctx, store, now } = deps;
   const result = await loadCompanyConfig(ctx, companyId);
   const draft = draftOf(result);
-  const halt = await readHaltSection(ctx, companyId);
+  const halt = await readHaltSection(ctx, companyId, now());
   const out: UiWidget = {
     state: result.state,
     ...(configError(result) ? { error: configError(result) } : {}),

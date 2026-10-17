@@ -106,9 +106,14 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
     setError(null);
     try {
       // `since` from the preview: the worker refuses if a newer kill switch set the halt again.
-      await clearHalt({ dryRun: false, confirm: true, since: preview.since });
+      const result = (await clearHalt({ dryRun: false, confirm: true, since: preview.since })) as { remaining?: HaltState };
       setPreview(null);
-      toast({ title: "Pysäytystila poistettu", tone: "success" });
+      // Another pause's halt may still be in force (e.g. the scheduled pause's under a cleared kill switch).
+      toast(
+        result.remaining
+          ? { title: "Pysäytystila poistettu, mutta toinen pysäytystila on yhä päällä", tone: "warn" }
+          : { title: "Pysäytystila poistettu", tone: "success" },
+      );
       props.onChanged();
     } catch (cause) {
       setError(errorText(cause));

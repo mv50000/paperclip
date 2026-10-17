@@ -333,6 +333,16 @@ describe("the kill switch closes open activation cards and leaves a standing hal
     expect(await haltOf(r)).toMatchObject({ initiator: { source: "agent", agentId: "agent-1" } });
   });
 
+  it("a listing that fails after the halt names the halt and the closed cards in the UI action's error", async () => {
+    const r = await rig();
+    await r.cards.openActivationCard(publication());
+    r.meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/campaigns") ? new Error("graph down") : null);
+    await expect(r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD)).rejects.toThrow(
+      /Pause failed before anything was paused: .*graph down.*Standing halt set.*Closed 1 open activation card/,
+    );
+    expect(await haltOf(r)).toMatchObject({ rule: "kill_switch" });
+  });
+
   it("a dry run of the kill switch closes nothing and sets no halt", async () => {
     const r = await rig();
     const sent = await r.cards.openActivationCard(publication());
@@ -633,13 +643,43 @@ describe("clearing the halt is board-only", () => {
     expect(r.harness.activity.some((entry) => entry.message === HALT_CLEARED_ACTIVITY)).toBe(false);
   });
 
-  it("a damaged halt record can be cleared by a board user with its `since`", async () => {
+  it("a damaged halt record can be cleared by a board user with its `since`; a later damaged record still halts", async () => {
     const r = await rig();
     await setHalt(r.harness.ctx, COMPANY_A, { broken: true } as unknown as HaltState);
     const preview = await r.harness.performAction<{ halt: HaltState }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
     expect(preview.halt).toMatchObject({ since: "?" });
     await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
     expect(await haltOf(r)).toBeNull();
+    await setHalt(r.harness.ctx, COMPANY_A, { broken: "again" } as unknown as HaltState);
+    expect(await haltOf(r)).toMatchObject({ reason: "unreadable halt record" });
+  });
+
+  it("a halt stored before RK9-561 (no id) is cleared by its `since`", async () => {
+    const r = await rig();
+    const legacy = { brandCode: "OLL", rule: "kill_switch", since: "2026-10-17T08:00:00.000Z", reason: "vanha", initiator: { source: "ui" } } as HaltState;
+    await setHalt(r.harness.ctx, COMPANY_A, legacy);
+    expect(await haltOf(r)).toMatchObject({ since: legacy.since, reason: "vanha" });
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: legacy.since }, BOARD)).toMatchObject({ cleared: true });
+    expect(await haltOf(r)).toBeNull();
+  });
+
+  it("the kill switch's halt comes first; clearing it leaves the scheduled pause's halt in force", async () => {
+    const r = await rig();
+    await runPause(r, "scheduled_pause");
+    await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD);
+    const first = (await haltOf(r))!;
+    expect(first).toMatchObject({ rule: "kill_switch" });
+    const cleared = await r.harness.performAction<{ cleared: boolean; remaining?: HaltState }>(
+      CLEAR_HALT_ACTION_KEY,
+      { dryRun: false, confirm: true, since: first.since },
+      BOARD,
+    );
+    expect(cleared).toMatchObject({ cleared: true, remaining: { rule: "scheduled_pause" } });
+    expect(await haltOf(r)).toMatchObject({ rule: "scheduled_pause", until: expect.any(String) });
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ reason: "halted" });
+    expect(activeWrites(r.meta)).toEqual([]);
   });
 
   it("a damaged halt record still refuses", async () => {

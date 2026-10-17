@@ -9,10 +9,10 @@
  *    time is at or after `at` (21:30 is right in both EET and EEST), once per
  *    local day. It also leaves a halt until the next local morning and closes
  *    the open activation cards (RK9-557, RK9-561). The day's marker is
- *    written once the Meta pauses succeeded, so a Meta failure is retried on
- *    the next tick (pauses are idempotent). A card close or halt write that
- *    failed fails the run once but is not retried: a retry would pause again
- *    ads activated on purpose later that evening. Off by default.
+ *    written once the Meta pauses succeeded and the halt is stored, so a Meta
+ *    or halt failure is retried on the next tick (pauses are idempotent). A
+ *    card close that failed fails the run once but is not retried: the halt
+ *    already refuses a tap on the card left open. Off by default.
  * 3. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
  *    (see data-gate.ts): a feed that cannot be read pauses nothing, but it
  *    fails the run so the broken feed is seen (RK9-523). When the predicate no
@@ -124,16 +124,18 @@ async function runForCompany(
           initiator,
           notify: true,
         });
-        // The card close and the halt are reported, not retried (RK9-561).
         failures.push(...stopFailures(`${brand} scheduled pause`, result));
         if (result.errors.length > 0) {
           failures.push(`${brand} scheduled pause: ${result.errors.length} pause(s) failed, retrying next tick`);
+        } else if (result.haltError) {
+          // Without the halt an open card could undo the pause: the next tick stores it and closes the cards again.
+          failures.push(`${brand} scheduled pause: retrying the halt next tick`);
         } else {
+          // A failed card close is reported, not retried (RK9-561): the halt refuses a tap on a card left open.
           await deps.store.claim(companyId, key, SCHEDULED_PAUSE_KIND, {
             count: result.count,
             jobRunId: job.runId,
             ...(result.cardsError ? { cardsError: result.cardsError } : {}),
-            ...(result.haltError ? { haltError: result.haltError } : {}),
           });
           const tg = telegramFailure(`${brand} scheduled pause`, result);
           if (tg) failures.push(tg);
