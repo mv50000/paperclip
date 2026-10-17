@@ -1,0 +1,39 @@
+{
+  "source": "Sunspot ops scripts as RK9 Ads config (A11, RK9-515). pulse-off = schedule.scheduledPause and data-gate = schedule.dataGate (A6, G14); the aamu-SOP CPC warning (> 0.50 EUR per link click, warn only) = a shadow threshold_pause. Secret ids are test placeholders.",
+  "config": {
+    "brandCode": "AUR",
+    "displayName": "Sunspot",
+    "monthlyCapEur": 100,
+    "meta": {
+      "adAccountId": "act_1336862981968191",
+      "pageId": "1000000000000001",
+      "accessTokenRef": { "type": "secret_ref", "secretId": "aaaaaaaa-0000-4000-8000-00000000000a", "version": "latest" },
+      "campaignId": "120247250925830775"
+    },
+    "landing": {
+      "allowedDomains": ["sunspot.fi"],
+      "urls": { "home": "https://sunspot.fi/" }
+    },
+    "schedule": {
+      "scheduledPause": { "enabled": true, "at": "21:30" },
+      "dataGate": { "url": "https://sunspot.fi/api/feed", "jsonPointer": "/inSunNow", "operator": "gte", "threshold": 8 }
+    },
+    "rules": {
+      "liveMode": false,
+      "list": [
+        {
+          "ruleId": "aamu-sop-cpc",
+          "type": "threshold_pause",
+          "mode": "shadow",
+          "metric": "cpc",
+          "operator": "gt",
+          "threshold": 0.5,
+          "days": 1,
+          "minImpressions": 0,
+          "minClicks": 1,
+          "cooldownHours": 24
+        }
+      ]
+    }
+  }
+}

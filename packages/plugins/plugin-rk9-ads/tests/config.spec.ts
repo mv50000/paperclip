@@ -39,7 +39,12 @@ describe("parseBrandConfig", () => {
     expect(config.schedule.scheduledPause).toEqual({ enabled: false, at: "21:30" });
     expect(config.digest).toEqual({ enabled: true, time: "07:30", cpcWarnEur: 0.5, zeroSpendMode: "message" });
     expect(config.fatigue.issuesEnabled).toBe(false);
-    expect(config.rules).toEqual({ liveMode: false, list: [] });
+    // Defaults (A11): the CPC ceiling and the built-in cap pause, both in shadow.
+    expect(config.rules.liveMode).toBe(false);
+    expect(config.rules.list.map((rule) => [rule.ruleId, rule.type, rule.mode])).toEqual([
+      ["cpc-ceiling", "threshold_pause", "shadow"],
+      ["pause_all_cap", "pause_all_cap", "shadow"],
+    ]);
   });
 
   it("has no enable switch and rejects unknown keys", () => {
@@ -128,14 +133,13 @@ describe("parseBrandConfig", () => {
         ],
       },
     })).join("\n");
-    expect(errors).toMatch(/propose_scale must stay disabled/);
-    expect(errors).toMatch(/threshold_pause needs metric, operator and threshold/);
-    expect(errors).toMatch(/duplicate rule id cpc/);
-    expect(errors).toMatch(/cooldownHours: must be >= 1/);
+    expect(errors).toMatch(/rules\.list\[0\] \(scale\)\.enabled: propose_scale must stay disabled/);
+    expect(errors).toMatch(/rules\.list\[1\] \(cpc\)\.metric: must be one of/);
+    expect(errors).toMatch(/rules\.list\[2\] \(cpc\)\.cooldownHours: must be >= 1/);
 
     const config = enabled(brandConfig({
       rules: {
-        list: [{ ruleId: "cpc-ceiling", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.5 }],
+        list: [{ ruleId: "cpc-ceiling", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.5, minImpressions: 500, minClicks: 10 }],
       },
     }));
     expect(config.rules.list[0]).toMatchObject({ mode: "shadow", enabled: true, cooldownHours: 24 });

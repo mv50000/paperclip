@@ -43,7 +43,8 @@ const LIST_MAX_PAGES = 100;
 /** Telegram allows 4096 characters; the notice stays below this. */
 const NOTICE_MAX = 3900;
 
-export type PauseRule = "kill_switch" | "scheduled_pause" | "data_gate";
+/** `pause_all_cap` is the rule engine's built-in 90 % cap pause (A11, RK9-515). */
+export type PauseRule = "kill_switch" | "scheduled_pause" | "data_gate" | "pause_all_cap";
 
 export interface PausedObject {
   id: string;
@@ -88,11 +89,16 @@ export interface PauseAllOptions {
   notify: boolean;
   /** Extra text for the notice, e.g. the data gate reading. */
   note?: string;
+  /** Extra figures for the audit row, e.g. the rule engine's MTD reading. */
+  metrics?: Record<string, unknown>;
 }
 
-/** The scope of a pause: the kill switch always takes the whole ad account. */
+/**
+ * The scope of a pause: the kill switch and the cap pause always take the
+ * whole ad account (the cap counts the whole account's spend).
+ */
 export function pauseScope(config: BrandConfig, rule: PauseRule): "campaign" | "account" {
-  return rule !== "kill_switch" && config.meta.campaignId ? "campaign" : "account";
+  return rule !== "kill_switch" && rule !== "pause_all_cap" && config.meta.campaignId ? "campaign" : "account";
 }
 
 /** The ACTIVE campaigns and ads the run would pause. Exported for parity tests. */
@@ -128,7 +134,13 @@ function label(object: PausedObject): string {
 export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at: Date, options: Pick<PauseAllOptions, "rule" | "note" | "reason">): string {
   const when = `${localDate(at, config.timeZone)} ${localTime(at, config.timeZone)}`;
   const why =
-    options.rule === "scheduled_pause" ? "ajastettu pysäytys" : options.rule === "data_gate" ? "data-gate" : "hätäkatkaisin";
+    options.rule === "scheduled_pause"
+      ? "ajastettu pysäytys"
+      : options.rule === "data_gate"
+        ? "data-gate"
+        : options.rule === "pause_all_cap"
+          ? "kulutuskatto 90 %"
+          : "hätäkatkaisin";
   const what = result.scope === "account" ? "koko mainostili pysäytetty" : "kampanja pysäytetty";
   const head = [
     `⏸ ${config.displayName || config.brandCode}`.slice(0, 120) + `: ${what} (${when}, ${why})`,
@@ -258,6 +270,7 @@ export async function pauseAll(
         failedIds: result.errors.map((entry) => entry.id),
         telegram: result.telegram,
         ...(options.note ? { note: options.note } : {}),
+        ...options.metrics,
       },
       initiator: options.initiator,
       error: [...result.errors.map((entry) => `${entry.id}: ${entry.error}`), ...(result.telegramError ? [`telegram: ${result.telegramError}`] : [])]

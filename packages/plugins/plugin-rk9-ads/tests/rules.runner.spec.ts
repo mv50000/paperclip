@@ -1,0 +1,258 @@
+import type { Company } from "@paperclipai/plugin-sdk";
+import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
+import { describe, expect, it } from "vitest";
+import { createLedger } from "../src/db.js";
+import type { RuleAdDay } from "../src/features/rules/evaluate.js";
+import { registerRules, RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY } from "../src/features/rules/register.js";
+import { RULES_JOB_KEY } from "../src/features/rules/runner.js";
+import { memoryRulesStore } from "../src/features/rules/store.js";
+import type { FeatureRuntime } from "../src/features/types.js";
+import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
+import manifest from "../src/manifest.js";
+import { brandConfig, COMPANY_A, COMPANY_B, SECRET_A_META, SECRET_B_META, secretRef } from "./fixtures.js";
+import { FakeMeta } from "./spend-guard/fake-meta.js";
+import { FakeNotifier, META_TOKEN, telegramBlock } from "./spend-guard/rig.js";
+
+const NOW = new Date("2026-10-21T09:00:00Z"); // yesterday = 2026-10-20 in Helsinki
+const CPC_LIVE = { ruleId: "cpc-ceiling", type: "threshold_pause", mode: "live", metric: "cpc", operator: "gt", threshold: 0.5, days: 2, minImpressions: 500, minClicks: 10 };
+
+/** Two days at 0.60 and 0.70 EUR per link click, 300 impressions and 5 clicks each. */
+function badDays(adId: string): RuleAdDay[] {
+  return [
+    { adId, date: "2026-10-19", spendCents: 300, impressions: 300, inlineLinkClicks: 5, frequency: 1.1 },
+    { adId, date: "2026-10-20", spendCents: 350, impressions: 300, inlineLinkClicks: 5, frequency: 1.1 },
+  ];
+}
+
+function accountMeta(): FakeMeta {
+  const meta = new FakeMeta();
+  meta.campaigns = [{ id: "100", name: "OLL jatkuva", status: "ACTIVE" }];
+  meta.ads = [
+    { id: "301", name: "Syksy 1", status: "ACTIVE", campaign_id: "100" },
+    { id: "302", name: "Syksy 2", status: "PAUSED", campaign_id: "100" },
+    { id: "303", name: "Syksy 3", status: "ACTIVE", campaign_id: "100" },
+  ];
+  // 40 EUR month-to-date of a 100 EUR cap.
+  meta.spend = () => "40.00";
+  return meta;
+}
+
+function setup(input: { rules?: Record<string, unknown>; meta?: FakeMeta; companies?: Record<string, Record<string, unknown>>; days?: RuleAdDay[] } = {}) {
+  const harness = createTestHarness({ manifest });
+  const configs = input.companies ?? { [COMPANY_A]: brandConfig({ telegram: telegramBlock(), ...(input.rules ? { rules: input.rules } : {}) }) };
+  harness.seed({ companies: Object.keys(configs).map((id, index) => ({ id, name: `Brand ${index}` }) as Company) });
+  useCompanyConfigs(harness, configs);
+  useCompanySecrets(harness, { [COMPANY_A]: { [SECRET_A_META]: META_TOKEN }, [COMPANY_B]: { [SECRET_B_META]: META_TOKEN } });
+  const meta = input.meta ?? accountMeta();
+  harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
+    if (url.startsWith("https://graph.facebook.com/")) return meta.fetch(url, init);
+    throw new Error(`no route for ${url}`);
+  };
+  const notifier = new FakeNotifier();
+  const store = memoryRulesStore({ days: input.days ?? [...badDays("301"), ...badDays("302")] });
+  const clock = { now: NOW };
+  const runtime: FeatureRuntime = {
+    ctx: harness.ctx,
+    ledger: createLedger(harness.ctx.db),
+    handleWebhook() {},
+    handleApiRoute() {},
+    onConfigChanged() {},
+    onShutdown() {},
+  };
+  registerRules(runtime, { store, notifier, now: () => clock.now, fatigue: async () => [] });
+  return {
+    harness,
+    meta,
+    notifier,
+    store,
+    clock,
+    /** rule_actions rows pauseAll wrote through the ledger (the SDK db stub records them). */
+    ledgerRuleActions: () =>
+      harness.dbExecutes
+        .filter((entry) => /INSERT INTO \S+\.rule_actions/.test(entry.sql))
+        .map((entry) => {
+          const columns = /\(([^)]*)\) VALUES/.exec(entry.sql)![1]!.split(",").map((column) => column.trim());
+          const row = Object.fromEntries(columns.map((column, index) => [column, entry.params?.[index]]));
+          if (typeof row.metrics === "string") row.metrics = JSON.parse(row.metrics);
+          return row;
+        }),
+  };
+}
+
+describe("rules-evaluate job (A11)", () => {
+  it("is declared hourly in the manifest", () => {
+    expect(manifest.jobs).toContainEqual(expect.objectContaining({ jobKey: RULES_JOB_KEY, schedule: "0 * * * *" }));
+  });
+
+  it("shadow (the default config): records the CPC hit and the 90 % cap hit, makes zero Meta writes and sends no Telegram", async () => {
+    const meta = accountMeta();
+    meta.spend = () => "95.00";
+    const r = setup({ meta });
+    await r.harness.runJob(RULES_JOB_KEY);
+
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.notifier.messages).toHaveLength(0);
+    expect(r.notifier.cards).toHaveLength(0);
+    expect(r.store.actions).toEqual([
+      expect.objectContaining({
+        companyId: COMPANY_A,
+        ruleId: "cpc-ceiling",
+        ruleType: "threshold_pause",
+        objectType: "ad",
+        objectId: "301",
+        action: "pause",
+        mode: "shadow",
+        dryRun: true,
+        applied: false,
+        metrics: expect.objectContaining({ spendEur: 6.5, clicks: 10, impressions: 600, cpc: 0.65, days: 2 }),
+      }),
+    ]);
+    // The cap rule runs A6's pauseAll as a dry run: it lists, writes nothing, audits.
+    expect(r.ledgerRuleActions()).toEqual([
+      expect.objectContaining({
+        rule_id: "pause_all_cap",
+        rule_type: "pause_all_cap",
+        action: "pause_all",
+        mode: "shadow",
+        dry_run: true,
+        applied: false,
+        metrics: expect.objectContaining({ ruleId: "pause_all_cap", pctUsed: 95, count: 3 }),
+      }),
+    ]);
+    expect(r.harness.activity.map((entry) => entry.message)).toEqual(
+      expect.arrayContaining(["rk9-ads rules: cpc-ceiling would pause ad 301 (shadow)", expect.stringMatching(/pause_all_cap dry-run would pause 3/)]),
+    );
+  });
+
+  it("shadow hits respect the cooldown: a second run within 24 h records nothing new", async () => {
+    const r = setup();
+    await r.harness.runJob(RULES_JOB_KEY);
+    r.clock.now = new Date(NOW.getTime() + 3_600_000);
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.store.actions).toHaveLength(1);
+    r.clock.now = new Date(NOW.getTime() + 24 * 3_600_000);
+    // A day later the window moved (yesterday = 2026-10-21, no row): nothing fires.
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.store.actions).toHaveLength(1);
+  });
+
+  it("a live rule stays shadow while the brand's liveMode is off", async () => {
+    const r = setup({ rules: { liveMode: false, list: [CPC_LIVE] } });
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toEqual([expect.objectContaining({ objectId: "301", mode: "shadow", dryRun: true })]);
+  });
+
+  it("live: pauses only the ACTIVE ad through the guarded client, notifies once, and a second run changes nothing and stays silent", async () => {
+    const r = setup({ rules: { liveMode: true, list: [CPC_LIVE] } });
+    await r.harness.runJob(RULES_JOB_KEY);
+
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
+    expect(r.store.actions).toEqual([expect.objectContaining({ objectId: "301", mode: "live", dryRun: false, applied: true, error: null })]);
+    expect(r.notifier.messages).toHaveLength(1);
+    expect(r.notifier.messages[0]!.text).toMatch(/säännöt pysäyttivät 1 mainos/);
+    expect(r.notifier.messages[0]!.text).toMatch(/cpc-ceiling: mainos Syksy 1 \(301\) – cpc > 0.5 on 2 consecutive day/);
+    expect(r.harness.activity.map((entry) => entry.message)).toContain("rk9-ads rules: cpc-ceiling paused ad 301");
+
+    // Next hour: 301 is PAUSED now (and in cooldown); nothing changes, no Telegram.
+    r.clock.now = new Date(NOW.getTime() + 3_600_000);
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.meta.writes).toHaveLength(1);
+    expect(r.notifier.messages).toHaveLength(1);
+  });
+
+  it("live: no Telegram when every matching ad is already PAUSED", async () => {
+    const r = setup({ rules: { liveMode: true, list: [CPC_LIVE] }, days: badDays("302") });
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.notifier.messages).toHaveLength(0);
+    expect(r.store.actions).toHaveLength(0);
+  });
+
+  it("live pause_all_cap: pauses the whole account through pauseAll at 90 % and audits the MTD figures", async () => {
+    const meta = accountMeta();
+    meta.spend = () => "90.00";
+    const r = setup({ meta, rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] } });
+    await r.harness.runJob(RULES_JOB_KEY);
+
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([
+      ["100", "PAUSED"],
+      ["301", "PAUSED"],
+      ["303", "PAUSED"],
+    ]);
+    expect(r.notifier.messages).toHaveLength(1);
+    expect(r.notifier.messages[0]!.text).toMatch(/koko mainostili pysäytetty .*kulutuskatto 90 %/);
+    expect(r.notifier.messages[0]!.text).toMatch(/Kulutus 90 % kuukauden katosta/);
+    expect(r.ledgerRuleActions()).toEqual([
+      expect.objectContaining({ rule_id: "pause_all_cap", mode: "live", dry_run: false, applied: true, metrics: expect.objectContaining({ pctUsed: 90, mtdEur: 90 }) }),
+    ]);
+    // Below 90 % nothing happens.
+    const quiet = setup({ rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] } });
+    await quiet.harness.runJob(RULES_JOB_KEY);
+    expect(quiet.meta.writes).toHaveLength(0);
+  });
+
+  it("propose_scale never calls Meta (G9)", async () => {
+    const r = setup({
+      rules: { liveMode: true, list: [{ ruleId: "scale", type: "propose_scale", enabled: false, mode: "live", threshold: 5, days: 1, minImpressions: 0, minClicks: 0 }] },
+    });
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toHaveLength(0);
+  });
+
+  it("fails open on a Meta read failure (no pause, run failed) and still evaluates the other brands", async () => {
+    const companies = {
+      // Another ad account: the fake answers every read of it with an error.
+      [COMPANY_A]: brandConfig({ meta: { adAccountId: "act_111", pageId: "1", accessTokenRef: secretRef(SECRET_A_META) }, rules: { liveMode: true, list: [CPC_LIVE] } }),
+      [COMPANY_B]: brandConfig({ brandCode: "AUR", meta: { adAccountId: "act_29231592883113369", pageId: "2", accessTokenRef: secretRef(SECRET_B_META) } }),
+    };
+    const r = setup({ companies });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: Meta status read failed, nothing paused \(fail-open\)/);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toEqual([expect.objectContaining({ companyId: COMPANY_B, brandCode: "AUR", objectId: "301", mode: "shadow" })]);
+  });
+
+  it("skips the cap rule when month-to-date cannot be read, and still runs the other rules", async () => {
+    const meta = accountMeta();
+    meta.fail = (call) => (call.path.endsWith("/insights") ? new Response(JSON.stringify({ error: { message: "x", code: 1 } }), { status: 500 }) : null);
+    const r = setup({ meta });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/month-to-date not read .*pause_all_cap skipped \(fail-open\)/);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toEqual([expect.objectContaining({ ruleId: "cpc-ceiling", objectId: "301" })]);
+  });
+
+  it("does not evaluate an invalid config", async () => {
+    const r = setup({ companies: { [COMPANY_A]: brandConfig({ rules: { list: [{ ruleId: "x", type: "nope" }] } }) } });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/brand config is invalid, rules not evaluated/);
+    expect(r.meta.calls).toHaveLength(0);
+  });
+});
+
+describe("rules data and dry-run action (for the A12 UI)", () => {
+  const UI = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "user-1" } };
+
+  it("the dry run returns live decisions without writing anything", async () => {
+    const r = setup({ rules: { liveMode: true, list: [CPC_LIVE] } });
+    const result = await r.harness.performAction<{ liveMode: boolean; decisions: Array<Record<string, unknown>> }>(RULES_DRY_RUN_ACTION_KEY, {}, UI);
+    expect(result.liveMode).toBe(true);
+    expect(result.decisions).toEqual([expect.objectContaining({ ruleId: "cpc-ceiling", objectId: "301", mode: "live", applied: false })]);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toHaveLength(0);
+    expect(r.ledgerRuleActions()).toHaveLength(0);
+    expect(r.harness.activity).toHaveLength(0);
+    expect(r.notifier.messages).toHaveLength(0);
+  });
+
+  it("serves the effective rules", async () => {
+    const r = setup();
+    const data = await r.harness.getData<{ state: string; liveMode: boolean; rules: Array<{ ruleId: string; mode: string }> }>(RULES_DATA_KEY, { companyId: COMPANY_A });
+    expect(data.state).toBe("enabled");
+    expect(data.liveMode).toBe(false);
+    expect(data.rules.map((rule) => [rule.ruleId, rule.mode])).toEqual([
+      ["cpc-ceiling", "shadow"],
+      ["pause_all_cap", "shadow"],
+    ]);
+    expect(await r.harness.getData(RULES_DATA_KEY, {})).toEqual({ state: "error", error: "company context is required" });
+  });
+});
