@@ -63,6 +63,7 @@ export function tokenAlertText(config: BrandConfigDraft, error: MetaGraphError, 
     `🔑 ${name}: Meta-token ei kelpaa (Graph ${error.code ?? 190}${error.subcode ? `/${error.subcode}` : ""}).`,
     `Toiminto ${context} epäonnistui eikä sitä yritetä uudelleen.`,
     "Luo system userille uusi token ja päivitä secret, johon meta.accessTokenRef osoittaa. Aja sitten Tarkista yhteys.",
+    "Jos brändin token-issue on jo suljettu, avaa se uudelleen.",
   ].join("\n");
 }
 
@@ -79,7 +80,7 @@ export function tokenIssueBody(config: BrandConfigDraft, error: MetaGraphError, 
       "1. Luo Business Settingsissä brändin system userille uusi token (ads_management, ads_read).",
       "2. Päivitä company secret, johon pluginin `meta.accessTokenRef` osoittaa.",
       "3. Aja pluginin asetussivulla **Tarkista yhteys**. Onnistunut tarkistus nollaa Telegram-hälytyksen.",
-      "4. Sulje tämä issue. Brändillä on yksi token-issue: jos token vanhenee uudelleen, tulee Telegram-viesti, ja tämä issue avataan uudelleen.",
+      "4. Sulje tämä issue. Brändillä on yksi token-issue: jos token vanhenee uudelleen, tulee vain Telegram-viesti. Avaa silloin tämä issue itse uudelleen.",
     ].join("\n"),
   };
 }
