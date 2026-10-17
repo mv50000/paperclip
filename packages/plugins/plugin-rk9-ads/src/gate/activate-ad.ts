@@ -26,7 +26,8 @@
  *    (or when the read fails) it is paused again and the card fails;
  * 7. the halt once more: a kill switch that started during the writes set
  *    it before its own first pause, so either its listing sees this run's
- *    ACTIVE objects, or this read sees the halt and pauses the ad again.
+ *    ACTIVE objects, or this read sees the halt. A halt seen during or after
+ *    the writes pauses again everything this run set ACTIVE.
  *
  * A refusal in 1-4 makes no Meta write and ends the card `denied`. A failed
  * write ends it `failed` with the step reached; nothing is retried. Meta's
@@ -399,13 +400,20 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       done.push("verify_halt");
     } catch (error) {
       let detail = safeError(error);
-      if (error instanceof HaltedError && done.includes("ad_active")) {
-        // The kill switch won the race: stop the ad rather than leave it to the switch's listing.
-        try {
-          await setStatus(target.id, "PAUSED");
-          detail = `${detail}; the ad was paused again`;
-        } catch (pauseError) {
-          detail = `${detail}; pausing the ad failed too (${safeError(pauseError)})`;
+      if (error instanceof HaltedError) {
+        // The kill switch won the race: pause what this run set ACTIVE (campaign first),
+        // rather than leave it to the switch's listing, which may have run before these writes.
+        const undo: Array<[string, string]> = [];
+        if (done.includes("campaign_active") && campaign) undo.push(["campaign", campaign.id]);
+        if (done.includes("adset_active")) undo.push(["ad set", adset.id]);
+        if (done.includes("ad_active")) undo.push(["ad", target.id]);
+        for (const [label, objectId] of undo) {
+          try {
+            await setStatus(objectId, "PAUSED");
+            detail = `${detail}; the ${label} was paused again`;
+          } catch (pauseError) {
+            detail = `${detail}; pausing the ${label} ${objectId} failed too (${safeError(pauseError)})`;
+          }
         }
       }
       await saveSafely(request, pausedAdIds);

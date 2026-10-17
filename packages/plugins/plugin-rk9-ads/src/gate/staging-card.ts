@@ -8,7 +8,8 @@
  *   refuses while an approved activation of the ad is running.
  * - `closeCardsForPause`: the kill switch, the 90 % cap pause and the
  *   scheduled pause close every open card of the company, so a tap after a
- *   pause cannot undo it (RK9-557).
+ *   pause cannot undo it (RK9-557). The rows close at once; the card edits
+ *   wait for `announce`, so Telegram never holds back the Meta pauses.
  * - `expireDueCards`: the gate-expiry job. Cards past valid_until move to
  *   `expired` and lose their buttons. A tap re-checks valid_until itself, so
  *   the job's cadence never stretches a card's life.
@@ -41,6 +42,12 @@ const EXPIRY_BATCH = 200;
 /** The pauses that close a company's open activation cards (RK9-557). The data gate does not. */
 export const CARD_CLOSING_PAUSES = ["kill_switch", "pause_all_cap", "scheduled_pause"] as const;
 export type CardClosingPause = (typeof CARD_CLOSING_PAUSES)[number];
+
+/** Cards a pause closed. `announce` edits them and writes the audit entries; it never throws. */
+export interface PauseCardClose {
+  ids: string[];
+  announce(): Promise<void>;
+}
 
 const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
   kill_switch: "⛔ Hätäkatkaisin painettu: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty, kunnes board poistaa pysäytystilan.",
@@ -157,16 +164,28 @@ export function createStagingCards(deps: StagingCardDeps) {
     }
   }
 
-  /** Closes the given open activate_ad cards. */
-  async function closeEach(companyId: string, open: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<string[]> {
-    const closed: string[] = [];
+  /** Closes the given open activate_ad rows (no Telegram call). */
+  async function closeRows(companyId: string, open: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<GateRequestRecord[]> {
+    const closed: GateRequestRecord[] = [];
     for (const request of open) {
-      if (!(await deps.repo.close(companyId, request.id, { handler: "not_run", ...outcome, statusText: status, closedAt: now().toISOString() }))) continue;
-      closed.push(request.id);
+      if (await deps.repo.close(companyId, request.id, { handler: "not_run", ...outcome, statusText: status, closedAt: now().toISOString() })) closed.push(request);
+    }
+    return closed;
+  }
+
+  /** Edits closed cards and audits them. Never throws. */
+  async function announceClosed(companyId: string, closed: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<void> {
+    for (const request of closed) {
       await editClosed(request, status);
       await audit(companyId, request.id, "closed", { adId: activationOf(request)?.adId ?? null, ...outcome });
     }
-    return closed;
+  }
+
+  /** Closes the given open activate_ad cards, then edits them. */
+  async function closeEach(companyId: string, open: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<string[]> {
+    const closed = await closeRows(companyId, open, outcome, status);
+    await announceClosed(companyId, closed, outcome, status);
+    return closed.map((request) => request.id);
   }
 
   /** Closes open activate_ad cards of one ad. */
@@ -293,18 +312,16 @@ export function createStagingCards(deps: StagingCardDeps) {
     },
 
     /**
-     * The pause hook (RK9-557): closes every open card of the company and
-     * edits it with the pause's reason. A tap that approved a card before
-     * this close is not stopped here; for the kill switch the standing halt
-     * stops it (activate-ad.ts).
+     * The pause hook (RK9-557): closes every open card row of the company
+     * now; `announce` edits the cards with the pause's reason later. A tap
+     * that approved a card before this close is not stopped here; for the
+     * kill switch the standing halt stops it (activate-ad.ts).
      */
-    async closeCardsForPause(companyId: string, input: { rule: CardClosingPause; reason: string }): Promise<string[]> {
-      return closeEach(
-        companyId,
-        await deps.repo.openForCompany(companyId),
-        { reason: input.rule, pauseReason: input.reason.slice(0, 300) },
-        PAUSE_CLOSE_TEXT[input.rule],
-      );
+    async closeCardsForPause(companyId: string, input: { rule: CardClosingPause; reason: string }): Promise<PauseCardClose> {
+      const outcome = { reason: input.rule, pauseReason: input.reason.slice(0, 300) };
+      const status = PAUSE_CLOSE_TEXT[input.rule];
+      const closed = await closeRows(companyId, await deps.repo.openForCompany(companyId), outcome, status);
+      return { ids: closed.map((request) => request.id), announce: () => announceClosed(companyId, closed, outcome, status) };
     },
 
     /** The gate-expiry job. Returns the number of cards this run expired. */

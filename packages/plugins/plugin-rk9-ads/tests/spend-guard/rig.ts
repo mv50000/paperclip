@@ -81,7 +81,7 @@ export function rig(input: { config?: Record<string, unknown>; overrides?: Spend
   const cardCloses: Rig["cardCloses"] = [];
   const closeCards = async (companyId: string, close: { rule: string; reason: string }) => {
     cardCloses.push({ companyId, ...close });
-    return [];
+    return { ids: [], announce: async () => undefined };
   };
   resetGateRegistry();
   registerSpendGuard(runtime, { store, notifier, now: () => clock.now, closeCards, ...input.overrides });

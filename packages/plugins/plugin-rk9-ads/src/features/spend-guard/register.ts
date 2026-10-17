@@ -29,7 +29,9 @@ import {
  * - action `pause-all`: the UI's "Pysäytä kaikki" (dry-run preview, then confirm)
  * - action `clear-halt`: lifts the kill switch's standing halt (RK9-557).
  *   Dry run by default; a real clear needs `confirm: true` and a board user
- *   (an agent may only preview it). No Telegram button clears it.
+ *   (an agent may only preview it). `since` from the preview makes the clear
+ *   refuse when a newer kill switch has set the halt again. No Telegram
+ *   button clears it.
  * - tools `rk9ads_pause_all` and `rk9ads_get_pacing`
  * - gate kind `pause_all`: one tap on the card's button pauses everything
  */
@@ -143,6 +145,10 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     }
     const halt = await readHalt(ctx, companyId);
     if (dryRun || !halt) return { dryRun, cleared: false, halt };
+    // `since` from the preview: a kill switch that ran after the preview stored a newer halt, so do not lift it blind.
+    if (typeof params.since === "string" && params.since !== halt.since) {
+      throw new Error("A newer kill switch set the halt after the preview; preview it again and clear the current one");
+    }
     await clearHalt(ctx, companyId);
     const reason = reasonText(params.reason, "");
     const metadata = {

@@ -146,6 +146,32 @@ describe("scheduled pause job", () => {
   });
 });
 
+describe("open activation cards (RK9-557)", () => {
+  it("does not mark the day when the open cards were not closed, and closes them on the next tick", async () => {
+    let failing = true;
+    const closes: string[] = [];
+    const r = rig({
+      meta: activeMeta(),
+      config: scheduled(),
+      overrides: {
+        closeCards: async (_companyId, input) => {
+          closes.push(input.rule);
+          if (failing) throw new Error("db down");
+          return { ids: [], announce: async () => undefined };
+        },
+      },
+    });
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/open activation cards not closed \(.*db down\)/);
+    expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(false);
+    failing = false;
+    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(closes).toEqual(["scheduled_pause", "scheduled_pause"]);
+    expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(true);
+  });
+});
+
 describe("pause side on an invalid or unavailable config (README ADR 3)", () => {
   const UI = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "u" } };
 

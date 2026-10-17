@@ -272,15 +272,18 @@ the core chat-channels bot is never shared. See
   button (allowlisted user in the brand chat, no second step).
 - **Open cards and the standing halt** (RK9-557, `halt.ts`). Before its
   first Meta call a live kill switch, 90 % cap pause or scheduled pause
-  closes every open `activate_ad` card of the company (row `expired`, card
-  edited with the reason), so a tap cannot undo the pause. The data gate
+  closes every open `activate_ad` card row of the company (`expired`), so a
+  tap cannot undo the pause. The cards are edited with the reason after the
+  Meta pauses, so a slow Telegram does not delay them. The data gate
   leaves the cards open. The kill switch also leaves a standing halt in the
   plugin state (`spend-guard` namespace, no migration). While it is set,
   `activate_ad` refuses (also a card sent later), and it reads the halt again
-  before every ACTIVE write and after the last write. The halt has no expiry.
+  before every ACTIVE write and after the last write; a halt seen during or
+  after the writes pauses again what the run set ACTIVE. The halt has no expiry.
   Only a board user clears it, with the action `clear-halt` (`dryRun`
   defaults to true; a real clear needs `confirm: true`; an agent may only
-  preview it). There is no Telegram button for it. A failed halt write or
+  preview it; pass the preview's `since` to refuse a clear when a newer kill
+  switch has set the halt again). There is no Telegram button for it. A failed halt write or
   card close does not stop the pause: the result (`haltError`,
   `cardsError`) and the audit row name it.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD

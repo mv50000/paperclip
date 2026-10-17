@@ -123,11 +123,13 @@ async function runForCompany(
         });
         if (result.errors.length > 0) {
           failures.push(`${brand} scheduled pause: ${result.errors.length} pause(s) failed, retrying next tick`);
+        } else if (result.cardsError) {
+          // The day is not marked: the next tick closes the cards again (the pauses are idempotent).
+          failures.push(`${brand} scheduled pause: open activation cards not closed (${result.cardsError}), retrying next tick`);
         } else {
           await deps.store.claim(companyId, key, SCHEDULED_PAUSE_KIND, { count: result.count, jobRunId: job.runId });
           const tg = telegramFailure(`${brand} scheduled pause`, result);
           if (tg) failures.push(tg);
-          if (result.cardsError) failures.push(`${brand} scheduled pause: open activation cards not closed (${result.cardsError})`);
         }
       }
     } catch (error) {

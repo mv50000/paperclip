@@ -320,7 +320,7 @@ describe("the kill switch closes open activation cards and leaves a standing hal
     expect(r.meta.writes.some((call) => call.path === ADSET || call.path === CAMPAIGN)).toBe(false);
   });
 
-  it("a halt seen only after the last write pauses the ad again", async () => {
+  it("a halt seen only after the last write pauses again the campaign, the ad set and the ad", async () => {
     let reads = 0;
     const halt: HaltState = { brandCode: "OLL", rule: "kill_switch", since: "2026-10-21T09:00:00.000Z", reason: "hätä", initiator: { source: "ui" } };
     // 1 before the writes, 3 ACTIVE writes (ad, ad set, campaign), then the final check.
@@ -328,7 +328,41 @@ describe("the kill switch closes open activation cards and leaves a standing hal
     const sent = await r.cards.openActivationCard(publication());
     await tap(r, sent.messageId);
     expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "failed", step: "verify_halt" });
-    expect(r.meta.ads.find((ad) => ad.id === AD)!.status).toBe("PAUSED");
+    expect(r.meta.writes.filter((call) => call.body.status !== undefined).map((call) => `${call.path}=${call.body.status}`)).toEqual([
+      `${AD}=ACTIVE`,
+      `${OLD_AD}=PAUSED`,
+      `${ADSET}=ACTIVE`,
+      `${CAMPAIGN}=ACTIVE`,
+      `${CAMPAIGN}=PAUSED`,
+      `${ADSET}=PAUSED`,
+      `${AD}=PAUSED`,
+    ]);
+  });
+
+  it("a card close that fails does not stop the kill switch, and the result and the notice say so", async () => {
+    const r = await rig();
+    const sent = await r.cards.openActivationCard(publication());
+    const result = await pauseAll(
+      {
+        ctx: r.harness.ctx,
+        ledger: r.runtime.ledger,
+        notifier: r.notifier,
+        closeCards: async () => {
+          throw new Error("db down");
+        },
+      },
+      COMPANY_A,
+      parsedConfig(),
+      { dryRun: false, rule: "kill_switch", reason: "hätä", initiator: { source: "ui" }, notify: true },
+    );
+    expect(result).toMatchObject({ count: 1, cardsError: expect.stringContaining("db down"), closedCardIds: [] });
+    expect(result.halt).toBeDefined();
+    expect(r.meta.ads.find((ad) => ad.id === OLD_AD)!.status).toBe("PAUSED");
+    expect(r.notifier.messages[0]!.text).toContain("Avoimia aktivointikortteja ei voitu sulkea");
+    // The halt still refuses the card that stayed open.
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ reason: "halted" });
+    expect(activeWrites(r.meta)).toEqual([]);
   });
 });
 
@@ -400,6 +434,17 @@ describe("clearing the halt is board-only", () => {
     await tap(r, next.messageId);
     expect(r.store.rows.get(next.id)!.outcome).toMatchObject({ result: "activated" });
     expect(activeWrites(r.meta).map((call) => call.path)).toContain(AD);
+  });
+
+  it("a clear refuses when a newer kill switch set the halt after the preview", async () => {
+    const r = await rig();
+    await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "eka" }, BOARD);
+    const preview = await r.harness.performAction<{ halt: HaltState }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    await setHalt(r.harness.ctx, COMPANY_A, { ...preview.halt, since: "2099-01-01T00:00:00.000Z", reason: "toka" });
+    await expect(
+      r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD),
+    ).rejects.toThrow(/newer kill switch/);
+    expect(await haltOf(r)).toMatchObject({ reason: "toka" });
   });
 
   it("a clear without a halt changes nothing", async () => {
