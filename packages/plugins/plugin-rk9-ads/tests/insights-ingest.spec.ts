@@ -21,7 +21,7 @@ import manifest from "../src/manifest.js";
 import { GraphHealth, MetaGraphClient } from "../src/meta/graph.js";
 import { linkCpc } from "../src/metrics/cpc.js";
 import plugin from "../src/worker.js";
-import { EMBEDDED_PG_TIMEOUT_MS, embeddedPostgresSupport, startPluginTestDatabase, type PluginTestDatabase } from "./helpers/embedded-pg.js";
+import { EMBEDDED_PG_TIMEOUT_MS, describeEmbeddedPostgres, startPluginTestDatabase, type PluginTestDatabase } from "./helpers/embedded-pg.js";
 import { brandConfig, PACKAGE_ROOT, SECRET_A_BOT, SECRET_A_META, SECRET_B_META, secretRef } from "./fixtures.js";
 import { FakeGraph, fixture, type FixtureResponse } from "./meta/fake-graph.js";
 
@@ -144,11 +144,7 @@ describe("fetchAdDays field fallback (no DB)", () => {
   });
 });
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
-if (!support.supported) {
-  console.warn(`Skipping embedded Postgres insights tests: ${support.reason ?? "unsupported environment"}`);
-}
+const describeDb = await describeEmbeddedPostgres("insights");
 
 describeDb("insights ingest and digest on real Postgres", () => {
   let testDb: PluginTestDatabase;

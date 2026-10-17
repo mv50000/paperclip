@@ -20,11 +20,14 @@ import {
   NUMBER_FIELDS,
   RULE_TYPE_LABEL,
   toEditor,
+  weakeningChanges,
   type EditorRule,
 } from "./rule-fields.js";
 
 export const PROVISION_WORD = "PROVISOI";
 export const LIVE_WORD = "LIVE";
+/** The typed word for a save that weakens the automatic spend protection (RK9-562). */
+export const WEAKEN_WORD = "HEIKENNÄ";
 
 interface PreflightStatus {
   state: string;
@@ -43,6 +46,16 @@ interface PreparedRules {
   ok: boolean;
   errors?: string[];
   rules?: { liveMode: boolean; list: Array<Record<string, unknown>> };
+}
+
+/** A prepared save that waits for the typed word. */
+interface PendingSave {
+  rules: NonNullable<PreparedRules["rules"]>;
+  word: string;
+  prompt: string;
+  /** Weakening changes the word confirms; empty for a plain shadow -> live switch. */
+  weakening: string[];
+  liveOn: boolean;
 }
 
 interface DryRunResult {
@@ -290,7 +303,7 @@ function RuleEditor(props: { companyId: string | null }) {
   const [liveMode, setLiveMode] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [confirmLive, setConfirmLive] = useState(false);
+  const [pending, setPending] = useState<PendingSave | null>(null);
   const [dry, setDry] = useState<DryRunResult | null>(null);
 
   useEffect(() => {
@@ -299,6 +312,9 @@ function RuleEditor(props: { companyId: string | null }) {
     setDraft((rules.data.rules ?? []).filter((rule) => rule.type !== "propose_scale").map(toEditor));
     setLiveMode(rules.data.liveMode === true);
   }, [rules.data]);
+
+  // A confirmation covers the draft it listed; an edit after it asks again.
+  useEffect(() => setPending(null), [draft, liveMode]);
 
   if (rules.error) return <Section title="Säännöt"><ErrorText>Sääntöjä ei voitu lukea: {rules.error.message}</ErrorText></Section>;
   if (!rules.data || !draft) {
@@ -310,6 +326,16 @@ function RuleEditor(props: { companyId: string | null }) {
   }
   const savedLive = rules.data.liveMode === true;
 
+  const savedRules = { liveMode: savedLive, list: rules.data.rules ?? [] };
+
+  async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[]) {
+    await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening);
+    setPending(null);
+    toast({ title: "Säännöt tallennettu", tone: "success" });
+    rules.refresh();
+  }
+
+  /** Prepares the draft; a save that weakens the protection or turns live mode on waits for the typed word. */
   async function save() {
     if (!props.companyId) return;
     setBusy(true);
@@ -320,10 +346,30 @@ function RuleEditor(props: { companyId: string | null }) {
         setErrors(prepared.errors ?? ["Säännöt eivät kelpaa"]);
         return;
       }
-      await saveRulesBlock(props.companyId, prepared.rules);
-      setConfirmLive(false);
-      toast({ title: "Säännöt tallennettu", tone: "success" });
-      rules.refresh();
+      const weakening = weakeningChanges(savedRules, prepared.rules);
+      const liveOn = prepared.rules.liveMode && !savedLive;
+      if (weakening.length > 0) {
+        setPending({ rules: prepared.rules, word: WEAKEN_WORD, prompt: "Tallennus heikentää automaattista kulusuojaa:", weakening, liveOn });
+        return;
+      }
+      if (liveOn) {
+        setPending({ rules: prepared.rules, word: LIVE_WORD, prompt: "Live-tilassa säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.", weakening, liveOn });
+        return;
+      }
+      await write(prepared.rules, []);
+    } catch (cause) {
+      setErrors([errorText(cause)]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmPending() {
+    if (!pending) return;
+    setBusy(true);
+    setErrors([]);
+    try {
+      await write(pending.rules, pending.weakening);
     } catch (cause) {
       setErrors([errorText(cause)]);
     } finally {
@@ -380,17 +426,27 @@ function RuleEditor(props: { companyId: string | null }) {
           </Button>
         ))}
       </div>
-      {confirmLive ? (
-        <TypedConfirm
-          word={LIVE_WORD}
-          prompt="Live-tilassa säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää."
-          confirmLabel="Tallenna live-tilassa"
-          busy={busy}
-          onConfirm={save}
-          onCancel={() => setConfirmLive(false)}
-        />
+      {pending ? (
+        <div className="space-y-2">
+          {pending.weakening.length > 0 || pending.liveOn ? (
+            <ul aria-label="Vahvistettavat muutokset" className="list-disc space-y-1 pl-5 text-sm">
+              {pending.weakening.map((change) => (
+                <li key={change}>{change}</li>
+              ))}
+              {pending.weakening.length > 0 && pending.liveOn ? <li>Live-tila päälle: säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.</li> : null}
+            </ul>
+          ) : null}
+          <TypedConfirm
+            word={pending.word}
+            prompt={pending.prompt}
+            confirmLabel={pending.weakening.length > 0 ? "Tallenna heikennetyt säännöt" : "Tallenna live-tilassa"}
+            busy={busy}
+            onConfirm={() => void confirmPending()}
+            onCancel={() => setPending(null)}
+          />
+        </div>
       ) : (
-        <Button variant="primary" disabled={busy} onClick={() => (liveMode && !savedLive ? setConfirmLive(true) : void save())}>
+        <Button variant="primary" disabled={busy} onClick={() => void save()}>
           {busy ? "Tallennetaan…" : "Tallenna säännöt"}
         </Button>
       )}

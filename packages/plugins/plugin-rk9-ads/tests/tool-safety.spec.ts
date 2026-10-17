@@ -17,7 +17,7 @@ import { brandConfig, PACKAGE_ROOT, SECRET_A_META } from "./fixtures.js";
 import { FakeMediaAndGraph, type RecordedRequest } from "./helpers/fake-media.js";
 import {
   EMBEDDED_PG_TIMEOUT_MS,
-  embeddedPostgresSupport,
+  describeEmbeddedPostgres,
   startPluginTestDatabase,
   type PluginTestDatabase,
 } from "./helpers/embedded-pg.js";
@@ -76,8 +76,7 @@ const PARAM_SETS: Array<Record<string, unknown>> = [
   { manifest: { status: "ACTIVE", daily_budget: 100000 } },
 ];
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
+const describeDb = await describeEmbeddedPostgres("tool safety");
 
 describe("agent tool surface", () => {
   it("declares the four creative and read-only tools of the spec, and no tool that sounds like spending", () => {

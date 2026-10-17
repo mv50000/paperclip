@@ -9,7 +9,7 @@ import { brandConfig, PACKAGE_ROOT, SECRET_A_META, SECRET_B_META, secretRef } fr
 import { FakeMediaAndGraph } from "./helpers/fake-media.js";
 import {
   EMBEDDED_PG_TIMEOUT_MS,
-  embeddedPostgresSupport,
+  describeEmbeddedPostgres,
   startPluginTestDatabase,
   type PluginTestDatabase,
 } from "./helpers/embedded-pg.js";
@@ -44,11 +44,7 @@ function imageManifest(overrides: Record<string, unknown> = {}): Record<string, 
   return { ...base, kind: "image", mediaUrl: IMAGE_URL, sha256: SHA_IMAGE, aspectRatio: "1:1", idempotencyKey: "oll-image-mokki", ...overrides };
 }
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
-if (!support.supported) {
-  console.warn(`Skipping embedded Postgres creative ingress tests: ${support.reason ?? "unsupported environment"}`);
-}
+const describeDb = await describeEmbeddedPostgres("creative ingress");
 
 describeDb("creative ingress (tool + route, real Postgres)", () => {
   let testDb: PluginTestDatabase;

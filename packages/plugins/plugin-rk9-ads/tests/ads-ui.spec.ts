@@ -11,7 +11,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { UiOverview, UiPublication, UiSettings, UiWidget } from "../src/features/ui/dto.js";
 import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
 import { CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
+import { saveRulesBlock } from "../src/ui/host-config.js";
 import { ACTION, DATA } from "../src/ui/keys.js";
+import { weakeningChanges } from "../src/ui/rule-fields.js";
+import { LIVE_WORD, WEAKEN_WORD } from "../src/ui/SettingsPage.js";
 
 const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 const CONTEXT = { companyId: COMPANY_ID, companyPrefix: "OLL", projectId: null, entityId: null, entityType: null, userId: "board-user-1" };
@@ -382,5 +385,119 @@ describe("operator UI (RK9-518)", () => {
     expect(bridge.refreshes).toContain(DATA.preflight);
     expect(container.textContent).toContain("spend_cap pass");
     expect(container.textContent).toContain("Julkaisuvalmis.");
+  });
+  it("shows a pause-ad card close failure as an error after the panel closes (RK9-562)", async () => {
+    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.actions.set(ACTION.pauseAd, async (params) =>
+      params.dryRun !== false
+        ? { dryRun: true, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "ACTIVE", paused: false }
+        : { dryRun: false, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "PAUSED", paused: true, closedCardIds: [], cardsError: "gate store down" },
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    await click("Pysäytä");
+    await click("Tarkista ja jatka");
+    await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
+    await click("Pysäytä mainos");
+    const alerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
+    expect(alerts).toEqual([expect.stringContaining("aktivointikortteja EI saatu varmasti suljettua: gate store down")]);
+  });
+
+  describe("rule editor confirmation for weakening saves (RK9-562)", () => {
+    const CAP = { ruleId: "pause_all_cap", type: "pause_all_cap", enabled: true, mode: "live", cooldownHours: 24 };
+    const CPC = { ruleId: "cpc-ceiling", type: "threshold_pause", enabled: true, mode: "live", metric: "cpc", operator: "gt", threshold: 0.8, days: 7, aggregate: "window_total", minImpressions: 0, minClicks: 0, minSpendEur: 3, cooldownHours: 24 };
+    const realFetch = globalThis.fetch;
+    let posts: Array<Record<string, unknown>>;
+
+    beforeEach(() => {
+      posts = [];
+      bridge.data.set(DATA.settings, { state: "disabled", errors: [], brand: null, meta: null, telegram: null, landing: null, schedule: null, digest: null, fatigue: null } satisfies UiSettings);
+      bridge.data.set(DATA.preflight, { state: "disabled", fresh: false, result: null });
+      bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: [CPC, CAP] });
+      bridge.actions.set(ACTION.rulesPrepareSave, async (params) => ({ ok: true, rules: { liveMode: params.liveMode, list: params.list } }));
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return new Response("{}", { status: 200 });
+        }
+        return new Response(JSON.stringify({ configJson: { brandCode: "OLL", rules: { liveMode: true, list: [CPC, { type: "pause_all_cap", mode: "live" }] } } }), { status: 200 });
+      }) as typeof fetch;
+    });
+
+    afterEach(() => {
+      globalThis.fetch = realFetch;
+    });
+
+    function changes(): string[] {
+      return Array.from(container.querySelectorAll('ul[aria-label="Vahvistettavat muutokset"] li')).map((node) => node.textContent ?? "");
+    }
+
+    it("a removed rule needs the typed word: no POST without it, the change is listed, the word saves", async () => {
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await click("Poista");
+      await click("Tallenna säännöt");
+      expect(changes()).toEqual(["Kynnyspysäytys cpc-ceiling: poistetaan."]);
+      expect(posts).toEqual([]);
+      expect(buttons("Tallenna heikennetyt säännöt")[0]!.disabled).toBe(true);
+      await type(`Kirjoita ${WEAKEN_WORD}`, LIVE_WORD);
+      expect(buttons("Tallenna heikennetyt säännöt")[0]!.disabled).toBe(true);
+      expect(posts).toEqual([]);
+      await type(`Kirjoita ${WEAKEN_WORD}`, WEAKEN_WORD);
+      await click("Tallenna heikennetyt säännöt");
+      expect(posts).toHaveLength(1);
+      expect((posts[0]!.configJson as { rules: { list: unknown[] } }).rules.list).toHaveLength(1);
+      expect(bridge.toasts.map((toast) => toast.title)).toContain("Säännöt tallennettu");
+    });
+
+    it("live mode off and a disabled rule are listed; cancel sends nothing", async () => {
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      const [liveToggle, enabledToggle] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+      await act(async () => {
+        liveToggle!.click();
+        enabledToggle!.click();
+        await flush();
+      });
+      await click("Tallenna säännöt");
+      expect(changes()).toEqual(["Live-tila pois: yksikään sääntö ei enää pysäytä mainoksia Metassa.", "Kynnyspysäytys cpc-ceiling: kytketään pois päältä."]);
+      await click("Peruuta");
+      expect(posts).toEqual([]);
+      expect(buttons("Tallenna säännöt")).toHaveLength(1);
+    });
+
+    it("a change that does not weaken the protection saves without a word", async () => {
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(changes()).toEqual([]);
+      expect(posts).toHaveLength(1);
+    });
+
+    it("the save refuses a weakening against the config saved now that the operator did not confirm", async () => {
+      const extra = { ...CPC, ruleId: "cpm-ceiling", metric: "cpm" };
+      const fetcher = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push({});
+          return new Response("{}", { status: 200 });
+        }
+        return new Response(JSON.stringify({ configJson: { brandCode: "OLL", rules: { liveMode: true, list: [CPC, extra] } } }), { status: 200 });
+      }) as typeof fetch;
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [])).rejects.toThrow(/Kynnyspysäytys cpm-ceiling: poistetaan/);
+      expect(posts).toEqual([]);
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, ["Kynnyspysäytys cpm-ceiling: poistetaan."])).resolves.toBeUndefined();
+      expect(posts).toHaveLength(1);
+    });
+
+    it("weakeningChanges: the cap to shadow, a live rule to shadow, a renamed rule; additions and disabled rules are not weakening", () => {
+      const saved = { liveMode: true, list: [CPC, CAP, { ...CPC, ruleId: "off-rule", enabled: false }, { ruleId: "scale", type: "propose_scale", enabled: false }] };
+      expect(
+        weakeningChanges(saved, {
+          liveMode: true,
+          list: [{ ...CPC, ruleId: "cpc-renamed" }, { ...CAP, mode: "shadow" }],
+        }),
+      ).toEqual(["Kynnyspysäytys cpc-ceiling: poistetaan.", "Kuukausikatto 90 % (sisäänrakennettu): live-tilasta varjotilaan."]);
+      expect(weakeningChanges(saved, { liveMode: true, list: [{ ...CPC, mode: "shadow" }, CAP, { ...CPC, ruleId: "new-rule" }] })).toEqual([
+        "Kynnyspysäytys cpc-ceiling: live-tilasta varjotilaan.",
+      ]);
+      expect(weakeningChanges({ liveMode: false, list: [CAP] }, { liveMode: true, list: [CAP, CPC] })).toEqual([]);
+    });
   });
 });

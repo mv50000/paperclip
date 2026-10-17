@@ -12,16 +12,12 @@ import manifest from "../../src/manifest.js";
 import { PACKAGE_ROOT } from "../fixtures.js";
 import {
   EMBEDDED_PG_TIMEOUT_MS,
-  embeddedPostgresSupport,
+  describeEmbeddedPostgres,
   startPluginTestDatabase,
   type PluginTestDatabase,
 } from "../helpers/embedded-pg.js";
 
-const support = await embeddedPostgresSupport();
-const describeDb = support.supported ? describe : describe.skip;
-if (!support.supported) {
-  console.warn(`Skipping embedded Postgres once-store tests: ${support.reason ?? "unsupported environment"}`);
-}
+const describeDb = await describeEmbeddedPostgres("once-store");
 
 describeDb("alert dedupe on real Postgres", () => {
   let testDb: PluginTestDatabase;
