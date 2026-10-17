@@ -690,10 +690,10 @@ describe("operator UI (RK9-518)", () => {
         expect(weakeningChanges({ liveMode: true, list: [{ ...ctr, operator: "lte" }] }, { liveMode: true, list: [ctr] })).toEqual(["Kynnyspysäytys cpc-ceiling: vertailu lte → lt."]);
         expect(edit({ operator: "gte" })).toEqual([]);
         expect(weakeningChanges({ liveMode: true, list: [{ ...CPC, operator: "gte" }] }, live)).toEqual(["Kynnyspysäytys cpc-ceiling: vertailu gte → gt."]);
-        // each_day: more days must all break the threshold.
+        // each_day: more days must all break the threshold; fewer days shrink the window the minimum gates sum over.
         const daily = { ...CPC, aggregate: "each_day", days: 2 };
         expect(weakeningChanges({ liveMode: true, list: [daily] }, { liveMode: true, list: [{ ...daily, days: 5 }] })).toEqual(["Kynnyspysäytys cpc-ceiling: päivät 2 → 5."]);
-        expect(weakeningChanges({ liveMode: true, list: [daily] }, { liveMode: true, list: [{ ...daily, days: 1 }] })).toEqual([]);
+        expect(weakeningChanges({ liveMode: true, list: [daily] }, { liveMode: true, list: [{ ...daily, days: 1 }] })).toEqual(["Kynnyspysäytys cpc-ceiling: päivät 2 → 1."]);
       });
 
       it("a shadow rule's tuning is not weakening; the schema's defaults fill missing fields", () => {

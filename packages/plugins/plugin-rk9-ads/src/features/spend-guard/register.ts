@@ -203,6 +203,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       throw new Error("Clearing the halt is board-only; an agent can run it with dryRun only");
     }
     if (params.adId !== undefined) {
+      if (Array.isArray(params.acknowledgeUndos) && params.acknowledgeUndos.length > 0) {
+        throw new Error("Acknowledge the activation undos in a call without adId");
+      }
       const adId = typeof params.adId === "string" ? params.adId.trim() : "";
       if (!AD_ID_RE.test(adId)) throw new Error("adId must be a Meta ad id (digits only)");
       if (dryRun) return { dryRun, cleared: false, adHalt: await readAdHalt(ctx, companyId, adId, now()) };

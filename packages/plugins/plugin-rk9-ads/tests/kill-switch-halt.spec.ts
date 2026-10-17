@@ -842,6 +842,7 @@ describe("clearing the halt is board-only", () => {
     await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD, id: first.id }, AGENT)).rejects.toThrow(/board-only/);
     await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD }, BOARD)).rejects.toThrow(/needs `id`/);
     await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { adId: "act_1" }, BOARD)).rejects.toThrow(/digits only/);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD, id: first.id, acknowledgeUndos: ["x"] }, BOARD)).rejects.toThrow(/without adId/);
     // Another company's call does not see the halt.
     expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { adId: AD }, { ...BOARD, companyId: "other-company" })).toMatchObject({ adHalt: null });
 

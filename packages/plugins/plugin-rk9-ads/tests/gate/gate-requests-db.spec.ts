@@ -98,6 +98,12 @@ describeDb("activation gate SQL on real Postgres", () => {
     expect((await repo.openForAd(companyA, "120200000000000312")).map((entry) => entry.id)).toEqual([id]);
     expect(await repo.openForAd(companyA, "120200000000000313")).toEqual([]);
     expect(await repo.openForAd(companyB, "120200000000000312")).toEqual([]);
+    // An approved one counts as running by its binding too.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET status = 'approved', decided_at = now() WHERE id = $1`, [id]);
+    expect(await repo.activationInFlight(companyA, "120200000000000312", 30)).toBe(true);
+    expect(await repo.activationInFlight(companyB, "120200000000000312", 30)).toBe(false);
+    // The suite shares one database: end the row so later publication lookups do not see it.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET status = 'denied', outcome = '{"handler":"done","result":"denied"}'::jsonb WHERE id = $1`, [id]);
   });
 
   it("lists the company's open activation cards for a pause, and reads a closer's status line back (RK9-557)", async () => {

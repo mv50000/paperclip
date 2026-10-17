@@ -184,7 +184,8 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateR
     async activationInFlight(companyId, adId, withinMinutes) {
       const rows = await db.query<{ n: unknown }>(
         `SELECT count(*) AS n FROM ${gate}
-          WHERE company_id = $1 AND kind = 'activate_ad' AND ad_id = $2 AND status = 'approved'
+          WHERE company_id = $1 AND kind = 'activate_ad' AND status = 'approved'
+            AND (ad_id = $2 OR (ad_id IS NULL AND payload->'activation'->>'adId' = $2))
             AND (outcome IS NULL OR outcome->>'handler' = 'started')
             AND decided_at > now() - make_interval(mins => $3)`,
         [companyId, adId, Math.max(1, Math.trunc(withinMinutes))],

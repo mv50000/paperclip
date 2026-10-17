@@ -158,8 +158,10 @@ const UPWARD = new Set(["gt", "gte"]);
  * - operator: a turn of direction (gt/gte <-> lt/lte), or gte -> gt and
  *   lte -> lt (equal values no longer fire);
  * - threshold, with the same operator direction: up for gt/gte, down for lt/lte;
- * - days: up with aggregate each_day (every day must break it), any change
- *   with window_total; aggregate: any change;
+ * - days and aggregate: any change. More days with each_day means every
+ *   one of them must break the threshold; fewer days shrink the window the
+ *   minimum-data gates sum over; a window_total over a different window
+ *   reads a different average;
  * - minImpressions, minClicks, minSpendEur, cooldownHours: up.
  */
 function parameterChanges(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
@@ -185,7 +187,7 @@ function parameterChanges(before: Record<string, unknown>, after: Record<string,
     const aggregate = [String(before.aggregate ?? "each_day"), String(after.aggregate ?? "each_day")];
     if (aggregate[0] !== aggregate[1]) out.push(`laskenta ${aggregate[0]} → ${aggregate[1]}`);
     const days = [num(before, "days", 1), num(after, "days", 1)];
-    if (aggregate[1] === "each_day" && aggregate[0] === aggregate[1] ? days[1]! > days[0]! : days[1] !== days[0]) out.push(`päivät ${days[0]} → ${days[1]}`);
+    if (days[1] !== days[0]) out.push(`päivät ${days[0]} → ${days[1]}`);
     up("minImpressions", "väh. näytöt", 0);
     up("minClicks", "väh. linkkiklikit", 0);
     up("minSpendEur", "väh. kulutus €", 0);

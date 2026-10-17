@@ -672,9 +672,10 @@ anything ACTIVE.
   approved just before the pause pauses the ad again, and a card of the ad
   tapped while the halt holds is refused. A board user lifts it early with
   `clear-halt` `{ adId, id }` (the page offers it after the pause).
-  `cardsError` names cards that did not close; `haltError` a halt that was
-  not stored, and then an approved activation that may still run is named
-  too. The page keeps these per ad. The closed cards say whether Meta
+  `cardsError` names cards that did not close and an approved activation
+  that may still run; `haltError` a halt that was not stored. An activation
+  that stalls longer than the halt before its last halt check is not
+  stopped by it. The page keeps these per ad. The closed cards say whether Meta
   confirmed the pause. There is no activate, resume or scale action (G1, G9).
 - **Money actions in the UI** (the kill switch, pause-ad, the halt clear,
   provision, switching the rules to live) need a dry-run preview and a typed
@@ -683,8 +684,7 @@ anything ACTIVE.
   off, a live rule or the cap to shadow, an enabled rule removed or disabled,
   and a live rule's parameter changed so that it fires less (RK9-566): the
   metric, the operator's direction or gte -> gt / lte -> lt, the threshold
-  in the operator's direction, more `days` (`each_day`) or any change of the
-  window (`window_total`) or of `aggregate`, a higher `minImpressions`,
+  in the operator's direction, any change of `days` or `aggregate`, a higher `minImpressions`,
   `minClicks`, `minSpendEur` or `cooldownHours` (also the cap's). A shadow
   rule's tuning is not checked. `rules.prepareSave` compares the draft with
   the config saved now and refuses an unconfirmed weakening or live-mode

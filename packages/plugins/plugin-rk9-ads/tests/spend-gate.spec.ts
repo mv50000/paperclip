@@ -681,13 +681,13 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     expect(caption(r, sent.messageId)).not.toContain(AD_PAUSE_CLOSE_TEXT);
   });
 
-  it("with the ad's halt stored, a running activation is no warning: the halt stops it (RK9-566)", async () => {
+  it("with the ad's halt stored, a running activation is still named, with the halt that stops it (RK9-566)", async () => {
     const r = await rig();
     registerUi(r.runtime);
     r.repo.activationInFlight = async () => true;
     const result = await pauseAd(r);
     expect(result).toMatchObject({ paused: true, closedCardIds: [], adHalt: { id: expect.any(String), until: expect.any(String) } });
-    expect(result.cardsError).toBeUndefined();
+    expect(result.cardsError).toMatch(/approved activation of ad .* is running; the ad's halt makes it pause the ad again/);
   });
 
   it("reports an approved activation that may still run when the ad's halt was not stored", async () => {

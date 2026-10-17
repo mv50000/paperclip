@@ -392,24 +392,28 @@ export function createStagingCards(deps: StagingCardDeps) {
     /**
      * The pause-ad hook (RK9-562): closes the open card rows of one ad now;
      * `announce` edits the cards later, with the pause's result. A tap that
-     * approved a card before this close is not stopped here. When the
-     * pause-ad halt was stored (`halted`, RK9-566), that activation sees it
-     * and pauses again what it set ACTIVE; without it, `error` says that an
-     * approved activation of the ad may still be running. Throws only when
-     * the open cards cannot be listed.
+     * approved a card before this close is not stopped here: `error` says
+     * that an approved activation of the ad may still be running. When the
+     * pause-ad halt was stored (`halted`, RK9-566), that activation reads it
+     * before its next ACTIVE write and after its writes and pauses again
+     * what it set ACTIVE; the warning stays, because a write Meta applies
+     * late or a failed write of its own can still leave the ad ACTIVE.
+     * Throws only when the open cards cannot be listed.
      */
     async closeCardsForAdPause(companyId: string, adId: string, input: { reason: string; halted?: boolean }): Promise<PauseCardClose> {
       const outcome = { reason: "ad_paused", pauseReason: input.reason.slice(0, 300) };
       const { closed, error } = await closeRows(companyId, await deps.repo.openForAd(companyId, adId), outcome, AD_PAUSE_CLOSE_TEXT);
       const errors = error ? [error] : [];
-      if (!input.halted) {
-        try {
-          if (await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
-            errors.push(`an approved activation of ad ${adId} is running; check the ad's status after it has finished`);
-          }
-        } catch (cause) {
-          errors.push(`running activations could not be read: ${safeError(cause)}`);
+      try {
+        if (await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
+          errors.push(
+            input.halted
+              ? `an approved activation of ad ${adId} is running; the ad's halt makes it pause the ad again, check the ad's status after it has finished`
+              : `an approved activation of ad ${adId} is running; check the ad's status after it has finished`,
+          );
         }
+      } catch (cause) {
+        errors.push(`running activations could not be read: ${safeError(cause)}`);
       }
       return {
         ids: closed.map((request) => request.id),
