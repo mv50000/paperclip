@@ -102,7 +102,7 @@ export async function describeEmbeddedPostgres(suite: string): Promise<typeof de
   const support = await embeddedPostgresSupport();
   if (support.supported) return describe;
   const reason = support.reason ?? "unsupported environment";
-  if (process.env.CI) throw new Error(`Embedded Postgres is required in CI for the ${suite} tests: ${reason}`);
+  if (process.env.CI && process.env.CI !== "false") throw new Error(`Embedded Postgres is required in CI for the ${suite} tests: ${reason}`);
   console.warn(`Skipping embedded Postgres ${suite} tests: ${reason}`);
   return describe.skip;
 }

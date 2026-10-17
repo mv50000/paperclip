@@ -169,7 +169,8 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       ctx.logger.warn("rk9-ads ui: closed activation cards not edited", { companyId, adId, detail: safeError(cause) });
     }
     if (!paused) {
-      throw new Error(`The pause of ad ${adId} failed: ${error}${cardsError ? `; open activation cards were not closed: ${cardsError}` : ""}`);
+      const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}`;
+      throw new Error(`The pause of ad ${adId} failed: ${error}. ${cards}`);
     }
     return sanitize({
       dryRun: false,

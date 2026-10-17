@@ -668,6 +668,16 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     expect(statusWrites(r.meta, "PAUSED")).toHaveLength(1);
   });
 
+  it("a failed Meta pause still closes the cards, and the error says so", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const sent = await r.cards.openActivationCard(publication());
+    r.meta.fail = (call) => (call.body.status === "PAUSED" ? new Error("Meta 500") : null);
+    await expect(pauseAd(r)).rejects.toThrow(/The pause of ad .* failed: .*1 activation card\(s\) of the ad closed/);
+    expect(r.store.rows.get(sent.id)!.status).toBe("expired");
+    expect(caption(r, sent.messageId)).toContain(AD_PAUSE_CLOSE_TEXT);
+  });
+
   it("reports an approved activation that may still run", async () => {
     const r = await rig();
     registerUi(r.runtime);

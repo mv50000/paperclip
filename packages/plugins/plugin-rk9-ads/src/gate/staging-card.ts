@@ -66,7 +66,7 @@ const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
   scheduled_pause: "⛔ Ajastettu pysäytys: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty aamuun asti.",
 };
 /** The card status after a pause of the ad from the UI (RK9-562). */
-export const AD_PAUSE_CLOSE_TEXT = "⛔ Mainos pysäytetty käyttöliittymästä: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi vaatii uuden kortin.";
+export const AD_PAUSE_CLOSE_TEXT = "⛔ Mainos pysäytetään käyttöliittymästä: kortti mitätöity. Aktivointi vaatii uuden kortin.";
 const COPY_MAX_CHARS = 400;
 
 /** The part of the Telegram controller the card life cycle uses. */

@@ -629,10 +629,18 @@ anything ACTIVE.
   brand's ad account. `dryRun` defaults to true. A real pause needs
   `confirm: true` and a board user. It writes a `rule_actions` row
   (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
-  activity entry. There is no activate, resume or scale action (G1, G9).
+  activity entry. Before the Meta write it closes the ad's open activation
+  cards (`closedCardIds`), so an old card cannot activate the ad again
+  (RK9-562). `cardsError` names cards that did not close, or an approved
+  activation that may still run; the page shows it as an error. There is no
+  activate, resume or scale action (G1, G9).
 - **Money actions in the UI** (the kill switch, pause-ad, the halt clear,
   provision, switching the rules to live) need a dry-run preview and a typed
   word before the live call.
+- **Weakening rule saves** need the typed word `HEIKENNÄ` (RK9-562): live mode
+  off, a live rule or the cap to shadow, an enabled rule removed or disabled.
+  The confirmation lists the changes. The save checks them again against the
+  config read right before the POST. Threshold changes are not checked.
 - The kill switch stays on the page when the config is invalid or
   unavailable; `pause-all` then runs on the last valid config.
 

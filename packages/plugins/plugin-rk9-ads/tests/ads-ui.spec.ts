@@ -463,6 +463,23 @@ describe("operator UI (RK9-518)", () => {
       expect(buttons("Tallenna säännöt")).toHaveLength(1);
     });
 
+    it("shadow -> live still needs LIVE; no POST without it", async () => {
+      bridge.data.set(DATA.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      const [liveToggle] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+      await act(async () => {
+        liveToggle!.click();
+        await flush();
+      });
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(buttons("Tallenna live-tilassa")[0]!.disabled).toBe(true);
+      await type(`Kirjoita ${LIVE_WORD}`, LIVE_WORD);
+      await click("Tallenna live-tilassa");
+      expect(posts).toHaveLength(1);
+      expect((posts[0]!.configJson as { rules: { liveMode: boolean } }).rules.liveMode).toBe(true);
+    });
+
     it("a change that does not weaken the protection saves without a word", async () => {
       await render(createElement(SettingsPage, { context: CONTEXT }));
       await type("Kynnys", "0.6");
