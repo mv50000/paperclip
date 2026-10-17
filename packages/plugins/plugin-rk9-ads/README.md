@@ -567,8 +567,14 @@ Not installed in prod by RK9-510.
    `meta.pageId` "1216714361516949", `meta.campaignId` "120247250925830775"
    and `meta.adSetId` "120247250925850775" (Aurinkopulssi, adopted, never
    created), `landing.urls.get` "https://sunspot.fi/get".
-3. Run `verify-connection`. Expect every Meta check to pass and
-   `launchReady: false` (`monthly_cap_unset`). Do not run `provision`.
+3. Run `verify-connection`. Expect `launchReady: false`: `token_scopes`
+   fails with `missing_scopes` (an ads_read token has no ads_management) and
+   the cap is unset (`monthly_cap_unset`). The account, page and spend_cap
+   checks should pass. Do not run `provision`.
+
+A disabled brand that was never enabled is skipped by `scheduled-pause`. A
+brand that was enabled before and is then saved disabled keeps the ADR 3
+fallback: the pause side runs on its last valid config and the run fails.
 
 `tests/fixtures/sunspot-brand-config.json` is the same config with a cap, for
 the mocked preflight test.

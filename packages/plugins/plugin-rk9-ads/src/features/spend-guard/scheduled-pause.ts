@@ -176,6 +176,12 @@ export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
       // unavailable config runs the pause side on the last valid config, and
       // the run fails either way so the broken config is seen.
       const loaded = await loadPauseConfig(ctx, companyId, result);
+      if (!loaded.ok && loaded.neverEnabled) {
+        // A disabled brand (monthlyCapEur unset, e.g. the AUR read-only
+        // config) that was never enabled is a normal state, not a failure.
+        ctx.logger.info("rk9-ads scheduled-pause: brand disabled and never enabled; skipped", { companyId });
+        continue;
+      }
       if (!loaded.ok) {
         failures.push(`company ${companyId}: ${loaded.error}; nothing paused`);
         continue;

@@ -64,7 +64,7 @@ export function register(runtime: FeatureRuntime): void {
         message: SMOKE_ACTIVITY_MESSAGE,
         metadata: {
           runId: job.runId,
-          configState: "enabled",
+          configState: result.state,
           brandCode: config.brandCode,
           timeZone: config.timeZone,
           localDate: localDate(now, config.timeZone),

@@ -22,7 +22,7 @@ import type { BrandConfig } from "../../config.js";
 export type PauseConfig =
   | { ok: true; config: BrandConfig; fallback: null }
   | { ok: true; config: BrandConfig; fallback: { state: "invalid" | "disabled" | "unavailable"; detail: string } }
-  | { ok: false; state: string; error: string };
+  | { ok: false; state: string; error: string; neverEnabled?: true };
 
 function lastValidKey(companyId: string) {
   return { scopeKind: "instance" as const, namespace: "spend-guard", stateKey: `last-valid-config:${companyId}` };
@@ -90,7 +90,9 @@ export async function loadPauseConfig(ctx: PluginContext, companyId: string, kno
     return { ok: false, state: result.state, error: `the brand config is ${result.state} and the last valid config could not be read: ${message}` };
   }
   if (!fallback) {
-    return { ok: false, state: result.state, error: `the brand config is ${result.state} and there is no last valid config to pause with` };
+    const error = `the brand config is ${result.state} and there is no last valid config to pause with`;
+    // A brand saved disabled and never enabled has had no spend guard to run.
+    return result.state === "disabled" ? { ok: false, state: result.state, error, neverEnabled: true } : { ok: false, state: result.state, error };
   }
   // The stored campaign scope may be stale (the broken save may have moved
   // it), so a fallback pauses the whole ad account.

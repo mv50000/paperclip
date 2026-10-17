@@ -195,6 +195,20 @@ describe("pause side on an invalid or unavailable config (README ADR 3)", () => 
     expect(r.meta.writes).toHaveLength(0);
   });
 
+  it("skips a disabled brand that was never enabled, but pauses one that was (RK9-510)", async () => {
+    const r = rig({ meta: activeMeta(), config: { ...scheduled(), monthlyCapEur: null } });
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).resolves.toBeUndefined();
+    expect(r.meta.writes).toHaveLength(0);
+
+    const later = rig({ meta: activeMeta(), config: scheduled() });
+    await later.harness.runJob("scheduled-pause");
+    later.harness.ctx.config.get = async () => ({ ...scheduled(), monthlyCapEur: null });
+    later.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(later.harness.runJob("scheduled-pause")).rejects.toThrow(/OLL: the brand config is disabled; pause side ran on the last valid config/);
+    expect(pauses(later.meta)).toBe(2);
+  });
+
   it("still pauses when the day marker cannot be read", async () => {
     const r = rig({ meta: activeMeta(), config: scheduled() });
     r.store.claimed = async () => {
