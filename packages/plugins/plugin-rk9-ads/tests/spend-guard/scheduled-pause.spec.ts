@@ -55,6 +55,8 @@ describe("scheduled pause job", () => {
     expect(pauses(r.meta)).toBe(2);
     expect(r.notifier.messages).toHaveLength(1);
     expect(r.store.keys()).toContain(`${COMPANY_A}|${scheduledPauseKey("OLL", "2026-03-28")}`);
+    // The pause closes the open activation cards (RK9-557).
+    expect(r.cardCloses).toEqual([{ companyId: COMPANY_A, rule: "scheduled_pause", reason: "scheduled pause at 21:30 Europe/Helsinki" }]);
 
     // Someone turns the ads back on: the same local day does not pause again.
     reactivate(r.meta);

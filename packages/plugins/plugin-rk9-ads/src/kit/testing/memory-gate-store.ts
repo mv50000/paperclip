@@ -43,6 +43,7 @@ export function createMemoryGateStore(now: () => Date = () => new Date()): Memor
       payload: structuredClone(row.payload),
       decidedByTgUserId: row.decidedByTgUserId,
       decidedAt: row.decidedAt,
+      closedStatus: typeof row.outcome?.statusText === "string" ? row.outcome.statusText : null,
     };
   }
 

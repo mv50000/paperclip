@@ -6,6 +6,7 @@ import type { FeatureRuntime } from "../types.js";
 import { spendGuardDeclarations } from "./declarations.js";
 import { alertedThresholds } from "./alerts.js";
 import { checkSpend, type GuardResult } from "./guard.js";
+import { clearHalt, readHalt, type HaltState } from "./halt.js";
 import { pauseAll, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
 import { loadPauseConfig, pauseReason } from "./pause-config.js";
 import { createScheduledPauseJob, SCHEDULED_PAUSE_JOB_KEY } from "./scheduled-pause.js";
@@ -23,14 +24,20 @@ import {
  * Spend guard, kill switch and scheduled pause (A6, RK9-511).
  *
  * - job `scheduled-pause`: alerts, scheduled pause, data gate (scheduled-pause.ts)
- * - data `spend-guard`: MTD, cap, spend_cap, projection, % used, alerted thresholds
+ * - data `spend-guard`: MTD, cap, spend_cap, projection, % used, alerted thresholds,
+ *   and `halt`: the standing halt or null (`haltError` when it cannot be read)
  * - action `pause-all`: the UI's "Pysäytä kaikki" (dry-run preview, then confirm)
+ * - action `clear-halt`: lifts the kill switch's standing halt (RK9-557).
+ *   Dry run by default; a real clear needs `confirm: true` and a board user
+ *   (an agent may only preview it). No Telegram button clears it.
  * - tools `rk9ads_pause_all` and `rk9ads_get_pacing`
  * - gate kind `pause_all`: one tap on the card's button pauses everything
  */
 
 export const SPEND_GUARD_DATA_KEY = "spend-guard";
 export const PAUSE_ALL_ACTION_KEY = "pause-all";
+export const CLEAR_HALT_ACTION_KEY = "clear-halt";
+export const HALT_CLEARED_ACTIVITY = "rk9-ads spend guard: halt cleared";
 const REASON_MAX = 300;
 
 export interface SpendGuardOverrides {
@@ -39,6 +46,7 @@ export interface SpendGuardOverrides {
   now?: () => Date;
   clientFor?: PauseAllDeps["clientFor"];
   feedFetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  closeCards?: PauseAllDeps["closeCards"];
 }
 
 type Loaded = { ok: true; config: BrandConfig } | { ok: false; state: string; error: string };
@@ -81,11 +89,26 @@ export async function spendSnapshot(
   return { ...result, brandCode: config.brandCode, alertedThresholds: alerted };
 }
 
+/** The halt for the data endpoint: a read failure is reported, never shown as "no halt". */
+async function haltView(ctx: PluginContext, companyId: string): Promise<{ halt: HaltState | null; haltError?: string }> {
+  try {
+    return { halt: await readHalt(ctx, companyId) };
+  } catch (error) {
+    return { halt: null, haltError: safeError(error) };
+  }
+}
+
 function pauseSummary(result: PauseAllResult): string {
   const verb = result.dryRun ? "Would pause" : "Paused";
   const head = `${verb} ${result.pausedAds.length} ad(s) and ${result.pausedCampaigns.length} campaign(s) (scope ${result.scope}).`;
   const failed = result.errors.length > 0 ? ` ${result.errors.length} pause(s) failed: ${result.errors.map((e) => e.id).join(", ")}.` : "";
-  return `${head}${failed}${result.list.length > 0 ? `\n${result.list.join("\n")}` : ""}`;
+  const stop = [
+    ...(result.halt ? ["Standing halt set: no activation until a board user clears it (clear-halt)."] : []),
+    ...(result.haltError ? [`The standing halt was NOT stored: ${result.haltError}.`] : []),
+    ...(result.closedCardIds.length > 0 ? [`Closed ${result.closedCardIds.length} open activation card(s).`] : []),
+    ...(result.cardsError ? [`Open activation cards were not closed: ${result.cardsError}.`] : []),
+  ];
+  return `${head}${failed}${stop.length > 0 ? ` ${stop.join(" ")}` : ""}${result.list.length > 0 ? `\n${result.list.join("\n")}` : ""}`;
 }
 
 export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuardOverrides = {}): void {
@@ -93,7 +116,7 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
   const store = overrides.store ?? sqlOnceStore(ledger);
   const notifier = overrides.notifier ?? controllerNotifier;
   const now = overrides.now ?? (() => new Date());
-  const deps = { ctx, ledger, store, notifier, now, clientFor: overrides.clientFor, feedFetch: overrides.feedFetch };
+  const deps = { ctx, ledger, store, notifier, now, clientFor: overrides.clientFor, feedFetch: overrides.feedFetch, closeCards: overrides.closeCards };
 
   ctx.jobs.register(SCHEDULED_PAUSE_JOB_KEY, createScheduledPauseJob(deps));
 
@@ -101,9 +124,39 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     // The host sets companyId to the company it authorized for this call.
     const companyId = typeof params.companyId === "string" ? params.companyId : null;
     if (!companyId) return { state: "error", error: "company context is required" };
+    const halt = await haltView(ctx, companyId);
     const loaded = await loadEnabled(ctx, companyId);
-    if (!loaded.ok) return { state: loaded.state, error: loaded.error };
-    return { state: "enabled", ...(await spendSnapshot(ctx, store, companyId, loaded.config, now())) };
+    if (!loaded.ok) return { state: loaded.state, error: loaded.error, ...halt };
+    return { state: "enabled", ...(await spendSnapshot(ctx, store, companyId, loaded.config, now())), ...halt };
+  });
+
+  ctx.actions.register(CLEAR_HALT_ACTION_KEY, async (params, context) => {
+    const companyId = context.companyId;
+    if (!companyId) throw new Error("company context is required");
+    const dryRun = params.dryRun !== false;
+    if (!dryRun && params.confirm !== true) {
+      throw new Error("A real clear needs confirm: true; preview it with dryRun first");
+    }
+    // Lifting the halt lets activations spend again: a board user decides, an agent only previews.
+    if (!dryRun && context.actor.type !== "user") {
+      throw new Error("Clearing the halt is board-only; an agent can run it with dryRun only");
+    }
+    const halt = await readHalt(ctx, companyId);
+    if (dryRun || !halt) return { dryRun, cleared: false, halt };
+    await clearHalt(ctx, companyId);
+    const reason = reasonText(params.reason, "");
+    const metadata = {
+      halt,
+      clearedBy: { userId: context.actor.userId ?? null, runId: context.actor.runId ?? null },
+      ...(reason ? { reason } : {}),
+    };
+    try {
+      await ctx.activity.log({ companyId, message: HALT_CLEARED_ACTIVITY, entityType: "rk9_ads_brand", entityId: halt.brandCode, metadata });
+    } catch (error) {
+      ctx.logger.warn("rk9-ads spend guard: halt clear not logged", { companyId, detail: safeError(error) });
+    }
+    ctx.logger.info("rk9-ads spend guard: standing halt cleared", { companyId, brandCode: halt.brandCode, since: halt.since });
+    return { dryRun: false, cleared: true, halt };
   });
 
   ctx.actions.register(PAUSE_ALL_ACTION_KEY, async (params, context) => {
@@ -151,7 +204,7 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
         const summary = loaded.fallback
           ? `${pauseSummary(result)} The brand config is ${loaded.fallback.state}: paused the whole ad account on the last valid config. Fix the config.`
           : pauseSummary(result);
-        if (result.errors.length > 0) return { error: summary, data: result };
+        if (result.errors.length > 0 || result.haltError) return { error: summary, data: result };
         return { content: summary, data: result };
       } catch (error) {
         return { error: `Pause failed before anything was paused: ${safeError(error)}` };
@@ -167,12 +220,14 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       if (!loaded.ok) return { error: loaded.error };
       const snapshot = await spendSnapshot(ctx, store, runCtx.companyId, loaded.config, now());
       if (snapshot.pctUsed === null) return { error: `Spend figures unavailable: ${snapshot.reason} (${snapshot.detail})`, data: snapshot };
+      const { halt } = await haltView(ctx, runCtx.companyId);
       const content = [
         `${snapshot.brandCode} ${snapshot.month}: spent ${snapshot.mtdEur} EUR of ${snapshot.monthlyCapEur} EUR (${snapshot.pctUsed} %).`,
         `Projected month-end ${snapshot.projectedMonthEndEur} EUR at ${snapshot.dailyBudgetSumEur} EUR/day for ${snapshot.remainingDays} day(s).`,
         `Spend guard: ${snapshot.allow ? "would allow" : "refuses"} new spend (${snapshot.reason}).`,
+        ...(halt ? [`Kill switch halt since ${halt.since}: no activation until a board user clears it.`] : []),
       ].join(" ");
-      return { content, data: snapshot };
+      return { content, data: { ...snapshot, halt } };
     },
   );
 
@@ -199,6 +254,10 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       statusText:
         (result.count > 0 ? `⏸ Pysäytetty: ${result.pausedAds.length} mainosta, ${result.pausedCampaigns.length} kampanjaa` : "⏸ Ei aktiivisia mainoksia") +
         (loaded.fallback ? " (konfiguraatio ei luettavissa: koko mainostili, viimeisin kelvollinen konfiguraatio)" : "") +
+        (result.halt ? "\n⛔ Pysäytystila päällä: aktivointi estetty, kunnes board poistaa tilan" : "") +
+        (result.haltError ? "\n⚠️ Pysäytystilan tallennus epäonnistui" : "") +
+        (result.closedCardIds.length > 0 ? `\nAktivointikortteja mitätöity: ${result.closedCardIds.length}` : "") +
+        (result.cardsError ? "\n⚠️ Avoimia aktivointikortteja ei voitu sulkea" : "") +
         (result.telegram === "failed" ? " (ilmoitus epäonnistui, kampanjalista aktiviteettilokissa)" : ""),
       outcome,
     };

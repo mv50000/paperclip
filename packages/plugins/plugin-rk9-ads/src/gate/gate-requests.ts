@@ -8,7 +8,9 @@
  *   the pending insert (a second statement) and before the card is sent. A
  *   swap that lists the ad's cards between the two misses that card; the
  *   creative check at tap time still refuses it;
- * - open cards of one ad (a creative swap closes them);
+ * - open cards of one ad (a creative swap closes them) and of the whole
+ *   company (the kill switch, the cap pause and the scheduled pause close
+ *   them, RK9-557);
  * - whether an approved activation of an ad may still be running;
  * - cards past valid_until for the expiry job;
  * - paused_ad_ids of a decided card.
@@ -80,6 +82,8 @@ export interface DueCard {
 export interface ActivationGateRepo {
   /** Pending activate_ad cards of one ad, live or not. */
   openForAd(companyId: string, adId: string): Promise<GateRequestRecord[]>;
+  /** Pending activate_ad cards of the company, live or not, oldest first. */
+  openForCompany(companyId: string): Promise<GateRequestRecord[]>;
   /**
    * True while an activate_ad card of this ad is approved and its handler has
    * not recorded an end (between the tap and the handler's own outcome),
@@ -87,7 +91,7 @@ export interface ActivationGateRepo {
    * leaves `started` behind, and that must not block the ad for good.
    */
   activationInFlight(companyId: string, adId: string, withinMinutes: number): Promise<boolean>;
-  /** pending -> expired with an outcome (superseded, creative swapped). True when this call won. */
+  /** pending -> expired with an outcome (superseded, creative swapped, paused). True when this call won. */
   close(companyId: string, id: string, outcome: Record<string, unknown>): Promise<boolean>;
   /** Pending cards of every company whose valid_until has passed, oldest first. */
   dueForExpiry(limit: number): Promise<DueCard[]>;
@@ -134,6 +138,16 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateR
           WHERE company_id = $1 AND kind = 'activate_ad' AND status = 'pending' AND ad_id = $2
           ORDER BY created_at`,
         [companyId, adId],
+      );
+      return rows.map(toGateRecord);
+    },
+
+    async openForCompany(companyId) {
+      const rows = await db.query<Record<string, unknown>>(
+        `SELECT ${GATE_RECORD_COLUMNS} FROM ${gate}
+          WHERE company_id = $1 AND kind = 'activate_ad' AND status = 'pending'
+          ORDER BY created_at`,
+        [companyId],
       );
       return rows.map(toGateRecord);
     },

@@ -270,6 +270,19 @@ the core chat-channels bot is never shared. See
   (`dryRun` defaults to true; a live run needs `confirm: true`), the agent tool
   `rk9ads_pause_all`, and the `pause_all` gate card's "⏸ Pysäytä kaikki"
   button (allowlisted user in the brand chat, no second step).
+- **Open cards and the standing halt** (RK9-557, `halt.ts`). Before its
+  first Meta call a live kill switch, 90 % cap pause or scheduled pause
+  closes every open `activate_ad` card of the company (row `expired`, card
+  edited with the reason), so a tap cannot undo the pause. The data gate
+  leaves the cards open. The kill switch also leaves a standing halt in the
+  plugin state (`spend-guard` namespace, no migration). While it is set,
+  `activate_ad` refuses (also a card sent later), and it reads the halt again
+  before every ACTIVE write and after the last write. The halt has no expiry.
+  Only a board user clears it, with the action `clear-halt` (`dryRun`
+  defaults to true; a real clear needs `confirm: true`; an agent may only
+  preview it). There is no Telegram button for it. A failed halt write or
+  card close does not stop the pause: the result (`haltError`,
+  `cardsError`) and the audit row name it.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
@@ -285,7 +298,8 @@ the core chat-channels bot is never shared. See
   (fail-open), but it fails the run so the broken feed is seen. A Telegram
   failure after a pause fails the run, and the pauses stay.
 - **Data** `spend-guard` (`getData`) and the tool `rk9ads_get_pacing` return
-  the guard figures and the alerted thresholds. They never return a token.
+  the guard figures, the alerted thresholds and `halt` (the standing halt or
+  null; `haltError` when it cannot be read). They never return a token.
 - Every pause, refusal and alert writes a `rule_actions` row and an activity
   entry. Refusals and alerts use `rule_type = pause_all_cap` with
   `action = none` (rule ids `spend-guard`, `spend-alert-80`,
@@ -539,10 +553,13 @@ The plugin's own spend gate (G1): `src/gate/` and `src/features/gate/`. No
    row pending -> approved with one conditional UPDATE, so a double tap acts
    once. The `activate_ad` handler (`src/gate/activate-ad.ts`) then re-runs
    the preflight, reads the ad set's ads, the ad set and the campaign, checks
-   that the ad still carries the creative the card showed, refuses ⚠ states
+   that the ad still carries the creative the card showed and that the
+   publication owning the ad is still the card's (same content hash and
+   creative, RK9-557), refuses ⚠ states
    (ARCHIVED, DELETED, effective_status such as DISAPPROVED or WITH_ISSUES),
-   and runs the spend guard for each object it will activate. Any refusal
-   ends the card `denied` with the reason and no Meta write.
+   and runs the spend guard for each object it will activate. Last it reads
+   the kill switch's standing halt. Any refusal ends the card `denied` with
+   the reason and no Meta write.
 3. **Writes.** The ad ACTIVE, every other ACTIVE ad of the ad set PAUSED
    (newest wins), then the ad set and the campaign ACTIVE only if PAUSED.
    Each write passes the spend guard hook again, and the hook lets ACTIVE
@@ -554,9 +571,11 @@ The plugin's own spend gate (G1): `src/gate/` and `src/features/gate/`. No
    `gate-expiry` job (every 5 min) moves cards past `valid_until` to
    `expired`; a tap checks `valid_until` itself. A creative swap closes the
    ad's open cards and is refused while an approved activation of the ad is
-   running (30 min window). `resend_gate_card` re-posts a pending card with a
-   new token; the old card's buttons stop working. The ad stays PAUSED in
-   every case but an approval.
+   running (30 min window). The kill switch, the cap pause and the scheduled
+   pause close every open card of the company; a stale tap on a closed card
+   keeps the reason on the card. `resend_gate_card` re-posts a pending card
+   with a new token; the old card's buttons stop working. The ad stays PAUSED
+   in every case but an approval.
 
 Every decision stores `decided_by_tg_user_id`, `decided_at`, `outcome` and
 `paused_ad_ids`, and writes an activity entry (`entityType: "gate_request"`).

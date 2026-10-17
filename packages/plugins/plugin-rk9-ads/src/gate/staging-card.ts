@@ -6,6 +6,9 @@
  *   chat. An older open card of the same ad is closed first.
  * - `closeCardsForSwap`: a creative swap closes the ad's open cards, and
  *   refuses while an approved activation of the ad is running.
+ * - `closeCardsForPause`: the kill switch, the 90 % cap pause and the
+ *   scheduled pause close every open card of the company, so a tap after a
+ *   pause cannot undo it (RK9-557).
  * - `expireDueCards`: the gate-expiry job. Cards past valid_until move to
  *   `expired` and lose their buttons. A tap re-checks valid_until itself, so
  *   the job's cadence never stretches a card's life.
@@ -34,6 +37,16 @@ export const GATE_CARD_ACTIVITY = "rk9-ads gate: card";
 /** A handler that started this long ago no longer blocks a swap (a crashed worker leaves `started`). */
 export const ACTIVATION_IN_FLIGHT_MINUTES = 30;
 const EXPIRY_BATCH = 200;
+
+/** The pauses that close a company's open activation cards (RK9-557). The data gate does not. */
+export const CARD_CLOSING_PAUSES = ["kill_switch", "pause_all_cap", "scheduled_pause"] as const;
+export type CardClosingPause = (typeof CARD_CLOSING_PAUSES)[number];
+
+const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
+  kill_switch: "⛔ Hätäkatkaisin painettu: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty, kunnes board poistaa pysäytystilan.",
+  pause_all_cap: "⛔ Kulutuskatto 90 % ylittyi: kortti mitätöity. Mainos jäi PAUSED-tilaan.",
+  scheduled_pause: "⛔ Ajastettu pysäytys: kortti mitätöity. Mainos jäi PAUSED-tilaan.",
+};
 const COPY_MAX_CHARS = 400;
 
 /** The part of the Telegram controller the card life cycle uses. */
@@ -144,16 +157,21 @@ export function createStagingCards(deps: StagingCardDeps) {
     }
   }
 
-  /** Closes open activate_ad cards of one ad. */
-  async function closeOpen(companyId: string, adId: string, outcome: Record<string, unknown>, status: string): Promise<string[]> {
+  /** Closes the given open activate_ad cards. */
+  async function closeEach(companyId: string, open: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<string[]> {
     const closed: string[] = [];
-    for (const request of await deps.repo.openForAd(companyId, adId)) {
-      if (!(await deps.repo.close(companyId, request.id, { handler: "not_run", ...outcome, closedAt: now().toISOString() }))) continue;
+    for (const request of open) {
+      if (!(await deps.repo.close(companyId, request.id, { handler: "not_run", ...outcome, statusText: status, closedAt: now().toISOString() }))) continue;
       closed.push(request.id);
       await editClosed(request, status);
-      await audit(companyId, request.id, "closed", { adId, ...outcome });
+      await audit(companyId, request.id, "closed", { adId: activationOf(request)?.adId ?? null, ...outcome });
     }
     return closed;
+  }
+
+  /** Closes open activate_ad cards of one ad. */
+  async function closeOpen(companyId: string, adId: string, outcome: Record<string, unknown>, status: string): Promise<string[]> {
+    return closeEach(companyId, await deps.repo.openForAd(companyId, adId), outcome, status);
   }
 
   return {
@@ -272,6 +290,21 @@ export function createStagingCards(deps: StagingCardDeps) {
         throw new Error(`an activation card of ad ${swap.adId} is still open; swap again`);
       }
       return closed;
+    },
+
+    /**
+     * The pause hook (RK9-557): closes every open card of the company and
+     * edits it with the pause's reason. A tap that approved a card before
+     * this close is not stopped here; for the kill switch the standing halt
+     * stops it (activate-ad.ts).
+     */
+    async closeCardsForPause(companyId: string, input: { rule: CardClosingPause; reason: string }): Promise<string[]> {
+      return closeEach(
+        companyId,
+        await deps.repo.openForCompany(companyId),
+        { reason: input.rule, pauseReason: input.reason.slice(0, 300) },
+        PAUSE_CLOSE_TEXT[input.rule],
+      );
     },
 
     /** The gate-expiry job. Returns the number of cards this run expired. */

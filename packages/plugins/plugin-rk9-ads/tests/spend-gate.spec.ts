@@ -21,6 +21,8 @@ import { createMemoryGateStore, type MemoryGateStore } from "../src/kit/testing/
 import { recordedOutput, useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
 import { telegramBotKey } from "../src/kit/telegram/bot-api.js";
 import type { PublishedPublication } from "../src/publish/handoff.js";
+import { memoryPublicationStore } from "../src/publish/store.js";
+import type { PublicationRecord } from "../src/publish/types.js";
 import { brandConfig, COMPANY_A, SECRET_A_BOT, SECRET_A_META, secretRef } from "./fixtures.js";
 import { FakeTelegram } from "./helpers/fake-telegram.js";
 import { memoryActivationRepo } from "./gate/memory-repo.js";
@@ -93,6 +95,35 @@ interface Rig {
   cards: StagingCards;
   clock: { now: Date };
   preflights: string[];
+  publications: ReturnType<typeof memoryPublicationStore>;
+}
+
+/** The publication row that owns AD, as the publish service leaves it. */
+function publicationRow(overrides: Partial<PublicationRecord> = {}): PublicationRecord {
+  return {
+    id: PUBLICATION_ID,
+    companyId: COMPANY_A,
+    brandCode: "OLL",
+    creativeId: null,
+    idempotencyKey: "oll-syksy-1",
+    contentHash: "c".repeat(64),
+    mode: "publish",
+    status: "published",
+    adName: "OLL syksy 1",
+    campaignId: CAMPAIGN,
+    adsetId: ADSET,
+    metaVideoId: null,
+    metaImageHash: null,
+    metaCreativeId: CREATIVE,
+    metaAdId: AD,
+    replacesPublicationId: null,
+    error: null,
+    payload: {} as PublicationRecord["payload"],
+    publishedAt: "2026-10-21T09:00:00.000Z",
+    createdAt: "2026-10-21T09:00:00.000Z",
+    updatedAt: "2026-10-21T09:00:00.000Z",
+    ...overrides,
+  };
 }
 
 const rigs: Rig[] = [];
@@ -135,9 +166,12 @@ async function rig(input: { config?: Record<string, unknown>; meta?: FakeMeta; o
     onShutdown() {},
   };
   const preflights: string[] = [];
+  const publications = memoryPublicationStore();
+  publications.rows.push(publicationRow());
   const { cards } = registerGate(runtime, {
     store,
     repo,
+    publications,
     transport: () => controller,
     assertLaunchReady: async (companyId) => {
       preflights.push(companyId);
@@ -148,7 +182,7 @@ async function rig(input: { config?: Record<string, unknown>; meta?: FakeMeta; o
   await controller.replan();
   const config = input.config ?? brandConfig({ telegram: telegramBlock() });
   if (config.telegram) await waitFor(() => controller.summary()[0]?.loop === "running");
-  const out = { harness, meta, fake, store, repo, controller, cards, clock, preflights };
+  const out = { harness, meta, fake, store, repo, controller, cards, clock, preflights, publications };
   rigs.push(out);
   return out;
 }

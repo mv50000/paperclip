@@ -6,19 +6,27 @@
  * saved config, and the card's validity).
  *
  * Order:
- * 1. the brand config and the card's binding (publication, ad, creative);
+ * 1. the brand config and the card's binding (publication, ad, creative).
+ *    The publication that owns the ad now must be the card's, with the same
+ *    contentHash and Meta creative (RK9-557);
  * 2. preflight, re-run now (assertLaunchReady with no cache);
  * 3. fresh Meta reads: the ad set's ads, the ad set, the campaign. The ad
  *    must still carry the creative the card showed (a swap since the card
  *    was sent refuses). ⚠ states (ARCHIVED, DELETED, an effective_status
  *    outside the allowed set) refuse and are reported, never fixed;
  * 4. the spend guard (checkSpend) for every object this run activates;
+ *    then the kill switch's standing halt (RK9-557): while it is set, or when
+ *    it cannot be read, nothing is written;
  * 5. writes: the ad ACTIVE, every other ACTIVE ad of the ad set PAUSED
  *    (newest wins), the ad set and then the campaign ACTIVE when PAUSED.
  *    Each write passes the spend guard hook again, and the hook lets
  *    through only ACTIVE writes on the objects this run named;
+ *    Every ACTIVE write reads the halt again first;
  * 6. a last read: the ad must still carry the approved creative, otherwise
- *    (or when the read fails) it is paused again and the card fails.
+ *    (or when the read fails) it is paused again and the card fails;
+ * 7. the halt once more: a kill switch that started during the writes set
+ *    it before its own first pause, so either its listing sees this run's
+ *    ACTIVE objects, or this read sees the halt and pauses the ad again.
  *
  * A refusal in 1-4 makes no Meta write and ends the card `denied`. A failed
  * write ends it `failed` with the step reached; nothing is retried. Meta's
@@ -31,6 +39,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../config.js";
 import type { Ledger } from "../db.js";
 import { checkSpend as defaultCheckSpend, type GuardResult, type ProposedChange } from "../features/spend-guard/guard.js";
+import type { HaltState } from "../features/spend-guard/halt.js";
 import { brandClient, safeError, type Initiator } from "../features/spend-guard/support.js";
 import type { GateHandler, GateHandlerResult } from "../kit/gate/registry.js";
 import type { GateRequestRecord } from "../kit/gate/state-machine.js";
@@ -50,7 +59,14 @@ export const ACTIVATABLE_EFFECTIVE_STATUS = {
 } as const;
 const GONE_STATUSES = new Set(["ARCHIVED", "DELETED"]);
 
-export type ActivationStep = "ad_active" | "pause_others" | "adset_active" | "campaign_active" | "verify_creative";
+export type ActivationStep = "ad_active" | "pause_others" | "adset_active" | "campaign_active" | "verify_creative" | "verify_halt";
+
+/** The publication that owns an ad now (publish/store.ts findByAd). */
+export interface AdOwner {
+  id: string;
+  contentHash: string;
+  metaCreativeId: string | null;
+}
 
 export interface ActivateAdDeps {
   ctx: Pick<PluginContext, "activity" | "logger">;
@@ -64,6 +80,10 @@ export interface ActivateAdDeps {
    * may set ACTIVE; the spend guard hook still checks each write.
    */
   activationClient(companyId: string, config: BrandConfig, initiator: Initiator, allowed: ReadonlySet<string>): MetaGraphClient;
+  /** The kill switch's standing halt (spend-guard/halt.ts). Throws when it cannot be read. */
+  haltOf(companyId: string): Promise<HaltState | null>;
+  /** The latest published or swapped publication of the ad, or null. */
+  publicationOf(companyId: string, adId: string): Promise<AdOwner | null>;
   checkSpend?: typeof defaultCheckSpend;
   now?: () => Date;
 }
@@ -109,6 +129,10 @@ const REASON_TEXT: Record<string, string> = {
   object_not_in_account: "ad set ei kuulu brändin mainostiliin",
   campaign_changed: "ad set on siirtynyt toiseen kampanjaan",
   creative_changed: "mainoksen creative on vaihtunut kortin lähettämisen jälkeen",
+  publication_unavailable: "mainoksen julkaisua ei voitu lukea",
+  content_changed: "mainoksen julkaisu tai sisältö on vaihtunut kortin lähettämisen jälkeen",
+  halted: "hätäkatkaisin on painettu: pysäytystila on päällä, kunnes board poistaa sen",
+  halt_unreadable: "pysäytystilaa ei voitu lukea",
   blocked_state: "mainoksen, ad setin tai kampanjan tila estää aktivoinnin",
   spend_guard: "kulutusvahti esti aktivoinnin",
 };
@@ -128,6 +152,13 @@ export function blockedStates(ad: StatusRow, adset: StatusRow, campaign: StatusR
   check("Ad set", adset, ACTIVATABLE_EFFECTIVE_STATUS.adset);
   if (campaign) check("Kampanja", campaign, ACTIVATABLE_EFFECTIVE_STATUS.campaign);
   return out;
+}
+
+/** The halt was set (or could not be read) after the first write began. */
+class HaltedError extends Error {}
+
+function haltLine(halt: HaltState): string {
+  return `Pysäytystila ${halt.since}: ${halt.reason}`.slice(0, 300);
 }
 
 function guardSummary(result: GuardResult): Partial<GuardResult> {
@@ -198,6 +229,28 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     const config = loaded.config;
     if (config.brandCode !== request.brandCode) {
       return deny(request, decidedBy, binding, { reason: "brand_changed", detail: `card ${request.brandCode}, config ${config.brandCode}`, lines: [] });
+    }
+
+    // The approval is bound to the publication's content, not only to the Meta creative id.
+    let owner: AdOwner | null;
+    try {
+      owner = await deps.publicationOf(companyId, binding.adId);
+    } catch (error) {
+      return deny(request, decidedBy, binding, { reason: "publication_unavailable", detail: safeError(error), lines: [] });
+    }
+    if (
+      !owner ||
+      owner.id !== binding.publicationId ||
+      owner.contentHash !== binding.contentHash ||
+      (owner.metaCreativeId !== null && owner.metaCreativeId !== binding.creativeId)
+    ) {
+      return deny(request, decidedBy, binding, {
+        reason: "content_changed",
+        detail: owner
+          ? `ad ${binding.adId} belongs to publication ${owner.id} (content ${owner.contentHash.slice(0, 12)}), the card showed ${binding.publicationId} (content ${binding.contentHash.slice(0, 12)})`
+          : `no published publication owns ad ${binding.adId}`,
+        lines: ["Lähetä uusi kortti nykyisestä julkaisusta."],
+      });
     }
 
     try {
@@ -271,12 +324,32 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       }
     }
 
+    // The kill switch's standing halt, read right before the first write.
+    const haltNow = async (): Promise<HaltState | null> => {
+      try {
+        return await deps.haltOf(companyId);
+      } catch (error) {
+        throw new HaltedError(`the kill switch halt could not be read (${safeError(error)})`);
+      }
+    };
+    try {
+      const halt = await haltNow();
+      if (halt) return deny(request, decidedBy, binding, { reason: "halted", detail: `halt since ${halt.since}: ${halt.reason}`, lines: [haltLine(halt)] });
+    } catch (error) {
+      return deny(request, decidedBy, binding, { reason: "halt_unreadable", detail: safeError(error), lines: [] });
+    }
+    const assertNotHalted = async () => {
+      const halt = await haltNow();
+      if (halt) throw new HaltedError(`the kill switch halt was set during the activation (${halt.since})`);
+    };
+
     const initiator: Initiator = { source: "telegram", tgUserId };
     const write = deps.activationClient(companyId, config, initiator, new Set(activate.map((object) => object.id)));
     const done: ActivationStep[] = [];
     const pausedAdIds: string[] = [];
     let step: ActivationStep = "ad_active";
     const setStatus = async (objectId: string, next: "ACTIVE" | "PAUSED") => {
+      if (next === "ACTIVE") await assertNotHalted();
       const result = await setObjectStatus(write, objectId, next);
       if (isDryRun(result)) throw new Error("the activation client is in dry-run mode");
       if (!result.success) throw new Error(`Meta did not confirm status ${next} on ${objectId}`);
@@ -321,8 +394,20 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
         throw new Error(`ad ${target.id} carries creative ${creativeAfter ?? "none"} after activation, not the approved ${binding.creativeId}; it was paused again`);
       }
       done.push("verify_creative");
+      step = "verify_halt";
+      await assertNotHalted();
+      done.push("verify_halt");
     } catch (error) {
-      const detail = safeError(error);
+      let detail = safeError(error);
+      if (error instanceof HaltedError && done.includes("ad_active")) {
+        // The kill switch won the race: stop the ad rather than leave it to the switch's listing.
+        try {
+          await setStatus(target.id, "PAUSED");
+          detail = `${detail}; the ad was paused again`;
+        } catch (pauseError) {
+          detail = `${detail}; pausing the ad failed too (${safeError(pauseError)})`;
+        }
+      }
       await saveSafely(request, pausedAdIds);
       const outcome = {
         handler: "done",

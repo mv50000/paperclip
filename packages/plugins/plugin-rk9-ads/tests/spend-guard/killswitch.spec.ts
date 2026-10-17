@@ -195,11 +195,16 @@ describe("kill switch pauseAll", () => {
     expect(handler).toBeDefined();
     const request = { id: "g1", companyId: COMPANY_A, brandCode: "OLL", kind: "pause_all", status: "approved" } as GateRequestRecord;
     const outcome = await handler!({ request, tgUserId: APPROVER });
-    expect(outcome).toMatchObject({ statusText: "⏸ Pysäytetty: 3 mainosta, 1 kampanjaa", outcome: { count: 4 } });
+    const halt = "\n⛔ Pysäytystila päällä: aktivointi estetty, kunnes board poistaa tilan";
+    expect(outcome).toMatchObject({ statusText: `⏸ Pysäytetty: 3 mainosta, 1 kampanjaa${halt}`, outcome: { count: 4 } });
     // The card shows the counts; the notice lists every paused campaign (RK9-523).
     expect(r.notifier.messages).toHaveLength(1);
     expect(r.notifier.messages[0]!.text).toContain("• kampanja OLL jatkuva (100)");
     expect(r.ruleActions()[0]!.metrics).toMatchObject({ initiator: { source: "telegram", tgUserId: APPROVER } });
-    expect(await handler!({ request, tgUserId: APPROVER })).toMatchObject({ statusText: "⏸ Ei aktiivisia mainoksia" });
+    expect(await handler!({ request, tgUserId: APPROVER })).toMatchObject({ statusText: `⏸ Ei aktiivisia mainoksia${halt}` });
+    expect(r.cardCloses).toEqual([
+      { companyId: COMPANY_A, rule: "kill_switch", reason: "Pysäytä kaikki (Telegram)" },
+      { companyId: COMPANY_A, rule: "kill_switch", reason: "Pysäytä kaikki (Telegram)" },
+    ]);
   });
 });
