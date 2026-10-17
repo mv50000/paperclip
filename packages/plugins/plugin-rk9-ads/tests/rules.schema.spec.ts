@@ -29,8 +29,8 @@ describe("rule schema (A11)", () => {
       ]);
     }
     expect(DEFAULT_RULES[0]).toMatchObject({ type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.5, mode: "shadow" });
-    expect(DEFAULT_RULES[0]).toHaveProperty("minClicks");
-    expect(DEFAULT_RULES[0]).toHaveProperty("days");
+    // RK9-536: a spend gate over a 7-day window total, no click gate.
+    expect(DEFAULT_RULES[0]).toMatchObject({ days: 7, aggregate: "window_total", minSpendEur: 3, minClicks: 0, minImpressions: 0 });
   });
 
   it("keeps the built-in pause_all_cap when rules[] is empty, and an entry can only switch its mode", async () => {
@@ -80,6 +80,11 @@ describe("rule schema (A11)", () => {
     ["an unknown key", { ...CPC, windowDays: 3 }, "rules.list[0] (cpc-ceiling).windowDays: is not a known setting"],
     ["a bad mode", { ...CPC, mode: "on" }, "rules.list[0] (cpc-ceiling).mode: must be one of shadow, live"],
     ["days 0", { ...CPC, days: 0 }, "rules.list[0] (cpc-ceiling).days: must be >= 1"],
+    ["an unknown aggregate", { ...CPC, aggregate: "sum" }, "rules.list[0] (cpc-ceiling).aggregate: must be one of each_day, window_total"],
+    ["a window total of frequency", { ...CPC, metric: "frequency", aggregate: "window_total" }, "rules.list[0] (cpc-ceiling).aggregate: frequency has no window total"],
+    ["a negative minSpendEur", { ...CPC, minSpendEur: -1 }, "rules.list[0] (cpc-ceiling).minSpendEur: must be >= 0"],
+    ["minClicks above 1e9", { ...CPC, minClicks: 1e16 }, "rules.list[0] (cpc-ceiling).minClicks: must be <= 1000000000"],
+    ["minImpressions above 1e9", { ...CPC, minImpressions: 1e10 }, "rules.list[0] (cpc-ceiling).minImpressions: must be <= 1000000000"],
   ])("rejects %s, naming the rule id and the field", async (_label, rule, message) => {
     const errors = await errorsOf({ list: [rule] });
     expect(errors.some((error) => error.startsWith(message))).toBe(true);
@@ -116,6 +121,12 @@ describe("rule schema (A11)", () => {
     };
     expect(validator.validateInstanceConfig(brandConfig({ rules }), schema).valid).toBe(true);
     expect(validator.validateInstanceConfig(brandConfig({ rules: { list: [{ ...CPC, threshold: 0 }] } }), schema).valid).toBe(false);
+    // RK9-536: the spend-gated window rule, as the default ships it.
+    const windowRule = { ...CPC, days: 7, aggregate: "window_total", minImpressions: 0, minClicks: 0, minSpendEur: 3 };
+    const saved = brandConfig({ rules: { list: [windowRule, { type: "pause_all_cap" }] } });
+    expect(validator.validateInstanceConfig(saved, schema).valid).toBe(true);
+    // The save check adds no default for the new fields, so parseRules still accepts the saved config.
+    expect(parseBrandConfig(saved).state).toBe("enabled");
   });
 
   it.each([
@@ -133,6 +144,11 @@ describe("rule schema (A11)", () => {
     ["pause_fatigued without ruleId", { type: "pause_fatigued" }],
     ["a rule without type", { ruleId: "x" }],
     ["a rule using the reserved id", { ruleId: "pause_all_cap", type: "pause_valid_until" }],
+    ["minClicks above 1e9 (RK9-531)", { ...CPC, minClicks: 1e16 }],
+    ["a window total of frequency", { ...CPC, metric: "frequency", aggregate: "window_total" }],
+    ["a cap rule with aggregate", { type: "pause_all_cap", aggregate: "window_total" }],
+    ["pause_valid_until with minSpendEur", { ruleId: "v", type: "pause_valid_until", minSpendEur: 3 }],
+    ["propose_scale with aggregate", { ruleId: "s", type: "propose_scale", enabled: false, threshold: 0.2, minImpressions: 1, minClicks: 1, aggregate: "window_total" }],
   ])("the host's save check refuses what parseRules refuses: %s", async (_label, rule) => {
     const validator = await importRepoModule<{
       validateInstanceConfig(config: Record<string, unknown>, schema: unknown): { valid: boolean };

@@ -3,8 +3,11 @@
  *
  * A brand's `rules` block is `{ liveMode, list }`. Every rule is one variant
  * of a zod discriminated union on `type`:
- * - threshold_pause: pause an ad whose metric breaks a threshold on N
- *   consecutive completed local days, behind minimum-data gates.
+ * - threshold_pause: pause an ad whose metric breaks a threshold over the N
+ *   completed local days that end yesterday, behind minimum-data gates.
+ *   `aggregate: "each_day"` (the default) needs every one of the N days to
+ *   break it; `"window_total"` computes the metric once from the window's
+ *   totals (RK9-536: a CPC ceiling on a small budget).
  * - pause_all_cap: the built-in pause of the whole ad account at 90 % of the
  *   monthly cap. It is always on: a config entry can only set its mode and
  *   cooldown, never remove it.
@@ -34,6 +37,9 @@ export type RuleMetric = (typeof RULE_METRICS)[number];
 export const RULE_OPERATORS = ["gt", "gte", "lt", "lte"] as const;
 export type RuleOperator = (typeof RULE_OPERATORS)[number];
 
+export const RULE_AGGREGATES = ["each_day", "window_total"] as const;
+export type RuleAggregate = (typeof RULE_AGGREGATES)[number];
+
 export const BUILTIN_PAUSE_ALL_CAP_PCT = 90;
 /** The built-in rule's id. It is also the rule_actions rule_id of its decisions. */
 export const BUILTIN_PAUSE_ALL_CAP_RULE_ID = "pause_all_cap";
@@ -48,6 +54,10 @@ export const MAX_RULE_COOLDOWN_HOURS = 720;
 export const MAX_CAP_COOLDOWN_HOURS = 24;
 /** Bounds the insights window a threshold rule reads. */
 export const MAX_RULE_DAYS = 14;
+/** Bounds minImpressions and minClicks (RK9-531: the JSON schema and zod agree). */
+export const MAX_RULE_MIN_COUNT = 1_000_000_000;
+/** Bounds minSpendEur. */
+export const MAX_RULE_MIN_SPEND_EUR = 1_000_000;
 export const RULE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 const ruleId = z.string({ error: "is required" }).regex(RULE_ID_RE, { error: `must match ${RULE_ID_RE.source}` });
@@ -61,7 +71,13 @@ const cooldownHours = z
 const minCount = z
   .number({ error: "is required (minimum-data gate)" })
   .int({ error: "must be an integer" })
-  .min(0, { error: "must be >= 0" });
+  .min(0, { error: "must be >= 0" })
+  .max(MAX_RULE_MIN_COUNT, { error: `must be <= ${MAX_RULE_MIN_COUNT}` });
+const minSpendEur = z
+  .number({ error: "must be a finite number" })
+  .min(0, { error: "must be >= 0" })
+  .max(MAX_RULE_MIN_SPEND_EUR, { error: `must be <= ${MAX_RULE_MIN_SPEND_EUR}` })
+  .default(0);
 const threshold = z.number({ error: "is required" }).positive({ error: "must be > 0" });
 const days = z
   .number({ error: "must be a finite number" })
@@ -70,22 +86,32 @@ const days = z
   .max(MAX_RULE_DAYS, { error: `must be <= ${MAX_RULE_DAYS}` })
   .default(1);
 
-const thresholdPause = z.strictObject({
-  ruleId,
-  type: z.literal("threshold_pause"),
-  enabled,
-  mode,
-  metric: z.enum(RULE_METRICS, { error: `must be one of ${RULE_METRICS.join(", ")}` }),
-  operator: z.enum(RULE_OPERATORS, { error: `must be one of ${RULE_OPERATORS.join(", ")}` }),
-  threshold,
-  /** Consecutive completed local days the metric must break the threshold. */
-  days,
-  /** Impressions over those days; below it the rule never fires (learning phase). */
-  minImpressions: minCount,
-  /** Link clicks over those days; below it the rule never fires. */
-  minClicks: minCount,
-  cooldownHours,
-});
+const thresholdPause = z
+  .strictObject({
+    ruleId,
+    type: z.literal("threshold_pause"),
+    enabled,
+    mode,
+    metric: z.enum(RULE_METRICS, { error: `must be one of ${RULE_METRICS.join(", ")}` }),
+    operator: z.enum(RULE_OPERATORS, { error: `must be one of ${RULE_OPERATORS.join(", ")}` }),
+    threshold,
+    /** The completed local days the rule reads, ending yesterday. */
+    days,
+    /** each_day: every day breaks the threshold; window_total: the window's totals do. */
+    aggregate: z.enum(RULE_AGGREGATES, { error: `must be one of ${RULE_AGGREGATES.join(", ")}` }).default("each_day"),
+    /** Impressions over those days; below it the rule never fires (learning phase). */
+    minImpressions: minCount,
+    /** Link clicks over those days; below it the rule never fires. */
+    minClicks: minCount,
+    /** Spend over those days in EUR; below it the rule never fires. */
+    minSpendEur,
+    cooldownHours,
+  })
+  .refine((rule) => !(rule.aggregate === "window_total" && rule.metric === "frequency"), {
+    // Daily frequencies do not add up: reach is not additive across days.
+    error: "frequency has no window total; use aggregate: \"each_day\"",
+    path: ["aggregate"],
+  });
 
 const pauseAllCap = z.strictObject({
   ruleId: ruleId.default(BUILTIN_PAUSE_ALL_CAP_RULE_ID),
@@ -137,7 +163,7 @@ export const ruleSchema = z.discriminatedUnion("type", [thresholdPause, pauseAll
 
 export type RuleConfig = z.output<typeof ruleSchema>;
 
-const VARIANT_ONLY_KEYS = ["metric", "operator", "threshold", "days", "minImpressions", "minClicks", "maxIncreasePct"] as const;
+const VARIANT_ONLY_KEYS = ["metric", "operator", "threshold", "days", "aggregate", "minImpressions", "minClicks", "minSpendEur", "maxIncreasePct"] as const;
 const forbid = (keys: readonly string[]) => ({ not: { anyOf: keys.map((key) => ({ required: [key] })) } });
 const notBuiltinId = { ruleId: { not: { const: BUILTIN_PAUSE_ALL_CAP_RULE_ID } } };
 
@@ -154,6 +180,8 @@ export const RULE_ITEM_JSON_CONDITIONS = [
       required: ["ruleId", "metric", "operator", "threshold", "minImpressions", "minClicks"],
       properties: notBuiltinId,
       ...forbid(["maxIncreasePct"]),
+      if: { properties: { aggregate: { const: "window_total" } }, required: ["aggregate"] },
+      then: { properties: { metric: { not: { const: "frequency" } } } },
     },
   },
   {
@@ -162,7 +190,7 @@ export const RULE_ITEM_JSON_CONDITIONS = [
       properties: {
         ruleId: { const: BUILTIN_PAUSE_ALL_CAP_RULE_ID },
         enabled: { const: true },
-        cooldownHours: { maximum: MAX_CAP_COOLDOWN_HOURS },
+        cooldownHours: { type: "number", maximum: MAX_CAP_COOLDOWN_HOURS },
       },
       ...forbid(VARIANT_ONLY_KEYS),
     },
@@ -176,7 +204,7 @@ export const RULE_ITEM_JSON_CONDITIONS = [
     then: {
       required: ["ruleId", "enabled", "threshold", "minImpressions", "minClicks"],
       properties: { ...notBuiltinId, enabled: { const: false } },
-      ...forbid(["metric", "operator"]),
+      ...forbid(["metric", "operator", "aggregate", "minSpendEur"]),
     },
   },
 ];
@@ -191,7 +219,16 @@ export interface RuleSet {
   list: RuleConfig[];
 }
 
-/** Shipped when the config has no `rules.list`: a CPC ceiling, in shadow. */
+/**
+ * Shipped when the config has no `rules.list`: a CPC ceiling, in shadow.
+ *
+ * It gates on spend, not on clicks (RK9-536). At a 100 EUR cap G3's daily
+ * budget is 3.22 EUR, so a click gate (10 clicks in 2 days) could never be
+ * met by an ad above about 0.64 EUR per click: the worst ads escaped it. The
+ * window is 7 days of totals: an ad that spent at least 3 EUR there and got
+ * fewer than spend / 0.50 link clicks breaks the ceiling, and so does one
+ * with no link click at all.
+ */
 export const DEFAULT_RULES: readonly RuleConfig[] = Object.freeze([
   {
     ruleId: "cpc-ceiling",
@@ -201,9 +238,11 @@ export const DEFAULT_RULES: readonly RuleConfig[] = Object.freeze([
     metric: "cpc",
     operator: "gt",
     threshold: 0.5,
-    days: 2,
-    minImpressions: 500,
-    minClicks: 10,
+    days: 7,
+    aggregate: "window_total",
+    minImpressions: 0,
+    minClicks: 0,
+    minSpendEur: 3,
     cooldownHours: DEFAULT_RULE_COOLDOWN_HOURS,
   },
 ]);

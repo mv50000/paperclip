@@ -4,17 +4,28 @@
  *
  * Days are calendar days of the brand's time zone (Europe/Helsinki by
  * default). Threshold rules read completed days only: the window of a rule
- * with `days: N` is the N local dates ending yesterday. A missing day in that
- * window breaks the streak, and so does a day whose metric cannot be computed
- * (CTR or CPM without impressions, CPC without spend or clicks). A day with
- * spend but no link click has an infinite CPC: it breaks a CPC threshold
- * from above, never from below. Date arithmetic is on YYYY-MM-DD strings, so
- * a 23- or 25-hour DST day is still one day. The runner reads the days only
- * after insights-daily-close has finalised yesterday.
+ * with `days: N` is the N local dates ending yesterday. Date arithmetic is on
+ * YYYY-MM-DD strings, so a 23- or 25-hour DST day is still one day. The
+ * runner reads the days only after insights-daily-close has finalised
+ * yesterday.
+ *
+ * - `aggregate: "each_day"`: every day of the window must break the
+ *   threshold. A missing day breaks the streak, and so does a day whose
+ *   metric cannot be computed (CTR or CPM without impressions, CPC without
+ *   spend or clicks).
+ * - `aggregate: "window_total"`: the metric is computed once from the
+ *   window's summed spend, impressions and link clicks (RK9-536). A missing
+ *   day is a day without delivery and adds nothing.
+ *
+ * Spend without a link click is an infinite CPC: it breaks a CPC threshold
+ * from above, never from below.
  *
  * Minimum-data gates: a threshold rule fires only when the window's total
- * impressions are at least `minImpressions` and its total link clicks at least
- * `minClicks` (equal fires). This keeps the learning phase safe.
+ * impressions are at least `minImpressions`, its total link clicks at least
+ * `minClicks` and its total spend at least `minSpendEur` (equal fires). This
+ * keeps the learning phase safe. A spend gate instead of a click gate lets a
+ * CPC ceiling catch the expensive ads too: an ad that spent `minSpendEur`
+ * with fewer than spend / threshold link clicks is above the ceiling.
  *
  * Only objects whose configured status is ACTIVE get a decision: a paused ad
  * needs no pause. An ad that is not in the status listing is skipped too.
@@ -23,8 +34,9 @@
  * decision of the same rule and object is younger than `cooldownHours`. Shadow
  * decisions count against shadow ones, so a shadow hit is recorded at most
  * once per window instead of every hour. Live decisions count only against
- * live pauses that were applied: a failed pause is retried on the next run,
- * and switching a rule to live is not delayed by its shadow history.
+ * live pauses that were applied without an error: a failed pause, or a
+ * pause_all that left some object unpaused (RK9-536), is retried on the next
+ * run, and switching a rule to live is not delayed by its shadow history.
  *
  * Metrics follow G18 (../../metrics/cpc.ts): link CPC and link CTR.
  */
@@ -52,6 +64,7 @@ export interface PriorRuleAction {
   ruleId: string;
   objectId: string;
   mode: RuleMode;
+  /** True for a live write that changed the object and recorded no error. */
   applied: boolean;
   /** ISO instant. */
   decidedAt: string;
@@ -189,6 +202,18 @@ function groupDays(days: readonly RuleAdDay[]): Map<string, Map<string, RuleAdDa
   return out;
 }
 
+function passesGates(rule: ThresholdPauseRule, totals: Totals): boolean {
+  return (
+    totals.impressions >= rule.minImpressions &&
+    totals.inlineLinkClicks >= rule.minClicks &&
+    totals.spendCents >= Math.round(rule.minSpendEur * 100)
+  );
+}
+
+function shownValue(value: number): number | string {
+  return Number.isFinite(value) ? (round(value, 2) as number) : "no link clicks";
+}
+
 function thresholdDecision(
   rule: ThresholdPauseRule,
   adId: string,
@@ -196,6 +221,31 @@ function thresholdDecision(
   yesterday: string,
 ): { metrics: Record<string, unknown>; reason: string } | null {
   if (!byDate) return null;
+  const from = addDays(yesterday, -(rule.days - 1));
+  if (rule.aggregate === "window_total") {
+    const window: RuleAdDay[] = [];
+    for (let offset = rule.days - 1; offset >= 0; offset -= 1) {
+      const day = byDate.get(addDays(yesterday, -offset));
+      if (day) window.push(day); // a missing day had no delivery
+    }
+    if (window.length === 0) return null;
+    const totals = sumTotals(window);
+    const value = metricValue(rule.metric, totals);
+    if (value === null || !compare(value, rule.operator, rule.threshold) || !passesGates(rule, totals)) return null;
+    return {
+      metrics: {
+        ...windowMetrics(totals, { from, to: yesterday, days: rule.days }),
+        metric: rule.metric,
+        operator: rule.operator,
+        threshold: rule.threshold,
+        aggregate: rule.aggregate,
+        windowValue: Number.isFinite(value) ? round(value, 4) : null,
+        daysWithData: window.length,
+      },
+      reason: `${rule.metric} ${OPERATOR_TEXT[rule.operator]} ${rule.threshold} over the ${rule.days}-day window ${from}..${yesterday} (total ${shownValue(value)}); ${(totals.spendCents / 100).toFixed(2)} EUR spend, ${totals.impressions} impressions, ${totals.inlineLinkClicks} link clicks`,
+    };
+  }
+
   const window: RuleAdDay[] = [];
   const values: number[] = [];
   for (let offset = rule.days - 1; offset >= 0; offset -= 1) {
@@ -207,8 +257,7 @@ function thresholdDecision(
     values.push(value);
   }
   const totals = sumTotals(window);
-  if (totals.impressions < rule.minImpressions || totals.inlineLinkClicks < rule.minClicks) return null;
-  const from = window[0]!.date;
+  if (!passesGates(rule, totals)) return null;
   const metrics = {
     ...windowMetrics(totals, { from, to: yesterday, days: rule.days }),
     metric: rule.metric,
@@ -216,10 +265,9 @@ function thresholdDecision(
     threshold: rule.threshold,
     dailyValues: values.map((value) => (Number.isFinite(value) ? round(value, 4) : null)),
   };
-  const shown = values.map((value) => (Number.isFinite(value) ? round(value, 2) : "no link clicks")).join(", ");
   return {
     metrics,
-    reason: `${rule.metric} ${OPERATOR_TEXT[rule.operator]} ${rule.threshold} on ${rule.days} consecutive day(s) ${from}..${yesterday} (${shown}); ${totals.impressions} impressions, ${totals.inlineLinkClicks} link clicks`,
+    reason: `${rule.metric} ${OPERATOR_TEXT[rule.operator]} ${rule.threshold} on ${rule.days} consecutive day(s) ${from}..${yesterday} (${values.map(shownValue).join(", ")}); ${totals.impressions} impressions, ${totals.inlineLinkClicks} link clicks`,
   };
 }
 
