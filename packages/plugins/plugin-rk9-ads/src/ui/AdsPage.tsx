@@ -363,8 +363,8 @@ function pausedAdNote(result: UiPauseAdResult): PausedAdNote {
   if (result.activationRunning) {
     warnings.push(
       result.adHalt
-        ? "juuri hyväksytty aktivointi on vielä käynnissä; mainoksen pysäytystila saa sen pysäyttämään mainoksen uudelleen"
-        : "juuri hyväksytty aktivointi on vielä käynnissä ja voi käynnistää mainoksen uudelleen",
+        ? "juuri hyväksytty aktivointi voi olla vielä käynnissä; mainoksen pysäytystila saa sen yleensä pysäyttämään mainoksen uudelleen"
+        : "juuri hyväksytty aktivointi voi olla vielä käynnissä ja käynnistää mainoksen uudelleen",
     );
   }
   return { adId: result.adId, warnings, ...(result.adHalt ? { adHalt: result.adHalt } : {}) };

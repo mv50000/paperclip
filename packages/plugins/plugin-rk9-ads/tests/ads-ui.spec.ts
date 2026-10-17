@@ -464,7 +464,7 @@ describe("operator UI (RK9-518)", () => {
       await click("Pysäytä mainos");
     }
     const alerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
-    expect(alerts).toEqual([expect.stringMatching(/Mainos 301 pysäytettiin, mutta pysäytystilaa EI tallennettu \(state down\).*juuri hyväksytty aktivointi on vielä käynnissä ja voi käynnistää mainoksen uudelleen/)]);
+    expect(alerts).toEqual([expect.stringMatching(/Mainos 301 pysäytettiin, mutta pysäytystilaa EI tallennettu \(state down\).*juuri hyväksytty aktivointi voi olla vielä käynnissä ja käynnistää mainoksen uudelleen/)]);
     expect(container.textContent).toContain("Mainoksen 302 aktivointi on estetty");
     await click("Poista mainoksen pysäytystila");
     await type(`Kirjoita ${CLEAR_HALT_WORD}`, CLEAR_HALT_WORD);

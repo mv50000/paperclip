@@ -691,6 +691,14 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     expect(result.cardsError).toBeUndefined();
   });
 
+  it("a failed Meta pause names an activation that may still run", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    r.repo.activationInFlight = async () => true;
+    r.meta.fail = (call) => (call.body.status === "PAUSED" ? new Error("Meta 500") : null);
+    await expect(pauseAd(r)).rejects.toThrow(/approved activation of the ad may still be running/);
+  });
+
   it("reports an approved activation that may still run when the ad's halt was not stored", async () => {
     const r = await rig();
     registerUi(r.runtime);
