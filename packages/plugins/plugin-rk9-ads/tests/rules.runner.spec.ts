@@ -255,6 +255,12 @@ describe("rules-evaluate job (A11)", () => {
     await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/brand config is invalid, rules not evaluated/);
     expect(r.meta.calls).toHaveLength(0);
   });
+
+  it("skips a disabled config (monthlyCapEur null) without failing the run", async () => {
+    const r = setup({ companies: { [COMPANY_A]: brandConfig({ monthlyCapEur: null }) } });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).resolves.toBeUndefined();
+    expect(r.meta.calls).toHaveLength(0);
+  });
 });
 
 describe("rules data and dry-run action (for the A12 UI)", () => {

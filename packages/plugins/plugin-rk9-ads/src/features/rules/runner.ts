@@ -325,6 +325,12 @@ export function createRulesJob(deps: RulesDeps) {
     let brands = 0;
     for (const { companyId, result } of await listCompanyConfigs(ctx)) {
       if (result.state === "absent") continue;
+      if (result.state === "disabled") {
+        // monthlyCapEur unset (RK9-510): nothing may spend, so no rule runs.
+        // The scheduled pause still covers a brand that was enabled before.
+        ctx.logger.info("rk9-ads rules: brand disabled; skipped", { companyId });
+        continue;
+      }
       if (result.state !== "enabled") {
         // No rule acts on a config it cannot read. The spend guard's pause side still runs (A6).
         failures.push(`company ${companyId}: brand config is ${result.state}, rules not evaluated`);
