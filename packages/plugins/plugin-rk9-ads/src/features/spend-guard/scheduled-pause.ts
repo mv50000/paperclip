@@ -7,7 +7,7 @@
  *    failed send fails the run and is retried on the next check.
  * 2. Scheduled pause: when `schedule.scheduledPause.enabled` and the local
  *    time is at or after `at` (21:30 is right in both EET and EEST), once per
- *    local day. The day's marker is written only after the Meta part
+ *    local day. It also closes the open activation cards (RK9-557). The day's marker is written only after the Meta part
  *    succeeded, so a Meta failure is retried on the next tick (pauses are
  *    idempotent). Off by default.
  * 3. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
@@ -123,6 +123,9 @@ async function runForCompany(
         });
         if (result.errors.length > 0) {
           failures.push(`${brand} scheduled pause: ${result.errors.length} pause(s) failed, retrying next tick`);
+        } else if (result.cardsError) {
+          // The day is not marked: the next tick closes the cards again (the pauses are idempotent).
+          failures.push(`${brand} scheduled pause: open activation cards not closed (${result.cardsError}), retrying next tick`);
         } else {
           await deps.store.claim(companyId, key, SCHEDULED_PAUSE_KIND, { count: result.count, jobRunId: job.runId });
           const tg = telegramFailure(`${brand} scheduled pause`, result);

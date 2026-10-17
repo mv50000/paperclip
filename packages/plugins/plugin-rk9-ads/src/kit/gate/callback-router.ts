@@ -264,8 +264,10 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       const expiredNow = await store.expire(request.companyId, tokenHash);
       const current = expiredNow ? null : await store.findByTokenHash(tokenHash);
       if (expiredNow || current?.status === "expired" || (current?.status === "pending" && !current.live)) {
+        // A card closed by its owner (a pause, a swap) keeps the reason it was closed for.
+        const closed = !expiredNow && current?.status === "expired" ? current.closedStatus : null;
         await answer(query, GATE_TEXT.expired, true);
-        await edit(request, query, `⌛ ${GATE_TEXT.expired}`);
+        await edit(request, query, closed ?? `⌛ ${GATE_TEXT.expired}`);
         if (expiredNow) await audit({ type: "expired", companyId: request.companyId, gateRequestId: request.id, tgUserId });
         return;
       }

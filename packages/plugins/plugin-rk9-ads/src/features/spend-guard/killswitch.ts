@@ -20,6 +20,14 @@
  * It is idempotent: a second run finds nothing ACTIVE, returns count 0 and
  * sends no Telegram. A dry run lists the same objects, sends no Meta write
  * (the client is in dry-run mode) and no Telegram.
+ *
+ * Before the first Meta call a live run of the kill switch, the cap pause or
+ * the scheduled pause closes the company's open activation card rows, so a
+ * tap cannot undo the pause (RK9-557); the cards are edited after the Meta
+ * pauses, so a slow Telegram does not delay them. The kill switch first leaves the standing
+ * halt (halt.ts), which activate_ad checks before every write: it also stops
+ * a tap that won before the close and every later card. A failed halt write
+ * or card close does not stop the pause; the result and the audit row name it.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -29,6 +37,9 @@ import { localDate, localTime } from "../../kit/local-time.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { adAccountPath, getObjectStatus, listAds, listCampaignAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import type { StatusRow } from "../../meta/types.js";
+import { CARD_CLOSING_PAUSES, type CardClosingPause, type PauseCardClose } from "../../gate/staging-card.js";
+import { getActivationCards } from "../gate/runtime.js";
+import { setHalt, type HaltState } from "./halt.js";
 import {
   brandClient,
   recordAction,
@@ -71,6 +82,14 @@ export interface PauseAllResult {
   telegramError?: string;
   /** The rule_actions insert of this run failed (the pause itself stands). */
   auditError?: string;
+  /** Activation cards this run closed (live kill switch, cap pause, scheduled pause). */
+  closedCardIds: string[];
+  /** The open cards could not be listed or closed; the pause itself stands. */
+  cardsError?: string;
+  /** The standing halt a live kill switch left. */
+  halt?: HaltState;
+  /** The halt could not be stored; the pause itself stands. */
+  haltError?: string;
 }
 
 export interface PauseAllDeps {
@@ -80,6 +99,8 @@ export interface PauseAllDeps {
   /** Tests: replaces the brand's Meta client. */
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "dryRun", initiator: Initiator) => MetaGraphClient;
   now?: () => Date;
+  /** Tests: replaces the running gate's card closer. */
+  closeCards?: (companyId: string, input: { rule: CardClosingPause; reason: string }) => Promise<PauseCardClose>;
 }
 
 export interface PauseAllOptions {
@@ -155,7 +176,11 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
   // not fit is counted on its own line, never cut silently; the audit row has
   // every id.
   const lines = [...head];
-  let length = [...head, ...tail].join("\n").length;
+  if (result.halt) lines.push("⛔ Pysäytystila päällä: aktivointikortit eivät aktivoi mitään, kunnes board poistaa tilan.");
+  if (result.haltError) lines.push("⚠️ Pysäytystilan tallennus epäonnistui: avoin kortti voi yhä aktivoida. Tarkista aktiviteettiloki.");
+  if (result.closedCardIds.length > 0) lines.push(`Avoimia aktivointikortteja mitätöity: ${result.closedCardIds.length}`);
+  if (result.cardsError) lines.push("⚠️ Avoimia aktivointikortteja ei voitu sulkea. Tarkista aktiviteettiloki.");
+  let length = [...lines, ...tail].join("\n").length;
   const fit = (items: PausedObject[], kind: string, rest: (n: number) => string) => {
     for (const [index, item] of items.entries()) {
       const line = `• ${kind} ${label(item)}`.slice(0, 200);
@@ -179,6 +204,64 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
  * paused). The audit row is written for every run that paused, planned or
  * failed something, and for every explicit (non-job) run.
  */
+function closesCards(rule: PauseRule): rule is CardClosingPause {
+  return (CARD_CLOSING_PAUSES as readonly string[]).includes(rule);
+}
+
+type Stopped = Pick<PauseAllResult, "closedCardIds" | "cardsError" | "halt" | "haltError">;
+
+/**
+ * The halt and the card row close of a live run, before any Meta call.
+ * Never throws. `announce` edits the closed cards; call it after the pauses.
+ */
+async function stopActivations(
+  deps: PauseAllDeps,
+  companyId: string,
+  config: BrandConfig,
+  options: PauseAllOptions,
+  now: Date,
+): Promise<{ stopped: Stopped; announce: () => Promise<void> }> {
+  const out: Stopped = { closedCardIds: [] };
+  let announce: () => Promise<void> = async () => undefined;
+  if (options.dryRun || !closesCards(options.rule)) return { stopped: out, announce };
+  if (options.rule === "kill_switch") {
+    const halt: HaltState = {
+      brandCode: config.brandCode,
+      rule: "kill_switch",
+      since: now.toISOString(),
+      reason: options.reason.slice(0, 300),
+      initiator: options.initiator,
+    };
+    try {
+      await setHalt(deps.ctx, companyId, halt);
+      out.halt = halt;
+    } catch (error) {
+      out.haltError = safeError(error);
+      deps.ctx.logger.error("rk9-ads kill switch: the standing halt was not stored", { companyId, detail: out.haltError });
+    }
+  }
+  const close = deps.closeCards ?? getActivationCards()?.closeCardsForPause;
+  if (!close) {
+    out.cardsError = "the activation gate is not running; open cards were not closed";
+  } else {
+    try {
+      const closed = await close(companyId, { rule: options.rule, reason: options.reason });
+      out.closedCardIds = closed.ids;
+      announce = async () => {
+        try {
+          await closed.announce();
+        } catch (error) {
+          deps.ctx.logger.warn("rk9-ads pause: closed activation cards not edited", { companyId, detail: safeError(error) });
+        }
+      };
+    } catch (error) {
+      out.cardsError = safeError(error);
+    }
+  }
+  if (out.cardsError) deps.ctx.logger.error("rk9-ads pause: open activation cards not closed", { companyId, rule: options.rule, detail: out.cardsError });
+  return { stopped: out, announce };
+}
+
 export async function pauseAll(
   deps: PauseAllDeps,
   companyId: string,
@@ -187,6 +270,11 @@ export async function pauseAll(
 ): Promise<PauseAllResult> {
   const now = deps.now?.() ?? new Date();
   const mode = options.dryRun ? "dryRun" : "live";
+  const { stopped, announce } = await stopActivations(deps, companyId, config, options, now);
+  const stopErrors = [
+    ...(stopped.haltError ? [`halt: ${stopped.haltError}`] : []),
+    ...(stopped.cardsError ? [`cards: ${stopped.cardsError}`] : []),
+  ];
   const client = deps.clientFor
     ? deps.clientFor(companyId, config, mode, options.initiator)
     : brandClient(deps, companyId, config, mode, { initiator: options.initiator });
@@ -207,11 +295,12 @@ export async function pauseAll(
       dryRun: options.dryRun,
       applied: false,
       reason: options.reason,
-      metrics: { count: 0, stage: "list" },
+      metrics: { count: 0, stage: "list", closedCardIds: stopped.closedCardIds, halt: stopped.halt !== undefined },
       initiator: options.initiator,
-      error: message,
+      error: [message, ...stopErrors].join("; ").slice(0, 1000),
       message: `${options.rule} failed before any pause: could not list the active ads (source ${options.initiator.source})`,
     });
+    await announce();
     throw error;
   }
   const result: PauseAllResult = {
@@ -225,6 +314,7 @@ export async function pauseAll(
     list: [],
     errors: [],
     telegram: "skipped",
+    ...stopped,
   };
 
   for (const [kind, objects] of [["campaign", targets.campaigns], ["ad", targets.ads]] as const) {
@@ -241,6 +331,7 @@ export async function pauseAll(
   }
   result.campaignPaused = result.pausedCampaigns.length > 0;
   result.count = result.pausedAds.length + result.pausedCampaigns.length;
+  await announce();
 
   if (!options.dryRun && options.notify && result.count > 0) {
     try {
@@ -251,7 +342,8 @@ export async function pauseAll(
     }
   }
 
-  if (result.count > 0 || result.errors.length > 0 || options.initiator.source !== "job") {
+  const stopRecorded = result.closedCardIds.length > 0 || result.halt !== undefined || stopErrors.length > 0;
+  if (result.count > 0 || result.errors.length > 0 || stopRecorded || options.initiator.source !== "job") {
     const auditError = await recordAction(deps, {
       companyId,
       config,
@@ -273,10 +365,16 @@ export async function pauseAll(
         campaigns: result.pausedCampaigns,
         failedIds: result.errors.map((entry) => entry.id),
         telegram: result.telegram,
+        closedCardIds: result.closedCardIds,
+        halt: result.halt !== undefined,
         ...(options.note ? { note: options.note } : {}),
       },
       initiator: options.initiator,
-      error: [...result.errors.map((entry) => `${entry.id}: ${entry.error}`), ...(result.telegramError ? [`telegram: ${result.telegramError}`] : [])]
+      error: [
+        ...result.errors.map((entry) => `${entry.id}: ${entry.error}`),
+        ...(result.telegramError ? [`telegram: ${result.telegramError}`] : []),
+        ...stopErrors,
+      ]
         .join("; ")
         .slice(0, 1000) || null,
       message: `${options.rule}${options.dryRun ? " dry-run" : ""} ${options.dryRun ? "would pause" : "paused"} ${result.count} (source ${options.initiator.source})`,

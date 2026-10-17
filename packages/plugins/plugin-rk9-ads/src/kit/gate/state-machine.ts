@@ -54,6 +54,8 @@ export interface GateRequestRecord {
   payload: Record<string, unknown>;
   decidedByTgUserId: number | null;
   decidedAt: Date | null;
+  /** The status line a closer stored in `outcome.statusText` (e.g. a pause that closed the card). */
+  closedStatus?: string | null;
 }
 
 export interface NewGateRequest {
@@ -266,7 +268,7 @@ function toRecord(value: unknown): Record<string, unknown> {
 }
 
 export const GATE_RECORD_COLUMNS = `id, company_id, brand_code, kind, status, chat_id, message_id, valid_until, payload,
-  decided_by_tg_user_id, decided_at, (valid_until > now()) AS live`;
+  decided_by_tg_user_id, decided_at, (valid_until > now()) AS live, outcome->>'statusText' AS closed_status`;
 
 export function toGateRecord(row: Record<string, unknown>): GateRequestRecord {
   return {
@@ -282,6 +284,7 @@ export function toGateRecord(row: Record<string, unknown>): GateRequestRecord {
     payload: toRecord(row.payload),
     decidedByTgUserId: toNumberOrNull(row.decided_by_tg_user_id),
     decidedAt: row.decided_at ? toDate(row.decided_at) : null,
+    closedStatus: typeof row.closed_status === "string" ? row.closed_status : null,
   };
 }
 

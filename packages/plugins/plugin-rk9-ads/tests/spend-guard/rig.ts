@@ -48,6 +48,8 @@ export interface Rig {
   /** Mutable clock. */
   clock: { now: Date };
   feeds: Map<string, () => Response | Promise<Response>>;
+  /** closeCardsForPause calls (the gate is not registered here). */
+  cardCloses: Array<{ companyId: string; rule: string; reason: string }>;
   /** rule_actions INSERTs as column -> value, in order. */
   ruleActions(): Array<Record<string, unknown>>;
 }
@@ -76,8 +78,13 @@ export function rig(input: { config?: Record<string, unknown>; overrides?: Spend
     onConfigChanged() {},
     onShutdown() {},
   };
+  const cardCloses: Rig["cardCloses"] = [];
+  const closeCards = async (companyId: string, close: { rule: string; reason: string }) => {
+    cardCloses.push({ companyId, ...close });
+    return { ids: [], announce: async () => undefined };
+  };
   resetGateRegistry();
-  registerSpendGuard(runtime, { store, notifier, now: () => clock.now, ...input.overrides });
+  registerSpendGuard(runtime, { store, notifier, now: () => clock.now, closeCards, ...input.overrides });
   return {
     harness,
     meta,
@@ -85,6 +92,7 @@ export function rig(input: { config?: Record<string, unknown>; overrides?: Spend
     store,
     clock,
     feeds,
+    cardCloses,
     ruleActions: () =>
       harness.dbExecutes
         .filter((entry) => /INSERT INTO \S+\.rule_actions/.test(entry.sql))

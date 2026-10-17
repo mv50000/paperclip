@@ -8,6 +8,8 @@ import { createStagingCards, type GateCardTransport, type StagingCards } from ".
 import { createSqlGateStore, type GateStore } from "../../kit/gate/state-machine.js";
 import { PLUGIN_ID } from "../../manifest.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
+import { sqlPublicationStore, type PublicationStore } from "../../publish/store.js";
+import { readHalt } from "../spend-guard/halt.js";
 import { brandReadClient, safeError, sqlOnceStore } from "../spend-guard/support.js";
 import { getTelegramController } from "../telegram/controller.js";
 import { registerGateHandler } from "../telegram/gates.js";
@@ -27,6 +29,11 @@ import { setActivationCards } from "./runtime.js";
  *   (`gateRequestId` or `publicationId`). The company comes from the host's
  *   invocation context.
  *
+ * The kill switch, the cap pause and the scheduled pause close the open
+ * cards through the same runtime (closeCardsForPause), and the kill switch's
+ * standing halt refuses every activation until a board user clears it
+ * (RK9-557, spend-guard/halt.ts).
+ *
  * No scale_budget handler (G9) and no ctx.approvals (G1).
  */
 
@@ -42,6 +49,8 @@ export interface GateOverrides {
   activationClient?: ActivateAdDeps["activationClient"];
   assertLaunchReady?: ActivateAdDeps["assertLaunchReady"];
   checkSpend?: ActivateAdDeps["checkSpend"];
+  haltOf?: ActivateAdDeps["haltOf"];
+  publications?: Pick<PublicationStore, "findByAd">;
   now?: () => Date;
 }
 
@@ -60,6 +69,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
   const loadConfig = overrides.loadConfig ?? ((companyId: string) => loadEnabled(ctx, companyId));
   const readClient = overrides.readClient ?? ((companyId: string, config: BrandConfig) => brandReadClient(ctx, companyId, config));
   const preflightDeps = { ctx, store: sqlOnceStore(ledger), pluginId: PLUGIN_ID, now };
+  const publications = overrides.publications ?? sqlPublicationStore(ledger);
 
   registerGateHandler(
     "activate_ad",
@@ -77,6 +87,11 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
       activationClient:
         overrides.activationClient ??
         ((companyId, config, initiator, allowed) => createActivationClient({ ctx, ledger }, companyId, config, initiator, allowed)),
+      haltOf: overrides.haltOf ?? ((companyId) => readHalt(ctx, companyId)),
+      publicationOf: async (companyId, adId) => {
+        const owner = await publications.findByAd(companyId, adId);
+        return owner ? { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId } : null;
+      },
       ...(overrides.checkSpend ? { checkSpend: overrides.checkSpend } : {}),
       now,
     }),

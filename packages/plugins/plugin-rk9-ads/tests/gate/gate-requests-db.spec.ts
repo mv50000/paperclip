@@ -93,6 +93,21 @@ describeDb("activation gate SQL on real Postgres", () => {
     expect(await store.findById(companyA, id)).toMatchObject({ status: "expired" });
   });
 
+  it("lists the company's open activation cards for a pause, and reads a closer's status line back (RK9-557)", async () => {
+    const repo = sqlActivationGateRepo(testDb.client);
+    const first = await card({ adId: "120200000000000321" });
+    const second = await card({ adId: "120200000000000322", validForMs: 1 });
+    const open = (await repo.openForCompany(companyA)).map((entry) => entry.id);
+    // Live or not: a pending card past valid_until is closed too.
+    expect(open).toEqual(expect.arrayContaining([first.id, second.id]));
+    expect(await repo.openForCompany(companyB)).toEqual([]);
+
+    expect(await store.findById(companyA, first.id)).toMatchObject({ closedStatus: null });
+    expect(await repo.close(companyA, first.id, { handler: "not_run", reason: "kill_switch", statusText: "⛔ Hätäkatkaisin" })).toBe(true);
+    expect(await store.findByTokenHash(first.tokenHash)).toMatchObject({ status: "expired", closedStatus: "⛔ Hätäkatkaisin" });
+    expect((await repo.openForCompany(companyA)).map((entry) => entry.id)).not.toContain(first.id);
+  });
+
   it("reports an approved activation in flight until the handler records its end, and only within the window", async () => {
     const repo = sqlActivationGateRepo(testDb.client);
     const { id, tokenHash } = await card({ adId: "120200000000000312" });

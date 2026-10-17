@@ -55,6 +55,8 @@ describe("scheduled pause job", () => {
     expect(pauses(r.meta)).toBe(2);
     expect(r.notifier.messages).toHaveLength(1);
     expect(r.store.keys()).toContain(`${COMPANY_A}|${scheduledPauseKey("OLL", "2026-03-28")}`);
+    // The pause closes the open activation cards (RK9-557).
+    expect(r.cardCloses).toEqual([{ companyId: COMPANY_A, rule: "scheduled_pause", reason: "scheduled pause at 21:30 Europe/Helsinki" }]);
 
     // Someone turns the ads back on: the same local day does not pause again.
     reactivate(r.meta);
@@ -141,6 +143,32 @@ describe("scheduled pause job", () => {
     await r.harness.runJob("scheduled-pause");
     expect(meta.campaigns[0]!.status).toBe("PAUSED");
     expect(meta.ads[0]!.status).toBe("PAUSED");
+  });
+});
+
+describe("open activation cards (RK9-557)", () => {
+  it("does not mark the day when the open cards were not closed, and closes them on the next tick", async () => {
+    let failing = true;
+    const closes: string[] = [];
+    const r = rig({
+      meta: activeMeta(),
+      config: scheduled(),
+      overrides: {
+        closeCards: async (_companyId, input) => {
+          closes.push(input.rule);
+          if (failing) throw new Error("db down");
+          return { ids: [], announce: async () => undefined };
+        },
+      },
+    });
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/open activation cards not closed \(.*db down\)/);
+    expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(false);
+    failing = false;
+    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(closes).toEqual(["scheduled_pause", "scheduled_pause"]);
+    expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(true);
   });
 });
 

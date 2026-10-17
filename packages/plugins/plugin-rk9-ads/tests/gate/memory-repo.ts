@@ -20,6 +20,12 @@ export function memoryActivationRepo(store: MemoryGateStore, now: () => Date): A
         .map((row) => row.id);
       return records(companyId, ids);
     },
+    async openForCompany(companyId) {
+      const ids = [...store.rows.values()]
+        .filter((row) => row.companyId === companyId && row.kind === "activate_ad" && row.status === "pending")
+        .map((row) => row.id);
+      return records(companyId, ids);
+    },
     async activationInFlight(companyId, adId, withinMinutes) {
       const since = now().getTime() - withinMinutes * 60_000;
       return [...store.rows.values()].some(
