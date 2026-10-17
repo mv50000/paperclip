@@ -10,6 +10,13 @@ import { ACTION, DATA } from "./keys.js";
 
 /** The word the operator types before a pause or the kill switch. */
 export const PAUSE_WORD = "PYSÄYTÄ";
+/** The pause that set the halt, as the banner names it. */
+const HALT_RULE_LABEL: Record<string, string> = {
+  kill_switch: "hätäkatkaisin",
+  scheduled_pause: "ajastettu pysäytys",
+  pause_all_cap: "kulutuskatto 90 %",
+};
+
 /** The word the operator types before lifting the standing halt. */
 export const CLEAR_HALT_WORD = "POISTA";
 
@@ -74,6 +81,7 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
   if (!props.halt) return null;
   const halt = props.halt;
   const who = halt.userId ?? halt.agentId ?? (halt.tgUserId !== null ? `Telegram ${halt.tgUserId}` : null);
+  const why = HALT_RULE_LABEL[halt.rule] ?? halt.rule;
 
   async function startClear() {
     setBusy(true);
@@ -98,9 +106,14 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
     setError(null);
     try {
       // `since` from the preview: the worker refuses if a newer kill switch set the halt again.
-      await clearHalt({ dryRun: false, confirm: true, since: preview.since });
+      const result = (await clearHalt({ dryRun: false, confirm: true, since: preview.since })) as { remaining?: HaltState };
       setPreview(null);
-      toast({ title: "Pysäytystila poistettu", tone: "success" });
+      // Another pause's halt may still be in force (e.g. the scheduled pause's under a cleared kill switch).
+      toast(
+        result.remaining
+          ? { title: "Pysäytystila poistettu, mutta toinen pysäytystila on yhä päällä", tone: "warn" }
+          : { title: "Pysäytystila poistettu", tone: "success" },
+      );
       props.onChanged();
     } catch (cause) {
       setError(errorText(cause));
@@ -111,10 +124,15 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
 
   return (
     <div role="status" className="space-y-2 rounded-md border border-destructive p-3">
-      <p className="text-sm font-semibold text-destructive">Pysäytystila päällä: mitään mainosta ei aktivoida ennen kuin board poistaa tilan.</p>
+      <p className="text-sm font-semibold text-destructive">
+        {halt.until
+          ? `Pysäytystila päällä (${why}): mitään mainosta ei aktivoida ennen ${fmtDateTime(halt.until, props.timeZone)}, ellei board poista tilaa.`
+          : `Pysäytystila päällä (${why}): mitään mainosta ei aktivoida ennen kuin board poistaa tilan.`}
+      </p>
       <KeyValueList
         pairs={[
           { label: "Alkaen", value: fmtDateTime(halt.since, props.timeZone) },
+          ...(halt.until ? [{ label: "Voimassa", value: fmtDateTime(halt.until, props.timeZone) }] : []),
           { label: "Kuka", value: who ? `${who} (${halt.source})` : halt.source },
           { label: "Syy", value: halt.reason || "–" },
         ]}

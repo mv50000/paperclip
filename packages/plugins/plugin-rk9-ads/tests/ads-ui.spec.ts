@@ -331,7 +331,7 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("shows the standing halt and clears it with the preview's since", async () => {
-    const halt = { since: "2026-10-17T08:00:00.000Z", reason: "Pysäytä kaikki (UI)", source: "ui", userId: "board-user-1", agentId: null, tgUserId: null };
+    const halt = { rule: "kill_switch", since: "2026-10-17T08:00:00.000Z", until: null, reason: "Pysäytä kaikki (UI)", source: "ui", userId: "board-user-1", agentId: null, tgUserId: null };
     bridge.data.set(DATA.overview, ollolaOverview({ halt }));
     bridge.actions.set(ACTION.clearHalt, async (params) => {
       if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: { brandCode: "OLL", rule: "kill_switch", since: halt.since, reason: halt.reason, initiator: { source: "ui" } } };

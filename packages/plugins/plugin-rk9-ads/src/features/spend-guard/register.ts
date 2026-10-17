@@ -6,9 +6,10 @@ import type { FeatureRuntime } from "../types.js";
 import { spendGuardDeclarations } from "./declarations.js";
 import { alertedThresholds } from "./alerts.js";
 import { checkSpend, type GuardResult } from "./guard.js";
+import { DEFAULT_TIME_ZONE } from "../../kit/local-time.js";
 import { clearHalt, readHalt, type HaltState } from "./halt.js";
-import { pauseAll, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
-import { loadPauseConfig, pauseReason } from "./pause-config.js";
+import { pauseAll, PauseListError, stopActivations, type PauseAllDeps, type PauseAllResult, type Stopped } from "./killswitch.js";
+import { loadPauseConfig, pauseReason, type PauseConfig } from "./pause-config.js";
 import { createScheduledPauseJob, SCHEDULED_PAUSE_JOB_KEY } from "./scheduled-pause.js";
 import {
   brandReadClient,
@@ -25,13 +26,17 @@ import {
  *
  * - job `scheduled-pause`: alerts, scheduled pause, data gate (scheduled-pause.ts)
  * - data `spend-guard`: MTD, cap, spend_cap, projection, % used, alerted thresholds,
- *   and `halt`: the standing halt or null (`haltError` when it cannot be read)
+ *   and `halt`: the halt in force or null (`haltError` when it cannot be read)
  * - action `pause-all`: the UI's "Pysäytä kaikki" (dry-run preview, then confirm)
- * - action `clear-halt`: lifts the kill switch's standing halt (RK9-557).
- *   Dry run by default; a real clear needs `confirm: true` and a board user
- *   (an agent may only preview it). `since` from the preview makes the clear
- *   refuse when a newer kill switch has set the halt again. No Telegram
- *   button clears it.
+ * - action `clear-halt`: lifts the halt in force (RK9-557, RK9-561). Dry run
+ *   by default; a real clear needs `confirm: true`, a board user (an agent
+ *   or the system may only preview it) and `since` from the preview: it
+ *   clears only the halt with that `since`, so a newer kill switch or pause
+ *   that set the halt again is not lifted blind. No Telegram button clears it.
+ *
+ * Every live kill switch (action, tool, Telegram button) leaves its halt and
+ * closes the open cards also when no brand config can be loaded; then it
+ * pauses nothing in Meta and fails (RK9-561).
  * - tools `rk9ads_pause_all` and `rk9ads_get_pacing`
  * - gate kind `pause_all`: one tap on the card's button pauses everything
  */
@@ -92,25 +97,38 @@ export async function spendSnapshot(
 }
 
 /** The halt for the data endpoint: a read failure is reported, never shown as "no halt". */
-async function haltView(ctx: PluginContext, companyId: string): Promise<{ halt: HaltState | null; haltError?: string }> {
+async function haltView(ctx: PluginContext, companyId: string, now: Date): Promise<{ halt: HaltState | null; haltError?: string }> {
   try {
-    return { halt: await readHalt(ctx, companyId) };
+    return { halt: await readHalt(ctx, companyId, now) };
   } catch (error) {
     return { halt: null, haltError: safeError(error) };
   }
+}
+
+function stopSummary(stopped: Stopped): string[] {
+  return [
+    ...(stopped.halt ? ["Standing halt set: no activation until a board user clears it (clear-halt)."] : []),
+    ...(stopped.haltError ? [`The standing halt was NOT stored: ${stopped.haltError}.`] : []),
+    ...(stopped.closedCardIds.length > 0 ? [`Closed ${stopped.closedCardIds.length} open activation card(s).`] : []),
+    ...(stopped.cardsError ? [`Open activation cards were not closed: ${stopped.cardsError}.`] : []),
+  ];
 }
 
 function pauseSummary(result: PauseAllResult): string {
   const verb = result.dryRun ? "Would pause" : "Paused";
   const head = `${verb} ${result.pausedAds.length} ad(s) and ${result.pausedCampaigns.length} campaign(s) (scope ${result.scope}).`;
   const failed = result.errors.length > 0 ? ` ${result.errors.length} pause(s) failed: ${result.errors.map((e) => e.id).join(", ")}.` : "";
-  const stop = [
-    ...(result.halt ? ["Standing halt set: no activation until a board user clears it (clear-halt)."] : []),
-    ...(result.haltError ? [`The standing halt was NOT stored: ${result.haltError}.`] : []),
-    ...(result.closedCardIds.length > 0 ? [`Closed ${result.closedCardIds.length} open activation card(s).`] : []),
-    ...(result.cardsError ? [`Open activation cards were not closed: ${result.cardsError}.`] : []),
-  ];
+  const stop = stopSummary(result);
   return `${head}${failed}${stop.length > 0 ? ` ${stop.join(" ")}` : ""}${result.list.length > 0 ? `\n${result.list.join("\n")}` : ""}`;
+}
+
+type KillSwitchRun =
+  | { ok: true; loaded: Extract<PauseConfig, { ok: true }>; result: PauseAllResult }
+  | { ok: false; error: string; stopped: Stopped };
+
+/** The failure text of a kill switch that had no config to pause with. */
+function noConfigText(run: Extract<KillSwitchRun, { ok: false }>): string {
+  return [`${run.error}; nothing was paused in Meta.`, ...stopSummary(run.stopped)].join(" ");
 }
 
 export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuardOverrides = {}): void {
@@ -120,13 +138,41 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
   const now = overrides.now ?? (() => new Date());
   const deps = { ctx, ledger, store, notifier, now, clientFor: overrides.clientFor, feedFetch: overrides.feedFetch, closeCards: overrides.closeCards };
 
+  /**
+   * The kill switch. A live run leaves the halt and closes the open cards
+   * whether or not a config loads: the halt is per company and needs none
+   * (RK9-561). Only the Meta pauses need the config.
+   */
+  async function killSwitch(companyId: string, input: { dryRun: boolean; reason: string; initiator: Initiator }): Promise<KillSwitchRun> {
+    let loaded: PauseConfig;
+    try {
+      loaded = await loadPauseConfig(ctx, companyId);
+    } catch (error) {
+      loaded = { ok: false, state: "unavailable", error: `the brand config could not be loaded: ${safeError(error)}` };
+    }
+    const options = { dryRun: input.dryRun, rule: "kill_switch" as const, reason: input.reason, initiator: input.initiator };
+    const brand = loaded.ok ? loaded.config : { brandCode: "?", timeZone: DEFAULT_TIME_ZONE };
+    const stop = input.dryRun ? undefined : await stopActivations(deps, companyId, brand, options, now());
+    if (!loaded.ok) {
+      await stop?.announce();
+      return { ok: false, error: loaded.error, stopped: stop?.stopped ?? { closedCardIds: [] } };
+    }
+    const result = await pauseAll(deps, companyId, loaded.config, {
+      ...options,
+      reason: pauseReason(loaded, input.reason),
+      notify: true,
+      ...(stop ? { stopped: stop } : {}),
+    });
+    return { ok: true, loaded, result };
+  }
+
   ctx.jobs.register(SCHEDULED_PAUSE_JOB_KEY, createScheduledPauseJob(deps));
 
   ctx.data.register(SPEND_GUARD_DATA_KEY, async (params) => {
     // The host sets companyId to the company it authorized for this call.
     const companyId = typeof params.companyId === "string" ? params.companyId : null;
     if (!companyId) return { state: "error", error: "company context is required" };
-    const halt = await haltView(ctx, companyId);
+    const halt = await haltView(ctx, companyId, now());
     const loaded = await loadEnabled(ctx, companyId);
     if (!loaded.ok) return { state: loaded.state, error: loaded.error, ...halt };
     return { state: "enabled", ...(await spendSnapshot(ctx, store, companyId, loaded.config, now())), ...halt };
@@ -143,13 +189,17 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     if (!dryRun && context.actor.type !== "user") {
       throw new Error("Clearing the halt is board-only; an agent can run it with dryRun only");
     }
-    const halt = await readHalt(ctx, companyId);
-    if (dryRun || !halt) return { dryRun, cleared: false, halt };
-    // `since` from the preview: a kill switch that ran after the preview stored a newer halt, so do not lift it blind.
-    if (typeof params.since === "string" && params.since !== halt.since) {
-      throw new Error("A newer kill switch set the halt after the preview; preview it again and clear the current one");
+    if (dryRun) return { dryRun, cleared: false, halt: await readHalt(ctx, companyId, now()) };
+    // `since` from the preview names the halt to clear: a kill switch or pause that ran after the preview stored a newer halt, which stays.
+    if (typeof params.since !== "string" || params.since === "") {
+      throw new Error("A real clear needs `since` of the halt from the preview (dryRun)");
     }
-    await clearHalt(ctx, companyId);
+    const { cleared, current } = await clearHalt(ctx, companyId, params.since, now());
+    if (!cleared) {
+      if (current) throw new Error("A newer kill switch or pause set the halt after the preview; preview it again and clear the current one");
+      return { dryRun: false, cleared: false, halt: null };
+    }
+    const halt = cleared;
     const reason = reasonText(params.reason, "");
     const metadata = {
       halt,
@@ -161,8 +211,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     } catch (error) {
       ctx.logger.warn("rk9-ads spend guard: halt clear not logged", { companyId, detail: safeError(error) });
     }
-    ctx.logger.info("rk9-ads spend guard: standing halt cleared", { companyId, brandCode: halt.brandCode, since: halt.since });
-    return { dryRun: false, cleared: true, halt };
+    ctx.logger.info("rk9-ads spend guard: halt cleared", { companyId, brandCode: halt.brandCode, rule: halt.rule, since: halt.since });
+    // `remaining`: another halt (e.g. a scheduled pause's under a cleared kill switch) still in force.
+    return { dryRun: false, cleared: true, halt, ...(current ? { remaining: current } : {}) };
   });
 
   ctx.actions.register(PAUSE_ALL_ACTION_KEY, async (params, context) => {
@@ -173,47 +224,46 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       throw new Error("A live pause needs confirm: true; preview it with dryRun first");
     }
     // Stopping works on the last valid config too (pause-config.ts).
-    const loaded = await loadPauseConfig(ctx, companyId);
-    if (!loaded.ok) throw new Error(loaded.error);
     const initiator: Initiator = {
       source: "ui",
       userId: context.actor.userId,
       agentId: context.actor.agentId,
       runId: context.actor.runId,
     };
-    const result = await pauseAll(deps, companyId, loaded.config, {
-      dryRun,
-      rule: "kill_switch",
-      reason: pauseReason(loaded, reasonText(params.reason, "Pysäytä kaikki (UI)")),
-      initiator,
-      notify: true,
-    });
-    return loaded.fallback ? { ...result, fallbackConfig: loaded.fallback.state } : result;
+    let run: KillSwitchRun;
+    try {
+      run = await killSwitch(companyId, { dryRun, reason: reasonText(params.reason, "Pysäytä kaikki (UI)"), initiator });
+    } catch (error) {
+      // The halt and the card close ran before the failed listing: the UI must say so.
+      if (error instanceof PauseListError) throw new Error([`Pause failed before anything was paused: ${error.message}.`, ...stopSummary(error.stopped)].join(" "));
+      throw error;
+    }
+    if (!run.ok) throw new Error(dryRun ? run.error : noConfigText(run));
+    return run.loaded.fallback ? { ...run.result, fallbackConfig: run.loaded.fallback.state } : run.result;
   });
 
   ctx.tools.register(
     "rk9ads_pause_all",
     toolDeclaration("rk9ads_pause_all"),
     async (params, runCtx): Promise<ToolResult> => {
-      const loaded = await loadPauseConfig(ctx, runCtx.companyId);
-      if (!loaded.ok) return { error: loaded.error };
       const reason = reasonText((params as { reason?: unknown } | null)?.reason, "");
       if (!reason) return { error: "reason is required" };
       try {
-        const result = await pauseAll(deps, runCtx.companyId, loaded.config, {
+        const run = await killSwitch(runCtx.companyId, {
           dryRun: false,
-          rule: "kill_switch",
-          reason: pauseReason(loaded, reason),
+          reason,
           initiator: { source: "agent", agentId: runCtx.agentId, runId: runCtx.runId },
-          notify: true,
         });
+        if (!run.ok) return { error: noConfigText(run), data: run.stopped };
+        const { loaded, result } = run;
         const summary = loaded.fallback
           ? `${pauseSummary(result)} The brand config is ${loaded.fallback.state}: paused the whole ad account on the last valid config. Fix the config.`
           : pauseSummary(result);
-        if (result.errors.length > 0 || result.haltError) return { error: summary, data: result };
+        if (result.errors.length > 0 || result.haltError || result.cardsError) return { error: summary, data: result };
         return { content: summary, data: result };
       } catch (error) {
-        return { error: `Pause failed before anything was paused: ${safeError(error)}` };
+        const stop = error instanceof PauseListError ? stopSummary(error.stopped) : [];
+        return { error: [`Pause failed before anything was paused: ${safeError(error)}.`, ...stop].join(" ") };
       }
     },
   );
@@ -226,29 +276,29 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       if (!loaded.ok) return { error: loaded.error };
       const snapshot = await spendSnapshot(ctx, store, runCtx.companyId, loaded.config, now());
       if (snapshot.pctUsed === null) return { error: `Spend figures unavailable: ${snapshot.reason} (${snapshot.detail})`, data: snapshot };
-      const { halt } = await haltView(ctx, runCtx.companyId);
+      const { halt } = await haltView(ctx, runCtx.companyId, now());
       const content = [
         `${snapshot.brandCode} ${snapshot.month}: spent ${snapshot.mtdEur} EUR of ${snapshot.monthlyCapEur} EUR (${snapshot.pctUsed} %).`,
         `Projected month-end ${snapshot.projectedMonthEndEur} EUR at ${snapshot.dailyBudgetSumEur} EUR/day for ${snapshot.remainingDays} day(s).`,
         `Spend guard: ${snapshot.allow ? "would allow" : "refuses"} new spend (${snapshot.reason}).`,
-        ...(halt ? [`Kill switch halt since ${halt.since}: no activation until a board user clears it.`] : []),
+        ...(halt
+          ? [
+              halt.until
+                ? `${halt.rule} halt since ${halt.since} until ${halt.until}: no activation before then unless a board user clears it.`
+                : `${halt.rule} halt since ${halt.since}: no activation until a board user clears it.`,
+            ]
+          : []),
       ].join(" ");
       return { content, data: { ...snapshot, halt } };
     },
   );
 
   registerGateHandler("pause_all", async ({ request, tgUserId }) => {
-    const loaded = await loadPauseConfig(ctx, request.companyId);
-    if (!loaded.ok) throw new Error(loaded.error);
-    const result = await pauseAll(deps, request.companyId, loaded.config, {
-      dryRun: false,
-      rule: "kill_switch",
-      reason: pauseReason(loaded, "Pysäytä kaikki (Telegram)"),
-      initiator: { source: "telegram", tgUserId },
-      // The card shows the counts; the notice lists every paused campaign for
-      // the restore (RK9-523).
-      notify: true,
-    });
+    // The card shows the counts; the notice lists every paused campaign for
+    // the restore (RK9-523).
+    const run = await killSwitch(request.companyId, { dryRun: false, reason: "Pysäytä kaikki (Telegram)", initiator: { source: "telegram", tgUserId } });
+    if (!run.ok) throw new Error(noConfigText(run));
+    const { loaded, result } = run;
     const outcome = {
       count: result.count,
       adIds: result.pausedAds.map((ad) => ad.id),

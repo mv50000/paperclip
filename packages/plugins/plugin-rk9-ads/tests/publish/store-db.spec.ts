@@ -100,6 +100,25 @@ describeDb("publication store on real Postgres", () => {
     await expect(testDb.adminQuery("UPDATE " + testDb.namespace + ".publications SET status = 'ACTIVE' WHERE id = $1", [record.id])).rejects.toThrow();
   });
 
+  it("finds the owner of an ad behind any number of newer failed or pending rows (RK9-561)", async () => {
+    const store = sqlPublicationStore(createLedger(testDb.client));
+    const insert = (key: string, status: string, updatedAt: string) =>
+      testDb.adminQuery<{ id: string }>(
+        `INSERT INTO ${testDb.namespace}.publications (company_id, brand_code, idempotency_key, content_hash, status, meta_ad_id, updated_at)
+         VALUES ($1, 'OLL', $2, $3, $4, '5900', $5) RETURNING id`,
+        [companyA, key, "f".repeat(64), status, updatedAt],
+      );
+    const [owner] = await insert("owner-5900", "published", "2026-10-17T09:00:00Z");
+    for (let index = 0; index < 25; index += 1) {
+      await insert(`retry-5900-${index}`, index % 2 === 0 ? "failed" : "pending", `2026-10-17T10:${String(index).padStart(2, "0")}:00Z`);
+    }
+    expect(await store.findByAd(companyA, "5900")).toMatchObject({ id: owner!.id, status: "published" });
+    expect(await store.findByAd(companyB, "5900")).toBeNull();
+    // A later swap owns the ad.
+    const [swap] = await insert("swap-5900", "swapped", "2026-10-17T11:00:00Z");
+    expect(await store.findByAd(companyA, "5900")).toMatchObject({ id: swap!.id, status: "swapped" });
+  });
+
   it("reads a staged creative row of the company only", async () => {
     const ledger = createLedger(testDb.client);
     const { id } = await ledger.insert(companyA, "creatives", {

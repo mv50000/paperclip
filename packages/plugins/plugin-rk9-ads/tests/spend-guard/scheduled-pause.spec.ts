@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../../src/config.js";
 import { alertKey, riskKey } from "../../src/features/spend-guard/alerts.js";
 import { evaluateDataGate, resolveJsonPointer } from "../../src/features/spend-guard/data-gate.js";
+import { readHalt } from "../../src/features/spend-guard/halt.js";
 import { ALERT_CHECK_INTERVAL_MS, scheduledPauseKey } from "../../src/features/spend-guard/scheduled-pause.js";
 import { brandConfig, COMPANY_A } from "../fixtures.js";
 import { FakeMeta } from "./fake-meta.js";
@@ -147,8 +148,7 @@ describe("scheduled pause job", () => {
 });
 
 describe("open activation cards (RK9-557)", () => {
-  it("does not mark the day when the open cards were not closed, and closes them on the next tick", async () => {
-    let failing = true;
+  it("marks the day once the Meta pauses succeeded, reports a failed card close once and does not pause again (RK9-561)", async () => {
     const closes: string[] = [];
     const r = rig({
       meta: activeMeta(),
@@ -156,19 +156,44 @@ describe("open activation cards (RK9-557)", () => {
       overrides: {
         closeCards: async (_companyId, input) => {
           closes.push(input.rule);
-          if (failing) throw new Error("db down");
-          return { ids: [], announce: async () => undefined };
+          throw new Error("db down");
         },
       },
     });
     r.clock.now = new Date("2026-10-21T18:31:00Z");
-    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/open activation cards not closed \(.*db down\)/);
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/scheduled pause: open activation cards were not closed \(.*db down\)/);
+    expect(pauses(r.meta)).toBe(2);
+    expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(true);
+    // An ad activated on purpose later that evening stays ACTIVE: the next tick does nothing.
+    reactivate(r.meta);
+    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(closes).toEqual(["scheduled_pause"]);
+    expect(pauses(r.meta)).toBe(2);
+  });
+});
+
+describe("the scheduled pause's halt (RK9-561)", () => {
+  it("leaves a halt until the next local morning, and retries a halt that was not stored", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled(), overrides: { closeCards: async () => ({ ids: [], announce: async () => undefined }) } });
+    const state = r.harness.ctx.state;
+    const set = state.set.bind(state);
+    let failing = true;
+    state.set = async (input, value) => {
+      if (failing && input.stateKey.startsWith("halt:")) throw new Error("state down");
+      return set(input, value);
+    };
+    r.clock.now = new Date("2026-10-21T18:31:00Z"); // 21:31 EEST
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/the halt was not stored \(.*state down\).*retrying the halt next tick/);
     expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(false);
     failing = false;
     r.clock.now = new Date("2026-10-21T18:36:00Z");
     await r.harness.runJob("scheduled-pause");
-    expect(closes).toEqual(["scheduled_pause", "scheduled_pause"]);
     expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(true);
+    expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toMatchObject({
+      rule: "scheduled_pause",
+      until: "2026-10-22T03:00:00.000Z", // 06:00 EEST
+    });
   });
 });
 

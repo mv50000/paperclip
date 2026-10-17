@@ -217,6 +217,20 @@ describe("rules-evaluate job (A11)", () => {
     expect(r.meta.writes.map((call) => call.body.status)).toEqual(["PAUSED", "PAUSED", "PAUSED"]);
   });
 
+  it("keeps the card-close failure when the cap pause's own listing fails (RK9-561)", async () => {
+    const meta = accountMeta();
+    meta.spend = () => "90.00";
+    // The month-to-date read and the status read list the campaigns first; the pause's listing is the third.
+    let campaignLists = 0;
+    meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/campaigns") && ++campaignLists > 2 ? new Error("graph down") : null);
+    const r = setup({ meta, rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] }, closeCardsError: new Error("gate store down") });
+    const run = r.harness.runJob(RULES_JOB_KEY);
+    await expect(run).rejects.toThrow(/graph down/);
+    await expect(run).rejects.toThrow(/pause_all_cap: open activation cards were not closed \(Error: gate store down\)/);
+    expect(campaignLists).toBe(3);
+    expect(r.meta.writes).toHaveLength(0);
+  });
+
   it("propose_scale never calls Meta (G9)", async () => {
     const r = setup({
       rules: { liveMode: true, list: [{ ruleId: "scale", type: "propose_scale", enabled: false, mode: "live", threshold: 5, days: 1, minImpressions: 0, minClicks: 0 }] },

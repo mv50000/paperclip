@@ -22,24 +22,28 @@
  * (the client is in dry-run mode) and no Telegram.
  *
  * Before the first Meta call a live run of the kill switch, the cap pause or
- * the scheduled pause closes the company's open activation card rows, so a
- * tap cannot undo the pause (RK9-557); the cards are edited after the Meta
- * pauses, so a slow Telegram does not delay them. The kill switch first leaves the standing
- * halt (halt.ts), which activate_ad checks before every write: it also stops
- * a tap that won before the close and every later card. A failed halt write
- * or card close does not stop the pause; the result and the audit row name it.
+ * the scheduled pause leaves its halt (halt.ts) and closes the company's open
+ * activation card rows, so a tap cannot undo the pause (RK9-557). activate_ad
+ * checks the halt before every ACTIVE write and after its writes, so the halt
+ * also stops an activation that was approved before the close (RK9-561). The
+ * kill switch's halt stands until a board user clears it; the scheduled
+ * pause's lasts until the next local morning, the cap pause's until the next
+ * local month. The cards are edited after the Meta pauses, so a slow Telegram
+ * does not delay them. A failed halt write or card close does not stop the
+ * pause; the result and the audit row name it.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../../config.js";
 import type { Ledger } from "../../db.js";
-import { localDate, localTime } from "../../kit/local-time.js";
+import { randomUUID } from "node:crypto";
+import { localDate, localTime, nextLocalMonthStart, nextLocalTime } from "../../kit/local-time.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { adAccountPath, getObjectStatus, listAds, listCampaignAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import type { StatusRow } from "../../meta/types.js";
 import { CARD_CLOSING_PAUSES, type CardClosingPause, type PauseCardClose } from "../../gate/staging-card.js";
 import { getActivationCards } from "../gate/runtime.js";
-import { setHalt, type HaltState } from "./halt.js";
+import { SCHEDULED_HALT_UNTIL, setHalt, type HaltState } from "./halt.js";
 import {
   brandClient,
   recordAction,
@@ -84,9 +88,9 @@ export interface PauseAllResult {
   auditError?: string;
   /** Activation cards this run closed (live kill switch, cap pause, scheduled pause). */
   closedCardIds: string[];
-  /** The open cards could not be listed or closed; the pause itself stands. */
+  /** The open cards could not be listed or closed (all or some); the pause itself stands. */
   cardsError?: string;
-  /** The standing halt a live kill switch left. */
+  /** The halt a live kill switch, cap pause or scheduled pause left. */
   halt?: HaltState;
   /** The halt could not be stored; the pause itself stands. */
   haltError?: string;
@@ -114,6 +118,36 @@ export interface PauseAllOptions {
   note?: string;
   /** Extra figures for the audit row, e.g. the rule engine's MTD reading. */
   metrics?: Record<string, unknown>;
+  /** The halt and card close the caller already ran (the kill switch runs them before it loads the config). */
+  stopped?: StopActivations;
+}
+
+/** The halt and the card close of a live run; `announce` edits the closed cards. */
+export interface StopActivations {
+  stopped: Stopped;
+  announce: () => Promise<void>;
+}
+
+/**
+ * The listing failed, so nothing was paused. Carries the halt and card
+ * close that ran before it, so the caller can report them (RK9-561). The
+ * message is the listing error's.
+ */
+export class PauseListError extends Error {
+  readonly stopped: Stopped;
+  constructor(cause: unknown, stopped: Stopped) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = cause instanceof Error ? cause.name : "Error";
+    this.stopped = stopped;
+  }
+}
+
+/** The halt and card-close failures of a pause, as failure lines for a job run. */
+export function stopFailures(prefix: string, stopped: Pick<Stopped, "cardsError" | "haltError">): string[] {
+  return [
+    ...(stopped.cardsError ? [`${prefix}: open activation cards were not closed (${stopped.cardsError})`] : []),
+    ...(stopped.haltError ? [`${prefix}: the halt was not stored (${stopped.haltError})`] : []),
+  ];
 }
 
 /**
@@ -176,7 +210,14 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
   // not fit is counted on its own line, never cut silently; the audit row has
   // every id.
   const lines = [...head];
-  if (result.halt) lines.push("⛔ Pysäytystila päällä: aktivointikortit eivät aktivoi mitään, kunnes board poistaa tilan.");
+  if (result.halt) {
+    const until = result.halt.until ? new Date(result.halt.until) : null;
+    lines.push(
+      until
+        ? `⛔ Pysäytystila päällä ${localDate(until, config.timeZone)} klo ${localTime(until, config.timeZone)} asti: aktivointikortit eivät aktivoi mitään (board voi poistaa tilan aiemmin).`
+        : "⛔ Pysäytystila päällä: aktivointikortit eivät aktivoi mitään, kunnes board poistaa tilan.",
+    );
+  }
   if (result.haltError) lines.push("⚠️ Pysäytystilan tallennus epäonnistui: avoin kortti voi yhä aktivoida. Tarkista aktiviteettiloki.");
   if (result.closedCardIds.length > 0) lines.push(`Avoimia aktivointikortteja mitätöity: ${result.closedCardIds.length}`);
   if (result.cardsError) lines.push("⚠️ Avoimia aktivointikortteja ei voitu sulkea. Tarkista aktiviteettiloki.");
@@ -208,37 +249,47 @@ function closesCards(rule: PauseRule): rule is CardClosingPause {
   return (CARD_CLOSING_PAUSES as readonly string[]).includes(rule);
 }
 
-type Stopped = Pick<PauseAllResult, "closedCardIds" | "cardsError" | "halt" | "haltError">;
+export type Stopped = Pick<PauseAllResult, "closedCardIds" | "cardsError" | "halt" | "haltError">;
+
+/** When the rule's halt ends: never for the kill switch. */
+function haltUntil(rule: CardClosingPause, timeZone: string, now: Date): string | undefined {
+  if (rule === "scheduled_pause") return nextLocalTime(now, SCHEDULED_HALT_UNTIL, timeZone).toISOString();
+  if (rule === "pause_all_cap") return nextLocalMonthStart(now, timeZone).toISOString();
+  return undefined;
+}
 
 /**
  * The halt and the card row close of a live run, before any Meta call.
  * Never throws. `announce` edits the closed cards; call it after the pauses.
+ * It needs no brand config: the kill switch runs it before it loads one
+ * (`brandCode` "?" when none could be loaded).
  */
-async function stopActivations(
-  deps: PauseAllDeps,
+export async function stopActivations(
+  deps: Pick<PauseAllDeps, "ctx" | "closeCards">,
   companyId: string,
-  config: BrandConfig,
-  options: PauseAllOptions,
+  brand: { brandCode: string; timeZone: string },
+  options: Pick<PauseAllOptions, "dryRun" | "rule" | "reason" | "initiator">,
   now: Date,
-): Promise<{ stopped: Stopped; announce: () => Promise<void> }> {
+): Promise<StopActivations> {
   const out: Stopped = { closedCardIds: [] };
   let announce: () => Promise<void> = async () => undefined;
   if (options.dryRun || !closesCards(options.rule)) return { stopped: out, announce };
-  if (options.rule === "kill_switch") {
-    const halt: HaltState = {
-      brandCode: config.brandCode,
-      rule: "kill_switch",
-      since: now.toISOString(),
-      reason: options.reason.slice(0, 300),
-      initiator: options.initiator,
-    };
-    try {
-      await setHalt(deps.ctx, companyId, halt);
-      out.halt = halt;
-    } catch (error) {
-      out.haltError = safeError(error);
-      deps.ctx.logger.error("rk9-ads kill switch: the standing halt was not stored", { companyId, detail: out.haltError });
-    }
+  const until = haltUntil(options.rule, brand.timeZone, now);
+  const halt: HaltState = {
+    brandCode: brand.brandCode,
+    rule: options.rule,
+    id: randomUUID(),
+    since: now.toISOString(),
+    ...(until ? { until } : {}),
+    reason: options.reason.slice(0, 300),
+    initiator: options.initiator,
+  };
+  try {
+    await setHalt(deps.ctx, companyId, halt);
+    out.halt = halt;
+  } catch (error) {
+    out.haltError = safeError(error);
+    deps.ctx.logger.error("rk9-ads pause: the halt was not stored", { companyId, rule: options.rule, detail: out.haltError });
   }
   const close = deps.closeCards ?? getActivationCards()?.closeCardsForPause;
   if (!close) {
@@ -247,6 +298,7 @@ async function stopActivations(
     try {
       const closed = await close(companyId, { rule: options.rule, reason: options.reason });
       out.closedCardIds = closed.ids;
+      if (closed.error) out.cardsError = closed.error;
       announce = async () => {
         try {
           await closed.announce();
@@ -270,7 +322,7 @@ export async function pauseAll(
 ): Promise<PauseAllResult> {
   const now = deps.now?.() ?? new Date();
   const mode = options.dryRun ? "dryRun" : "live";
-  const { stopped, announce } = await stopActivations(deps, companyId, config, options, now);
+  const { stopped, announce } = options.stopped ?? (await stopActivations(deps, companyId, config, options, now));
   const stopErrors = [
     ...(stopped.haltError ? [`halt: ${stopped.haltError}`] : []),
     ...(stopped.cardsError ? [`cards: ${stopped.cardsError}`] : []),
@@ -301,7 +353,7 @@ export async function pauseAll(
       message: `${options.rule} failed before any pause: could not list the active ads (source ${options.initiator.source})`,
     });
     await announce();
-    throw error;
+    throw new PauseListError(error, stopped);
   }
   const result: PauseAllResult = {
     dryRun: options.dryRun,

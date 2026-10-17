@@ -15,8 +15,9 @@
  *    was sent refuses). ⚠ states (ARCHIVED, DELETED, an effective_status
  *    outside the allowed set) refuse and are reported, never fixed;
  * 4. the spend guard (checkSpend) for every object this run activates;
- *    then the kill switch's standing halt (RK9-557): while it is set, or when
- *    it cannot be read, nothing is written;
+ *    then the halt in force (RK9-557, RK9-561): the kill switch's, the
+ *    scheduled pause's or the cap pause's. While one is set, or when the
+ *    halts cannot be read, nothing is written;
  * 5. writes: the ad ACTIVE, every other ACTIVE ad of the ad set PAUSED
  *    (newest wins), the ad set and then the campaign ACTIVE when PAUSED.
  *    Each write passes the spend guard hook again, and the hook lets
@@ -24,7 +25,7 @@
  *    Every ACTIVE write reads the halt again first;
  * 6. a last read: the ad must still carry the approved creative, otherwise
  *    (or when the read fails) it is paused again and the card fails;
- * 7. the halt once more: a kill switch that started during the writes set
+ * 7. the halt once more: a pause that started during the writes set
  *    it before its own first pause, so either its listing sees this run's
  *    ACTIVE objects, or this read sees the halt. A halt seen during or after
  *    the writes pauses again everything this run set ACTIVE.
@@ -81,7 +82,7 @@ export interface ActivateAdDeps {
    * may set ACTIVE; the spend guard hook still checks each write.
    */
   activationClient(companyId: string, config: BrandConfig, initiator: Initiator, allowed: ReadonlySet<string>): MetaGraphClient;
-  /** The kill switch's standing halt (spend-guard/halt.ts). Throws when it cannot be read. */
+  /** The halt in force (spend-guard/halt.ts). Throws when it cannot be read. */
   haltOf(companyId: string): Promise<HaltState | null>;
   /** The latest published or swapped publication of the ad, or null. */
   publicationOf(companyId: string, adId: string): Promise<AdOwner | null>;
@@ -118,6 +119,8 @@ interface Denial {
   lines: string[];
   warnings?: string[];
   guard?: Partial<GuardResult>;
+  /** The card's head text, when the reason's own text is not specific enough. */
+  head?: string;
 }
 
 const REASON_TEXT: Record<string, string> = {
@@ -133,6 +136,8 @@ const REASON_TEXT: Record<string, string> = {
   publication_unavailable: "mainoksen julkaisua ei voitu lukea",
   content_changed: "mainoksen julkaisu tai sisältö on vaihtunut kortin lähettämisen jälkeen",
   halted: "hätäkatkaisin on painettu: pysäytystila on päällä, kunnes board poistaa sen",
+  "halted:scheduled_pause": "ajastettu pysäytys on päällä: pysäytystila on voimassa aamuun asti, ellei board poista sitä",
+  "halted:pause_all_cap": "kulutuskatto 90 % ylittyi: pysäytystila on voimassa kuun loppuun, ellei board poista sitä",
   halt_unreadable: "pysäytystilaa ei voitu lukea",
   blocked_state: "mainoksen, ad setin tai kampanjan tila estää aktivoinnin",
   spend_guard: "kulutusvahti esti aktivoinnin",
@@ -159,7 +164,7 @@ export function blockedStates(ad: StatusRow, adset: StatusRow, campaign: StatusR
 class HaltedError extends Error {}
 
 function haltLine(halt: HaltState): string {
-  return `Pysäytystila ${halt.since}: ${halt.reason}`.slice(0, 300);
+  return `Pysäytystila ${halt.since}${halt.until ? `–${halt.until}` : ""}: ${halt.reason}`.slice(0, 300);
 }
 
 function guardSummary(result: GuardResult): Partial<GuardResult> {
@@ -209,7 +214,7 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     if (denial.warnings?.length) deps.ctx.logger.warn("rk9-ads gate: activation refused", meta);
     else deps.ctx.logger.info("rk9-ads gate: activation refused", meta);
     await audit(request, "denied", outcome);
-    const head = `⛔ Ei aktivoitu: ${REASON_TEXT[denial.reason.split(":")[0]!] ?? denial.reason}`;
+    const head = `⛔ Ei aktivoitu: ${denial.head ?? REASON_TEXT[denial.reason.split(":")[0]!] ?? denial.reason}`;
     return {
       status: "denied",
       statusText: [head, ...denial.lines, "Mainos jäi PAUSED-tilaan."].join("\n"),
@@ -330,18 +335,25 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       try {
         return await deps.haltOf(companyId);
       } catch (error) {
-        throw new HaltedError(`the kill switch halt could not be read (${safeError(error)})`);
+        throw new HaltedError(`the halt could not be read (${safeError(error)})`);
       }
     };
     try {
       const halt = await haltNow();
-      if (halt) return deny(request, decidedBy, binding, { reason: "halted", detail: `halt since ${halt.since}: ${halt.reason}`, lines: [haltLine(halt)] });
+      if (halt) {
+        return deny(request, decidedBy, binding, {
+          reason: "halted",
+          detail: `${halt.rule} halt since ${halt.since}${halt.until ? ` until ${halt.until}` : ""}: ${halt.reason}`,
+          lines: [haltLine(halt)],
+          head: REASON_TEXT[`halted:${halt.rule}`] ?? REASON_TEXT.halted,
+        });
+      }
     } catch (error) {
       return deny(request, decidedBy, binding, { reason: "halt_unreadable", detail: safeError(error), lines: [] });
     }
     const assertNotHalted = async () => {
       const halt = await haltNow();
-      if (halt) throw new HaltedError(`the kill switch halt was set during the activation (${halt.since})`);
+      if (halt) throw new HaltedError(`the ${halt.rule} halt was set during the activation (${halt.since})`);
     };
 
     const initiator: Initiator = { source: "telegram", tgUserId };
@@ -401,8 +413,8 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     } catch (error) {
       let detail = safeError(error);
       if (error instanceof HaltedError) {
-        // The kill switch won the race: pause what this run set ACTIVE (campaign first),
-        // rather than leave it to the switch's listing, which may have run before these writes.
+        // A pause won the race: pause what this run set ACTIVE (campaign first),
+        // rather than leave it to the pause's listing, which may have run before these writes.
         const undo: Array<[string, string]> = [];
         if (done.includes("campaign_active") && campaign) undo.push(["campaign", campaign.id]);
         if (done.includes("adset_active")) undo.push(["ad set", adset.id]);

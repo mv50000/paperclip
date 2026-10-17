@@ -30,9 +30,9 @@ import { setActivationCards } from "./runtime.js";
  *   invocation context.
  *
  * The kill switch, the cap pause and the scheduled pause close the open
- * cards through the same runtime (closeCardsForPause), and the kill switch's
- * standing halt refuses every activation until a board user clears it
- * (RK9-557, spend-guard/halt.ts).
+ * cards through the same runtime (closeCardsForPause), and their halts
+ * refuse every activation while in force (RK9-557, RK9-561,
+ * spend-guard/halt.ts).
  *
  * No scale_budget handler (G9) and no ctx.approvals (G1).
  */
@@ -64,6 +64,7 @@ async function loadEnabled(ctx: PluginContext, companyId: string): Promise<{ ok:
 export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides = {}): { cards: StagingCards } {
   const { ctx, ledger } = runtime;
   const now = overrides.now ?? (() => new Date());
+  const haltOf = overrides.haltOf ?? ((companyId: string) => readHalt(ctx, companyId, now()));
   const store = overrides.store ?? withActivationColumns(createSqlGateStore(ctx.db), ctx.db);
   const repo = overrides.repo ?? sqlActivationGateRepo(ctx.db);
   const loadConfig = overrides.loadConfig ?? ((companyId: string) => loadEnabled(ctx, companyId));
@@ -87,7 +88,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
       activationClient:
         overrides.activationClient ??
         ((companyId, config, initiator, allowed) => createActivationClient({ ctx, ledger }, companyId, config, initiator, allowed)),
-      haltOf: overrides.haltOf ?? ((companyId) => readHalt(ctx, companyId)),
+      haltOf,
       publicationOf: async (companyId, adId) => {
         const owner = await publications.findByAd(companyId, adId);
         return owner ? { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId } : null;
@@ -104,6 +105,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
     transport: overrides.transport ?? getTelegramController,
     loadConfig,
     readClient,
+    haltOf,
     ...(overrides.checkSpend ? { checkSpend: overrides.checkSpend } : {}),
     now,
   });

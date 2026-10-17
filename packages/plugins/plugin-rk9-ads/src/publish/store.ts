@@ -170,12 +170,19 @@ export function sqlPublicationStore(ledger: Ledger): PublicationStore {
     get: async (companyId, id) => (UUID_RE.test(id) ? one(companyId, { id }) : null),
     findByKey: (companyId, idempotencyKey) => one(companyId, { idempotency_key: idempotencyKey }),
     async findByAd(companyId, adId) {
-      const rows = await ledger.select(companyId, "publications", {
-        where: { meta_ad_id: adId },
-        orderBy: { column: "updated_at", direction: "desc" },
-        limit: 20,
-      });
-      const owner = rows.find((row) => row.status === "published" || row.status === "swapped");
+      // The status filter is in SQL: any number of newer failed or pending rows of the ad cannot hide the owner (RK9-561).
+      const latest = async (status: "published" | "swapped") =>
+        (
+          await ledger.select(companyId, "publications", {
+            where: { meta_ad_id: adId, status },
+            orderBy: { column: "updated_at", direction: "desc" },
+            limit: 1,
+          })
+        )[0];
+      const [published, swapped] = [await latest("published"), await latest("swapped")];
+      const time = (row: Record<string, unknown> | undefined) => (row ? Date.parse(iso(row.updated_at) ?? "") || 0 : -1);
+      // A tie goes to the swap: it is the later owner of the same ad.
+      const owner = time(swapped) >= time(published) ? swapped : published;
       return owner ? toPublicationRecord(owner) : null;
     },
     async insertPending(companyId, values) {
