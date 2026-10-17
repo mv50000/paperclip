@@ -96,9 +96,16 @@ describe("evaluateRules (A11)", () => {
       // A good day breaks it too.
       const good = [day("1", "2026-10-19", 1, 300, 5), day("1", "2026-10-20", 3.5, 300, 5)];
       expect(evaluateRules(snapshots({ days: good }), status(), rules, NOW)).toEqual([]);
-      // A day without link clicks has no CPC: the streak breaks (no pause on missing data).
+      // Spend without a link click is an infinite CPC: over a ceiling, never under a floor.
       const noClicks = [day("1", "2026-10-19", 3, 300, 0), day("1", "2026-10-20", 3.5, 300, 10)];
       expect(evaluateRules(snapshots({ days: noClicks }), status(), ruleSet([{ ...CPC, minClicks: 0 }]), NOW)).toEqual([]);
+      expect(evaluateRules(snapshots({ days: noClicks }), status(), ruleSet([{ ...CPC, minClicks: 0, threshold: 0.3 }]), NOW)).toMatchObject([
+        { metrics: { dailyValues: [null, 0.35] }, reason: expect.stringMatching(/\(no link clicks, 0\.35\)/) },
+      ]);
+      expect(evaluateRules(snapshots({ days: noClicks }), status(), ruleSet([{ ...CPC, operator: "lt", minClicks: 0 }]), NOW)).toEqual([]);
+      // No spend and no clicks: no CPC at all, the streak breaks.
+      const idle = [day("1", "2026-10-19", 0, 300, 0), day("1", "2026-10-20", 3.5, 300, 5)];
+      expect(evaluateRules(snapshots({ days: idle }), status(), ruleSet([{ ...CPC, minClicks: 0 }]), NOW)).toEqual([]);
     });
 
     it("counts the 25-hour day of 2026-10-25 (EEST -> EET) as one day", () => {

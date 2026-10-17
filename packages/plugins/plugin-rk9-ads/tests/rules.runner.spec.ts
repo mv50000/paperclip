@@ -37,7 +37,7 @@ function accountMeta(): FakeMeta {
   return meta;
 }
 
-function setup(input: { rules?: Record<string, unknown>; meta?: FakeMeta; companies?: Record<string, Record<string, unknown>>; days?: RuleAdDay[] } = {}) {
+function setup(input: { rules?: Record<string, unknown>; meta?: FakeMeta; companies?: Record<string, Record<string, unknown>>; days?: RuleAdDay[]; closed?: boolean } = {}) {
   const harness = createTestHarness({ manifest });
   const configs = input.companies ?? { [COMPANY_A]: brandConfig({ telegram: telegramBlock(), ...(input.rules ? { rules: input.rules } : {}) }) };
   harness.seed({ companies: Object.keys(configs).map((id, index) => ({ id, name: `Brand ${index}` }) as Company) });
@@ -49,7 +49,7 @@ function setup(input: { rules?: Record<string, unknown>; meta?: FakeMeta; compan
     throw new Error(`no route for ${url}`);
   };
   const notifier = new FakeNotifier();
-  const store = memoryRulesStore({ days: input.days ?? [...badDays("301"), ...badDays("302")] });
+  const store = memoryRulesStore({ days: input.days ?? [...badDays("301"), ...badDays("302")], closed: input.closed ?? true });
   const clock = { now: NOW };
   const runtime: FeatureRuntime = {
     ctx: harness.ctx,
@@ -220,6 +220,34 @@ describe("rules-evaluate job (A11)", () => {
     await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/month-to-date not read .*pause_all_cap skipped \(fail-open\)/);
     expect(r.meta.writes).toHaveLength(0);
     expect(r.store.actions).toEqual([expect.objectContaining({ ruleId: "cpc-ceiling", objectId: "301" })]);
+  });
+
+  it("threshold rules wait until insights-daily-close has finalised yesterday", async () => {
+    const r = setup({ rules: { liveMode: true, list: [CPC_LIVE] }, closed: false });
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toHaveLength(0);
+    r.store.closed = true;
+    await r.harness.runJob(RULES_JOB_KEY);
+    expect(r.meta.writes.map((call) => call.path)).toEqual(["301"]);
+  });
+
+  it("the cap rule makes no decision on a non-EUR account", async () => {
+    const meta = new FakeMeta(undefined, { currency: "SEK" });
+    meta.campaigns = accountMeta().campaigns;
+    meta.ads = accountMeta().ads;
+    meta.spend = () => "99.00";
+    const r = setup({ meta, rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] } });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/month-to-date not read .*pause_all_cap skipped/);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.ledgerRuleActions()).toHaveLength(0);
+  });
+
+  it("fails the run when a decision's rule_actions row cannot be written (its cooldown would be lost)", async () => {
+    const r = setup();
+    r.store.failInsert = true;
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/cpc-ceiling: rule_actions insert failed for ad 301/);
+    expect(r.meta.writes).toHaveLength(0);
   });
 
   it("does not evaluate an invalid config", async () => {

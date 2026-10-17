@@ -392,11 +392,13 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   - `threshold_pause`: `metric` (`cpc`, `ctr`, `cpm`, `frequency`, `spend`)
     `operator` `threshold` on `days` consecutive completed Helsinki days,
     behind `minImpressions` and `minClicks` (window totals, both required;
-    equal fires). CPC and CTR are link metrics (G18).
+    equal fires). CPC and CTR are link metrics (G18). A day with spend and no
+    link click counts as an infinite CPC.
   - `pause_all_cap`: built in. Pauses the whole ad account (A6's `pauseAll`)
     when month-to-date spend is at 90 % of `monthlyCapEur` or more. MTD is the
-    spend guard's (RK9-526). A list entry `{ type: "pause_all_cap", mode }` only
-    sets its mode and cooldown; it cannot be disabled or removed.
+    spend guard's (RK9-526) and must be in EUR. A list entry
+    `{ type: "pause_all_cap", mode }` only sets its mode and cooldown (at most
+    24 h); it cannot be disabled or removed.
   - `pause_valid_until`: pauses an ad whose creative `validUntil` has passed.
   - `pause_fatigued`: opt-in; pauses an ad that A10 calls `fatigued`.
   - `propose_scale`: schema only, must stay `enabled: false` (G9).
@@ -407,7 +409,9 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
 - **Job** `rules-evaluate` (`0 * * * *`): reads ad and campaign status, the
   guard's MTD, `insights_daily`, creative `validUntil` and earlier
   `rule_actions`, then calls the pure `evaluateRules()`. Today's partial day
-  never counts. Only ACTIVE ads get a decision. A failed status read pauses
+  never counts, and threshold rules wait until `insights-daily-close` has
+  finalised yesterday. Only ACTIVE ads get a decision, account-wide like the
+  kill switch (RK9-523: the ad account belongs to the brand). A failed status read pauses
   nothing (fail-open) and fails the run; one brand's failure does not stop
   the others.
 - **Cooldown** `cooldownHours` (default 24, 1–720): a rule does not decide on
@@ -418,6 +422,10 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   impressions, CPC, CTR, days). Shadow hits reach Telegram through the morning
   digest. A live run sends one Telegram message when at least one ad changed
   state; the cap rule's `pauseAll` sends its own notice.
+- **Save check:** the manifest schema carries the per-type rules
+  (`RULE_ITEM_JSON_CONDITIONS`), so the host refuses on save what
+  `parseRules()` would refuse. Duplicate rule ids are caught only by
+  `parseRules()` (onValidateConfig).
 - **Data** `rules` and **action** `rules.dryRun` (A12's editor, G13): the
   effective rules, and the decisions the rules would make now without any
   write.

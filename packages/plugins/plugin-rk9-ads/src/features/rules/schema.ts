@@ -41,6 +41,11 @@ export const MAX_SCALE_INCREASE_PCT = 20;
 export const DEFAULT_RULE_COOLDOWN_HOURS = 24;
 /** Bounds the cooldown lookback in rule_actions. */
 export const MAX_RULE_COOLDOWN_HOURS = 720;
+/**
+ * The built-in cap pause may wait at most a day before it acts again, so its
+ * cooldown can never switch it off for a month.
+ */
+export const MAX_CAP_COOLDOWN_HOURS = 24;
 /** Bounds the insights window a threshold rule reads. */
 export const MAX_RULE_DAYS = 14;
 export const RULE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -87,7 +92,11 @@ const pauseAllCap = z.strictObject({
   type: z.literal("pause_all_cap"),
   enabled: z.literal(true, { error: "the built-in pause_all_cap cannot be disabled; set mode: \"shadow\" instead" }).default(true),
   mode,
-  cooldownHours,
+  cooldownHours: z
+    .number({ error: "must be a finite number" })
+    .min(1, { error: "must be >= 1" })
+    .max(MAX_CAP_COOLDOWN_HOURS, { error: `must be <= ${MAX_CAP_COOLDOWN_HOURS}` })
+    .default(DEFAULT_RULE_COOLDOWN_HOURS),
 });
 
 const pauseValidUntil = z.strictObject({
@@ -127,6 +136,50 @@ const proposeScale = z.strictObject({
 export const ruleSchema = z.discriminatedUnion("type", [thresholdPause, pauseAllCap, pauseValidUntil, pauseFatigued, proposeScale]);
 
 export type RuleConfig = z.output<typeof ruleSchema>;
+
+const VARIANT_ONLY_KEYS = ["metric", "operator", "threshold", "days", "minImpressions", "minClicks", "maxIncreasePct"] as const;
+const forbid = (keys: readonly string[]) => ({ not: { anyOf: keys.map((key) => ({ required: [key] })) } });
+const notBuiltinId = { ruleId: { not: { const: BUILTIN_PAUSE_ALL_CAP_RULE_ID } } };
+
+/**
+ * The per-type rules of `ruleSchema` as JSON Schema conditions for one
+ * `rules.list` item (config.ts). The host checks a saved config with Ajv
+ * against the manifest schema; without these, a config could pass the save
+ * and then fail parseRules(), which turns the whole brand off.
+ */
+export const RULE_ITEM_JSON_CONDITIONS = [
+  {
+    if: { properties: { type: { const: "threshold_pause" } }, required: ["type"] },
+    then: {
+      required: ["ruleId", "metric", "operator", "threshold", "minImpressions", "minClicks"],
+      properties: notBuiltinId,
+      ...forbid(["maxIncreasePct"]),
+    },
+  },
+  {
+    if: { properties: { type: { const: "pause_all_cap" } }, required: ["type"] },
+    then: {
+      properties: {
+        ruleId: { const: BUILTIN_PAUSE_ALL_CAP_RULE_ID },
+        enabled: { const: true },
+        cooldownHours: { maximum: MAX_CAP_COOLDOWN_HOURS },
+      },
+      ...forbid(VARIANT_ONLY_KEYS),
+    },
+  },
+  {
+    if: { properties: { type: { enum: ["pause_valid_until", "pause_fatigued"] } }, required: ["type"] },
+    then: { required: ["ruleId"], properties: notBuiltinId, ...forbid(VARIANT_ONLY_KEYS) },
+  },
+  {
+    if: { properties: { type: { const: "propose_scale" } }, required: ["type"] },
+    then: {
+      required: ["ruleId", "enabled", "threshold", "minImpressions", "minClicks"],
+      properties: { ...notBuiltinId, enabled: { const: false } },
+      ...forbid(["metric", "operator"]),
+    },
+  },
+];
 export type ThresholdPauseRule = z.output<typeof thresholdPause>;
 export type PauseAllCapRule = z.output<typeof pauseAllCap>;
 export type ProposeScaleRule = z.output<typeof proposeScale>;

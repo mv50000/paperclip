@@ -6,8 +6,11 @@
  * default). Threshold rules read completed days only: the window of a rule
  * with `days: N` is the N local dates ending yesterday. A missing day in that
  * window breaks the streak, and so does a day whose metric cannot be computed
- * (CPC without link clicks, CTR or CPM without impressions). Date arithmetic
- * is on YYYY-MM-DD strings, so a 23- or 25-hour DST day is still one day.
+ * (CTR or CPM without impressions, CPC without spend or clicks). A day with
+ * spend but no link click has an infinite CPC: it breaks a CPC threshold
+ * from above, never from below. Date arithmetic is on YYYY-MM-DD strings, so
+ * a 23- or 25-hour DST day is still one day. The runner reads the days only
+ * after insights-daily-close has finalised yesterday.
  *
  * Minimum-data gates: a threshold rule fires only when the window's total
  * impressions are at least `minImpressions` and its total link clicks at least
@@ -114,6 +117,8 @@ interface Totals {
 export function metricValue(metric: RuleMetric, totals: Totals, frequency: number | null = null): number | null {
   switch (metric) {
     case "cpc":
+      // Spend without a single link click is the worst CPC there is.
+      if (totals.inlineLinkClicks === 0 && totals.spendCents > 0) return Number.POSITIVE_INFINITY;
       return linkCpc(totals.spendCents, totals.inlineLinkClicks);
     case "ctr":
       return linkCtr(totals.inlineLinkClicks, totals.impressions);
@@ -209,9 +214,9 @@ function thresholdDecision(
     metric: rule.metric,
     operator: rule.operator,
     threshold: rule.threshold,
-    dailyValues: values.map((value) => round(value, 4)),
+    dailyValues: values.map((value) => (Number.isFinite(value) ? round(value, 4) : null)),
   };
-  const shown = values.map((value) => round(value, 2)).join(", ");
+  const shown = values.map((value) => (Number.isFinite(value) ? round(value, 2) : "no link clicks")).join(", ");
   return {
     metrics,
     reason: `${rule.metric} ${OPERATOR_TEXT[rule.operator]} ${rule.threshold} on ${rule.days} consecutive day(s) ${from}..${yesterday} (${shown}); ${totals.impressions} impressions, ${totals.inlineLinkClicks} link clicks`,

@@ -117,4 +117,35 @@ describe("rule schema (A11)", () => {
     expect(validator.validateInstanceConfig(brandConfig({ rules }), schema).valid).toBe(true);
     expect(validator.validateInstanceConfig(brandConfig({ rules: { list: [{ ...CPC, threshold: 0 }] } }), schema).valid).toBe(false);
   });
+
+  it.each([
+    ["a threshold rule without minImpressions", { ...CPC, minImpressions: undefined }],
+    ["a threshold rule without minClicks", { ...CPC, minClicks: undefined }],
+    ["a threshold rule without metric", { ...CPC, metric: undefined }],
+    ["a threshold rule with maxIncreasePct", { ...CPC, maxIncreasePct: 10 }],
+    ["a disabled cap rule", { type: "pause_all_cap", enabled: false }],
+    ["a renamed cap rule", { ruleId: "cap", type: "pause_all_cap" }],
+    ["a cap rule with a 25 h cooldown", { type: "pause_all_cap", cooldownHours: 25 }],
+    ["a cap rule with a threshold", { type: "pause_all_cap", threshold: 0.9 }],
+    ["propose_scale without enabled", { ruleId: "s", type: "propose_scale", threshold: 0.2, minImpressions: 1, minClicks: 1 }],
+    ["propose_scale enabled", { ruleId: "s", type: "propose_scale", enabled: true, threshold: 0.2, minImpressions: 1, minClicks: 1 }],
+    ["pause_valid_until with a metric", { ruleId: "v", type: "pause_valid_until", metric: "cpc" }],
+    ["pause_fatigued without ruleId", { type: "pause_fatigued" }],
+    ["a rule without type", { ruleId: "x" }],
+    ["a rule using the reserved id", { ruleId: "pause_all_cap", type: "pause_valid_until" }],
+  ])("the host's save check refuses what parseRules refuses: %s", async (_label, rule) => {
+    const validator = await importRepoModule<{
+      validateInstanceConfig(config: Record<string, unknown>, schema: unknown): { valid: boolean };
+    }>("server/src/services/plugin-config-validator.ts");
+    const config = brandConfig({ rules: { list: [JSON.parse(JSON.stringify(rule))] } });
+    expect(parseBrandConfig(config).state).toBe("invalid");
+    expect(validator.validateInstanceConfig(config, manifest.instanceConfigSchema).valid).toBe(false);
+  });
+
+  it("keeps the built-in cap rule's cooldown at 24 h or less, so it cannot sleep through a month", async () => {
+    expect(parseRules({ list: [{ type: "pause_all_cap", cooldownHours: 24 }] }).errors).toEqual([]);
+    expect(await errorsOf({ list: [{ type: "pause_all_cap", cooldownHours: 25 }] })).toEqual([
+      "rules.list[0] (pause_all_cap).cooldownHours: must be <= 24",
+    ]);
+  });
 });

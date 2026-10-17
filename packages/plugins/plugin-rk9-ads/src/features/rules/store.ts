@@ -11,6 +11,7 @@
 
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 import { createLedger } from "../../db.js";
+import { closeMarkerKey } from "../../insights/ingest.js";
 import { createInsightsStore } from "../../insights/store.js";
 import type { PriorRuleAction, RuleAdDay } from "./evaluate.js";
 
@@ -36,6 +37,11 @@ export interface RuleActionRow {
 }
 
 export interface RulesStore {
+  /**
+   * True when insights-daily-close has finalised the day before `localToday`
+   * (its marker is keyed by the local date whose yesterday it closed).
+   */
+  dayClosed(companyId: string, localToday: string): Promise<boolean>;
   /** Ad-days in an inclusive local-date range, for ads with impressions in it. */
   adDays(companyId: string, since: string, until: string): Promise<RuleAdDay[]>;
   /** validUntil of the creative of each published ad (its latest publication). */
@@ -62,6 +68,10 @@ export function createRulesStore(db: PluginDatabaseClient): RulesStore {
   const insights = createInsightsStore(db);
 
   return {
+    async dayClosed(companyId, localToday) {
+      return insights.hasMark(companyId, closeMarkerKey(localToday));
+    },
+
     async adDays(companyId, since, until) {
       const rows = await insights.recentAdSeries(companyId, since, since);
       return rows
@@ -138,14 +148,19 @@ export function createRulesStore(db: PluginDatabaseClient): RulesStore {
 }
 
 /** In-memory store for tests: rows in, rows out, no SQL. */
-export function memoryRulesStore(seed: { days?: RuleAdDay[]; creatives?: Array<{ adId: string; validUntil: string }> } = {}) {
+export function memoryRulesStore(seed: { days?: RuleAdDay[]; creatives?: Array<{ adId: string; validUntil: string }>; closed?: boolean } = {}) {
   const days = [...(seed.days ?? [])];
   const creatives = [...(seed.creatives ?? [])];
   const actions: Array<RuleActionRow & { companyId: string }> = [];
-  const store: RulesStore & { actions: typeof actions; days: RuleAdDay[]; creatives: typeof creatives } = {
+  const store: RulesStore & { actions: typeof actions; days: RuleAdDay[]; creatives: typeof creatives; closed: boolean; failInsert: boolean } = {
     actions,
     days,
     creatives,
+    closed: seed.closed ?? true,
+    failInsert: false,
+    async dayClosed() {
+      return store.closed;
+    },
     async adDays(_companyId, since, until) {
       const active = new Set(days.filter((day) => day.date >= since && day.date <= until && day.impressions > 0).map((day) => day.adId));
       return days.filter((day) => active.has(day.adId) && day.date >= since && day.date <= until);
@@ -159,6 +174,7 @@ export function memoryRulesStore(seed: { days?: RuleAdDay[]; creatives?: Array<{
         .map((row) => ({ ruleId: row.ruleId, objectId: row.objectId, mode: row.mode, applied: row.applied, decidedAt: row.decidedAt.toISOString() }));
     },
     async insertAction(companyId, row) {
+      if (store.failInsert) throw new Error("insert failed");
       actions.push({ ...row, companyId });
     },
   };

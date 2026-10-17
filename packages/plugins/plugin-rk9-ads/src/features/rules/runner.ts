@@ -37,7 +37,7 @@ import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
 import { pauseAll } from "../spend-guard/killswitch.js";
 import { brandClient, brandReadClient, safeError, type Initiator, type SpendGuardNotifier } from "../spend-guard/support.js";
-import { evaluateRules, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
+import { evaluateRules, type RuleAdDay, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
 import type { RuleSet, ThresholdPauseRule } from "./schema.js";
 import type { RulesStore } from "./store.js";
 
@@ -94,8 +94,13 @@ async function logActivity(deps: RulesDeps, companyId: string, config: BrandConf
   }
 }
 
-/** rule_actions row + activity entry of one ad decision. An audit failure is logged, never thrown. */
-async function audit(deps: RulesDeps, companyId: string, config: BrandConfig, decision: AppliedDecision, initiator: Initiator, now: Date): Promise<void> {
+/**
+ * rule_actions row + activity entry of one ad decision. An audit failure is
+ * never thrown (it must not undo a pause); it returns the error text so the
+ * run fails, because a missing row also lifts the decision's cooldown.
+ */
+async function audit(deps: RulesDeps, companyId: string, config: BrandConfig, decision: AppliedDecision, initiator: Initiator, now: Date): Promise<string | null> {
+  let failure: string | null = null;
   const shadow = decision.mode === "shadow";
   try {
     await deps.store.insertAction(companyId, {
@@ -114,7 +119,8 @@ async function audit(deps: RulesDeps, companyId: string, config: BrandConfig, de
       decidedAt: now,
     });
   } catch (error) {
-    deps.ctx.logger.error("rk9-ads rules: rule_actions insert failed", { companyId, error: safeError(error) });
+    failure = safeError(error);
+    deps.ctx.logger.error("rk9-ads rules: rule_actions insert failed", { companyId, error: failure });
   }
   const verb = shadow ? "would pause" : decision.applied ? "paused" : "failed to pause";
   await logActivity(deps, companyId, config, `${decision.ruleId} ${verb} ${decision.objectType} ${decision.objectId}${shadow ? " (shadow)" : ""}`, {
@@ -131,6 +137,7 @@ async function audit(deps: RulesDeps, companyId: string, config: BrandConfig, de
     ...decision.metrics,
     ...(decision.error ? { error: decision.error } : {}),
   });
+  return failure;
 }
 
 export function liveNoticeText(config: BrandConfig, paused: readonly AppliedDecision[], names: ReadonlyMap<string, string>, at: Date): string {
@@ -178,7 +185,8 @@ async function readInputs(
   let spend: RuleSnapshots["spend"] = null;
   if (enabled.some((rule) => rule.type === "pause_all_cap")) {
     const figures = await checkSpend({ config, client: readClient, now });
-    if (figures.pctUsed === null || figures.mtdEur === null) {
+    // The cap is in EUR: a figure in another currency is no basis for a pause.
+    if (figures.pctUsed === null || figures.mtdEur === null || figures.currency !== "EUR") {
       failures.push(`${brand}: month-to-date not read (${figures.reason}: ${figures.detail}), pause_all_cap skipped (fail-open)`);
     } else {
       spend = { month: figures.month, mtdEur: figures.mtdEur, monthlyCapEur: figures.monthlyCapEur, pctUsed: figures.pctUsed };
@@ -188,7 +196,16 @@ async function readInputs(
   const yesterday = addDays(localDate(now, config.timeZone), -1);
   const thresholdRules = enabled.filter((rule): rule is ThresholdPauseRule => rule.type === "threshold_pause");
   const maxDays = Math.max(0, ...thresholdRules.map((rule) => rule.days));
-  const days = maxDays > 0 ? await deps.store.adDays(companyId, addDays(yesterday, -(maxDays - 1)), yesterday) : [];
+  // Yesterday's rows are partial until insights-daily-close finalised them
+  // (shortly after local midnight); until then threshold rules wait.
+  let days: RuleAdDay[] = [];
+  if (maxDays > 0) {
+    if (await deps.store.dayClosed(companyId, localDate(now, config.timeZone))) {
+      days = await deps.store.adDays(companyId, addDays(yesterday, -(maxDays - 1)), yesterday);
+    } else {
+      deps.ctx.logger.info("rk9-ads rules: yesterday's insights are not closed yet, threshold rules wait", { companyId, yesterday });
+    }
+  }
 
   const creatives = enabled.some((rule) => rule.type === "pause_valid_until") ? await deps.store.creativeValidity(companyId) : [];
 
@@ -284,7 +301,8 @@ export async function runRulesForBrand(
       if (applied.applied) paused.push(applied);
       else failures.push(`${config.brandCode} ${decision.ruleId}: pause of ad ${decision.objectId} failed (${applied.error})`);
     }
-    await audit(deps, companyId, config, applied, options.initiator, now);
+    const auditFailure = await audit(deps, companyId, config, applied, options.initiator, now);
+    if (auditFailure) failures.push(`${config.brandCode} ${decision.ruleId}: rule_actions insert failed for ${decision.objectType} ${decision.objectId} (${auditFailure})`);
     outcome.decisions.push(applied);
   }
 

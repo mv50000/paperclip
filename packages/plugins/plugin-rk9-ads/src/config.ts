@@ -20,6 +20,7 @@ import {
   RULE_METRICS,
   RULE_MODES,
   RULE_OPERATORS,
+  RULE_ITEM_JSON_CONDITIONS,
   RULE_TYPES,
   type RuleOperator,
   type RuleSet,
@@ -304,6 +305,8 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
           items: {
             type: "object",
             additionalProperties: false,
+            required: ["type"],
+            allOf: RULE_ITEM_JSON_CONDITIONS,
             properties: {
               ruleId: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,63}$" },
               type: { type: "string", enum: [...RULE_TYPES] },

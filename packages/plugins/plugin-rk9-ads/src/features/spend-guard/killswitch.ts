@@ -262,6 +262,8 @@ export async function pauseAll(
       applied: !options.dryRun && result.count > 0,
       reason: options.reason,
       metrics: {
+        // The caller's figures first: they never overwrite the pause's own keys.
+        ...options.metrics,
         count: result.count,
         scope: result.scope,
         adIds: result.pausedAds.map((ad) => ad.id),
@@ -270,7 +272,6 @@ export async function pauseAll(
         failedIds: result.errors.map((entry) => entry.id),
         telegram: result.telegram,
         ...(options.note ? { note: options.note } : {}),
-        ...options.metrics,
       },
       initiator: options.initiator,
       error: [...result.errors.map((entry) => `${entry.id}: ${entry.error}`), ...(result.telegramError ? [`telegram: ${result.telegramError}`] : [])]
