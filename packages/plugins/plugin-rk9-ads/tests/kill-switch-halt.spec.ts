@@ -18,6 +18,7 @@ import { registerGate, type GateOverrides } from "../src/features/gate/register.
 import { readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
 import { pauseAll, type PauseAllResult, type PauseRule } from "../src/features/spend-guard/killswitch.js";
 import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_DATA_KEY } from "../src/features/spend-guard/register.js";
+import { readPendingUndos } from "../src/features/spend-guard/pending-undo.js";
 import { memoryOnceStore } from "../src/features/spend-guard/support.js";
 import { TelegramController } from "../src/features/telegram/controller.js";
 import { gateRegistry, resetGateRegistry } from "../src/features/telegram/gates.js";
@@ -142,6 +143,7 @@ interface Rig {
   notifier: FakeNotifier;
   publications: ReturnType<typeof memoryPublicationStore>;
   repo: ReturnType<typeof memoryActivationRepo>;
+  once: ReturnType<typeof memoryOnceStore>;
 }
 
 const rigs: Rig[] = [];
@@ -183,7 +185,9 @@ async function rig(input: { meta?: FakeMeta; gate?: GateOverrides } = {}): Promi
     onShutdown() {},
   };
   const notifier = new FakeNotifier();
-  registerSpendGuard(runtime, { store: memoryOnceStore(), notifier });
+  // One marker store for the spend guard's job and the gate's undo alert, as in the worker (alert_dedupe).
+  const once = memoryOnceStore();
+  registerSpendGuard(runtime, { store: once, notifier });
   const publications = memoryPublicationStore();
   publications.rows.push(publicationRow());
   const { cards } = registerGate(runtime, {
@@ -192,11 +196,13 @@ async function rig(input: { meta?: FakeMeta; gate?: GateOverrides } = {}): Promi
     publications,
     transport: () => controller,
     assertLaunchReady: async () => undefined,
+    notifier,
+    onceStore: once,
     ...input.gate,
   });
   await controller.replan();
   await waitFor(() => controller.summary()[0]?.loop === "running");
-  const out = { harness, runtime, meta, fake, store, controller, cards, notifier, publications, repo };
+  const out = { harness, runtime, meta, fake, store, controller, cards, notifier, publications, repo, once };
   rigs.push(out);
   return out;
 }
@@ -534,6 +540,85 @@ describe("a real pause during an approved activation wins (RK9-561)", () => {
   });
 });
 
+describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
+  /** The pause lists before Meta applies the ad's ACTIVE, so only the handler's undo can stop the ad; Meta then refuses that PAUSED write. */
+  async function lostUndo(r: Rig) {
+    let refuse = true;
+    r.meta.fail = (call) => (refuse && call.method === "POST" && call.path === AD && call.body.status === "PAUSED" ? new Response(JSON.stringify({ error: { message: "rate limited", code: 17 } }), { status: 400 }) : null);
+    const sent = await r.cards.openActivationCard(publication());
+    pauseDuringWrite(r, AD, "before", () => runPause(r, "kill_switch"));
+    await tap(r, sent.messageId);
+    return { sent, allow: () => (refuse = false) };
+  }
+
+  it("alerts once, marks the card failed and pauses the ad on the next tick", async () => {
+    const r = await rig();
+    const { sent, allow } = await lostUndo(r);
+    expect(statusOf(r.meta, AD)).toBe("ACTIVE");
+    const row = r.store.rows.get(sent.id)!;
+    expect(row.status).toBe("failed");
+    expect(row.outcome).toMatchObject({
+      result: "failed",
+      step: "adset_active",
+      undoFailed: [{ kind: "ad", objectId: AD }],
+      undoRetry: { stored: true, telegram: "sent" },
+    });
+    expect(caption(r, sent.messageId)).toContain(`Peruutus epäonnistui, voi olla yhä ACTIVE: ${AD}`);
+    expect(caption(r, sent.messageId)).toContain("yritetään uudelleen 5 minuutin välein");
+    const alerts = () => r.notifier.messages.filter((message) => message.text.includes("aktivoinnin peruutus epäonnistui"));
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.text).toContain(`mainos ${AD}`);
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toMatchObject([{ objectId: AD, kind: "ad", gateRequestId: sent.id, haltRule: "kill_switch" }]);
+
+    // Meta still refuses: the run fails, the ad stays listed, no second alert.
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`activation undo: pausing ad ${AD} failed again`));
+    expect(alerts()).toHaveLength(1);
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toHaveLength(1);
+
+    allow();
+    await r.harness.runJob("scheduled-pause");
+    expect(statusOf(r.meta, AD)).toBe("PAUSED");
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+    const writes = r.meta.writes.length;
+    await r.harness.runJob("scheduled-pause");
+    expect(r.meta.writes).toHaveLength(writes);
+  });
+
+  it("a board user's clear of the halt acknowledges the undo: the next tick drops it with one alert and pauses nothing", async () => {
+    const r = await rig();
+    await lostUndo(r);
+    const preview = await r.harness.performAction<{ halt: HaltState; pendingUndo?: unknown[] }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    expect(preview.pendingUndo).toMatchObject([{ objectId: AD }]);
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
+    const writes = r.meta.writes.length;
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/activation undo: the halt ended first, 1 object\(s\) may still be ACTIVE/);
+    expect(r.meta.writes).toHaveLength(writes);
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+    expect(r.notifier.messages.filter((message) => message.text.includes("pysäytystila päättyi ennen kuin aktivoinnin peruutus onnistui"))).toHaveLength(1);
+    await r.harness.runJob("scheduled-pause");
+  });
+
+  it("an ad that was ACTIVE before the run is not this run's: the undo leaves it ACTIVE", async () => {
+    const meta = freshMeta();
+    meta.ads.find((ad) => ad.id === AD)!.status = "ACTIVE";
+    let reads = 0;
+    const halt: HaltState = { brandCode: "OLL", rule: "kill_switch", since: "2026-10-21T09:00:00.000Z", reason: "hätä", initiator: { source: "ui" } };
+    // The card send, 1 before the writes, 2 ACTIVE writes (ad set, campaign), then the final check.
+    const r = await rig({ meta, gate: { haltOf: async () => (++reads <= 4 ? null : halt) } });
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "failed", step: "verify_halt", done: ["pause_others", "adset_active", "campaign_active", "verify_creative"] });
+    expect(r.meta.writes.filter((call) => call.body.status !== undefined).map((call) => `${call.path}=${call.body.status}`)).toEqual([
+      `${OLD_AD}=PAUSED`,
+      `${ADSET}=ACTIVE`,
+      `${CAMPAIGN}=ACTIVE`,
+      `${CAMPAIGN}=PAUSED`,
+      `${ADSET}=PAUSED`,
+    ]);
+    expect(statusOf(r.meta, AD)).toBe("ACTIVE");
+  });
+});
+
 describe("clearing the halt is board-only", () => {
   it("an agent may preview but not clear; a board user clears and a new card activates", async () => {
     const r = await rig();
@@ -680,6 +765,17 @@ describe("clearing the halt is board-only", () => {
     await tap(r, sent.messageId);
     expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ reason: "halted" });
     expect(activeWrites(r.meta)).toEqual([]);
+  });
+
+  it("two damaged records that share their first 500 characters are two halts (RK9-565)", async () => {
+    const r = await rig();
+    const head = "x".repeat(600);
+    await setHalt(r.harness.ctx, COMPANY_A, { broken: `${head}-first` } as unknown as HaltState);
+    const preview = await r.harness.performAction<{ halt: HaltState }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
+    expect(await haltOf(r)).toBeNull();
+    await setHalt(r.harness.ctx, COMPANY_A, { broken: `${head}-second` } as unknown as HaltState);
+    expect(await haltOf(r)).toMatchObject({ reason: "unreadable halt record" });
   });
 
   it("a damaged halt record still refuses", async () => {

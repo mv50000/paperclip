@@ -158,6 +158,7 @@ function ollolaOverview(overrides: Partial<UiOverview> = {}): UiOverview {
       risks: [],
     },
     halt: null,
+    pendingUndo: [],
     publications: [publication()],
     pendingGates: [{ id: "gate-1", kind: "activate_ad", adId: "302", publicationId: "pub-2", validUntil: "2026-10-18T09:00:00.000Z" }],
     ruleLog: [{ ruleId: "cpc-ceiling", ruleType: "threshold_pause", action: "pause", objectType: "ad", objectId: "301", mode: "shadow", applied: false, decidedAt: "2026-10-17T05:00:00.000Z" }],
@@ -350,6 +351,24 @@ describe("operator UI (RK9-518)", () => {
     await click("Poista pysäytystila");
     expect(bridge.actionCalls.map((call) => call.params)).toEqual([{ dryRun: true }, { dryRun: false, confirm: true, since: halt.since }]);
     expect(container.textContent).not.toContain("Pysäytystila päällä");
+  });
+
+  it("says so when the halt ended before the clear, and shows the open activation undos (RK9-565)", async () => {
+    const halt = { rule: "kill_switch", since: "2026-10-17T08:00:00.000Z", until: null, reason: "Pysäytä kaikki (UI)", source: "ui", userId: "board-user-1", agentId: null, tgUserId: null };
+    const pendingUndo = [{ kind: "campaign", objectId: "120200000000000101", gateRequestId: "gate-9", since: "2026-10-17T08:00:05.000Z" }];
+    bridge.data.set(DATA.overview, ollolaOverview({ halt, pendingUndo }));
+    bridge.actions.set(ACTION.clearHalt, async (params) => {
+      if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: { brandCode: "OLL", rule: "kill_switch", since: halt.since, reason: halt.reason, initiator: { source: "ui" } } };
+      bridge.data.set(DATA.overview, ollolaOverview());
+      return { dryRun: false, cleared: false, halt: null };
+    });
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    expect(container.textContent).toContain("Aktivoinnin peruutus epäonnistui, voi olla yhä ACTIVE: kampanja 120200000000000101");
+    await click("Poista pysäytystila");
+    expect(container.textContent).toContain("Poisto kuittaa 1 epäonnistunutta peruutusta");
+    await type(`Kirjoita ${CLEAR_HALT_WORD}`, CLEAR_HALT_WORD);
+    await click("Poista pysäytystila");
+    expect(bridge.toasts.map((toast) => toast.title)).toEqual(["Pysäytystila oli jo päättynyt, mitään ei poistettu"]);
   });
 
   it("the widget shows MTD against the cap and the pending gate count", async () => {

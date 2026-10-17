@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { createLedger } from "../src/db.js";
 import type { RuleAdDay } from "../src/features/rules/evaluate.js";
 import { registerRules, RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY } from "../src/features/rules/register.js";
-import { RULES_JOB_KEY } from "../src/features/rules/runner.js";
+import { CAP_HALT_RELEASED_ACTIVITY, RULES_JOB_KEY } from "../src/features/rules/runner.js";
+import { readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
 import { memoryRulesStore } from "../src/features/rules/store.js";
 import type { FeatureRuntime } from "../src/features/types.js";
 import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
@@ -440,5 +441,63 @@ describe("rules data and dry-run action (for the A12 UI)", () => {
       ["pause_all_cap", "shadow"],
     ]);
     expect(await r.harness.getData(RULES_DATA_KEY, {})).toEqual({ state: "error", error: "company context is required" });
+  });
+});
+
+
+describe("the cap pause's halt ends when the month is back under the cap (RK9-565)", () => {
+  const CAP_LIVE = { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] };
+  const capHalt: HaltState = {
+    brandCode: "OLL",
+    rule: "pause_all_cap",
+    id: "cap-halt-1",
+    since: "2026-10-21T07:00:00.000Z",
+    until: "2026-10-31T22:00:00.000Z",
+    reason: "pause_all_cap test",
+    initiator: { source: "job" },
+  };
+  const at = async (r: ReturnType<typeof setup>, minutes: number) => {
+    r.clock.now = new Date(NOW.getTime() + minutes * 60_000);
+    await r.harness.runJob(RULES_JOB_KEY);
+  };
+  const halt = (r: ReturnType<typeof setup>) => readHalt(r.harness.ctx, COMPANY_A, r.clock.now);
+
+  it("on the second consecutive run that reads headroom, at least 30 min after the first", async () => {
+    const r = setup({ rules: CAP_LIVE }); // 40 % of the cap
+    await setHalt(r.harness.ctx, COMPANY_A, capHalt);
+    await at(r, 0);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+    await at(r, 10); // a manual re-run right after is not a second tick
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+    await at(r, 60);
+    expect(await halt(r)).toBeNull();
+    expect(r.harness.activity.find((entry) => entry.message === CAP_HALT_RELEASED_ACTIVITY)).toMatchObject({
+      metadata: { halt: { id: "cap-halt-1" }, clearedBy: { rulesJob: expect.any(String) } },
+    });
+    expect(r.notifier.messages.at(-1)!.text).toContain("kulutuskaton pysäytystila poistettu");
+    // Nothing paused, nothing activated.
+    expect(r.meta.writes).toEqual([]);
+  });
+
+  it("a run that cannot read the month starts the count again", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, capHalt);
+    await at(r, 0);
+    r.meta.fail = (call) => (call.path.endsWith("/insights") ? new Response(JSON.stringify({ error: { message: "x", code: 1 } }), { status: 500 }) : null);
+    r.clock.now = new Date(NOW.getTime() + 60 * 60_000);
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/month-to-date not read/);
+    r.meta.fail = () => null;
+    await at(r, 120);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+    await at(r, 180);
+    expect(await halt(r)).toBeNull();
+  });
+
+  it("leaves the kill switch's halt alone", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, { ...capHalt, rule: "kill_switch", id: "ks-1", until: undefined });
+    await at(r, 0);
+    await at(r, 60);
+    expect(await halt(r)).toMatchObject({ rule: "kill_switch" });
   });
 });

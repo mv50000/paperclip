@@ -10,6 +10,7 @@ import { DEFAULT_TIME_ZONE } from "../../kit/local-time.js";
 import { clearHalt, readHalt, type HaltState } from "./halt.js";
 import { pauseAll, PauseListError, stopActivations, type PauseAllDeps, type PauseAllResult, type Stopped } from "./killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "./pause-config.js";
+import { readPendingUndos } from "./pending-undo.js";
 import { createScheduledPauseJob, SCHEDULED_PAUSE_JOB_KEY } from "./scheduled-pause.js";
 import {
   brandReadClient,
@@ -33,6 +34,9 @@ import {
  *   or the system may only preview it) and `since` from the preview: it
  *   clears only the halt with that `since`, so a newer kill switch or pause
  *   that set the halt again is not lifted blind. No Telegram button clears it.
+ *   The preview names the open activation undos (pending-undo.ts): when no
+ *   halt is left in force, the clear acknowledges them and the next tick
+ *   stops retrying them (RK9-565).
  *
  * Every live kill switch (action, tool, Telegram button) leaves its halt and
  * closes the open cards also when no brand config can be loaded; then it
@@ -189,7 +193,16 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     if (!dryRun && context.actor.type !== "user") {
       throw new Error("Clearing the halt is board-only; an agent can run it with dryRun only");
     }
-    if (dryRun) return { dryRun, cleared: false, halt: await readHalt(ctx, companyId, now()) };
+    if (dryRun) {
+      const halt = await readHalt(ctx, companyId, now());
+      let pendingUndo: Awaited<ReturnType<typeof readPendingUndos>> = [];
+      try {
+        pendingUndo = await readPendingUndos(ctx, companyId);
+      } catch (error) {
+        return { dryRun, cleared: false, halt, pendingUndoError: safeError(error) };
+      }
+      return { dryRun, cleared: false, halt, ...(pendingUndo.length > 0 ? { pendingUndo } : {}) };
+    }
     // `since` from the preview names the halt to clear: a kill switch or pause that ran after the preview stored a newer halt, which stays.
     if (typeof params.since !== "string" || params.since === "") {
       throw new Error("A real clear needs `since` of the halt from the preview (dryRun)");

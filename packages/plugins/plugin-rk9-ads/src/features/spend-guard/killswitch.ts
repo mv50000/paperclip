@@ -31,6 +31,11 @@
  * local month. The cards are edited after the Meta pauses, so a slow Telegram
  * does not delay them. A failed halt write or card close does not stop the
  * pause; the result and the audit row name it.
+ *
+ * A live kill switch or scheduled pause also stores a re-check (recheck.ts,
+ * RK9-565): about a minute later the scheduled-pause job lists the ACTIVE
+ * objects again, in case Meta's listing showed an activation's last write
+ * late.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -43,7 +48,8 @@ import { adAccountPath, getObjectStatus, listAds, listCampaignAds, listCampaigns
 import type { StatusRow } from "../../meta/types.js";
 import { CARD_CLOSING_PAUSES, type CardClosingPause, type PauseCardClose } from "../../gate/staging-card.js";
 import { getActivationCards } from "../gate/runtime.js";
-import { SCHEDULED_HALT_UNTIL, setHalt, type HaltState } from "./halt.js";
+import { haltIdentity, SCHEDULED_HALT_UNTIL, setHalt, type HaltState } from "./halt.js";
+import { isRecheckRule, RECHECK_DELAY_MS, scheduleRecheck } from "./recheck.js";
 import {
   brandClient,
   recordAction,
@@ -94,6 +100,8 @@ export interface PauseAllResult {
   halt?: HaltState;
   /** The halt could not be stored; the pause itself stands. */
   haltError?: string;
+  /** The re-check of a live kill switch or scheduled pause could not be stored (RK9-565). */
+  recheckError?: string;
 }
 
 export interface PauseAllDeps {
@@ -120,6 +128,15 @@ export interface PauseAllOptions {
   metrics?: Record<string, unknown>;
   /** The halt and card close the caller already ran (the kill switch runs them before it loads the config). */
   stopped?: StopActivations;
+  /** This run is a re-check (recheck.ts): it stores no re-check of its own. */
+  recheck?: boolean;
+  /**
+   * Asked before a job run writes an audit row that has only a halt or card
+   * failure to report (nothing paused, no pause error). False skips the row,
+   * so a retry every tick does not write one each time (RK9-565). A throw
+   * writes it.
+   */
+  recordStopOnly?: () => Promise<boolean>;
 }
 
 /** The halt and the card close of a live run; `announce` edits the closed cards. */
@@ -252,7 +269,7 @@ function closesCards(rule: PauseRule): rule is CardClosingPause {
 export type Stopped = Pick<PauseAllResult, "closedCardIds" | "cardsError" | "halt" | "haltError">;
 
 /** When the rule's halt ends: never for the kill switch. */
-function haltUntil(rule: CardClosingPause, timeZone: string, now: Date): string | undefined {
+export function haltUntil(rule: CardClosingPause, timeZone: string, now: Date): string | undefined {
   if (rule === "scheduled_pause") return nextLocalTime(now, SCHEDULED_HALT_UNTIL, timeZone).toISOString();
   if (rule === "pause_all_cap") return nextLocalMonthStart(now, timeZone).toISOString();
   return undefined;
@@ -314,6 +331,33 @@ export async function stopActivations(
   return { stopped: out, announce };
 }
 
+async function stopOnlyRowWanted(options: PauseAllOptions): Promise<boolean> {
+  if (!options.recordStopOnly) return true;
+  try {
+    return await options.recordStopOnly();
+  } catch {
+    return true;
+  }
+}
+
+/** Stores the re-check of a live kill switch or scheduled pause. Returns the error text when it could not. */
+async function storeRecheck(deps: Pick<PauseAllDeps, "ctx">, companyId: string, options: PauseAllOptions, stopped: Stopped, now: Date): Promise<string | undefined> {
+  if (!isRecheckRule(options.rule)) return undefined;
+  try {
+    await scheduleRecheck(deps.ctx, companyId, {
+      rule: options.rule,
+      haltId: stopped.halt ? haltIdentity(stopped.halt) : null,
+      dueAt: new Date(now.getTime() + RECHECK_DELAY_MS).toISOString(),
+      reason: options.reason.slice(0, 300),
+    });
+    return undefined;
+  } catch (error) {
+    const detail = safeError(error);
+    deps.ctx.logger.error("rk9-ads pause: the re-check was not stored", { companyId, rule: options.rule, detail });
+    return detail;
+  }
+}
+
 export async function pauseAll(
   deps: PauseAllDeps,
   companyId: string,
@@ -323,9 +367,15 @@ export async function pauseAll(
   const now = deps.now?.() ?? new Date();
   const mode = options.dryRun ? "dryRun" : "live";
   const { stopped, announce } = options.stopped ?? (await stopActivations(deps, companyId, config, options, now));
+  // A halt was set or tried: a pause that reused a halt the board cleared re-checks nothing.
+  const recheckError =
+    !options.dryRun && !options.recheck && isRecheckRule(options.rule) && (stopped.halt || stopped.haltError)
+      ? await storeRecheck(deps, companyId, options, stopped, now)
+      : undefined;
   const stopErrors = [
     ...(stopped.haltError ? [`halt: ${stopped.haltError}`] : []),
     ...(stopped.cardsError ? [`cards: ${stopped.cardsError}`] : []),
+    ...(recheckError ? [`re-check: ${recheckError}`] : []),
   ];
   const client = deps.clientFor
     ? deps.clientFor(companyId, config, mode, options.initiator)
@@ -367,6 +417,7 @@ export async function pauseAll(
     errors: [],
     telegram: "skipped",
     ...stopped,
+    ...(recheckError ? { recheckError } : {}),
   };
 
   for (const [kind, objects] of [["campaign", targets.campaigns], ["ad", targets.ads]] as const) {
@@ -395,7 +446,8 @@ export async function pauseAll(
   }
 
   const stopRecorded = result.closedCardIds.length > 0 || result.halt !== undefined || stopErrors.length > 0;
-  if (result.count > 0 || result.errors.length > 0 || stopRecorded || options.initiator.source !== "job") {
+  const stopOnly = result.count === 0 && result.errors.length === 0 && options.initiator.source === "job";
+  if (result.count > 0 || result.errors.length > 0 || (stopRecorded && (!stopOnly || (await stopOnlyRowWanted(options)))) || options.initiator.source !== "job") {
     const auditError = await recordAction(deps, {
       companyId,
       config,

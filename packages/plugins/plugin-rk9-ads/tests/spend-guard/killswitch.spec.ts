@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { PauseAllResult } from "../../src/features/spend-guard/killswitch.js";
+import { parseBrandConfig } from "../../src/config.js";
+import { createLedger } from "../../src/db.js";
+import { pauseAll, type PauseAllResult, type PauseRule } from "../../src/features/spend-guard/killswitch.js";
 import type { GateRequestRecord } from "../../src/kit/gate/state-machine.js";
 import { brandConfig, COMPANY_A } from "../fixtures.js";
 import { FakeMeta } from "./fake-meta.js";
@@ -207,4 +209,55 @@ describe("kill switch pauseAll", () => {
       { companyId: COMPANY_A, rule: "kill_switch", reason: "Pysäytä kaikki (Telegram)" },
     ]);
   });
+});
+
+describe("the order of a live pause's calls (RK9-557 round 2, RK9-565)", () => {
+  it.each(["kill_switch", "scheduled_pause", "pause_all_cap"] as const)(
+    "%s: the halt, then the card rows close, then the Meta calls, then the card edits, then the notice",
+    async (rule: PauseRule) => {
+      const r = rig({ meta: accountMeta() });
+      const events: string[] = [];
+      const { ctx } = r.harness;
+      const set = ctx.state.set.bind(ctx.state);
+      ctx.state.set = async (input, value) => {
+        if (input.stateKey.startsWith("halt:")) events.push("halt");
+        return set(input, value);
+      };
+      const fetch = ctx.http.fetch;
+      ctx.http.fetch = async (url: string, init?: RequestInit) => {
+        if (url.startsWith("https://graph.facebook.com/")) events.push(`meta ${init?.method ?? "GET"}`);
+        return fetch(url, init);
+      };
+      const notifier = {
+        sendMessage: async (...args: Parameters<typeof r.notifier.sendMessage>) => {
+          events.push("notice");
+          return r.notifier.sendMessage(...args);
+        },
+        sendPauseCard: r.notifier.sendPauseCard.bind(r.notifier),
+      };
+      const parsed = parseBrandConfig(brandConfig({ telegram: telegramBlock() }));
+      if (parsed.state !== "enabled") throw new Error("test config invalid");
+      const result = await pauseAll(
+        {
+          ctx,
+          ledger: createLedger(ctx.db),
+          notifier,
+          closeCards: async () => {
+            events.push("close");
+            return { ids: ["gate-1"], announce: async () => void events.push("announce") };
+          },
+        },
+        COMPANY_A,
+        parsed.config,
+        { dryRun: false, rule, reason: "order", initiator: { source: "job" }, notify: true },
+      );
+      expect(result.count).toBe(4);
+      const first = (prefix: string) => events.findIndex((event) => event.startsWith(prefix));
+      const last = (prefix: string) => events.length - 1 - [...events].reverse().findIndex((event) => event.startsWith(prefix));
+      expect(events.slice(0, 2)).toEqual(["halt", "close"]);
+      expect(first("meta")).toBe(2);
+      expect(first("announce")).toBe(last("meta POST") + 1);
+      expect(events.at(-1)).toBe("notice");
+    },
+  );
 });

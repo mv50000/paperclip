@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../../src/config.js";
 import { alertKey, riskKey } from "../../src/features/spend-guard/alerts.js";
 import { evaluateDataGate, resolveJsonPointer } from "../../src/features/spend-guard/data-gate.js";
-import { readHalt } from "../../src/features/spend-guard/halt.js";
+import { readHalt, type HaltState } from "../../src/features/spend-guard/halt.js";
+import { readRecheck } from "../../src/features/spend-guard/recheck.js";
+import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../../src/features/spend-guard/register.js";
 import { ALERT_CHECK_INTERVAL_MS, scheduledPauseKey } from "../../src/features/spend-guard/scheduled-pause.js";
 import { brandConfig, COMPANY_A } from "../fixtures.js";
 import { FakeMeta } from "./fake-meta.js";
@@ -164,9 +166,10 @@ describe("open activation cards (RK9-557)", () => {
     await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/scheduled pause: open activation cards were not closed \(.*db down\)/);
     expect(pauses(r.meta)).toBe(2);
     expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(true);
-    // An ad activated on purpose later that evening stays ACTIVE: the next tick does nothing.
+    // An ad activated on purpose later that evening stays ACTIVE: a tick after
+    // the re-check's window (RK9-565) does nothing.
     reactivate(r.meta);
-    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    r.clock.now = new Date("2026-10-21T19:00:00Z");
     await r.harness.runJob("scheduled-pause");
     expect(closes).toEqual(["scheduled_pause"]);
     expect(pauses(r.meta)).toBe(2);
@@ -194,6 +197,140 @@ describe("the scheduled pause's halt (RK9-561)", () => {
       rule: "scheduled_pause",
       until: "2026-10-22T03:00:00.000Z", // 06:00 EEST
     });
+  });
+});
+
+describe("the second listing after a kill switch or scheduled pause (RK9-565)", () => {
+  const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-1" } };
+  const at = async (r: ReturnType<typeof rig>, iso: string) => {
+    r.clock.now = new Date(iso);
+    await r.harness.runJob("scheduled-pause");
+  };
+  const killSwitch = async (r: ReturnType<typeof rig>) => {
+    r.clock.now = new Date("2026-10-21T10:00:00Z");
+    await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD);
+    expect(pauses(r.meta)).toBe(2);
+  };
+
+  it("a kill switch lists again on the first tick a minute later and pauses what Meta showed late", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    // The activation's last write reaches Meta's listing only now.
+    reactivate(r.meta);
+    await at(r, "2026-10-21T10:00:30Z");
+    expect(pauses(r.meta)).toBe(2);
+    await at(r, "2026-10-21T10:05:00Z");
+    expect(pauses(r.meta)).toBe(4);
+    expect(r.notifier.messages.at(-1)!.text).toContain("Uudelleentarkistus");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+    // Once: a later reactivation is not the read delay.
+    reactivate(r.meta);
+    await at(r, "2026-10-21T10:10:00Z");
+    expect(pauses(r.meta)).toBe(4);
+  });
+
+  it("is dropped when a board user cleared the halt before it ran", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    const preview = await r.harness.performAction<{ halt: HaltState }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
+    reactivate(r.meta);
+    await at(r, "2026-10-21T10:05:00Z");
+    expect(pauses(r.meta)).toBe(2);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+
+  it("is dropped unrun when no tick came within its window", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    reactivate(r.meta);
+    await at(r, "2026-10-21T10:30:00Z");
+    expect(pauses(r.meta)).toBe(2);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+
+  it("a failed listing keeps it for the next tick and fails the run", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    reactivate(r.meta);
+    r.meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/campaigns") ? new Error("graph down") : null);
+    r.clock.now = new Date("2026-10-21T10:05:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/OLL kill_switch re-check: .*graph down.*retrying next tick/);
+    r.meta.fail = () => null;
+    await at(r, "2026-10-21T10:10:00Z");
+    expect(pauses(r.meta)).toBe(4);
+  });
+
+  it("the scheduled pause lists again on its next tick", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled() });
+    await at(r, "2026-10-21T18:31:00Z");
+    expect(pauses(r.meta)).toBe(2);
+    reactivate(r.meta);
+    await at(r, "2026-10-21T18:36:00Z");
+    expect(pauses(r.meta)).toBe(4);
+    reactivate(r.meta);
+    await at(r, "2026-10-21T18:41:00Z");
+    expect(pauses(r.meta)).toBe(4);
+  });
+});
+
+describe("a scheduled pause's retry tick (RK9-565)", () => {
+  const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-1" } };
+
+  it("keeps the day's halt: a board user's clear stands and the open cards are not closed again", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled() });
+    let failing = true;
+    r.meta.fail = (call) => (failing && call.method === "POST" && call.path === "301" ? new Error("rate limited") : null);
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/1 pause\(s\) failed, retrying next tick/);
+    const halt = (await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))!;
+    expect(halt).toMatchObject({ rule: "scheduled_pause" });
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, BOARD);
+
+    failing = false;
+    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(r.meta.ads[0]!.status).toBe("PAUSED");
+    expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toBeNull();
+    expect(r.cardCloses).toHaveLength(1);
+    expect(r.store.keys()).toContain(`${COMPANY_A}|${scheduledPauseKey("OLL", "2026-10-21")}`);
+  });
+
+  it("a retry tick that keeps the day's halt in force does not write a new one", async () => {
+    const r = rig({ meta: activeMeta(), config: scheduled() });
+    let failing = true;
+    r.meta.fail = (call) => (failing && call.method === "POST" && call.path === "301" ? new Error("rate limited") : null);
+    r.clock.now = new Date("2026-10-21T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/retrying next tick/);
+    const first = (await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))!;
+    failing = false;
+    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toEqual(first);
+    expect(r.cardCloses).toHaveLength(1);
+  });
+
+  it("a halt that keeps failing to store writes its audit row once per local day", async () => {
+    const meta = activeMeta();
+    meta.campaigns[0]!.status = "PAUSED";
+    meta.ads[0]!.status = "PAUSED";
+    const r = rig({ meta, config: scheduled() });
+    const state = r.harness.ctx.state;
+    const set = state.set.bind(state);
+    state.set = async (input, value) => {
+      if (input.stateKey.startsWith("halt:")) throw new Error("state down");
+      return set(input, value);
+    };
+    const rows = () => r.ruleActions().filter((row) => row.rule_type === "scheduled_pause");
+    for (const iso of ["2026-10-21T18:31:00Z", "2026-10-21T18:36:00Z", "2026-10-21T18:41:00Z"]) {
+      r.clock.now = new Date(iso);
+      await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/the halt was not stored/);
+    }
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ error: expect.stringContaining("halt: Error: state down") });
+    r.clock.now = new Date("2026-10-22T18:31:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/the halt was not stored/);
+    expect(rows()).toHaveLength(2);
   });
 });
 
