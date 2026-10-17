@@ -245,7 +245,6 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       return { dryRun: false, cleared: false, halt: null, ...(acknowledgedUndos > 0 ? { acknowledgedUndos } : {}) };
     }
     const halt = cleared;
-    const acknowledgedUndos = await acknowledge();
     const metadata = {
       halt,
       clearedBy: { userId: context.actor.userId ?? null, runId: context.actor.runId ?? null },
@@ -257,8 +256,16 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
       ctx.logger.warn("rk9-ads spend guard: halt clear not logged", { companyId, detail: safeError(error) });
     }
     ctx.logger.info("rk9-ads spend guard: halt cleared", { companyId, brandCode: halt.brandCode, rule: halt.rule, since: halt.since });
+    // After the clear's log: a failed acknowledgement must not hide that the halt was lifted.
+    let acknowledgedUndos = 0;
+    let acknowledgeError: string | undefined;
+    try {
+      acknowledgedUndos = await acknowledge();
+    } catch (error) {
+      acknowledgeError = safeError(error);
+    }
     // `remaining`: another halt (e.g. a scheduled pause's under a cleared kill switch) still in force.
-    return { dryRun: false, cleared: true, halt, ...(current ? { remaining: current } : {}), ...(acknowledgedUndos > 0 ? { acknowledgedUndos } : {}) };
+    return { dryRun: false, cleared: true, halt, ...(current ? { remaining: current } : {}), ...(acknowledgedUndos > 0 ? { acknowledgedUndos } : {}), ...(acknowledgeError ? { acknowledgeError } : {}) };
   });
 
   ctx.actions.register(PAUSE_ALL_ACTION_KEY, async (params, context) => {

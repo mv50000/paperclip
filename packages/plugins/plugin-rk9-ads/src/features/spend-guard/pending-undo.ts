@@ -13,18 +13,24 @@
  *
  * An entry ends only when:
  * - Meta confirms the PAUSED write (one audit row);
- * - a newer activation of the same object or of the card's publication
- *   completed after the failure (an approved card, outcome `activated`):
- *   the operator wants it running, so the retry stops (one audit row, one
+ * - no halt is in force and a newer card of the same object or of the
+ *   card's publication was approved after the failure and activated: the
+ *   operator wants it running, so the retry stops (one audit row, one
  *   alert);
  * - a board user acknowledges it with `clear-halt` (`acknowledgeUndos`, the
  *   entries the preview listed; activity log).
+ * Every doubt pauses: a halt or a newer-card lookup that cannot be read
+ * pauses the object, which at worst stops an approved ad and never spends.
+ * While a newer card's handler still runs (approved, no outcome yet), the
+ * tick leaves the entry alone, so it neither pauses what that card is
+ * activating nor drops the entry before the card's result is known.
  *
  * Alerts use alert_dedupe markers (`undo-failed:<brand>:<gateRequestId>`,
  * `undo-dropped:<brand>:<gateRequestId>`) like the spend alerts (alerts.ts):
- * claimed before the send and given back when the send fails, so the next
- * tick sends again. A failed retry writes no audit row (the job run fails
- * instead).
+ * claimed before the send and given back when the send fails. A failed
+ * alert of an entry still open goes out on the next tick; a drop alert is
+ * sent once, after the entry is gone, and is not resent. A failed retry
+ * writes no audit row (the job run fails instead).
  *
  * Stored in plugin_state (no migration, G11), one key per company. The gate
  * handlers and the job run in one worker process, so a per-company lock
@@ -39,11 +45,14 @@ import type { Ledger } from "../../db.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { setObjectStatus } from "../../meta/methods.js";
 import { isDryRun } from "../../meta/types.js";
-import { HALT_NAMESPACE, type HaltRule } from "./halt.js";
+import type { NewerActivation, NewerActivationQuery } from "../../gate/gate-requests.js";
+import { HALT_NAMESPACE, readHalt, type HaltRule } from "./halt.js";
 import { brandClient, recordAction, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const UNDO_FAILED_KIND = "undo_failed";
 export const UNDO_DROPPED_KIND = "undo_dropped";
+/** A newer card approved this recently whose handler has not finished is still activating (staging-card.ts ACTIVATION_IN_FLIGHT_MINUTES). */
+export const UNDO_IN_FLIGHT_MINUTES = 30;
 
 export type UndoObjectKind = "campaign" | "adset" | "ad";
 
@@ -158,7 +167,7 @@ export function undoAlertText(
         ]
       : [
           `ℹ️ ${name}: aktivoinnin peruutuksen uudelleenyritys lopetettiin, koska uudempi aktivointi hyväksyttiin`,
-          `Jää ACTIVE-tilaan: ${objectList(entries)}`,
+          `Ei enää pysäytetä: ${objectList(entries)}. Tarkista tila Metassa.`,
         ];
   return lines.join("\n").slice(0, 3900);
 }
@@ -245,8 +254,8 @@ export interface UndoRetryDeps extends AlertDeps {
   ctx: PluginContext;
   ledger: Ledger;
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "dryRun", initiator: Initiator) => MetaGraphClient;
-  /** The newer completed activation that ends an entry's retry (gate-requests.ts newerActivation); none when not wired. */
-  newerActivation?: (companyId: string, input: { objectId: string; gateRequestId: string; since: Date }) => Promise<string | null>;
+  /** The newer card that ends or delays an entry's retry once no halt is in force (gate-requests.ts newerActivation); none when not wired. */
+  newerActivation?: (companyId: string, input: NewerActivationQuery) => Promise<NewerActivation | null>;
 }
 
 function byRequest(entries: readonly PendingUndo[]): Map<string, PendingUndo[]> {
@@ -265,7 +274,7 @@ export async function retryPendingUndos(
   companyId: string,
   config: BrandConfig,
   initiator: Initiator,
-  _now: Date,
+  now: Date,
 ): Promise<string[]> {
   const entries = await readPendingUndos(deps.ctx, companyId);
   if (entries.length === 0) return [];
@@ -293,20 +302,31 @@ export async function retryPendingUndos(
   const done: PendingUndo[] = [];
   const superseded: Array<{ entry: PendingUndo; by: string }> = [];
   const stillFailing: PendingUndo[] = [];
+  // A newer activation ends the retry only when no halt is in force; a halt that cannot be read counts as one.
+  let haltInForce = true;
+  try {
+    haltInForce = (await readHalt(deps.ctx, companyId, now)) !== null;
+  } catch (error) {
+    failures.push(`${brand} activation undo: halt not read (${safeError(error)}), pausing anyway`);
+  }
   for (const entry of entries) {
-    let by: string | null;
-    try {
-      const since = new Date(entry.since);
-      by = deps.newerActivation && Number.isFinite(since.getTime()) ? await deps.newerActivation(companyId, { objectId: entry.objectId, gateRequestId: entry.gateRequestId, since }) : null;
-    } catch (error) {
-      // Unknown whether a newer approval wants it running: neither pause nor drop on this tick.
-      stillFailing.push(entry);
-      failures.push(`${brand} activation undo: newer activations of ${entry.kind} ${entry.objectId} not read (${safeError(error)}), retrying next tick`);
+    let newer: NewerActivation | null = null;
+    const since = new Date(entry.since);
+    if (!haltInForce && deps.newerActivation && Number.isFinite(since.getTime())) {
+      try {
+        newer = await deps.newerActivation(companyId, { objectId: entry.objectId, gateRequestId: entry.gateRequestId, since, inFlightMinutes: UNDO_IN_FLIGHT_MINUTES });
+      } catch (error) {
+        failures.push(`${brand} activation undo: newer activations of ${entry.kind} ${entry.objectId} not read (${safeError(error)}), pausing anyway`);
+      }
+    }
+    if (newer?.inFlight) {
+      // Its result decides: activated ends this retry, failed leaves it for the next tick.
+      deps.ctx.logger.info("rk9-ads activation undo: a newer card is still activating; retry left for the next tick", { companyId, objectId: entry.objectId, gateRequestId: newer.id });
       continue;
     }
-    if (by) {
-      superseded.push({ entry, by });
-      await audit(entry, false, "a newer activation was approved after the failed undo", null, `activation undo of ${entry.kind} ${entry.objectId} ended: superseded by ${by}`, { supersededBy: by });
+    if (newer) {
+      superseded.push({ entry, by: newer.id });
+      await audit(entry, false, "a newer activation was approved after the failed undo", null, `activation undo of ${entry.kind} ${entry.objectId} ended: superseded by ${newer.id}`, { supersededBy: newer.id });
       continue;
     }
     try {

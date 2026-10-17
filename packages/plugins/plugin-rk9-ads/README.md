@@ -313,9 +313,13 @@ the core chat-channels bot is never shared. See
   again and fails its run until Meta confirms, whether a halt is still in
   force or not: a scheduled halt that ends at 06:00 or a cap halt that ends
   with the month must not leave the object spending. An entry ends only when
-  Meta confirms (one audit row), when a newer card of the same object or
-  publication was approved and activated after the failure (one audit row,
-  one alert), or when a board user acknowledges it: the `clear-halt` preview
+  Meta confirms (one audit row), when no halt is in force and a newer card
+  of the same object or publication was approved and activated after the
+  failure (one audit row, one alert), or when a board user acknowledges it.
+  A halt or newer-card lookup that cannot be read pauses anyway; while a
+  newer card's handler still runs, the tick leaves the entry alone. A
+  company whose config was removed with entries open fails the run and
+  names them (no Meta client to retry with). The `clear-halt` preview
   lists the entries with their keys, and a real call with
   `acknowledgeUndos` (no `since` needed) removes those (activity log). The
   Ads page shows them with a typed "KUITTAA" confirmation; clearing a halt

@@ -48,7 +48,7 @@ import { checkSpend } from "./guard.js";
 import { haltIdentity, readRuleHalt, storedRuleHalt } from "./halt.js";
 import { haltUntil, pauseAll, PauseListError, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
-import { retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
+import { readPendingUndos, retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
 import { dropRecheck, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS } from "./recheck.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
@@ -296,13 +296,27 @@ export async function runDueRechecks(
   return failures;
 }
 
+/** Open activation undos of a company the job skips: without a brand config there is no Meta client to retry them with. */
+async function orphanedUndos(ctx: ScheduledPauseDeps["ctx"], companyId: string): Promise<string[]> {
+  try {
+    const open = await readPendingUndos(ctx, companyId);
+    if (open.length === 0) return [];
+    return [`company ${companyId}: ${open.length} activation undo(s) open (${open.map((entry) => `${entry.kind} ${entry.objectId}`).join(", ")}) but no brand config to retry them; pause them by hand in Meta`];
+  } catch (error) {
+    return [`company ${companyId}: open activation undos not read (${safeError(error)})`];
+  }
+}
+
 export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
   return async (job: PluginJobContext): Promise<void> => {
     const { ctx } = deps;
     const now = deps.now?.() ?? new Date();
     const failures: string[] = [];
     for (const { companyId, result } of await listCompanyConfigs(ctx)) {
-      if (result.state === "absent") continue;
+      if (result.state === "absent") {
+        failures.push(...(await orphanedUndos(ctx, companyId)));
+        continue;
+      }
       // README ADR 3: a pause is never skipped silently. An invalid or
       // unavailable config runs the pause side on the last valid config, and
       // the run fails either way so the broken config is seen.
@@ -311,6 +325,7 @@ export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
         // A disabled brand (monthlyCapEur unset, e.g. the AUR read-only
         // config) that was never enabled is a normal state, not a failure.
         ctx.logger.info("rk9-ads scheduled-pause: brand disabled and never enabled; skipped", { companyId });
+        failures.push(...(await orphanedUndos(ctx, companyId)));
         continue;
       }
       if (!loaded.ok) {
