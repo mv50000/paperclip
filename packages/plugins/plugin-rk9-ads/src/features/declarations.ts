@@ -2,6 +2,7 @@
  * Manifest-side feature list. Pure data: imported by src/manifest.ts, which the
  * host loads in its own process.
  */
+import { brandDeclarations } from "./brand/declarations.js";
 import { creativesDeclarations } from "./creatives/declarations.js";
 import { gateDeclarations } from "./gate/declarations.js";
 import { insightsDeclarations } from "./insights/declarations.js";
@@ -16,6 +17,7 @@ export const FEATURE_DECLARATIONS: readonly FeatureDeclarations[] = [
   smokeDeclarations,
   telegramDeclarations,
   spendGuardDeclarations,
+  brandDeclarations,
   creativesDeclarations,
   gateDeclarations,
   insightsDeclarations,

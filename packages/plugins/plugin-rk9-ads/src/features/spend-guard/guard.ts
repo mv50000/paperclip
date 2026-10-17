@@ -472,8 +472,18 @@ const CREATE_LEVEL = { campaigns: "campaign", adsets: "adset", ads: "ad" } as co
  * also on a PAUSED create, which the default hook would let through.
  */
 const PLAIN_BUDGET_KEYS = new Set(["daily_budget", "lifetime_budget"]);
+/**
+ * Meta wants `is_adset_budget_sharing_enabled` on a campaign without a
+ * campaign budget (provisioning, A4). `false` turns sharing off, so each ad
+ * set spends only its own budget: the projection's model. Only `false` passes,
+ * or its form-encoded twin `"false"`.
+ */
+const BUDGET_SHARING_KEY = "is_adset_budget_sharing_enabled";
 export function unmodelledBudgetKeys(fields: Record<string, unknown>): string[] {
-  return Object.keys(fields).filter((key) => fields[key] !== undefined && /budget/i.test(key) && !PLAIN_BUDGET_KEYS.has(key));
+  return Object.keys(fields).filter((key) => {
+    if (fields[key] === undefined || !/budget/i.test(key) || PLAIN_BUDGET_KEYS.has(key)) return false;
+    return !(key === BUDGET_SHARING_KEY && (fields[key] === false || fields[key] === "false"));
+  });
 }
 
 function budgetField(fields: Record<string, unknown>, key: string): number | null | undefined {

@@ -1,0 +1,29 @@
+{
+  "source": "Sunspot (AUR) brand config for the G19 parity and smoke tests: the existing Aurinkopulssi campaign and ad set adopted by id (tests/fixtures/sunspot-pulse-off). The secret ids are test placeholders; the real AUR read-only config is described in the README runbook and is not installed in prod.",
+  "config": {
+    "brandCode": "AUR",
+    "displayName": "Sunspot",
+    "timeZone": "Europe/Helsinki",
+    "monthlyCapEur": 100,
+    "namingPrefix": "AUR",
+    "meta": {
+      "adAccountId": "act_1336862981968191",
+      "pageId": "1216714361516949",
+      "accessTokenRef": { "type": "secret_ref", "secretId": "cccccccc-0000-4000-8000-00000000000a", "version": "latest" },
+      "specialAdCategories": ["NONE"],
+      "campaignId": "120247250925830775",
+      "adSetId": "120247250925850775"
+    },
+    "landing": {
+      "allowedDomains": ["sunspot.fi"],
+      "urls": { "get": "https://sunspot.fi/get" },
+      "defaultUrlKey": "get"
+    },
+    "telegram": {
+      "botTokenRef": { "type": "secret_ref", "secretId": "cccccccc-0000-4000-8000-00000000000b", "version": "latest" },
+      "chatId": "-1001234567890",
+      "allowedUserIds": ["440715827"],
+      "mode": "poll"
+    }
+  }
+}

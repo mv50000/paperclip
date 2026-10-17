@@ -2,6 +2,7 @@
  * Worker-side feature list. `ui` has no worker part: its slots are served by
  * the UI bundle.
  */
+import { register as registerBrand } from "./brand/register.js";
 import { register as registerCreatives } from "./creatives/register.js";
 import { register as registerGate } from "./gate/register.js";
 import { register as registerInsights } from "./insights/register.js";
@@ -15,6 +16,7 @@ export const FEATURES: readonly FeatureModule[] = [
   { key: "smoke", register: registerSmoke },
   { key: "telegram", register: registerTelegram },
   { key: "spend-guard", register: registerSpendGuard },
+  { key: "brand", register: registerBrand },
   { key: "creatives", register: registerCreatives },
   { key: "gate", register: registerGate },
   { key: "insights", register: registerInsights },

@@ -90,6 +90,7 @@ const plugin = definePlugin({
       return { ok: true, warnings: ["Config is empty: the plugin stays off for this company."] };
     }
     if (result.state === "invalid") return { ok: false, errors: result.errors };
+    if (result.state === "disabled") return { ok: true, warnings: [result.reason] };
     return { ok: true };
   },
 

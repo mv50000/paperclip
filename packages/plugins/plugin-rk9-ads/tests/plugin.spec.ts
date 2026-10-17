@@ -233,4 +233,14 @@ describe("smoke job", () => {
     expect(resolutions).toEqual([]);
     expect(harness.activity[0]?.metadata).toMatchObject({ configState: "invalid" });
   });
+
+  it("logs a disabled config (monthlyCapEur null) as disabled", async () => {
+    const harness = await setupHarness();
+    useCompanyConfigs(harness, { [COMPANY_A]: brandConfig({ monthlyCapEur: null }) });
+    useCompanySecrets(harness, { [COMPANY_A]: { [SECRET_A_META]: META_TOKEN_A } });
+
+    await harness.runJob("smoke", { trigger: "manual" });
+
+    expect(harness.activity[0]?.metadata).toMatchObject({ configState: "disabled", brandCode: "OLL" });
+  });
 });

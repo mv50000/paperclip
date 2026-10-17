@@ -497,3 +497,149 @@ export async function createAd(
   if (isDryRun(result)) return result;
   return { adId: requireString(result.id, "id") };
 }
+
+// ---------------------------------------------------------------------------
+// Brand preflight and provisioning (A4, RK9-510)
+// ---------------------------------------------------------------------------
+
+export interface TokenPermissions {
+  granted: string[];
+  declined: string[];
+}
+
+/**
+ * The permissions of the client's own token (`me/permissions`). Used instead
+ * of `debug_token`, which takes the inspected token as a query parameter: the
+ * client sends a token only as a Bearer header. A system user token answers
+ * this edge too.
+ */
+export async function getTokenPermissions(client: MetaGraphClient): Promise<TokenPermissions> {
+  const path = "me/permissions";
+  const rows = complete(await client.paginate<{ permission?: unknown; status?: unknown }>(path, { limit: LIST_LIMIT }), path);
+  const out: TokenPermissions = { granted: [], declined: [] };
+  for (const row of rows) {
+    const permission = optionalString(row.permission);
+    if (!permission) continue;
+    if (row.status === "granted") out.granted.push(permission);
+    else out.declined.push(permission);
+  }
+  return out;
+}
+
+/** Meta's minimum daily budget of the ad account, minor units; null when Graph does not say. */
+export async function getAccountMinDailyBudgetCents(client: MetaGraphClient, actId: string): Promise<number | null> {
+  const raw = await client.get<{ min_daily_budget?: unknown }>(adAccountPath(actId), { fields: "min_daily_budget" });
+  if (raw.min_daily_budget === undefined || raw.min_daily_budget === null || raw.min_daily_budget === "") return null;
+  return parseMinorUnits(raw.min_daily_budget, "min_daily_budget");
+}
+
+export interface PageSummary {
+  id: string;
+  name: string;
+  /** `instagram_business_account.id`; null when the page has no linked IG account the token can see. */
+  instagramBusinessAccountId: string | null;
+}
+
+export async function getPage(client: MetaGraphClient, pageId: string): Promise<PageSummary> {
+  const raw = await client.get<{ id?: unknown; name?: unknown; instagram_business_account?: { id?: unknown } | null }>(
+    requireId(pageId, "pageId"),
+    { fields: "id,name,instagram_business_account" },
+  );
+  return {
+    id: requireString(raw.id, "id"),
+    name: typeof raw.name === "string" ? raw.name : "",
+    instagramBusinessAccountId: optionalString(raw.instagram_business_account?.id),
+  };
+}
+
+export async function getInstagramUser(client: MetaGraphClient, igUserId: string): Promise<{ id: string; username: string | null }> {
+  const raw = await client.get<{ id?: unknown; username?: unknown }>(requireId(igUserId, "igUserId"), { fields: "id,username" });
+  return { id: requireString(raw.id, "id"), username: optionalString(raw.username) };
+}
+
+/** Datasets (pixels) the ad account can use (`act_<id>/adspixels`), every page. */
+export async function listAdAccountDatasets(client: MetaGraphClient, actId: string): Promise<Array<{ id: string; name: string }>> {
+  const path = `${adAccountPath(actId)}/adspixels`;
+  const rows = complete(await client.paginate<{ id?: unknown; name?: unknown }>(path, { fields: "id,name", limit: LIST_LIMIT }), path);
+  return rows.map((raw) => ({ id: requireString(raw.id, "id"), name: typeof raw.name === "string" ? raw.name : "" }));
+}
+
+export interface CampaignDetail extends StatusRow {
+  /** Digits, no act_ prefix. */
+  accountId: string | null;
+  objective: string | null;
+}
+
+export interface AdSetDetail extends StatusRow {
+  accountId: string | null;
+  campaignId: string | null;
+  dailyBudgetCents: number | null;
+}
+
+interface RawDetailRow extends RawBudgetRow {
+  account_id?: unknown;
+  objective?: unknown;
+}
+
+function accountIdOf(value: unknown): string | null {
+  return normaliseAdAccountId(optionalString(value)) ?? null;
+}
+
+export async function getCampaign(client: MetaGraphClient, campaignId: string): Promise<CampaignDetail> {
+  const raw = await client.get<RawDetailRow>(requireId(campaignId, "campaignId"), { fields: `${STATUS_FIELDS},account_id,objective` });
+  return { ...toStatusRow(raw), accountId: accountIdOf(raw.account_id), objective: optionalString(raw.objective) };
+}
+
+export async function getAdSet(client: MetaGraphClient, adSetId: string): Promise<AdSetDetail> {
+  const raw = await client.get<RawDetailRow>(requireId(adSetId, "adSetId"), {
+    fields: `${STATUS_FIELDS},account_id,campaign_id,daily_budget`,
+  });
+  return {
+    ...toStatusRow(raw),
+    accountId: accountIdOf(raw.account_id),
+    campaignId: optionalString(raw.campaign_id),
+    dailyBudgetCents: parseBudget(raw.daily_budget, "daily_budget"),
+  };
+}
+
+/**
+ * Creates a campaign, always PAUSED. `fields` is the rest of the Graph body
+ * (objective, special_ad_categories ...); a status in it is overridden.
+ */
+export async function createCampaign(
+  client: MetaGraphClient,
+  actId: string,
+  input: { name: string; fields: Record<string, unknown> },
+): Promise<WriteResult<{ campaignId: string }>> {
+  if (!input.name) throw new InvalidParamError("campaign name is required");
+  const result = await client.post<{ id?: unknown }>(`${adAccountPath(actId)}/campaigns`, { ...input.fields, name: input.name, status: "PAUSED" });
+  if (isDryRun(result)) return result;
+  return { campaignId: requireString(result.id, "id") };
+}
+
+export interface AdSetCreateInput {
+  name: string;
+  campaignId: string;
+  dailyBudgetCents: number;
+  fields: Record<string, unknown>;
+}
+
+/**
+ * The Graph body of a PAUSED ad set create. Also the dry-run plan when the
+ * campaign does not exist yet (`campaignId` is then a placeholder).
+ */
+export function adSetCreateBody(input: AdSetCreateInput): Record<string, unknown> {
+  if (!input.name) throw new InvalidParamError("ad set name is required");
+  if (!Number.isSafeInteger(input.dailyBudgetCents) || input.dailyBudgetCents <= 0) {
+    throw new InvalidParamError("dailyBudgetCents must be a positive integer (minor units)");
+  }
+  return { ...input.fields, name: input.name, campaign_id: input.campaignId, daily_budget: String(input.dailyBudgetCents), status: "PAUSED" };
+}
+
+/** Creates an ad set under `campaignId`, always PAUSED. */
+export async function createAdSet(client: MetaGraphClient, actId: string, input: AdSetCreateInput): Promise<WriteResult<{ adSetId: string }>> {
+  requireId(input.campaignId, "campaignId");
+  const result = await client.post<{ id?: unknown }>(`${adAccountPath(actId)}/adsets`, adSetCreateBody(input));
+  if (isDryRun(result)) return result;
+  return { adSetId: requireString(result.id, "id") };
+}

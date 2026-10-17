@@ -23,6 +23,7 @@ the features.
 | `src/features/<name>/register.ts` | Worker handlers of a feature |
 | `src/kit/` | Ads-agnostic code: local time, Telegram transport, the gate state machine, SDK harness helpers |
 | `src/meta/` | The one Meta Graph client (G12): `graph.ts`, `methods.ts`, `errors.ts`, `redact.ts`, `types.ts` |
+| `src/brand/` | Live preflight, launch gate, provisioning, token incident, UTM links (RK9-510) |
 | `scripts/live-smoke-sunspot.ts` | Read-only live smoke against Sunspot's ad account; never run by tests or CI |
 | `tests/helpers/embedded-pg.ts` | Real Postgres with the host migration and runtime SQL validators |
 | `src/ui/` | UI placeholders; RK9-518 owns this directory |
@@ -430,6 +431,154 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   effective rules, and the decisions the rules would make now without any
   write.
 
+## Brand config, preflight and provisioning (RK9-510)
+
+### Config fields
+
+The spec's field names map to the scaffold's `BrandConfig` (G11) like this:
+
+| Spec | Config path |
+|---|---|
+| brandCode, namingPrefix, monthlyCapEur | same names at the top level |
+| adAccountId, pageId, igUserId?, datasetId? | `meta.*` (`act_` prefix is stripped) |
+| metaTokenRef | `meta.accessTokenRef` (secret_ref) |
+| landingUrl | `landing.urls[landing.defaultUrlKey]` |
+| allowedLandingDomains[], utmTemplate | `landing.allowedDomains`, `landing.utmTemplate` |
+| telegram{chatId, approverUserIds[], botTokenRef} | `telegram.chatId`, `telegram.allowedUserIds`, `telegram.botTokenRef` |
+| schedule{}, rules{}, fatigue{} | same names (run by their own features) |
+
+`monthlyCapEur` defaults to null. A config without it is valid but
+`disabled`: `onValidateConfig` warns, every feature treats the brand as off,
+the preflight still runs and reports `launchReady: false`. Secrets are only
+`{ type: "secret_ref", secretId, version? }` objects; a raw token fails the
+host's save check.
+
+Ololla (OLL company):
+
+```json
+{
+  "brandCode": "OLL", "displayName": "Ololla", "monthlyCapEur": 100,
+  "meta": {
+    "adAccountId": "act_29231592883113369", "pageId": "1284777064729996", "datasetId": "1473972751305488",
+    "accessTokenRef": { "type": "secret_ref", "secretId": "<OLL meta.ads_access_token>" }
+  },
+  "landing": { "allowedDomains": ["ololla.fi"], "urls": { "home": "https://www.ololla.fi/" } },
+  "telegram": {
+    "botTokenRef": { "type": "secret_ref", "secretId": "<OLL telegram.rk9ads_bot_token_prod>" },
+    "chatId": "-5540940287", "allowedUserIds": ["440715827"]
+  }
+}
+```
+
+The two secret ids of the OLL company (secret references, not values; the
+dev instance uses another bot, G17):
+
+| OLL secret | Secret id |
+|---|---|
+| Meta system user (meta.ads_access_token) | f9567c7b-627c-4c7d-9781-745fb3eb448d |
+| Telegram bot (telegram.rk9ads_bot_token_prod) | 370f0ce5-1333-4a64-a276-c5f86eb7f3cc |
+
+`tests/fixtures/ololla-brand-config.json` is the same config with placeholder
+secret ids.
+
+### Actions and data (company from the host context)
+
+| Key | Kind | What it does |
+|---|---|---|
+| `verify-connection` | action | "Tarkista yhteys": the live preflight, cached in plugin state |
+| `provision` | action | `{ dryRun?, confirm?, dailyBudgetCents?, campaignId?, adSetId? }`; dry run unless `dryRun: false, confirm: true` |
+| `preflight-status` | data | The cached preflight and `fresh`; no Meta call |
+
+The buttons belong to the operator UI (A12, G13). Until then an operator calls
+the actions through the host's plugin action API.
+
+### Preflight checks
+
+Each check returns `pass`, `fail` or `skipped`, a typed `reason` and a
+redacted `detail`:
+
+| Check | Passes when | Fail reasons |
+|---|---|---|
+| `token_scopes` | `me/permissions` grants ads_management and ads_read | `missing_scopes`, `token_invalid`, `token_unresolved` |
+| `ad_account` | EUR, `timezone_name` = config `timeZone`, `account_status` 1 | `currency_not_eur`, `timezone_mismatch`, `account_not_active`, `account_unreachable` |
+| `spend_cap` | spend_cap set, headroom > 0 and at most the rest of the monthly cap (G2) | `monthly_cap_unset`, `no_spend_cap`, `spend_cap_reached`, `spend_cap_headroom_exceeds_remaining` |
+| `page` | the page reads | `page_unreachable` |
+| `ig_actor` | configured `igUserId` reads, or the page has `instagram_business_account` | `ig_unreachable`; skipped `ig_not_linked` (Facebook placements only) |
+| `dataset` | `datasetId` is in `act_<id>/adspixels` | `dataset_not_attached`; skipped without a datasetId |
+| `telegram` | getChat + getChatMember say the bot can post | `telegram_not_configured`, `telegram_token_unresolved`, `telegram_token_invalid`, `telegram_chat_unreachable`, `telegram_cannot_post` |
+
+`launchReady` = every required check passed and `monthlyCapEur` is set. A
+skipped check is never required; `ig_actor` is required only with a configured
+`igUserId`, `dataset` only with a `datasetId`. The spend_cap rule is the
+guard's month position (RK9-526), not "spend_cap <= monthlyCapEur".
+
+`assertLaunchReady()` (`src/brand/preflight.ts`) is the gate of every
+mutating path: provision here, activation in A9. It re-runs the preflight when
+the cached result is older than 15 min, belongs to another config (sha256 of
+the parsed config) or is not launch-ready, and throws `LaunchNotReadyError`
+when the fresh result is not launch-ready.
+
+The token check uses `me/permissions`, not `debug_token`: `debug_token` takes
+the inspected token as a query parameter, and the Meta client sends a token
+only as a Bearer header. The Telegram check sends no test message.
+
+### Expired token (Graph 190)
+
+The job or action fails at once; the Meta client never retries a 190, and the
+preflight skips its later Meta checks. `reportTokenInvalid()`
+(`src/brand/token-alert.ts`) sends one Telegram message and creates one issue
+in the brand company with originKind `plugin:rk9-ads` and originId
+`rk9-ads:<brand>:token_invalid`. alert_dedupe markers make both once per
+incident; the next successful token check clears them. The plugin has no
+issues.read, so close the issue after rotating the token.
+
+### Provision
+
+Creates one OUTCOME_TRAFFIC campaign and one ad set, both PAUSED and named
+`<namingPrefix>-traffic` (G8: permanent, no month in the name).
+
+- daily_budget = floor(monthlyCapEur * 100 / days in the local month) cents
+  (G3; Ololla in October: 322). A larger request is refused before any API
+  call; one below Meta's `min_daily_budget` before any write.
+- Ad set: LINK_CLICKS, IMPRESSIONS, LOWEST_COST_WITHOUT_CAP, destination
+  WEBSITE, Finland, 18+, Advantage audience off. Campaign:
+  `special_ad_categories` from the config (G6), no campaign budget and
+  `is_adset_budget_sharing_enabled: false` (the spend guard lets only `false`
+  through).
+- Idempotent: an id given to the action or set in the config is verified
+  (ad account, ad set under the campaign) and adopted; otherwise the
+  brand_bindings row, then an exact name match, is reused. Only when nothing
+  matches does it create. Two campaigns with the brand name are refused.
+- A real run passes `assertLaunchReady`, writes through the spend-guarded
+  brand client, logs one activity entry per created object and stores the ids
+  in brand_bindings. One run per company at a time (in-process lock; one
+  worker).
+
+### Sunspot (AUR) config, read-only (G19)
+
+For the parity and smoke tests only; Sunspot's ads stay paused in this epic.
+Not installed in prod by RK9-510.
+
+1. In the AUR company, add a secret with a read-only token (ads_read) of the
+   Sunspot system user. Do not reuse or regenerate the token of the organic
+   runner (G5).
+2. Save a config with `brandCode` "AUR", `monthlyCapEur` null (disabled, so
+   nothing can spend), `meta.adAccountId` "act_1336862981968191",
+   `meta.pageId` "1216714361516949", `meta.campaignId` "120247250925830775"
+   and `meta.adSetId` "120247250925850775" (Aurinkopulssi, adopted, never
+   created), `landing.urls.get` "https://sunspot.fi/get".
+3. Run `verify-connection`. Expect `launchReady: false`: `token_scopes`
+   fails with `missing_scopes` (an ads_read token has no ads_management) and
+   the cap is unset (`monthly_cap_unset`). The account, page and spend_cap
+   checks should pass. Do not run `provision`.
+
+A disabled brand that was never enabled is skipped by `scheduled-pause`. A
+brand that was enabled before and is then saved disabled keeps the ADR 3
+fallback: the pause side runs on its last valid config and the run fails.
+
+`tests/fixtures/sunspot-brand-config.json` is the same config with a cap, for
+the mocked preflight test.
+
 ## Architecture decisions
 
 ### ADR 1: The core/plugin boundary
@@ -525,7 +674,8 @@ their source: recorded live, or hand-written from the recorded shapes.
 
 An absent or empty company config means the plugin is off for that company. A
 valid config means it is on. An invalid config is reported (`onValidateConfig`,
-smoke activity) and treated as off. There is no `enabled` flag to forget in the
+smoke activity) and treated as off. A valid config without `monthlyCapEur` is
+`disabled` (RK9-510): off for every feature, but the preflight can check it. There is no `enabled` flag to forget in the
 wrong state. Removing the config turns a brand off. The emergency stop is the
 kill switch (RK9-511), not a config flag.
 
