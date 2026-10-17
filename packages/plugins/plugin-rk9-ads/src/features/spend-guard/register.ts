@@ -7,7 +7,7 @@ import { spendGuardDeclarations } from "./declarations.js";
 import { alertedThresholds } from "./alerts.js";
 import { checkSpend, type GuardResult } from "./guard.js";
 import { DEFAULT_TIME_ZONE } from "../../kit/local-time.js";
-import { clearHalt, readHalt, type HaltState } from "./halt.js";
+import { clearAdHalt, clearHalt, readAdHalt, readHalt, type HaltState } from "./halt.js";
 import { pauseAll, PauseListError, stopActivations, type PauseAllDeps, type PauseAllResult, type Stopped } from "./killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "./pause-config.js";
 import { sqlActivationGateRepo } from "../../gate/gate-requests.js";
@@ -38,7 +38,9 @@ import {
  *   The preview names the open activation undos (pending-undo.ts). A real
  *   call acknowledges those named in `acknowledgeUndos` (keys from the
  *   preview), and their retry stops (RK9-565); with no halt to clear, `since`
- *   may be left out to only acknowledge them.
+ *   may be left out to only acknowledge them. With `adId` it previews or
+ *   clears that ad's pause-ad halt instead (RK9-566), named by its `id`
+ *   from the preview.
  *
  * Every live kill switch (action, tool, Telegram button) leaves its halt and
  * closes the open cards also when no brand config can be loaded; then it
@@ -53,6 +55,7 @@ export const CLEAR_HALT_ACTION_KEY = "clear-halt";
 export const HALT_CLEARED_ACTIVITY = "rk9-ads spend guard: halt cleared";
 export const UNDO_ACKNOWLEDGED_ACTIVITY = "rk9-ads spend guard: activation undo acknowledged";
 const REASON_MAX = 300;
+const AD_ID_RE = /^\d{1,30}$/;
 
 export interface SpendGuardOverrides {
   store?: OnceStore;
@@ -198,6 +201,34 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
     // Lifting the halt lets activations spend again: a board user decides, an agent only previews.
     if (!dryRun && context.actor.type !== "user") {
       throw new Error("Clearing the halt is board-only; an agent can run it with dryRun only");
+    }
+    if (params.adId !== undefined) {
+      if (Array.isArray(params.acknowledgeUndos) && params.acknowledgeUndos.length > 0) {
+        throw new Error("Acknowledge the activation undos in a call without adId");
+      }
+      const adId = typeof params.adId === "string" ? params.adId.trim() : "";
+      if (!AD_ID_RE.test(adId)) throw new Error("adId must be a Meta ad id (digits only)");
+      if (dryRun) return { dryRun, cleared: false, adHalt: await readAdHalt(ctx, companyId, adId, now()) };
+      if (typeof params.id !== "string" || params.id === "") throw new Error("A real clear of an ad's halt needs `id` of the halt from the preview (dryRun)");
+      const cleared = await clearAdHalt(ctx, companyId, adId, params.id, now());
+      if (!cleared) {
+        if (await readAdHalt(ctx, companyId, adId, now())) throw new Error("A newer pause of the ad set its halt after the preview; preview it again and clear the current one");
+        return { dryRun: false, cleared: false, adHalt: null };
+      }
+      const reason = reasonText(params.reason, "");
+      try {
+        await ctx.activity.log({
+          companyId,
+          message: HALT_CLEARED_ACTIVITY,
+          entityType: "rk9_ads_brand",
+          entityId: cleared.brandCode,
+          metadata: { adHalt: cleared, clearedBy: { userId: context.actor.userId ?? null, runId: context.actor.runId ?? null }, ...(reason ? { reason } : {}) },
+        });
+      } catch (error) {
+        ctx.logger.warn("rk9-ads spend guard: ad halt clear not logged", { companyId, detail: safeError(error) });
+      }
+      ctx.logger.info("rk9-ads spend guard: ad halt cleared", { companyId, adId, since: cleared.since });
+      return { dryRun: false, cleared: true, adHalt: cleared };
     }
     if (dryRun) {
       const halt = await readHalt(ctx, companyId, now());

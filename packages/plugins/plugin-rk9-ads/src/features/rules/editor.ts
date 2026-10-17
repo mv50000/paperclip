@@ -9,8 +9,18 @@
  * The editor saves pause rules only. A propose_scale entry already in the
  * config is kept as it is (the schema keeps it disabled, G9); one sent by the
  * editor is refused.
+ *
+ * A block that weakens the spend protection against the config saved now
+ * (ui/rule-fields.ts weakeningChanges), or turns live mode on, is refused
+ * until the call names those changes in `confirmedWeakening` and sets
+ * `confirmLive` (RK9-566): the refusal's `confirm` lists them for the UI's
+ * typed words. The browser checks again right before its POST
+ * (ui/host-config.ts). Both guard against an operator's mistake, not
+ * against an instance admin: the host's config route saves any
+ * schema-valid config without asking this worker.
  */
 
+import { liveModeTurnedOn, savedRulesBlock, weakeningChanges } from "../../ui/rule-fields.js";
 import { UI_PAUSE_RULE_ID } from "../ui/register.js";
 import { parseRules, type RuleSet } from "./schema.js";
 
@@ -19,7 +29,13 @@ export const MAX_EDITED_RULES = 50;
 
 export type PreparedRules =
   | { ok: true; rules: { liveMode: boolean; list: Array<Record<string, unknown>> }; effective: RuleSet }
-  | { ok: false; errors: string[] };
+  | { ok: false; errors: string[]; confirm?: RulesConfirmation };
+
+/** What a weakening or live-mode save must confirm (RK9-566). */
+export interface RulesConfirmation {
+  weakening: string[];
+  liveOn: boolean;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -32,7 +48,10 @@ function keptEntries(rawConfig: Record<string, unknown>): Array<Record<string, u
   return rules.list.filter((entry): entry is Record<string, unknown> => isRecord(entry) && entry.type === "propose_scale");
 }
 
-export function prepareRules(rawConfig: Record<string, unknown>, input: { liveMode?: unknown; list?: unknown }): PreparedRules {
+export function prepareRules(
+  rawConfig: Record<string, unknown>,
+  input: { liveMode?: unknown; list?: unknown; confirmedWeakening?: unknown; confirmLive?: unknown },
+): PreparedRules {
   const errors: string[] = [];
   if (input.liveMode !== undefined && typeof input.liveMode !== "boolean") errors.push("rules.liveMode: must be a boolean");
   if (!Array.isArray(input.list)) return { ok: false, errors: [...errors, "rules.list: must be an array"] };
@@ -58,5 +77,20 @@ export function prepareRules(rawConfig: Record<string, unknown>, input: { liveMo
   const block = { liveMode: input.liveMode === true, list: [...edited, ...keptEntries(rawConfig)] };
   const parsed = parseRules(block);
   if (parsed.errors.length > 0) return { ok: false, errors: parsed.errors };
+  const saved = savedRulesBlock(rawConfig);
+  const confirm: RulesConfirmation = { weakening: weakeningChanges(saved, block), liveOn: liveModeTurnedOn(saved, block) };
+  const confirmed = Array.isArray(input.confirmedWeakening) ? input.confirmedWeakening.filter((entry): entry is string => typeof entry === "string") : [];
+  const unconfirmed = confirm.weakening.filter((change) => !confirmed.includes(change));
+  const liveUnconfirmed = confirm.liveOn && input.confirmLive !== true;
+  if (unconfirmed.length > 0 || liveUnconfirmed) {
+    return {
+      ok: false,
+      errors: [
+        ...(unconfirmed.length > 0 ? [`The save weakens the spend protection and needs confirmation: ${unconfirmed.join(" ")}`] : []),
+        ...(liveUnconfirmed ? ["The save turns live mode on and needs confirmation"] : []),
+      ],
+      confirm,
+    };
+  }
   return { ok: true, rules: block, effective: parsed.rules };
 }

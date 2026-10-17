@@ -328,12 +328,19 @@ describe("operator UI handlers (RK9-518)", () => {
   it("rules.prepareSave returns the pause-rules block to save and refuses propose_scale", async () => {
     const valid = await r.harness.performAction<{ ok: boolean; rules: { liveMode: boolean; list: unknown[] } }>(
       RULES_PREPARE_SAVE_ACTION_KEY,
-      { liveMode: true, list: [{ ruleId: "cpc-max", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.8, days: 3, minImpressions: 0, minClicks: 0 }, { type: "pause_all_cap", mode: "live" }] },
+      { liveMode: true, confirmLive: true, confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: poistetaan."], list: [{ ruleId: "cpc-max", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.8, days: 3, minImpressions: 0, minClicks: 0 }, { type: "pause_all_cap", mode: "live" }] },
       UI,
     );
     expect(valid.ok).toBe(true);
     expect(valid.rules.liveMode).toBe(true);
     expect(valid.rules.list).toHaveLength(2);
+    // Unconfirmed, the worker refuses and names what to confirm against the config saved now (RK9-566).
+    const unconfirmed = await r.harness.performAction<{ ok: boolean; confirm: { weakening: string[]; liveOn: boolean } }>(
+      RULES_PREPARE_SAVE_ACTION_KEY,
+      { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] },
+      UI,
+    );
+    expect(unconfirmed).toMatchObject({ ok: false, confirm: { liveOn: true } });
     const scale = await r.harness.performAction<{ ok: boolean; errors: string[] }>(
       RULES_PREPARE_SAVE_ACTION_KEY,
       { list: [{ ruleId: "grow", type: "propose_scale", enabled: true, threshold: 0.2, minImpressions: 0, minClicks: 0 }] },

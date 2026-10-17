@@ -13,7 +13,9 @@ import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
 import { ACK_UNDO_WORD, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
 import { saveRulesBlock } from "../src/ui/host-config.js";
 import { ACTION, DATA } from "../src/ui/keys.js";
-import { weakeningChanges } from "../src/ui/rule-fields.js";
+import { EDITOR_DEFAULT_RULES, savedRulesBlock, weakeningChanges } from "../src/ui/rule-fields.js";
+import { prepareRules } from "../src/features/rules/editor.js";
+import { DEFAULT_RULES } from "../src/features/rules/schema.js";
 import { LIVE_WORD, WEAKEN_WORD } from "../src/ui/SettingsPage.js";
 
 const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
@@ -436,7 +438,41 @@ describe("operator UI (RK9-518)", () => {
     await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
     await click("Pysäytä mainos");
     const alerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
-    expect(alerts).toEqual([expect.stringContaining("aktivointikortteja EI saatu varmasti suljettua: gate store down")]);
+    expect(alerts).toEqual([expect.stringContaining("Mainos 301 pysäytettiin, mutta aktivointikorttien sulkemisessa oli ongelma (gate store down)")]);
+  });
+
+  it("a clean pause of another ad keeps the first ad's warning; the ad's halt shows and a board user lifts it (RK9-566)", async () => {
+    bridge.data.set(DATA.overview, ollolaOverview({ publications: [publication(), publication({ id: "aaaaaaaa-1111-4111-8111-000000000002", adName: "OLL kesä 2", metaAdId: "302" })] }));
+    const halt = { id: "halt-302", until: "2026-10-17T10:30:00.000Z" };
+    const clears: Array<Record<string, unknown>> = [];
+    bridge.actions.set(ACTION.pauseAd, async (params) => {
+      const adId = String(params.adId);
+      if (params.dryRun !== false) return { dryRun: true, adId, name: null, previousStatus: "ACTIVE", status: "ACTIVE", paused: false };
+      return adId === "301"
+        ? { dryRun: false, adId, name: null, previousStatus: "ACTIVE", status: "PAUSED", paused: true, closedCardIds: [], haltError: "state down", activationRunning: true }
+        : { dryRun: false, adId, name: null, previousStatus: "ACTIVE", status: "PAUSED", paused: true, closedCardIds: [], adHalt: halt };
+    });
+    bridge.actions.set(ACTION.clearHalt, async (params) => {
+      clears.push(params);
+      return { dryRun: false, cleared: true };
+    });
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    for (const index of [0, 1]) {
+      await click("Pysäytä", index);
+      await click("Tarkista ja jatka");
+      await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
+      await click("Pysäytä mainos");
+    }
+    const alerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
+    expect(alerts).toEqual([expect.stringMatching(/Mainos 301 pysäytettiin, mutta pysäytystilaa EI tallennettu \(state down\).*juuri hyväksytty aktivointi voi olla vielä käynnissä ja käynnistää mainoksen uudelleen/)]);
+    expect(container.textContent).toContain("Mainoksen 302 aktivointi on estetty");
+    await click("Poista mainoksen pysäytystila");
+    await type(`Kirjoita ${CLEAR_HALT_WORD}`, CLEAR_HALT_WORD);
+    await click("Poista pysäytystila");
+    expect(clears).toEqual([{ dryRun: false, confirm: true, adId: "302", id: "halt-302" }]);
+    expect(container.textContent).not.toContain("Mainoksen 302 aktivointi on estetty");
+    // The first ad's warning stays.
+    expect(Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent)).toEqual(alerts);
   });
 
   describe("rule editor confirmation for weakening saves (RK9-562)", () => {
@@ -444,19 +480,29 @@ describe("operator UI (RK9-518)", () => {
     const CPC = { ruleId: "cpc-ceiling", type: "threshold_pause", enabled: true, mode: "live", metric: "cpc", operator: "gt", threshold: 0.8, days: 7, aggregate: "window_total", minImpressions: 0, minClicks: 0, minSpendEur: 3, cooldownHours: 24 };
     const realFetch = globalThis.fetch;
     let posts: Array<Record<string, unknown>>;
+    let prepares: Array<Record<string, unknown>>;
+    /** The config saved now: the worker's prepareSave and the browser's GET read it. */
+    let savedConfig: { brandCode: string; rules: { liveMode: boolean; list: Array<Record<string, unknown>> } };
 
     beforeEach(() => {
       posts = [];
+      prepares = [];
+      savedConfig = { brandCode: "OLL", rules: { liveMode: true, list: [CPC, { type: "pause_all_cap", mode: "live" }] } };
       bridge.data.set(DATA.settings, { state: "disabled", errors: [], brand: null, meta: null, telegram: null, landing: null, schedule: null, digest: null, fatigue: null } satisfies UiSettings);
       bridge.data.set(DATA.preflight, { state: "disabled", fresh: false, result: null });
       bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: [CPC, CAP] });
-      bridge.actions.set(ACTION.rulesPrepareSave, async (params) => ({ ok: true, rules: { liveMode: params.liveMode, list: params.list } }));
+      // The worker's own check (features/rules/editor.ts) against the config saved now.
+      bridge.actions.set(ACTION.rulesPrepareSave, async (params) => {
+        prepares.push(params);
+        const { effective: _effective, ...out } = prepareRules(savedConfig, params) as Record<string, unknown>;
+        return out;
+      });
       globalThis.fetch = (async (_url: string, init?: RequestInit) => {
         if (init?.method === "POST") {
           posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
           return new Response("{}", { status: 200 });
         }
-        return new Response(JSON.stringify({ configJson: { brandCode: "OLL", rules: { liveMode: true, list: [CPC, { type: "pause_all_cap", mode: "live" }] } } }), { status: 200 });
+        return new Response(JSON.stringify({ configJson: savedConfig }), { status: 200 });
       }) as typeof fetch;
     });
 
@@ -502,6 +548,7 @@ describe("operator UI (RK9-518)", () => {
 
     it("shadow -> live still needs LIVE; no POST without it", async () => {
       bridge.data.set(DATA.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
+      savedConfig.rules.liveMode = false;
       await render(createElement(SettingsPage, { context: CONTEXT }));
       const [liveToggle] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
       await act(async () => {
@@ -515,6 +562,54 @@ describe("operator UI (RK9-518)", () => {
       await click("Tallenna live-tilassa");
       expect(posts).toHaveLength(1);
       expect((posts[0]!.configJson as { rules: { liveMode: boolean } }).rules.liveMode).toBe(true);
+    });
+
+    it("a live rule's threshold raised needs the word; the worker refuses it unconfirmed and accepts it confirmed (RK9-566)", async () => {
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await type("Kynnys", "9999");
+      await click("Tallenna säännöt");
+      expect(changes()).toEqual(["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 9999."]);
+      expect(prepares).toHaveLength(1);
+      expect(posts).toEqual([]);
+      await type(`Kirjoita ${WEAKEN_WORD}`, WEAKEN_WORD);
+      await click("Tallenna heikennetyt säännöt");
+      expect(prepares.at(-1)).toMatchObject({ confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 9999."], confirmLive: false });
+      expect(posts).toHaveLength(1);
+    });
+
+    it("a weakening save that also turns live mode on asks HEIKENNÄ and then LIVE (RK9-566)", async () => {
+      bridge.data.set(DATA.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
+      savedConfig.rules.liveMode = false;
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      const [liveToggle] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+      await act(async () => {
+        liveToggle!.click();
+        await flush();
+      });
+      await click("Poista");
+      await click("Tallenna säännöt");
+      expect(changes()).toEqual(["Kynnyspysäytys cpc-ceiling: poistetaan.", "Live-tila päälle: säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää."]);
+      await type(`Kirjoita ${WEAKEN_WORD}`, WEAKEN_WORD);
+      await click("Jatka");
+      expect(posts).toEqual([]);
+      expect(buttons("Tallenna heikennetyt säännöt")[0]!.disabled).toBe(true);
+      await type(`Kirjoita ${LIVE_WORD}`, LIVE_WORD);
+      await click("Tallenna heikennetyt säännöt");
+      expect(posts).toHaveLength(1);
+      expect((posts[0]!.configJson as { rules: { liveMode: boolean } }).rules.liveMode).toBe(true);
+    });
+
+    it("live mode turned off elsewhere after the page loaded: a save with live on asks LIVE again", async () => {
+      // The page loaded with live mode on; another session turned it off since.
+      savedConfig.rules.liveMode = false;
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(buttons("Tallenna live-tilassa")).toHaveLength(1);
+      await type(`Kirjoita ${LIVE_WORD}`, LIVE_WORD);
+      await click("Tallenna live-tilassa");
+      expect(posts).toHaveLength(1);
     });
 
     it("a change that does not weaken the protection saves without a word", async () => {
@@ -538,6 +633,87 @@ describe("operator UI (RK9-518)", () => {
       expect(posts).toEqual([]);
       await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, ["Kynnyspysäytys cpm-ceiling: poistetaan."])).resolves.toBeUndefined();
       expect(posts).toHaveLength(1);
+    });
+
+    it("the save refuses live mode on against a config saved with it off, unless LIVE was typed (RK9-566)", async () => {
+      const fetcher = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push({});
+          return new Response("{}", { status: 200 });
+        }
+        return new Response(JSON.stringify({ configJson: { brandCode: "OLL", rules: { liveMode: false, list: [CPC] } } }), { status: 200 });
+      }) as typeof fetch;
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [])).rejects.toThrow(/Live-tila päälle/);
+      expect(posts).toEqual([]);
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [], true)).resolves.toBeUndefined();
+      expect(posts).toHaveLength(1);
+    });
+
+    it("a saved config without rules.list reads as the default rules (RK9-566)", async () => {
+      expect(EDITOR_DEFAULT_RULES).toEqual(DEFAULT_RULES);
+      expect(savedRulesBlock({ brandCode: "OLL" })).toEqual({ liveMode: false, list: EDITOR_DEFAULT_RULES });
+      expect(savedRulesBlock({ rules: { liveMode: true } }).list).toEqual(EDITOR_DEFAULT_RULES);
+      expect(savedRulesBlock({ rules: { liveMode: true, list: [] } }).list).toEqual([]);
+      // Removing the shipped default is listed like any enabled rule's removal.
+      expect(weakeningChanges(savedRulesBlock({ rules: {} }), { liveMode: false, list: [] })).toEqual(["Kynnyspysäytys cpc-ceiling: poistetaan."]);
+    });
+
+    describe("parameter changes of a live rule (RK9-566)", () => {
+      const live = { liveMode: true, list: [CPC, CAP] };
+      const edit = (patch: Record<string, unknown>, cap: Record<string, unknown> = {}) =>
+        weakeningChanges(live, { liveMode: true, list: [{ ...CPC, ...patch }, { ...CAP, ...cap }] });
+
+      it("flags the direction that fires less, for each parameter", () => {
+        expect(edit({ threshold: 1000 })).toEqual(["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 1000."]);
+        expect(edit({ operator: "lt" })).toEqual(["Kynnyspysäytys cpc-ceiling: vertailu gt → lt."]);
+        expect(edit({ metric: "cpm" })).toEqual(["Kynnyspysäytys cpc-ceiling: mittari cpc → cpm."]);
+        expect(edit({ minSpendEur: 1_000_000 })).toEqual(["Kynnyspysäytys cpc-ceiling: väh. kulutus € 3 → 1000000."]);
+        expect(edit({ minImpressions: 500, minClicks: 5 })).toEqual(["Kynnyspysäytys cpc-ceiling: väh. näytöt 0 → 500, väh. linkkiklikit 0 → 5."]);
+        expect(edit({ cooldownHours: 720 })).toEqual(["Kynnyspysäytys cpc-ceiling: cooldown h 24 → 720."]);
+        expect(edit({}, { cooldownHours: 24 })).toEqual([]);
+        expect(weakeningChanges({ liveMode: true, list: [CPC, { ...CAP, cooldownHours: 6 }] }, live)).toEqual(["Kuukausikatto 90 % (sisäänrakennettu): cooldown h 6 → 24."]);
+        // window_total: any change of the window is flagged; aggregate changes too.
+        expect(edit({ days: 3 })).toEqual(["Kynnyspysäytys cpc-ceiling: päivät 7 → 3."]);
+        expect(edit({ aggregate: "each_day" })).toEqual(["Kynnyspysäytys cpc-ceiling: laskenta window_total → each_day."]);
+      });
+
+      it("does not flag a change that fires as much or more", () => {
+        expect(edit({ threshold: 0.5, minSpendEur: 1, minImpressions: 0, cooldownHours: 12, operator: "gte" })).toEqual([]);
+        expect(edit({}, { cooldownHours: 12 })).toEqual([]);
+      });
+
+      it("reads the threshold against the operator's direction, and gte -> gt / lte -> lt as weakening", () => {
+        const ctr = { ...CPC, metric: "ctr", operator: "lt", threshold: 0.5 };
+        const savedCtr = { liveMode: true, list: [ctr] };
+        expect(weakeningChanges(savedCtr, { liveMode: true, list: [{ ...ctr, threshold: 0.1 }] })).toEqual(["Kynnyspysäytys cpc-ceiling: kynnys 0.5 → 0.1."]);
+        expect(weakeningChanges(savedCtr, { liveMode: true, list: [{ ...ctr, threshold: 0.9 }] })).toEqual([]);
+        expect(weakeningChanges({ liveMode: true, list: [{ ...ctr, operator: "lte" }] }, { liveMode: true, list: [ctr] })).toEqual(["Kynnyspysäytys cpc-ceiling: vertailu lte → lt."]);
+        expect(edit({ operator: "gte" })).toEqual([]);
+        expect(weakeningChanges({ liveMode: true, list: [{ ...CPC, operator: "gte" }] }, live)).toEqual(["Kynnyspysäytys cpc-ceiling: vertailu gte → gt."]);
+        // each_day: more days must all break the threshold; fewer days shrink the window the minimum gates sum over.
+        const daily = { ...CPC, aggregate: "each_day", days: 2 };
+        expect(weakeningChanges({ liveMode: true, list: [daily] }, { liveMode: true, list: [{ ...daily, days: 5 }] })).toEqual(["Kynnyspysäytys cpc-ceiling: päivät 2 → 5."]);
+        expect(weakeningChanges({ liveMode: true, list: [daily] }, { liveMode: true, list: [{ ...daily, days: 1 }] })).toEqual(["Kynnyspysäytys cpc-ceiling: päivät 2 → 1."]);
+      });
+
+      it("a shadow rule's tuning is not weakening; the schema's defaults fill missing fields", () => {
+        const shadow = { ...CPC, mode: "shadow" };
+        expect(weakeningChanges({ liveMode: true, list: [shadow] }, { liveMode: true, list: [{ ...shadow, threshold: 1000 }] })).toEqual([]);
+        const bare = { ruleId: "bare", type: "threshold_pause", mode: "live", metric: "cpc", operator: "gt", threshold: 1, minImpressions: 0, minClicks: 0 };
+        expect(weakeningChanges({ liveMode: true, list: [bare] }, { liveMode: true, list: [{ ...bare, days: 1, aggregate: "each_day", minSpendEur: 0, cooldownHours: 24, enabled: true }] })).toEqual([]);
+        expect(weakeningChanges({ liveMode: true, list: [bare] }, { liveMode: true, list: [{ ...bare, cooldownHours: 48 }] })).toEqual(["Kynnyspysäytys bare: cooldown h 24 → 48."]);
+      });
+
+      it("the worker refuses an unconfirmed weakening or live-mode save and accepts the confirmed one", () => {
+        const raw = { brandCode: "OLL", rules: live };
+        const weakened = { liveMode: true, list: [{ ...CPC, threshold: 1000 }, CAP] };
+        expect(prepareRules(raw, weakened)).toMatchObject({ ok: false, confirm: { weakening: ["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 1000."], liveOn: false } });
+        expect(prepareRules(raw, { ...weakened, confirmedWeakening: ["something else"] })).toMatchObject({ ok: false });
+        expect(prepareRules(raw, { ...weakened, confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 1000."] })).toMatchObject({ ok: true });
+        const off = { brandCode: "OLL", rules: { ...live, liveMode: false } };
+        expect(prepareRules(off, live)).toMatchObject({ ok: false, confirm: { weakening: [], liveOn: true } });
+        expect(prepareRules(off, { ...live, confirmLive: true })).toMatchObject({ ok: true });
+      });
     });
 
     it("weakeningChanges: the cap to shadow, a live rule to shadow, a renamed rule; additions and disabled rules are not weakening", () => {

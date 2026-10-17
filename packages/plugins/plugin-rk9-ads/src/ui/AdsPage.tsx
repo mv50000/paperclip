@@ -343,6 +343,90 @@ export function KillSwitchResult(props: { result: KillSwitchOutcome }) {
   );
 }
 
+/**
+ * What the page keeps of a live pause-ad after its panel closes, per ad
+ * (RK9-566): the warnings, and the ad's short halt, which a board user may
+ * lift before it ends.
+ */
+interface PausedAdNote {
+  adId: string;
+  warnings: string[];
+  adHalt?: { id: string; until: string };
+}
+
+function pausedAdNote(result: UiPauseAdResult): PausedAdNote {
+  const warnings: string[] = [];
+  if (result.haltError) {
+    warnings.push(`pysäytystilaa EI tallennettu (${result.haltError}): juuri hyväksytty aktivointi voi käynnistää mainoksen uudelleen`);
+  }
+  if (result.cardsError) warnings.push(`aktivointikorttien sulkemisessa oli ongelma (${result.cardsError})`);
+  if (result.activationRunning) {
+    warnings.push(
+      result.adHalt
+        ? "juuri hyväksytty aktivointi voi olla vielä käynnissä; mainoksen pysäytystila saa sen yleensä pysäyttämään mainoksen uudelleen"
+        : "juuri hyväksytty aktivointi voi olla vielä käynnissä ja käynnistää mainoksen uudelleen",
+    );
+  }
+  return { adId: result.adId, warnings, ...(result.adHalt ? { adHalt: result.adHalt } : {}) };
+}
+
+function PausedAdNotice(props: { note: PausedAdNote; timeZone?: string; onHaltCleared: () => void }) {
+  const clearHalt = usePluginAction(ACTION.clearHalt);
+  const toast = usePluginToast();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { note } = props;
+
+  async function clear() {
+    if (!note.adHalt) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // `id` from the pause: the worker refuses if a newer pause of the ad set its halt again.
+      const result = (await clearHalt({ dryRun: false, confirm: true, adId: note.adId, id: note.adHalt.id })) as { cleared?: boolean };
+      toast(result.cleared ? { title: `Mainoksen ${note.adId} pysäytystila poistettu`, tone: "success" } : { title: "Mainoksen pysäytystila oli jo päättynyt", tone: "info" });
+      props.onHaltCleared();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      {note.warnings.length > 0 ? (
+        <ErrorText>
+          Mainos {note.adId} pysäytettiin, mutta {note.warnings.join("; ")}. Tarkista mainoksen tila.
+        </ErrorText>
+      ) : null}
+      {note.adHalt ? (
+        <>
+          <Muted>
+            Mainoksen {note.adId} aktivointi on estetty {fmtDateTime(note.adHalt.until, props.timeZone)} asti, myös juuri hyväksytyltä kortilta.
+          </Muted>
+          {confirming ? (
+            <TypedConfirm
+              word={CLEAR_HALT_WORD}
+              prompt={`Poistetaan mainoksen ${note.adId} pysäytystila: hyväksytty kortti voi taas aktivoida sen.`}
+              confirmLabel="Poista pysäytystila"
+              busy={busy}
+              onConfirm={() => void clear()}
+              onCancel={() => setConfirming(false)}
+            />
+          ) : (
+            <Button onClick={() => setConfirming(true)} disabled={busy}>
+              Poista mainoksen pysäytystila
+            </Button>
+          )}
+        </>
+      ) : null}
+      {error ? <ErrorText>Pysäytystilaa ei poistettu: {error}</ErrorText> : null}
+    </div>
+  );
+}
+
 function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void; onPaused: (result: UiPauseAdResult) => void }) {
   const pauseAd = usePluginAction(ACTION.pauseAd);
   const toast = usePluginToast();
@@ -488,8 +572,8 @@ export function AdsPage(props: PluginPageProps) {
   const companyId = props.context.companyId;
   const overview = usePluginData<UiOverview>(DATA.overview, { companyId });
   const [pausing, setPausing] = useState<UiPublication | null>(null);
-  // A pause whose card close failed: the error stays on the page after the panel closes (RK9-562).
-  const [pauseCardsError, setPauseCardsError] = useState<{ adId: string; error: string } | null>(null);
+  // A pause's warnings and halt stay on the page after the panel closes, per ad: a later pause of another ad keeps them (RK9-562, RK9-566).
+  const [pausedAds, setPausedAds] = useState<PausedAdNote[]>([]);
 
   if (overview.loading && !overview.data) return <Spinner label="Ladataan mainontaa" />;
   if (overview.error) return <ErrorText>Mainonnan tietoja ei voitu ladata: {overview.error.message}</ErrorText>;
@@ -540,16 +624,20 @@ export function AdsPage(props: PluginPageProps) {
             onCancel={() => setPausing(null)}
             onPaused={(result) => {
               setPausing(null);
-              setPauseCardsError(result.cardsError ? { adId: result.adId, error: result.cardsError } : null);
+              const note = pausedAdNote(result);
+              setPausedAds((current) => [...current.filter((entry) => entry.adId !== result.adId), ...(note.warnings.length > 0 || note.adHalt ? [note] : [])]);
               overview.refresh();
             }}
           />
         ) : null}
-        {pauseCardsError ? (
-          <ErrorText>
-            Mainos {pauseCardsError.adId} pysäytettiin, mutta sen aktivointikortteja EI saatu varmasti suljettua: {pauseCardsError.error}. Mainos voi aktivoitua uudelleen: tarkista sen tila.
-          </ErrorText>
-        ) : null}
+        {pausedAds.map((note) => (
+          <PausedAdNotice
+            key={note.adId}
+            note={note}
+            timeZone={timeZone}
+            onHaltCleared={() => setPausedAds((current) => current.map((entry) => (entry.adId === note.adId ? { adId: entry.adId, warnings: entry.warnings } : entry)))}
+          />
+        ))}
         {data.publications.length === 0 && !data.publicationsError ? (
           <EmptyState title="Ei vielä julkaisuja." detail="Julkaisut ilmestyvät tähän, kun ensimmäinen mainos on julkaistu." />
         ) : (

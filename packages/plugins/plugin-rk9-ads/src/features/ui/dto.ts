@@ -191,7 +191,16 @@ export interface UiPauseAdResult {
   paused: boolean;
   /** Activation cards of the ad a live pause closed (RK9-562). */
   closedCardIds?: string[];
-  /** The ad's open cards could not be listed or closed (all or some), or an approved activation may still run; the pause itself stands. */
+  /** The ad's open cards could not be listed or closed (all or some), or running activations could not be read; the pause itself stands. */
   cardsError?: string;
+  /** An approved activation of the ad may still be running (RK9-566); with `adHalt` it pauses the ad again. */
+  activationRunning?: boolean;
+  /**
+   * The ad's short pause-ad halt (RK9-566): until then no activation of the
+   * ad runs, unless a board user clears it (`clear-halt` with `adId` and `id`).
+   */
+  adHalt?: { id: string; until: string };
+  /** The pause-ad halt was not stored: an approved activation may still set the ad ACTIVE. */
+  haltError?: string;
   auditError?: string;
 }
