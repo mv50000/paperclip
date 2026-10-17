@@ -80,6 +80,16 @@ describe("brand actions", () => {
     await expect(harness.performAction(PROVISION_ACTION_KEY, { dailyBudgetCents: 1000 }, UI)).rejects.toThrow(/budget_above_cap/);
   });
 
+  it("a real provision is board-only: an agent may only preview it (RK9-538)", async () => {
+    const { harness, routes } = setup();
+    routes.on("GET act_29231592883113369/campaigns", { body: { data: [] } });
+    const agent = { companyId: COMPANY, actor: { type: "agent" as const, agentId: "agent-1" } };
+    const preview = await harness.performAction<ProvisionResult>(PROVISION_ACTION_KEY, {}, agent);
+    expect(preview.dryRun).toBe(true);
+    await expect(harness.performAction(PROVISION_ACTION_KEY, { dryRun: false, confirm: true }, agent)).rejects.toThrow(/board-only/);
+    expect(routes.writes()).toEqual([]);
+  });
+
   it("provision refuses a disabled brand", async () => {
     const raw = { ...loadFixtureConfig("ololla"), monthlyCapEur: null };
     const { harness, routes } = setup(raw);

@@ -754,9 +754,10 @@ export function configSecretRefs(config: BrandConfigDraft): Array<{ configPath: 
 }
 
 /**
- * Daily budget in cents (G3): floor(monthlyCapEur * 100 / days in the local month).
- * The spend guard projects with the same formula, so a provisioned budget passes
- * its own guard in a 31-day month too.
+ * Daily budget in cents (G3): floor(monthlyCapEur * 100 / daysInMonth).
+ * A budget for a given month passes the spend guard in that month and in
+ * shorter ones, not in a longer one. The permanent ad set (provision.ts) is
+ * created with daysInMonth 31, so it passes in every month (RK9-538).
  */
 export function dailyBudgetCents(monthlyCapEur: number, daysInMonth: number): number {
   if (!(monthlyCapEur > 0)) throw new Error("monthlyCapEur must be > 0");

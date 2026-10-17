@@ -24,7 +24,8 @@ import type { FeatureRuntime } from "../types.js";
  *
  * - action `verify-connection` ("Tarkista yhteys"): the live preflight, cached.
  * - action `provision`: the PAUSED campaign + ad set. Dry run by default; a
- *   real run needs `confirm: true` and a launch-ready preflight.
+ *   real run needs `confirm: true`, a board user (an agent may only preview
+ *   it, RK9-538) and a launch-ready preflight.
  * - data `preflight-status`: the cached preflight and whether it is fresh. No
  *   Meta call.
  *
@@ -116,6 +117,10 @@ export function registerBrand(runtime: FeatureRuntime, overrides: BrandOverrides
     if (!dryRun && params.confirm !== true) {
       throw new Error("A real provision needs confirm: true; preview it with dryRun first");
     }
+    // Creates Meta objects: a board user decides, an agent's key only previews.
+    if (!dryRun && context.actor.type !== "user") {
+      throw new Error("A real provision is board-only; an agent can run it with dryRun only");
+    }
     const loaded = await loadDraft(ctx, companyId);
     if (!loaded.ok) throw new Error(loaded.error);
     const config = loaded.enabled;
@@ -133,7 +138,6 @@ export function registerBrand(runtime: FeatureRuntime, overrides: BrandOverrides
         {
           ctx,
           bindings,
-          now,
           readClient: readClientFor(companyId, config),
           writeClient: writeClientFor(companyId, config, dryRun ? "dryRun" : "live", initiator),
           assertLaunchReady: () => assertLaunchReady(preflightDeps, companyId, { config }),

@@ -197,15 +197,20 @@ describe("Graph error 190", () => {
     expect(r.issues).toHaveLength(1);
   });
 
-  it("clears the incident after a successful token check, so the next 190 is reported again", async () => {
+  it("clears the Telegram marker after a successful token check, so the next 190 is messaged again", async () => {
     const r = rig();
     const config = ollola();
-    await runPreflight(deps(r, happyRoutes(config, { "GET me/permissions": expired })), COMPANY, config);
+    const first = happyRoutes(config, { "GET me/permissions": expired });
+    await runPreflight(deps(r, first), COMPANY, config);
     expect(r.store.keys()).toEqual([`${COMPANY}|${tokenAlertKey("OLL")}`, `${COMPANY}|${tokenIncidentKey("OLL")}`]);
     await runPreflight(deps(r, happyRoutes(config)), COMPANY, config);
-    expect(r.store.keys()).toEqual([]);
-    await runPreflight(deps(r, happyRoutes(config, { "GET me/permissions": expired })), COMPANY, config);
-    expect(r.issues).toHaveLength(2);
+    // RK9-538: the issue marker stays. The plugin cannot see whether the issue is still open.
+    expect(r.store.keys()).toEqual([`${COMPANY}|${tokenIncidentKey("OLL")}`]);
+    const again = happyRoutes(config, { "GET me/permissions": expired });
+    const second = await runPreflight(deps(r, again), COMPANY, config);
+    expect(second.tokenIncident).toEqual({ errorClass: "token_invalid", telegram: "sent", issue: "exists" });
+    expect(again.calls.filter((call) => call.key === "tg:sendMessage")).toHaveLength(1);
+    expect(r.issues).toHaveLength(1);
   });
 
   it("gives the alert marker back when Telegram fails, but keeps the issue", async () => {
