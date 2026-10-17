@@ -22,7 +22,9 @@
  *
  * Stored in plugin_state (no migration, G11), one key per company. The gate
  * handlers and the job run in one worker process, so a per-company lock
- * there serializes every read-modify-write of the list.
+ * there serializes every write of the list. The job removes only the
+ * entries it handled (object and gate request), so a newer failure of the
+ * same object that arrived during its Meta calls stays.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -99,11 +101,12 @@ export async function addPendingUndos(ctx: StateCtx, companyId: string, entries:
   });
 }
 
-async function removePendingUndos(ctx: StateCtx, companyId: string, objectIds: readonly string[]): Promise<void> {
-  if (objectIds.length === 0) return;
+/** Removes these entries. A newer failure of the same object (another gate request) that replaced one stays. */
+async function removePendingUndos(ctx: StateCtx, companyId: string, entries: readonly Pick<PendingUndo, "objectId" | "gateRequestId">[]): Promise<void> {
+  if (entries.length === 0) return;
   await withLock(companyId, async () => {
-    const ids = new Set(objectIds);
-    const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(entry.objectId));
+    const ids = new Set(entries.map((entry) => `${entry.objectId}|${entry.gateRequestId}`));
+    const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(`${entry.objectId}|${entry.gateRequestId}`));
     if (rest.length === 0) await ctx.state.delete(undoKey(companyId));
     else await ctx.state.set(undoKey(companyId), rest);
   });
@@ -269,19 +272,19 @@ export async function retryPendingUndos(
       const alert = await sendUndoAlert(deps, companyId, config, "dropped", gateRequestId, group);
       if (alert.error) failures.push(`${brand} activation undo: drop alert failed (${alert.error})`);
     }
-    await removePendingUndos(deps.ctx, companyId, entries.map((entry) => entry.objectId));
+    await removePendingUndos(deps.ctx, companyId, entries);
     failures.push(`${brand} activation undo: the halt ended first, ${entries.length} object(s) may still be ACTIVE (${objectList(entries)})`);
     return failures;
   }
 
   const client = deps.clientFor ? deps.clientFor(companyId, config, "live", initiator) : brandClient(deps, companyId, config, "live", { initiator });
-  const done: string[] = [];
+  const done: PendingUndo[] = [];
   const stillFailing: PendingUndo[] = [];
   for (const entry of entries) {
     try {
       const result = await setObjectStatus(client, entry.objectId, "PAUSED");
       if (isDryRun(result) || !result.success) throw new Error(`Meta did not confirm status PAUSED on ${entry.objectId}`);
-      done.push(entry.objectId);
+      done.push(entry);
       await audit(entry, true, null, `activation undo paused ${entry.kind} ${entry.objectId} on retry`);
     } catch (error) {
       stillFailing.push(entry);

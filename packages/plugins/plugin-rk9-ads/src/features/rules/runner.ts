@@ -29,8 +29,9 @@
  * runs, at least CAP_HEADROOM_MIN_GAP_MS apart, read the month under the 90 %
  * cap, e.g. after monthlyCapEur was raised (RK9-565). Spend only grows within
  * a month, so a reading below the MTD the halt stored is a bad reading (an
- * empty or partial insights answer reads as 0) and counts as none; a halt
- * without those figures waits for the board. A run that reads the month at
+ * empty or partial insights answer reads as 0) and counts as none, also a
+ * downward correction by Meta; a halt without those figures waits for the
+ * board. A first reading more than CAP_HEADROOM_MAX_GAP_MS old counts as none. A run that reads the month at
  * or over the cap, or cannot read it or the status, starts the count again.
  * The release is audited like a board user's clear and announced in Telegram.
  *
@@ -71,6 +72,8 @@ const NOTICE_MAX = 3900;
 const CLOSE_DEADLINE = "06:00";
 /** The second run that sees headroom must come at least this long after the first (the job is hourly). */
 export const CAP_HEADROOM_MIN_GAP_MS = 30 * 60_000;
+/** A first reading older than this (runs skipped, e.g. an unreadable config) counts as none: two runs in a row are needed. */
+export const CAP_HEADROOM_MAX_GAP_MS = 2 * 60 * 60_000;
 export const CAP_HALT_RELEASED_ACTIVITY = "rk9-ads spend guard: cap halt released";
 
 export interface RulesDeps {
@@ -318,7 +321,9 @@ async function releaseCapHalt(
   const key = capHeadroomKey(companyId);
   try {
     const halt = await readRuleHalt(ctx, companyId, "pause_all_cap", now);
-    const credible = spend !== null && halt?.cap !== undefined && spend.mtdEur >= halt.cap.mtdEur;
+    const stored = halt?.cap;
+    // A damaged or missing figure waits for the board.
+    const credible = spend !== null && typeof stored?.mtdEur === "number" && Number.isFinite(stored.mtdEur) && spend.mtdEur >= stored.mtdEur;
     if (!halt || !spend || !credible || spend.pctUsed >= BUILTIN_PAUSE_ALL_CAP_PCT) {
       // No halt to lift, or no headroom seen: the count starts again.
       await ctx.state.delete(key);
@@ -326,11 +331,12 @@ async function releaseCapHalt(
     }
     const id = haltIdentity(halt);
     const seen = (await ctx.state.get(key)) as { haltId?: unknown; at?: unknown } | null;
-    if (!seen || seen.haltId !== id || typeof seen.at !== "string") {
+    const gap = typeof seen?.at === "string" ? now.getTime() - Date.parse(seen.at) : Number.NaN;
+    if (!seen || seen.haltId !== id || !(gap <= CAP_HEADROOM_MAX_GAP_MS)) {
       await ctx.state.set(key, { haltId: id, at: now.toISOString(), pctUsed: spend.pctUsed });
       return;
     }
-    if (!(now.getTime() - Date.parse(seen.at) >= CAP_HEADROOM_MIN_GAP_MS)) return;
+    if (!(gap >= CAP_HEADROOM_MIN_GAP_MS)) return;
     const released = await clearRuleHalt(ctx, companyId, "pause_all_cap", id, now);
     await ctx.state.delete(key);
     if (!released) return;

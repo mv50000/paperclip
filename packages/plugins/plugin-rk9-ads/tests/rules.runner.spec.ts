@@ -503,6 +503,24 @@ describe("the cap pause's halt ends when the month is back under the cap (RK9-56
     expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
   });
 
+  it("a first reading from before skipped runs counts as none", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, capHalt);
+    await at(r, 0);
+    await at(r, 180); // runs at +60 and +120 did not see the company
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+    await at(r, 240);
+    expect(await halt(r)).toBeNull();
+  });
+
+  it("a damaged cap figure waits for the board and does not fail the run", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, { ...capHalt, cap: null } as unknown as HaltState);
+    await at(r, 0);
+    await at(r, 60);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+  });
+
   it("a cap halt without the figures waits for the board", async () => {
     const r = setup({ rules: CAP_LIVE });
     await setHalt(r.harness.ctx, COMPANY_A, { ...capHalt, cap: undefined });

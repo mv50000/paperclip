@@ -613,6 +613,27 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     expect((await readPendingUndos(r.harness.ctx, COMPANY_A)).map((undo) => undo.objectId).sort()).toEqual(["1", "2", "3"]);
   });
 
+  it("the tick removes only what it handled: a newer failure of the same object stays", async () => {
+    const r = await rig();
+    const { sent, allow } = await lostUndo(r);
+    allow();
+    // While the tick pauses the ad, another card's undo of the same ad fails and replaces the entry.
+    const fetch = r.harness.ctx.http.fetch;
+    r.harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
+      const response = await fetch(url, init);
+      if (init?.method === "POST" && new URL(url).pathname.endsWith(`/${AD}`)) {
+        r.harness.ctx.http.fetch = fetch;
+        await addPendingUndos(r.harness.ctx, COMPANY_A, [
+          { objectId: AD, kind: "ad", gateRequestId: "gate-newer", brandCode: "OLL", haltRule: "kill_switch", since: new Date().toISOString(), error: "x" },
+        ]);
+      }
+      return response;
+    };
+    await r.harness.runJob("scheduled-pause");
+    expect((await readPendingUndos(r.harness.ctx, COMPANY_A)).map((undo) => undo.gateRequestId)).toEqual(["gate-newer"]);
+    expect(sent.id).not.toBe("gate-newer");
+  });
+
   it("an undo that cannot be stored alerts to pause by hand, not a retry", async () => {
     const r = await rig();
     const state = r.harness.ctx.state;
