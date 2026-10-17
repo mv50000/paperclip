@@ -101,12 +101,22 @@ const INLINE_PARENT_SPEC_RE = /^(adset|campaign)_spec$/i;
  * - POST to an ad account's adimages, advideos or adcreatives edge;
  * - POST to its campaigns, adsets or ads edge only with `status: "PAUSED"`;
  * - POST to an object id that only renames it or sets `status: "PAUSED"`;
+ * - POST to an object id that only swaps its creative (`creative: { creative_id }`,
+ *   A8 RK9-514): no status or budget travels with it;
  * - DELETE of an object id.
  * Everything else is refused, for example activation, a budget change, the
  * copies or async batch edges. The gate (A9) and the spend guard (RK9-511)
  * pass their own hooks for the writes they own. `plan.path` is the normalised
  * path that is actually sent.
  */
+/** `{ creative_id: "<digits>" }` and nothing else. */
+function isCreativeRef(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  const id = (value as { creative_id?: unknown }).creative_id;
+  return keys.length === 1 && keys[0] === "creative_id" && typeof id === "string" && NODE_RE.test(id);
+}
+
 export const pausedOnlyWrites = (plan: WritePlan): GuardDecision => {
   // Own keys only: an inherited value is never sent.
   const keys = Object.keys(plan.fields).filter((key) => plan.fields[key] !== undefined && plan.fields[key] !== null);
@@ -126,6 +136,7 @@ export const pausedOnlyWrites = (plan: WritePlan): GuardDecision => {
       : { allow: false, reason: "a campaign, ad set or ad must be created with status PAUSED" };
   }
   if (NODE_RE.test(plan.path)) {
+    if (keys.length === 1 && keys[0] === "creative" && isCreativeRef(plan.fields.creative)) return { allow: true };
     const pauseOrRename =
       keys.length > 0 &&
       keys.every((key) => key === "name" || key === "status") &&

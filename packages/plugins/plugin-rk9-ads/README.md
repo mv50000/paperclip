@@ -24,6 +24,7 @@ the features.
 | `src/kit/` | Ads-agnostic code: local time, Telegram transport, the gate state machine, SDK harness helpers |
 | `src/meta/` | The one Meta Graph client (G12): `graph.ts`, `methods.ts`, `errors.ts`, `redact.ts`, `types.ts` |
 | `src/brand/` | Live preflight, launch gate, provisioning, token incident, UTM links (RK9-510) |
+| `src/publish/` | Publishing pipeline: prevalidate, final URL, ad name, creative body, runner, hand-off hook (RK9-514) |
 | `scripts/live-smoke-sunspot.ts` | Read-only live smoke against Sunspot's ad account; never run by tests or CI |
 | `tests/helpers/embedded-pg.ts` | Real Postgres with the host migration and runtime SQL validators |
 | `src/ui/` | UI placeholders; RK9-518 owns this directory |
@@ -430,6 +431,74 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
 - **Data** `rules` and **action** `rules.dryRun` (A12's editor, G13): the
   effective rules, and the decisions the rules would make now without any
   write.
+
+## Publishing pipeline (RK9-514)
+
+A publication turns a staged creative into a PAUSED ad in the brand's bound
+ad set (G8). The steps:
+
+1. **Prevalidate** (`src/publish/prevalidate.ts`, pure, before any Meta
+   call): aspect ratio 1:1, 4:5 or 9:16 (per placement: feed 1:1/4:5, story
+   and reels 9:16), size and video length when the caller gives them, text
+   limits (2000/255/255), the CTA enum (no NO_BUTTON on a video), the landing
+   domain against `landing.allowedDomains`, and `utm_campaign`. Every problem
+   comes back as `{ code, field, message }`.
+2. **Final URL** (`final-url.ts`): `utm_source=meta&utm_medium=paid&utm_campaign=<campaign>`,
+   plus the other parameters of `landing.utmTemplate` (`{brand}`,
+   `{campaign}`, `{adset}`, `{ad}`). The fixed three win over the template.
+   Existing parameters keep their bytes, the fragment stays last, and a
+   second application changes nothing.
+3. **Media** (G4, URL only): a video goes to `act_<id>/advideos` by
+   `file_url` (or reuses the creative's uploaded video) and is polled until
+   `video_status=ready`. Its thumbnail is the manifest poster, or Meta's
+   preferred `/{video}/thumbnails` URI. An image goes in as
+   `link_data.picture`. No ffmpeg, no child process, no adimages upload.
+4. **Creative** (`creative.ts`): `video_data` (+ `instagram_user_id` when the
+   brand has an IG actor) or `link_data` (never an IG actor). No
+   `degrees_of_freedom_spec`.
+5. **Ad**: `act_<id>/ads` with `status: "PAUSED"`, named
+   `{BRAND}-{campaign}-{format}-{yyyymmdd}-{hash6}`. hash6 comes from the
+   content hash (media, copy, CTA, final URL, ad set). Swap mode instead
+   POSTs only `{ creative: { creative_id } }` to an existing ad of the same
+   ad account.
+6. **Hand-off**: after `published`, `onPublished(publication)` in
+   `src/publish/handoff.ts` runs exactly once per publication. It is a no-op
+   until the activation gate (A9, RK9-517) implements it. Nothing here
+   activates an ad.
+
+Text variants belong to the publication (RK9-525): `text` overrides the
+creative's copy, CTA, landing key or campaign, the result is stored in
+`publications.payload`, and the content hash tells publications apart.
+
+**Idempotency.** The row is written `pending` before the first Meta write,
+and each Meta id is stored right after the write that made it. The stored
+key is `pub:v1:sha256(company, mode, target ad, key)`, where `key` is the
+caller's `idempotencyKey` or the content hash. A re-run returns a published
+row, or resumes a pending or failed one from its stored ids. Before an ad
+create the run looks for an ad with the same name and creative in the ad set
+and adopts it, so a crash between create and save leaves no duplicate.
+
+**Failures.** A video error, a poll timeout, or a failed creative, ad or
+swap write sets `failed` with a one-line message and the fix
+(`operatorMessage()` in `src/meta/errors.ts`, e.g. subcode 2859024). A
+creative made for an ad that was never created is deleted; if Meta refuses
+the delete, `payload.cleanup` names it and the re-run reuses it.
+
+**Async.** The action records the row, starts the run as a background
+promise of short Graph calls (each well inside the host's 30 s RPC limit),
+and waits at most `waitMs` (default 10 s, at most 20 s). A longer run
+returns `pending`; poll the `publication` data key. A worker restart cuts a
+run off; publish again with the same input to resume it.
+
+Every Meta write writes an activity entry: `entityType: "rk9_ads_publication"`,
+`entityId` the publication id, `metadata.metaObjectId` and `metadata.step`.
+No token or secret goes into it.
+
+| Key | Kind | What it does |
+|---|---|---|
+| `publish` | action | `{ creativeId \| manifest, text?, placement?, sizeBytes?, durationSec?, idempotencyKey?, dryRun?, confirm?, waitMs? }`. Dry run (the full planned payloads, no Meta call) unless `dryRun: false, confirm: true`. A real run needs `creativeId` and a launch-ready preflight |
+| `swap-creative` | action | The same plus `adId`: a new creative on an existing ad; its status is never touched |
+| `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication |
 
 ## Brand config, preflight and provisioning (RK9-510)
 

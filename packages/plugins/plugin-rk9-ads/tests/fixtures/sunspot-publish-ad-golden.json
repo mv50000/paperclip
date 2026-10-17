@@ -1,0 +1,59 @@
+{
+  "source": "Built by hand from /opt/repos/sunspot/marketing/reel-studio/publish-ad.mjs (createCreative L168-187, createImageCreative L200-217, the PAUSED ad create L284-289, the swap L270-275) with its default CFG for Sunspot, 2026-10-17. Its --dry-run output is cut at 400 characters, so the bodies are reconstructed from the code. Placeholders in angle brackets are values that only exist at run time.",
+  "allowedDifferences": [
+    "name: the plugin uses the deterministic {BRAND}-{campaign}-{format}-{yyyymmdd}-{hash6} name instead of 'Aurinkopulssi reel/kuva <date>'",
+    "UTM: the plugin's final URL adds the brand template's extra parameters (utm_content) to utm_source=meta&utm_medium=paid&utm_campaign",
+    "video thumbnail: image_url (the poster or Meta's /{video}/thumbnails URI) instead of image_hash of an ffmpeg frame",
+    "image media: link_data.picture (the media URL, G4) instead of image_hash of an adimages upload"
+  ],
+  "inputs": {
+    "adAccount": "1336862981968191",
+    "pageId": "1216714361516949",
+    "igActorId": "17841400000000777",
+    "adsetId": "120247250925850775",
+    "landing": "https://sunspot.fi/get",
+    "utmCampaign": "pulssi",
+    "message": "Näet yhdellä silmäyksellä, mitkä Helsingin terassit ovat juuri nyt auringossa ☀️ Laskettu rakennusten varjoista — ei arvailtua. Lisää suosikkiterassisi, niin saat ilmoituksen kun aurinko osuu siihen.",
+    "title": "Katso mitkä terassit ovat auringossa juuri nyt",
+    "linkDescription": "Ilmainen • sunspot.fi",
+    "ctaType": "LEARN_MORE"
+  },
+  "videoCreative": {
+    "name": "Aurinkopulssi reel 2026-10-17",
+    "object_story_spec": {
+      "page_id": "1216714361516949",
+      "video_data": {
+        "video_id": "<VIDEO_ID>",
+        "image_hash": "<THUMBNAIL_IMAGE_HASH>",
+        "title": "Katso mitkä terassit ovat auringossa juuri nyt",
+        "message": "Näet yhdellä silmäyksellä, mitkä Helsingin terassit ovat juuri nyt auringossa ☀️ Laskettu rakennusten varjoista — ei arvailtua. Lisää suosikkiterassisi, niin saat ilmoituksen kun aurinko osuu siihen.",
+        "link_description": "Ilmainen • sunspot.fi",
+        "call_to_action": { "type": "LEARN_MORE", "value": { "link": "https://sunspot.fi/get?utm_source=meta&utm_medium=paid&utm_campaign=pulssi" } }
+      },
+      "instagram_user_id": "17841400000000777"
+    }
+  },
+  "imageCreative": {
+    "name": "Aurinkopulssi kuva 2026-10-17",
+    "object_story_spec": {
+      "page_id": "1216714361516949",
+      "link_data": {
+        "image_hash": "<IMAGE_HASH>",
+        "link": "https://sunspot.fi/get?utm_source=meta&utm_medium=paid&utm_campaign=pulssi",
+        "message": "Näet yhdellä silmäyksellä, mitkä Helsingin terassit ovat juuri nyt auringossa ☀️ Laskettu rakennusten varjoista — ei arvailtua. Lisää suosikkiterassisi, niin saat ilmoituksen kun aurinko osuu siihen.",
+        "name": "Katso mitkä terassit ovat auringossa juuri nyt",
+        "description": "Ilmainen • sunspot.fi",
+        "call_to_action": { "type": "LEARN_MORE", "value": { "link": "https://sunspot.fi/get?utm_source=meta&utm_medium=paid&utm_campaign=pulssi" } }
+      }
+    }
+  },
+  "adCreate": {
+    "name": "Aurinkopulssi reel 2026-10-17",
+    "adset_id": "120247250925850775",
+    "creative": { "creative_id": "<CREATIVE_ID>" },
+    "status": "PAUSED"
+  },
+  "swap": {
+    "creative": { "creative_id": "<CREATIVE_ID>" }
+  }
+}
