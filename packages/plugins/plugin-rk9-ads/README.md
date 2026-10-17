@@ -672,8 +672,9 @@ anything ACTIVE.
   approved just before the pause pauses the ad again, and a card of the ad
   tapped while the halt holds is refused. A board user lifts it early with
   `clear-halt` `{ adId, id }` (the page offers it after the pause).
-  `cardsError` names cards that did not close and an approved activation
-  that may still run; `haltError` a halt that was not stored. An activation
+  `cardsError` names cards that did not close; `activationRunning` an
+  approved activation that may still run; `haltError` a halt that was not
+  stored. An activation
   that stalls longer than the halt before its last halt check is not
   stopped by it. The page keeps these per ad. The closed cards say whether Meta
   confirmed the pause. There is no activate, resume or scale action (G1, G9).

@@ -133,6 +133,7 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     // Then the ad's open cards close, so no tap after this point activates it again.
     let closedCardIds: string[] = [];
     let cardsError: string | undefined;
+    let activationRunning = false;
     let announce: (paused?: boolean) => Promise<void> = async () => undefined;
     const close = overrides.closeAdCards ?? getActivationCards()?.closeCardsForAdPause;
     if (!close) {
@@ -142,12 +143,14 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
         const closed = await close(companyId, adId, { reason, halted: adHalt !== null });
         closedCardIds = closed.ids;
         cardsError = closed.error;
+        activationRunning = closed.activationRunning === true;
         announce = closed.announce;
       } catch (cause) {
         cardsError = safeError(cause);
       }
     }
     if (cardsError) ctx.logger.error("rk9-ads ui: open activation cards of the ad not closed", { companyId, adId, detail: cardsError });
+    if (activationRunning) ctx.logger.warn("rk9-ads ui: an approved activation of the paused ad may still be running", { companyId, adId, halted: adHalt !== null });
 
     let paused = false;
     let error: string | null = null;
@@ -177,6 +180,7 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
           closedCardIds,
           ...(adHalt ? { adHalt: { id: adHalt.id, until: adHalt.until } } : {}),
           ...(cardsError ? { cardsError } : {}),
+          ...(activationRunning ? { activationRunning } : {}),
           ...(haltError ? { haltError } : {}),
         },
         initiator,
@@ -203,6 +207,7 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       closedCardIds,
       ...(adHalt ? { adHalt: { id: adHalt.id, until: adHalt.until } } : {}),
       ...(cardsError ? { cardsError } : {}),
+      ...(activationRunning ? { activationRunning } : {}),
       ...(haltError ? { haltError } : {}),
       ...(auditError ? { auditError } : {}),
     });

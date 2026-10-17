@@ -686,8 +686,9 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     registerUi(r.runtime);
     r.repo.activationInFlight = async () => true;
     const result = await pauseAd(r);
-    expect(result).toMatchObject({ paused: true, closedCardIds: [], adHalt: { id: expect.any(String), until: expect.any(String) } });
-    expect(result.cardsError).toMatch(/approved activation of ad .* is running; the ad's halt makes it pause the ad again/);
+    expect(result).toMatchObject({ paused: true, closedCardIds: [], activationRunning: true, adHalt: { id: expect.any(String), until: expect.any(String) } });
+    // A running activation is not a card close failure.
+    expect(result.cardsError).toBeUndefined();
   });
 
   it("reports an approved activation that may still run when the ad's halt was not stored", async () => {
@@ -702,7 +703,8 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     const result = await pauseAd(r);
     expect(result).toMatchObject({ paused: true, closedCardIds: [], haltError: expect.stringContaining("state down") });
     expect(result.adHalt).toBeUndefined();
-    expect(result.cardsError).toMatch(/approved activation of ad .* is running/);
+    expect(result.activationRunning).toBe(true);
+    expect(result.cardsError).toBeUndefined();
   });
 
   it("reports cardsError when the activation gate is not running", async () => {

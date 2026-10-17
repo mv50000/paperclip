@@ -449,7 +449,7 @@ describe("operator UI (RK9-518)", () => {
       const adId = String(params.adId);
       if (params.dryRun !== false) return { dryRun: true, adId, name: null, previousStatus: "ACTIVE", status: "ACTIVE", paused: false };
       return adId === "301"
-        ? { dryRun: false, adId, name: null, previousStatus: "ACTIVE", status: "PAUSED", paused: true, closedCardIds: [], haltError: "state down", cardsError: "an approved activation of ad 301 is running" }
+        ? { dryRun: false, adId, name: null, previousStatus: "ACTIVE", status: "PAUSED", paused: true, closedCardIds: [], haltError: "state down", activationRunning: true }
         : { dryRun: false, adId, name: null, previousStatus: "ACTIVE", status: "PAUSED", paused: true, closedCardIds: [], adHalt: halt };
     });
     bridge.actions.set(ACTION.clearHalt, async (params) => {
@@ -464,7 +464,7 @@ describe("operator UI (RK9-518)", () => {
       await click("Pysäytä mainos");
     }
     const alerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
-    expect(alerts).toEqual([expect.stringMatching(/Mainos 301 pysäytettiin, mutta pysäytystilaa EI tallennettu \(state down\).*approved activation of ad 301 is running/)]);
+    expect(alerts).toEqual([expect.stringMatching(/Mainos 301 pysäytettiin, mutta pysäytystilaa EI tallennettu \(state down\).*juuri hyväksytty aktivointi on vielä käynnissä ja voi käynnistää mainoksen uudelleen/)]);
     expect(container.textContent).toContain("Mainoksen 302 aktivointi on estetty");
     await click("Poista mainoksen pysäytystila");
     await type(`Kirjoita ${CLEAR_HALT_WORD}`, CLEAR_HALT_WORD);

@@ -57,6 +57,8 @@ export interface PauseCardClose {
   ids: string[];
   /** Set when some open cards could not be listed or closed; `ids` are the ones that did close. */
   error?: string;
+  /** pause-ad: an approved activation of the ad may still be running (RK9-566). Not a close failure. */
+  activationRunning?: boolean;
   /** Edits the closed cards. pause-ad passes whether Meta confirmed its pause (RK9-566); the pauses pass nothing. */
   announce(paused?: boolean): Promise<void>;
 }
@@ -392,8 +394,9 @@ export function createStagingCards(deps: StagingCardDeps) {
     /**
      * The pause-ad hook (RK9-562): closes the open card rows of one ad now;
      * `announce` edits the cards later, with the pause's result. A tap that
-     * approved a card before this close is not stopped here: `error` says
-     * that an approved activation of the ad may still be running. When the
+     * approved a card before this close is not stopped here:
+     * `activationRunning` says that an approved activation of the ad may
+     * still be running, and `error` that it could not be read. When the
      * pause-ad halt was stored (`halted`, RK9-566), that activation reads it
      * before its next ACTIVE write and after its writes and pauses again
      * what it set ACTIVE; the warning stays, because a write Meta applies
@@ -404,20 +407,16 @@ export function createStagingCards(deps: StagingCardDeps) {
       const outcome = { reason: "ad_paused", pauseReason: input.reason.slice(0, 300) };
       const { closed, error } = await closeRows(companyId, await deps.repo.openForAd(companyId, adId), outcome, AD_PAUSE_CLOSE_TEXT);
       const errors = error ? [error] : [];
+      let activationRunning = false;
       try {
-        if (await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
-          errors.push(
-            input.halted
-              ? `an approved activation of ad ${adId} is running; the ad's halt makes it pause the ad again, check the ad's status after it has finished`
-              : `an approved activation of ad ${adId} is running; check the ad's status after it has finished`,
-          );
-        }
+        activationRunning = await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES);
       } catch (cause) {
         errors.push(`running activations could not be read: ${safeError(cause)}`);
       }
       return {
         ids: closed.map((request) => request.id),
         ...(errors.length > 0 ? { error: errors.join("; ").slice(0, 500) } : {}),
+        ...(activationRunning ? { activationRunning } : {}),
         announce: (paused) => announceClosed(companyId, closed, outcome, paused === false ? AD_PAUSE_FAILED_CLOSE_TEXT : AD_PAUSE_CLOSE_TEXT),
       };
     },

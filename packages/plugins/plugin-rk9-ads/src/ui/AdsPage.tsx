@@ -360,6 +360,13 @@ function pausedAdNote(result: UiPauseAdResult): PausedAdNote {
     warnings.push(`pysäytystilaa EI tallennettu (${result.haltError}): juuri hyväksytty aktivointi voi käynnistää mainoksen uudelleen`);
   }
   if (result.cardsError) warnings.push(`aktivointikorttien sulkemisessa oli ongelma (${result.cardsError})`);
+  if (result.activationRunning) {
+    warnings.push(
+      result.adHalt
+        ? "juuri hyväksytty aktivointi on vielä käynnissä; mainoksen pysäytystila saa sen pysäyttämään mainoksen uudelleen"
+        : "juuri hyväksytty aktivointi on vielä käynnissä ja voi käynnistää mainoksen uudelleen",
+    );
+  }
   return { adId: result.adId, warnings, ...(result.adHalt ? { adHalt: result.adHalt } : {}) };
 }
 
