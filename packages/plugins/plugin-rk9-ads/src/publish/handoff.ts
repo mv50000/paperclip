@@ -1,8 +1,9 @@
 /**
  * Publication -> spend gate hand-off (G15, A8 RK9-514).
  *
- * The publish service calls `onPublished` exactly once per publication, after
- * its PAUSED ad exists and the row says `published`. The service itself never
+ * The publish service calls `onPublished` at most once per publication, after
+ * its PAUSED ad exists and the row says `published` (a once-marker; a hook
+ * that throws gives it back, a worker crash mid-hook does not). The service itself never
  * activates anything. The activation gate (A9, RK9-517) implements this hook:
  * it opens the Telegram approval for the ad. Until then it is a no-op.
  */

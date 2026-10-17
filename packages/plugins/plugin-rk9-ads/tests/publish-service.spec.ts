@@ -250,6 +250,39 @@ describe("failures and resume", () => {
     await service.settled();
     expect(routes.calls.filter((call) => call.key === `POST ${ACT}/adcreatives`).length).toBe(creativesBefore);
     expect(store.rows[0]).toMatchObject({ status: "published", metaCreativeId: "7001", metaAdId: "5002" });
+    // The marker is stale once the creative is the ad's creative.
+    expect(store.rows[0]!.payload.cleanup ?? null).toBeNull();
+  });
+
+  it("keeps the creative when the ad create response is lost or the ad id cannot be saved", async () => {
+    const { service, routes, store } = serviceRig();
+    routes.on(`POST ${ACT}/ads`, new Error("socket hang up"));
+    await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await service.settled();
+    expect(store.rows[0]).toMatchObject({ status: "failed", metaCreativeId: "7001" });
+    expect(routes.calls.some((call) => call.method === "DELETE")).toBe(false);
+
+    // The re-run finds the ad that Meta did create and adopts it: no second creative, no second ad.
+    const planned = await service.plan(COMPANY, { creativeId: CREATIVE_IMAGE });
+    routes.on(`GET ${ADSET}/ads`, { body: { data: [{ id: "5010", name: planned.adName, status: "PAUSED", effective_status: "PAUSED", creative: { id: "7001" } }] } });
+    const adPostsBefore = adPosts(routes.calls).length;
+    await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await service.settled();
+    expect(store.rows[0]).toMatchObject({ status: "published", metaCreativeId: "7001", metaAdId: "5010" });
+    expect(adPosts(routes.calls)).toHaveLength(adPostsBefore);
+    expect(routes.calls.filter((call) => call.key === `POST ${ACT}/adcreatives`)).toHaveLength(1);
+
+    // A save failure right after a successful ad create keeps the creative too.
+    const second = serviceRig();
+    const update = second.store.update.bind(second.store);
+    second.store.update = async (companyId, id, expected, patch) => {
+      if (patch.metaAdId) throw new Error("database is down");
+      return update(companyId, id, expected, patch);
+    };
+    await second.service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await second.service.settled();
+    expect(second.routes.calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(second.store.rows[0]).toMatchObject({ status: "failed", metaCreativeId: "7001" });
   });
 
   it("a video processing error fails the publication and creates no creative or ad", async () => {
@@ -317,9 +350,9 @@ describe("failures and resume", () => {
 });
 
 describe("swap mode", () => {
-  it("posts only { creative } to the existing ad and never touches its status", async () => {
+  it("posts only { creative, status: PAUSED } to a PAUSED ad that this company published", async () => {
     const { service, routes, store, handoffs } = serviceRig();
-    routes.on("GET 5001", { body: { account_id: "29231592883113369", adset_id: ADSET } });
+    routes.on("GET 5001", { body: { id: "5001", account_id: "29231592883113369", adset_id: ADSET, status: "PAUSED", effective_status: "PAUSED" } });
     routes.on("POST 5001", { body: { success: true } });
     await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
     await service.settled();
@@ -329,17 +362,31 @@ describe("swap mode", () => {
     await service.settled();
     const swap = store.rows.find((row) => row.id === outcome.publication.id)!;
     const swapCall = routes.calls.find((call) => call.key === "POST 5001")!;
-    expect(formOf(swapCall)).toEqual({ creative: { creative_id: "7001" } });
+    expect(formOf(swapCall)).toEqual({ creative: { creative_id: "7001" }, status: "PAUSED" });
     expect(swap).toMatchObject({ mode: "swap", status: "swapped", metaAdId: "5001", replacesPublicationId: original.id });
     expect(adPosts(routes.calls)).toHaveLength(1);
     expect(handoffs).toHaveLength(1);
   });
 
-  it("refuses an ad from another ad account before any write", async () => {
+  it("refuses an ad that no publication of this company made, before any read or write", async () => {
     const { service, routes } = serviceRig();
-    routes.on("GET 5001", { body: { account_id: "1336862981968191", adset_id: ADSET } });
-    await expect(service.swap(COMPANY, { creativeId: CREATIVE_IMAGE, adId: "5001" }, UI)).rejects.toThrow(/not in this brand's ad account/);
-    expect(routes.writes()).toEqual([]);
+    routes.on("GET 5001", { body: { id: "5001", account_id: "29231592883113369", adset_id: ADSET, status: "PAUSED", effective_status: "PAUSED" } });
+    await expect(service.swap(COMPANY, { creativeId: CREATIVE_IMAGE, adId: "5001" }, UI)).rejects.toThrow(/ad_not_owned|not published by this company/);
+    expect(routes.calls).toEqual([]);
+  });
+
+  it("refuses an owned ad from another ad account, or one that is not PAUSED, before any write", async () => {
+    const { service, routes } = serviceRig();
+    await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await service.settled();
+    const writes = routes.writes().length;
+    routes.on("GET 5001", { body: { id: "5001", account_id: "1336862981968191", adset_id: ADSET, status: "PAUSED", effective_status: "PAUSED" } });
+    await expect(service.swap(COMPANY, { creativeId: CREATIVE_IMAGE, adId: "5001", text: { copy: { message: "B" } } }, UI)).rejects.toThrow(/not in this brand's ad account/);
+    for (const status of ["ACTIVE", "ARCHIVED"]) {
+      routes.on("GET 5001", { body: { id: "5001", account_id: "29231592883113369", adset_id: ADSET, status, effective_status: "DISAPPROVED" } });
+      await expect(service.swap(COMPANY, { creativeId: CREATIVE_IMAGE, adId: "5001", text: { copy: { message: "B" } } }, UI)).rejects.toThrow(/pause it before a creative swap/);
+    }
+    expect(routes.writes()).toHaveLength(writes);
   });
 });
 
@@ -351,17 +398,19 @@ describe("no path to ACTIVE", () => {
     }
   });
 
-  it("the spend-guarded hook lets a PAUSED ad create and a creative swap through without a spend read, and refuses ACTIVE", async () => {
+  it("the spend-guarded hook lets a PAUSED ad create and a pausing creative swap through without a spend read, and refuses ACTIVE", async () => {
     const config = olollaConfig();
     const refusingRead = liveClient({ fetch: async () => { throw new Error("no read expected"); } } as never, { now: 0 });
     const hook = createSpendGuardHook({ config, readClient: refusingRead });
     const plan = (path: string, fields: Record<string, unknown>) => ({ companyId: COMPANY, mode: "live" as const, method: "POST" as const, path, fields });
     expect(await hook(plan(`${ACT}/ads`, { name: "a", adset_id: ADSET, creative: { creative_id: "1" }, status: "PAUSED" }))).toEqual({ allow: true });
-    expect(await hook(plan("5001", { creative: { creative_id: "7001" } }))).toEqual({ allow: true });
+    expect(await hook(plan("5001", { creative: { creative_id: "7001" }, status: "PAUSED" }))).toEqual({ allow: true });
+    // A swap without the pause would reach the gate, which refuses it.
+    expect((await hook(plan("5001", { creative: { creative_id: "7001" } }))).allow).toBe(false);
     expect((await hook(plan(`${ACT}/ads`, { name: "a", adset_id: ADSET, creative: { creative_id: "1" }, status: "ACTIVE" }))).allow).toBe(false);
     // A swap that smuggles a status is not a swap.
     expect(pausedOnlyWrites(plan("5001", { creative: { creative_id: "7001" }, status: "ACTIVE" })).allow).toBe(false);
-    expect(pausedOnlyWrites(plan("5001", { creative: { creative_id: "7001", extra: 1 } })).allow).toBe(false);
+    expect(pausedOnlyWrites(plan("5001", { creative: { creative_id: "7001", extra: 1 }, status: "PAUSED" })).allow).toBe(false);
     expect(pausedOnlyWrites(plan("5001", { creative: { object_story_spec: {} } })).allow).toBe(false);
   });
 });

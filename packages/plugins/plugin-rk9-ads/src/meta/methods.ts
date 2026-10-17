@@ -664,16 +664,18 @@ export async function listAdSetAds(client: MetaGraphClient, adSetId: string, opt
 }
 
 /**
- * Points an existing ad at another creative. Only `creative` is sent: the
- * ad's status, budget and ad set stay as they are.
+ * Points an existing ad at another creative and pauses it. Only `creative`
+ * and `status: "PAUSED"` are sent: the budget and ad set stay as they are.
  */
 export async function swapAdCreative(
   client: MetaGraphClient,
   adId: string,
   creativeId: string,
 ): Promise<WriteResult<{ success: boolean }>> {
+  // status PAUSED travels with the swap: new content never goes live without the gate (A9).
   const result = await client.post<{ success?: unknown }>(requireId(adId, "adId"), {
     creative: { creative_id: requireId(creativeId, "creativeId") },
+    status: "PAUSED",
   });
   if (isDryRun(result)) return result;
   return { success: result.success === true };

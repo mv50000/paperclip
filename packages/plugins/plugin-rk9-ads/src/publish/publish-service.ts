@@ -27,7 +27,7 @@ import type { BrandConfig } from "../config.js";
 import { parseCreativeManifest } from "../creative-manifest/schema.js";
 import type { Initiator, OnceStore } from "../features/spend-guard/support.js";
 import { localDate } from "../kit/local-time.js";
-import { MediaProcessingError, operatorMessage } from "../meta/errors.js";
+import { MediaProcessingError, MetaGraphError, operatorMessage, WriteRefusedError } from "../meta/errors.js";
 import type { MetaGraphClient } from "../meta/graph.js";
 import {
   adAccountPath,
@@ -35,6 +35,7 @@ import {
   createAdCreative,
   deleteObject,
   getAdOwner,
+  getObjectStatus,
   getVideoThumbnails,
   listAdSetAds,
   swapAdCreative,
@@ -70,6 +71,8 @@ export type PublishErrorCode =
   | "no_bound_adset"
   | "adset_not_bound"
   | "ad_not_in_account"
+  | "ad_not_owned"
+  | "ad_not_paused"
   | "idempotency_key_conflict"
   | "publication_not_found";
 
@@ -358,9 +361,19 @@ export function createPublishService(deps: PublishServiceDeps) {
     let targetAdId: string | null = null;
     if (mode === "swap") {
       if (!request.adId) throw new PublishError("invalid_request", "adId is required for a creative swap");
-      const owner = await getAdOwner(deps.readClient(companyId, config), request.adId);
+      // Only an ad that a publication of this company made, and only while it is PAUSED:
+      // a swap must never put new content live or restart spend (G1).
+      if (!(await deps.store.findByAd(companyId, request.adId))) {
+        throw new PublishError("ad_not_owned", `ad ${request.adId} was not published by this company's ads plugin`);
+      }
+      const readClient = deps.readClient(companyId, config);
+      const owner = await getAdOwner(readClient, request.adId);
       if (owner.accountId !== config.meta.adAccountId) {
         throw new PublishError("ad_not_in_account", `ad ${request.adId} is not in this brand's ad account`);
+      }
+      const adStatus = await getObjectStatus(readClient, request.adId);
+      if (adStatus.status !== "PAUSED") {
+        throw new PublishError("ad_not_paused", `ad ${request.adId} has status ${adStatus.status ?? "unknown"}; pause it before a creative swap`);
       }
       targetAdId = request.adId;
       adsetId = owner.adsetId;
@@ -492,6 +505,20 @@ export function createPublishService(deps: PublishServiceDeps) {
     }
   }
 
+  /** The ad write surely did not happen: the guard refused it, or Meta answered with a 4xx Graph error. */
+  function adWriteRejected(error: unknown): boolean {
+    if (error instanceof WriteRefusedError) return true;
+    return error instanceof MetaGraphError && error.code !== null && error.httpStatus !== null && error.httpStatus >= 400 && error.httpStatus < 500;
+  }
+
+  /** A settled run drops a stale cleanup marker: its creative is now the ad's creative. */
+  async function clearedCleanup(companyId: string, id: string): Promise<{ payload?: PublicationPayload }> {
+    const latest = await deps.store.get(companyId, id);
+    if (!latest?.payload.cleanup) return {};
+    const { cleanup: _cleanup, ...payload } = latest.payload;
+    return { payload };
+  }
+
   async function ensureHandoff(companyId: string, record: PublicationRecord): Promise<void> {
     if (record.status !== "published" || !record.metaAdId || !record.metaCreativeId || !record.adsetId || !record.adName) return;
     const key = `publication-handoff:${record.id}`;
@@ -520,7 +547,9 @@ export function createPublishService(deps: PublishServiceDeps) {
     let record = await deps.store.get(companyId, id);
     if (!record || record.status !== "pending") return;
     let client: MetaGraphClient | null = null;
+    // The creative this run made, until an ad write that used it succeeded.
     let createdCreativeId: string | null = null;
+    let adWriteSent = false;
     try {
       const config = await enabledConfig(companyId);
       if (record.brandCode !== config.brandCode) throw new Error(`the publication is for brand ${record.brandCode}, the config is ${config.brandCode}`);
@@ -577,10 +606,12 @@ export function createPublishService(deps: PublishServiceDeps) {
       if (record.mode === "swap") {
         const target = payload.targetAdId ?? record.metaAdId;
         if (!target) throw new Error("the swap has no target ad");
+        adWriteSent = true;
         const swapped = await swapAdCreative(client, target, creativeId);
         if (isDryRun(swapped)) throw new Error("the write client is in dry-run mode");
+        createdCreativeId = null;
         await logActivity(companyId, id, "ad creative swapped", { metaObjectId: target, creativeId, step: "ads_update" });
-        await save(companyId, id, { status: "swapped", error: null, publishedAt: now() });
+        await save(companyId, id, { status: "swapped", error: null, publishedAt: now(), ...(await clearedCleanup(companyId, id)) });
         return;
       }
 
@@ -593,22 +624,25 @@ export function createPublishService(deps: PublishServiceDeps) {
           await save(companyId, id, { metaAdId: adId });
           await logActivity(companyId, id, "existing PAUSED ad adopted", { metaObjectId: adId, step: "ads_adopt" });
         } else {
+          adWriteSent = true;
           const created = await createAd(client, account, { name: record.adName!, adsetId: record.adsetId!, creativeId });
           if (isDryRun(created)) throw new Error("the write client is in dry-run mode");
+          createdCreativeId = null;
           adId = created.adId;
           await save(companyId, id, { metaAdId: adId });
           await logActivity(companyId, id, "PAUSED ad created", { metaObjectId: adId, creativeId, step: "ads_create" });
         }
       }
-      createdCreativeId = null;
-      await save(companyId, id, { status: "published", error: null, publishedAt: now() });
+      await save(companyId, id, { status: "published", error: null, publishedAt: now(), ...(await clearedCleanup(companyId, id)) });
       const published = await deps.store.get(companyId, id);
       if (published) await ensureHandoff(companyId, published);
     } catch (error) {
       const message = error instanceof PublishError ? `${error.code}: ${error.message}` : operatorMessage(error);
       const current = (await deps.store.get(companyId, id).catch(() => null)) ?? record;
-      // The ad was never created: remove the creative this run made, so nothing is left behind.
-      const orphan = createdCreativeId ?? (current.metaAdId ? null : current.metaCreativeId);
+      // Only a creative this run made, and only when no ad can use it: the ad write was not
+      // sent or surely did not happen. A lost response or a failed save keeps it; a creative
+      // from an earlier run stays referenced, and a re-run reuses or adopts it.
+      const orphan = createdCreativeId && (!adWriteSent || adWriteRejected(error)) ? createdCreativeId : null;
       if (client && orphan && current.status === "pending") await cleanupCreative(companyId, current, client, orphan, error);
       const failed = await deps.store.update(companyId, id, "pending", { status: "failed", error: message }).catch(() => false);
       if (failed) await logActivity(companyId, id, "publication failed", { error: message, step: "failed" });

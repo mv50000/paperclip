@@ -459,10 +459,13 @@ ad set (G8). The steps:
 5. **Ad**: `act_<id>/ads` with `status: "PAUSED"`, named
    `{BRAND}-{campaign}-{format}-{yyyymmdd}-{hash6}`. hash6 comes from the
    content hash (media, copy, CTA, final URL, ad set). Swap mode instead
-   POSTs only `{ creative: { creative_id } }` to an existing ad of the same
-   ad account.
+   POSTs only `{ creative: { creative_id }, status: "PAUSED" }` to an
+   existing ad. The ad must be one that a publication of this company made,
+   in the brand's ad account, and its status must already be PAUSED. New
+   content never goes live without the activation gate (G1).
 6. **Hand-off**: after `published`, `onPublished(publication)` in
-   `src/publish/handoff.ts` runs exactly once per publication. It is a no-op
+   `src/publish/handoff.ts` runs at most once per publication (a once-marker;
+   a hook that throws gives the marker back and runs on the next publish). It is a no-op
    until the activation gate (A9, RK9-517) implements it. Nothing here
    activates an ad.
 
@@ -481,8 +484,11 @@ and adopts it, so a crash between create and save leaves no duplicate.
 **Failures.** A video error, a poll timeout, or a failed creative, ad or
 swap write sets `failed` with a one-line message and the fix
 (`operatorMessage()` in `src/meta/errors.ts`, e.g. subcode 2859024). A
-creative made for an ad that was never created is deleted; if Meta refuses
-the delete, `payload.cleanup` names it and the re-run reuses it.
+creative is deleted only when this run made it and no ad can use it: the ad
+write was not sent, the guard refused it, or Meta answered it with a 4xx
+error. After a lost response or a failed save the creative stays on the row,
+and the re-run reuses it and adopts the ad. If Meta refuses the delete,
+`payload.cleanup` names the creative; a later successful run clears it.
 
 **Async.** The action records the row, starts the run as a background
 promise of short Graph calls (each well inside the host's 30 s RPC limit),
@@ -497,7 +503,7 @@ No token or secret goes into it.
 | Key | Kind | What it does |
 |---|---|---|
 | `publish` | action | `{ creativeId \| manifest, text?, placement?, sizeBytes?, durationSec?, idempotencyKey?, dryRun?, confirm?, waitMs? }`. Dry run (the full planned payloads, no Meta call) unless `dryRun: false, confirm: true`. A real run needs `creativeId` and a launch-ready preflight |
-| `swap-creative` | action | The same plus `adId`: a new creative on an existing ad; its status is never touched |
+| `swap-creative` | action | The same plus `adId`: a new creative on a PAUSED ad that this company published; the ad stays PAUSED |
 | `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication |
 
 ## Brand config, preflight and provisioning (RK9-510)

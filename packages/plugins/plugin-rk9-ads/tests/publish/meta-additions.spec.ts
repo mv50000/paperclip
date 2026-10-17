@@ -22,32 +22,33 @@ import { formOf } from "./rig.js";
 describe("pausedOnlyWrites and the creative swap", () => {
   const node = (fields: Record<string, unknown>): WritePlan => ({ companyId: "c", mode: "live", method: "POST", path: "5001", fields });
 
-  it("allows a node POST whose only field is a numeric creative reference", () => {
-    expect(pausedOnlyWrites(node({ creative: { creative_id: "7001" } }))).toEqual({ allow: true });
+  it("allows a node POST with exactly a numeric creative reference and status PAUSED", () => {
+    expect(pausedOnlyWrites(node({ creative: { creative_id: "7001" }, status: "PAUSED" }))).toEqual({ allow: true });
   });
 
   it.each([
-    ["a status next to the creative", { creative: { creative_id: "7001" }, status: "ACTIVE" }],
-    ["a PAUSED status next to the creative", { creative: { creative_id: "7001" }, status: "PAUSED" }],
-    ["a name next to the creative", { creative: { creative_id: "7001" }, name: "x" }],
-    ["an extra key inside the creative", { creative: { creative_id: "7001", object_story_spec: {} } }],
-    ["a non-numeric creative id", { creative: { creative_id: "abc" } }],
-    ["a numeric (not string) creative id", { creative: { creative_id: 7001 } }],
-    ["an inline creative", { creative: { object_story_spec: { page_id: "1" } } }],
+    ["a creative without the pause", { creative: { creative_id: "7001" } }],
+    ["an ACTIVE status next to the creative", { creative: { creative_id: "7001" }, status: "ACTIVE" }],
+    ["a name next to the paused creative", { creative: { creative_id: "7001" }, status: "PAUSED", name: "x" }],
+    ["a budget next to the paused creative", { creative: { creative_id: "7001" }, status: "PAUSED", daily_budget: "100" }],
+    ["an extra key inside the creative", { creative: { creative_id: "7001", object_story_spec: {} }, status: "PAUSED" }],
+    ["a non-numeric creative id", { creative: { creative_id: "abc" }, status: "PAUSED" }],
+    ["a numeric (not string) creative id", { creative: { creative_id: 7001 }, status: "PAUSED" }],
+    ["an inline creative", { creative: { object_story_spec: { page_id: "1" } }, status: "PAUSED" }],
   ])("refuses %s", (_label, fields) => {
     expect(pausedOnlyWrites(node(fields as Record<string, unknown>)).allow).toBe(false);
   });
 });
 
 describe("publishing methods", () => {
-  it("swapAdCreative sends only the creative, deleteObject a bare DELETE, listAdSetAds reads the ad set edge", async () => {
+  it("swapAdCreative sends only the creative and the pause, deleteObject a bare DELETE, listAdSetAds reads the ad set edge", async () => {
     const routes = new FakeRoutes()
       .on("POST 5001", { body: { success: true } })
       .on("DELETE 7001", { body: { success: true } })
       .on("GET 200/ads", { body: { data: [{ id: "5001", name: "n", status: "PAUSED", effective_status: "PAUSED", creative: { id: "7001" } }] } });
     const client = metaClient(routes, { mode: "live" });
     expect(await swapAdCreative(client, "5001", "7001")).toEqual({ success: true });
-    expect(formOf(routes.calls[0]!)).toEqual({ creative: { creative_id: "7001" } });
+    expect(formOf(routes.calls[0]!)).toEqual({ creative: { creative_id: "7001" }, status: "PAUSED" });
     expect(await deleteObject(client, "7001")).toEqual({ success: true });
     expect(routes.calls[1]).toMatchObject({ method: "DELETE", key: "DELETE 7001" });
     expect(await listAdSetAds(client, "200")).toEqual([
