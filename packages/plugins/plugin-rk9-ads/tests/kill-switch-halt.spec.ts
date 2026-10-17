@@ -18,7 +18,7 @@ import { registerGate, type GateOverrides } from "../src/features/gate/register.
 import { readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
 import { pauseAll, type PauseAllResult, type PauseRule } from "../src/features/spend-guard/killswitch.js";
 import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_DATA_KEY } from "../src/features/spend-guard/register.js";
-import { readPendingUndos } from "../src/features/spend-guard/pending-undo.js";
+import { addPendingUndos, readPendingUndos, reportUndoFailure, type PendingUndo } from "../src/features/spend-guard/pending-undo.js";
 import { memoryOnceStore } from "../src/features/spend-guard/support.js";
 import { TelegramController } from "../src/features/telegram/controller.js";
 import { gateRegistry, resetGateRegistry } from "../src/features/telegram/gates.js";
@@ -596,6 +596,39 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
     expect(r.notifier.messages.filter((message) => message.text.includes("pysäytystila päättyi ennen kuin aktivoinnin peruutus onnistui"))).toHaveLength(1);
     await r.harness.runJob("scheduled-pause");
+  });
+
+  it("concurrent writes of the list keep every entry", async () => {
+    const r = await rig();
+    const entry = (objectId: string): PendingUndo => ({ objectId, kind: "ad", gateRequestId: `gate-${objectId}`, brandCode: "OLL", haltRule: "kill_switch", since: "2026-10-21T09:00:00.000Z", error: "x" });
+    // A slow state store widens the read-modify-write window.
+    const state = r.harness.ctx.state;
+    const get = state.get.bind(state);
+    state.get = async (input) => {
+      const value = await get(input);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return value;
+    };
+    await Promise.all(["1", "2", "3"].map((id) => addPendingUndos(r.harness.ctx, COMPANY_A, [entry(id)])));
+    expect((await readPendingUndos(r.harness.ctx, COMPANY_A)).map((undo) => undo.objectId).sort()).toEqual(["1", "2", "3"]);
+  });
+
+  it("an undo that cannot be stored alerts to pause by hand, not a retry", async () => {
+    const r = await rig();
+    const state = r.harness.ctx.state;
+    const set = state.set.bind(state);
+    state.set = async (input, value) => {
+      if (input.stateKey.startsWith("pending-undo:")) throw new Error("state down");
+      return set(input, value);
+    };
+    const report = await reportUndoFailure({ ctx: r.harness.ctx, store: r.once, notifier: r.notifier }, COMPANY_A, parsedConfig(), {
+      gateRequestId: "gate-1",
+      haltRule: "kill_switch",
+      failed: [{ kind: "campaign", objectId: CAMPAIGN, error: "rate limited" }],
+    }, new Date());
+    expect(report).toMatchObject({ stored: false, telegram: "sent", error: expect.stringContaining("state down") });
+    expect(r.notifier.messages.at(-1)!.text).toContain("Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.");
+    expect(r.notifier.messages.at(-1)!.text).not.toContain("yritetään uudelleen");
   });
 
   it("an ad that was ACTIVE before the run is not this run's: the undo leaves it ACTIVE", async () => {

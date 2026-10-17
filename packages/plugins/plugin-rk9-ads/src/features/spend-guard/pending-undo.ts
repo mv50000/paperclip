@@ -20,9 +20,9 @@
  * tick sends again. A failed retry writes no audit row (the job run fails
  * instead); a successful retry and a drop write one each.
  *
- * Stored in plugin_state (no migration, G11), one key per company. Each
- * write reads the list again right before it, so the handler and the job
- * race only in that short window.
+ * Stored in plugin_state (no migration, G11), one key per company. The gate
+ * handlers and the job run in one worker process, so a per-company lock
+ * there serializes every read-modify-write of the list.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -75,19 +75,38 @@ export async function readPendingUndos(ctx: StateCtx, companyId: string): Promis
   return value;
 }
 
+const locks = new Map<string, Promise<unknown>>();
+
+/** Runs `work` after every earlier write of the company's list has finished. */
+async function withLock<T>(companyId: string, work: () => Promise<T>): Promise<T> {
+  const previous = locks.get(companyId) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(work);
+  const tail = run.catch(() => undefined);
+  locks.set(companyId, tail);
+  try {
+    return await run;
+  } finally {
+    if (locks.get(companyId) === tail) locks.delete(companyId);
+  }
+}
+
 /** Adds (or replaces, by object id) open undos. */
 export async function addPendingUndos(ctx: StateCtx, companyId: string, entries: readonly PendingUndo[]): Promise<void> {
-  const ids = new Set(entries.map((entry) => entry.objectId));
-  const current = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(entry.objectId));
-  await ctx.state.set(undoKey(companyId), [...current, ...entries]);
+  await withLock(companyId, async () => {
+    const ids = new Set(entries.map((entry) => entry.objectId));
+    const current = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(entry.objectId));
+    await ctx.state.set(undoKey(companyId), [...current, ...entries]);
+  });
 }
 
 async function removePendingUndos(ctx: StateCtx, companyId: string, objectIds: readonly string[]): Promise<void> {
   if (objectIds.length === 0) return;
-  const ids = new Set(objectIds);
-  const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(entry.objectId));
-  if (rest.length === 0) await ctx.state.delete(undoKey(companyId));
-  else await ctx.state.set(undoKey(companyId), rest);
+  await withLock(companyId, async () => {
+    const ids = new Set(objectIds);
+    const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(entry.objectId));
+    if (rest.length === 0) await ctx.state.delete(undoKey(companyId));
+    else await ctx.state.set(undoKey(companyId), rest);
+  });
 }
 
 const KIND_TEXT: Record<UndoObjectKind, string> = { campaign: "kampanja", adset: "ad set", ad: "mainos" };
@@ -96,14 +115,21 @@ function objectList(entries: readonly Pick<PendingUndo, "kind" | "objectId">[]):
   return entries.map((entry) => `${KIND_TEXT[entry.kind]} ${entry.objectId}`).join(", ");
 }
 
-export function undoAlertText(config: BrandConfig, kind: "failed" | "dropped", entries: readonly Pick<PendingUndo, "kind" | "objectId">[]): string {
+export function undoAlertText(
+  config: BrandConfig,
+  kind: "failed" | "dropped",
+  entries: readonly Pick<PendingUndo, "kind" | "objectId">[],
+  stored = true,
+): string {
   const name = config.displayName || config.brandCode;
   const lines =
     kind === "failed"
       ? [
           `⚠️ ${name}: aktivoinnin peruutus epäonnistui pysäytyksen aikana`,
           `Voi olla yhä ACTIVE-tilassa: ${objectList(entries)}`,
-          "Peruutusta yritetään uudelleen 5 minuutin välein niin kauan kuin pysäytystila on päällä. Tarkista tila Metassa.",
+          stored
+            ? "Peruutusta yritetään uudelleen 5 minuutin välein niin kauan kuin pysäytystila on päällä. Tarkista tila Metassa."
+            : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
         ]
       : [
           `⚠️ ${name}: pysäytystila päättyi ennen kuin aktivoinnin peruutus onnistui`,
@@ -126,6 +152,7 @@ async function sendUndoAlert(
   kind: "failed" | "dropped",
   gateRequestId: string,
   entries: readonly Pick<PendingUndo, "kind" | "objectId">[],
+  stored = true,
 ): Promise<{ telegram: "sent" | "not_configured" | "skipped" | "failed"; error?: string }> {
   // Without Telegram there is no marker, so the alert goes out once Telegram is set up.
   if (!config.telegram) return { telegram: "not_configured" };
@@ -138,7 +165,7 @@ async function sendUndoAlert(
     return { telegram: "failed", error: `alert marker not claimed (${safeError(error)})` };
   }
   try {
-    return { telegram: await deps.notifier.sendMessage(companyId, config, undoAlertText(config, kind, entries)) };
+    return { telegram: await deps.notifier.sendMessage(companyId, config, undoAlertText(config, kind, entries, stored)) };
   } catch (error) {
     await deps.store.release(companyId, key).catch(() => undefined);
     return { telegram: "failed", error: safeError(error) };
@@ -185,7 +212,7 @@ export async function reportUndoFailure(
   } catch (error) {
     errors.push(`not stored for the retry (${safeError(error)})`);
   }
-  const alert = await sendUndoAlert(deps, companyId, config, "failed", input.gateRequestId, input.failed);
+  const alert = await sendUndoAlert(deps, companyId, config, "failed", input.gateRequestId, input.failed, stored);
   if (alert.error) errors.push(`alert: ${alert.error}`);
   return { stored, telegram: alert.telegram, ...(errors.length > 0 ? { error: errors.join("; ") } : {}) };
 }

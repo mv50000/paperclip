@@ -162,7 +162,9 @@ function HaltBanner(props: {
         <TypedConfirm
           word={CLEAR_HALT_WORD}
           prompt={`Poistetaan ${fmtDateTime(preview.since, props.timeZone)} asetettu pysäytystila. Aktivointikortit toimivat taas.${
-            undo.length > 0 ? ` Poisto kuittaa ${undo.length} epäonnistunutta peruutusta: niitä ei enää yritetä, tarkista ne Metassa.` : ""
+            undo.length > 0
+              ? ` Poisto kuittaa ${undo.length} epäonnistunutta peruutusta: kun mikään pysäytystila ei ole enää voimassa, niitä ei enää yritetä. Tarkista ne Metassa.`
+              : ""
           }`}
           confirmLabel="Poista pysäytystila"
           busy={busy}

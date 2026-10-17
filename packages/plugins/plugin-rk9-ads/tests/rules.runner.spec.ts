@@ -455,6 +455,8 @@ describe("the cap pause's halt ends when the month is back under the cap (RK9-56
     until: "2026-10-31T22:00:00.000Z",
     reason: "pause_all_cap test",
     initiator: { source: "job" },
+    // Paused at 33 of a 36 EUR cap; the cap is now 100 EUR.
+    cap: { mtdEur: 33, monthlyCapEur: 36 },
   };
   const at = async (r: ReturnType<typeof setup>, minutes: number) => {
     r.clock.now = new Date(NOW.getTime() + minutes * 60_000);
@@ -491,6 +493,44 @@ describe("the cap pause's halt ends when the month is back under the cap (RK9-56
     expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
     await at(r, 180);
     expect(await halt(r)).toBeNull();
+  });
+
+  it("a reading below the MTD the halt stored is no headroom (an empty insights answer reads as 0)", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, { ...capHalt, cap: { mtdEur: 95, monthlyCapEur: 100 } });
+    await at(r, 0);
+    await at(r, 60);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+  });
+
+  it("a cap halt without the figures waits for the board", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, { ...capHalt, cap: undefined });
+    await at(r, 0);
+    await at(r, 60);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+  });
+
+  it("a run whose status read fails starts the count again", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, capHalt);
+    await at(r, 0);
+    r.meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/campaigns") ? new Error("graph down") : null);
+    r.clock.now = new Date(NOW.getTime() + 60 * 60_000);
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/Meta status read failed/);
+    r.meta.fail = () => null;
+    await at(r, 120);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+    await at(r, 180);
+    expect(await halt(r)).toBeNull();
+  });
+
+  it("the live cap pause stores its MTD and cap on the halt", async () => {
+    const meta = accountMeta();
+    meta.spend = () => "95.00";
+    const r = setup({ meta, rules: CAP_LIVE });
+    await at(r, 0);
+    expect(await halt(r)).toMatchObject({ rule: "pause_all_cap", cap: { mtdEur: 95, monthlyCapEur: 100 } });
   });
 
   it("leaves the kill switch's halt alone", async () => {

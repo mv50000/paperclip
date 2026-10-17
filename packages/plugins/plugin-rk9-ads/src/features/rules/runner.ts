@@ -27,9 +27,12 @@
  *
  * The cap pause's halt (spend-guard/halt.ts) is lifted when two consecutive
  * runs, at least CAP_HEADROOM_MIN_GAP_MS apart, read the month under the 90 %
- * cap, e.g. after monthlyCapEur was raised (RK9-565). A run that reads the
- * month at or over the cap, or cannot read it, starts the count again. The
- * release is audited like a board user's clear and announced in Telegram.
+ * cap, e.g. after monthlyCapEur was raised (RK9-565). Spend only grows within
+ * a month, so a reading below the MTD the halt stored is a bad reading (an
+ * empty or partial insights answer reads as 0) and counts as none; a halt
+ * without those figures waits for the board. A run that reads the month at
+ * or over the cap, or cannot read it or the status, starts the count again.
+ * The release is audited like a board user's clear and announced in Telegram.
  *
  * A brand whose config is invalid, unavailable or disabled (monthlyCapEur
  * cleared) runs only the built-in cap rule, on the last valid config (A6's
@@ -315,7 +318,8 @@ async function releaseCapHalt(
   const key = capHeadroomKey(companyId);
   try {
     const halt = await readRuleHalt(ctx, companyId, "pause_all_cap", now);
-    if (!halt || !spend || spend.pctUsed >= BUILTIN_PAUSE_ALL_CAP_PCT) {
+    const credible = spend !== null && halt?.cap !== undefined && spend.mtdEur >= halt.cap.mtdEur;
+    if (!halt || !spend || !credible || spend.pctUsed >= BUILTIN_PAUSE_ALL_CAP_PCT) {
       // No halt to lift, or no headroom seen: the count starts again.
       await ctx.state.delete(key);
       return;
@@ -371,7 +375,15 @@ export async function runRulesForBrand(
   const now = deps.now();
   const failures: string[] = [];
   const outcome: BrandRulesOutcome = { brandCode: config.brandCode, decisions: [], changed: 0, telegram: "skipped", failures };
-  const { snapshots, status, rules } = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
+  let inputs: Awaited<ReturnType<typeof readInputs>>;
+  try {
+    inputs = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
+  } catch (error) {
+    // No reading: the cap halt's headroom count starts again.
+    if (options.persist) await deps.ctx.state.delete(capHeadroomKey(companyId)).catch(() => undefined);
+    throw error;
+  }
+  const { snapshots, status, rules } = inputs;
   const decisions = evaluateRules(snapshots, status, rules, now);
   if (!options.persist) {
     outcome.decisions = decisions.map((decision) => ({ ...decision, applied: false, error: null }));

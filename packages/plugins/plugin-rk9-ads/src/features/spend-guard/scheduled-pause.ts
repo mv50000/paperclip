@@ -75,7 +75,15 @@ async function dayHalt(ctx: PluginContext, companyId: string, config: BrandConfi
   } catch {
     return undefined;
   }
-  if (!stored || stored.halt.until !== haltUntil("scheduled_pause", config.timeZone, now)) return undefined;
+  // The same night's halt from the same local day: an `at` moved past midnight starts a new one.
+  if (
+    !stored ||
+    stored.halt.until !== haltUntil("scheduled_pause", config.timeZone, now) ||
+    !Number.isFinite(Date.parse(stored.halt.since)) ||
+    localDate(new Date(stored.halt.since), config.timeZone) !== localDate(now, config.timeZone)
+  ) {
+    return undefined;
+  }
   return { stopped: { closedCardIds: [], ...(stored.cleared ? {} : { halt: stored.halt }) }, announce: async () => undefined };
 }
 
@@ -244,6 +252,8 @@ export async function runDueRechecks(
       if (!Number.isFinite(due) || now.getTime() - due > RECHECK_WINDOW_MS) {
         deps.ctx.logger.warn("rk9-ads pause: re-check past its window, dropped", { companyId, rule, dueAt: recheck.dueAt });
         await drop();
+        // The second listing never ran: the run fails once so it is seen.
+        failures.push(`${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`);
         continue;
       }
       if (recheck.haltId !== null) {

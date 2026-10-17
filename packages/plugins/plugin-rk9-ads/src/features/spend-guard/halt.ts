@@ -64,6 +64,11 @@ export interface HaltState {
   until?: string;
   reason: string;
   initiator: Initiator;
+  /**
+   * The cap pause's month-to-date and cap when it paused (RK9-565). The rules
+   * job lifts that halt early only on a reading not below this MTD.
+   */
+  cap?: { mtdEur: number; monthlyCapEur: number };
 }
 
 type StateCtx = Pick<PluginContext, "state">;

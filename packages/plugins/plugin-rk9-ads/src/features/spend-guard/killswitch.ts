@@ -268,6 +268,14 @@ function closesCards(rule: PauseRule): rule is CardClosingPause {
 
 export type Stopped = Pick<PauseAllResult, "closedCardIds" | "cardsError" | "halt" | "haltError">;
 
+/** The cap pause's MTD and cap, from the rules runner's figures, for the halt's early release. */
+function capFigures(options: Pick<PauseAllOptions, "rule" | "metrics">): Pick<HaltState, "cap"> {
+  const mtdEur = options.metrics?.mtdEur;
+  const monthlyCapEur = options.metrics?.monthlyCapEur;
+  if (options.rule !== "pause_all_cap" || typeof mtdEur !== "number" || typeof monthlyCapEur !== "number") return {};
+  return { cap: { mtdEur, monthlyCapEur } };
+}
+
 /** When the rule's halt ends: never for the kill switch. */
 export function haltUntil(rule: CardClosingPause, timeZone: string, now: Date): string | undefined {
   if (rule === "scheduled_pause") return nextLocalTime(now, SCHEDULED_HALT_UNTIL, timeZone).toISOString();
@@ -285,7 +293,7 @@ export async function stopActivations(
   deps: Pick<PauseAllDeps, "ctx" | "closeCards">,
   companyId: string,
   brand: { brandCode: string; timeZone: string },
-  options: Pick<PauseAllOptions, "dryRun" | "rule" | "reason" | "initiator">,
+  options: Pick<PauseAllOptions, "dryRun" | "rule" | "reason" | "initiator" | "metrics">,
   now: Date,
 ): Promise<StopActivations> {
   const out: Stopped = { closedCardIds: [] };
@@ -300,6 +308,7 @@ export async function stopActivations(
     ...(until ? { until } : {}),
     reason: options.reason.slice(0, 300),
     initiator: options.initiator,
+    ...capFigures(options),
   };
   try {
     await setHalt(deps.ctx, companyId, halt);

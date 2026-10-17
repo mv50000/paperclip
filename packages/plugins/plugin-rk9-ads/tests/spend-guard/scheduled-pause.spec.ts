@@ -61,6 +61,9 @@ describe("scheduled pause job", () => {
     // The pause closes the open activation cards (RK9-557).
     expect(r.cardCloses).toEqual([{ companyId: COMPANY_A, rule: "scheduled_pause", reason: "scheduled pause at 21:30 Europe/Helsinki" }]);
 
+    // The next tick runs the re-check (RK9-565): nothing ACTIVE is left.
+    await tick("2026-03-28T19:35:00Z");
+    expect(pauses(r.meta)).toBe(2);
     // Someone turns the ads back on: the same local day does not pause again.
     reactivate(r.meta);
     await tick("2026-03-28T21:55:00Z"); // 23:55 EET
@@ -93,6 +96,8 @@ describe("scheduled pause job", () => {
     r.clock.now = new Date("2026-10-24T18:30:00Z"); // 21:30 EEST, Saturday
     await r.harness.runJob("scheduled-pause");
     expect(pauses(r.meta)).toBe(2);
+    r.clock.now = new Date("2026-10-24T18:35:00Z"); // the re-check's tick (RK9-565)
+    await r.harness.runJob("scheduled-pause");
     reactivate(r.meta);
     r.clock.now = new Date("2026-10-25T18:30:00Z"); // 20:30 EET on Sunday: too early
     await r.harness.runJob("scheduled-pause");
@@ -166,8 +171,10 @@ describe("open activation cards (RK9-557)", () => {
     await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/scheduled pause: open activation cards were not closed \(.*db down\)/);
     expect(pauses(r.meta)).toBe(2);
     expect(r.store.keys().some((key) => key.includes("scheduled-pause"))).toBe(true);
-    // An ad activated on purpose later that evening stays ACTIVE: a tick after
-    // the re-check's window (RK9-565) does nothing.
+    // The next tick runs the re-check (RK9-565) and finds nothing ACTIVE.
+    r.clock.now = new Date("2026-10-21T18:36:00Z");
+    await r.harness.runJob("scheduled-pause");
+    // An ad activated on purpose later that evening stays ACTIVE: the next tick does nothing.
     reactivate(r.meta);
     r.clock.now = new Date("2026-10-21T19:00:00Z");
     await r.harness.runJob("scheduled-pause");
@@ -240,11 +247,13 @@ describe("the second listing after a kill switch or scheduled pause (RK9-565)", 
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
   });
 
-  it("is dropped unrun when no tick came within its window", async () => {
+  it("is dropped unrun when no tick came within its window, and the run fails once", async () => {
     const r = rig({ meta: activeMeta() });
     await killSwitch(r);
     reactivate(r.meta);
-    await at(r, "2026-10-21T10:30:00Z");
+    r.clock.now = new Date("2026-10-21T10:30:00Z");
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/kill_switch re-check: no tick ran within 15 min .* dropped unrun/);
+    await at(r, "2026-10-21T10:35:00Z");
     expect(pauses(r.meta)).toBe(2);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
   });
@@ -276,6 +285,22 @@ describe("the second listing after a kill switch or scheduled pause (RK9-565)", 
 
 describe("a scheduled pause's retry tick (RK9-565)", () => {
   const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-1" } };
+
+  it("does not take the previous evening's halt when `at` moved past midnight", async () => {
+    const r = rig({ meta: activeMeta(), config: brandConfig({ telegram: telegramBlock(), schedule: { scheduledPause: { enabled: true, at: "23:00" } } }) });
+    r.clock.now = new Date("2026-10-21T20:00:00Z"); // 23:00 EEST
+    await r.harness.runJob("scheduled-pause");
+    const evening = (await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))!;
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: evening.since }, BOARD);
+    r.harness.ctx.config.get = async () => brandConfig({ telegram: telegramBlock(), schedule: { scheduledPause: { enabled: true, at: "01:00" } } });
+    reactivate(r.meta);
+    r.clock.now = new Date("2026-10-21T22:00:00Z"); // 01:00 EEST on 22.10.
+    await r.harness.runJob("scheduled-pause");
+    const night = (await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))!;
+    expect(night).toMatchObject({ rule: "scheduled_pause", until: evening.until });
+    expect(night.id).not.toBe(evening.id);
+    expect(r.cardCloses).toHaveLength(2);
+  });
 
   it("keeps the day's halt: a board user's clear stands and the open cards are not closed again", async () => {
     const r = rig({ meta: activeMeta(), config: scheduled() });
