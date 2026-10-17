@@ -2,10 +2,10 @@
  * Gate state machine (A5, RK9-509): a plugin-owned approval card, decided by
  * one Telegram tap. Not a core approval: nothing here calls `ctx.approvals`.
  *
- *   pending -> approved | denied   (tap, while valid_until > now())
+ *   pending -> approved | denied | skipped   (tap, while valid_until > now())
  *   pending -> expired             (tap or job, once valid_until <= now())
  *   pending -> failed              (the card could not be sent)
- *   approved -> failed             (the kind handler threw)
+ *   approved -> failed | denied    (the kind handler threw or refused)
  *
  * Every transition is one conditional UPDATE (compare-and-set). Only the
  * caller whose UPDATE changed exactly one row goes on, so a double tap or a
@@ -29,7 +29,10 @@ import type { GateRegistry } from "./registry.js";
 
 export const GATE_STATUSES = ["pending", "approved", "denied", "skipped", "expired", "failed"] as const;
 export type GateStatus = (typeof GATE_STATUSES)[number];
-export type GateDecision = "approved" | "denied";
+/** "skipped" is a deny button that means "not now" rather than "no" (e.g. 🗑 Ohita). */
+export type GateDecision = "approved" | "denied" | "skipped";
+/** What a card's second button records. */
+export type GateDenyDecision = Exclude<GateDecision, "approved">;
 
 export interface GateCard {
   media: CardMedia;
@@ -68,7 +71,7 @@ export interface GateStore {
   insertPending(request: NewGateRequest): Promise<void>;
   setMessageId(companyId: string, id: string, messageId: number): Promise<boolean>;
   findByTokenHash(tokenHash: string): Promise<GateRequestRecord | null>;
-  /** pending -> approved|denied while valid_until > now(). True when this call won. */
+  /** pending -> approved|denied|skipped while valid_until > now(). True when this call won. */
   decide(companyId: string, tokenHash: string, decision: GateDecision, tgUserId: number): Promise<boolean>;
   /** pending -> expired once valid_until <= now(). True when this call won. */
   expire(companyId: string, tokenHash: string): Promise<boolean>;
@@ -80,6 +83,12 @@ export interface GateStore {
   ): Promise<boolean>;
   /** Records a Telegram update id. False when it was already recorded. */
   markUpdateProcessed(companyId: string, botKey: string, updateId: number, updateKind: string): Promise<boolean>;
+  findById(companyId: string, id: string): Promise<GateRequestRecord | null>;
+  /**
+   * Gives a pending, live card a new token and chat and clears its message id
+   * (re-send). The old token stops matching any row. True when this call won.
+   */
+  rotateToken(companyId: string, id: string, tokenHash: string, chatId: string): Promise<boolean>;
 }
 
 /** 18 random bytes = 144 bit, 24 base64url chars. */
@@ -91,11 +100,15 @@ export function gateTokenHash(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-/** callback_data layout: "g:a:<token>" approves, "g:d:<token>" denies. */
-const CALLBACK_RE = /^g:([ad]):([A-Za-z0-9_-]{16,48})$/;
+/** callback_data layout: "g:a:<token>" approves, "g:d:<token>" denies, "g:s:<token>" skips. */
+const CALLBACK_RE = /^g:([ads]):([A-Za-z0-9_-]{16,48})$/;
+const DECISION_CODE: Record<GateDecision, string> = { approved: "a", denied: "d", skipped: "s" };
+const CODE_DECISION: Record<string, GateDecision> = { a: "approved", d: "denied", s: "skipped" };
 
 export function gateCallbackData(decision: GateDecision, token: string): string {
-  const data = `g:${decision === "approved" ? "a" : "d"}:${token}`;
+  const code = DECISION_CODE[decision];
+  if (!code) throw new Error("Invalid gate decision");
+  const data = `g:${code}:${token}`;
   if (Buffer.byteLength(data, "utf8") > CALLBACK_DATA_MAX_BYTES) throw new Error("callback_data exceeds 64 bytes");
   return data;
 }
@@ -104,15 +117,19 @@ export function parseGateCallbackData(data: string | undefined): { decision: Gat
   if (typeof data !== "string") return null;
   const match = CALLBACK_RE.exec(data);
   if (!match) return null;
-  return { decision: match[1] === "a" ? "approved" : "denied", token: match[2]! };
+  return { decision: CODE_DECISION[match[1]!]!, token: match[2]! };
 }
 
-export function gateButtons(token: string, labels: { approve?: string; deny?: string } = {}): InlineKeyboardMarkup {
+export function gateButtons(
+  token: string,
+  labels: { approve?: string; deny?: string } = {},
+  denyDecision: GateDenyDecision = "denied",
+): InlineKeyboardMarkup {
   return {
     inline_keyboard: [
       [
         { text: labels.approve ?? "✅ Hyväksy", callback_data: gateCallbackData("approved", token) },
-        { text: labels.deny ?? "❌ Hylkää", callback_data: gateCallbackData("denied", token) },
+        { text: labels.deny ?? "❌ Hylkää", callback_data: gateCallbackData(denyDecision, token) },
       ],
     ],
   };
@@ -143,6 +160,8 @@ export async function createGateCard(input: {
   card: GateCard & { mediaUrl?: string };
   payload?: Record<string, unknown>;
   labels?: { approve?: string; deny?: string };
+  /** What the second button records; default "denied". */
+  denyDecision?: GateDenyDecision;
 }): Promise<{ id: string; messageId: number }> {
   if (!input.registry.has(input.kind)) throw new Error(`Gate kind ${input.kind} has no handler`);
   if (!(input.validUntil instanceof Date) || Number.isNaN(input.validUntil.getTime())) {
@@ -167,7 +186,7 @@ export async function createGateCard(input: {
       media: input.card.media,
       mediaUrl: input.card.mediaUrl,
       text: input.card.text,
-      buttons: gateButtons(token, input.labels),
+      buttons: gateButtons(token, input.labels, input.denyDecision),
     });
     messageId = message.message_id;
   } catch (error) {
@@ -184,6 +203,39 @@ export async function createGateCard(input: {
   }
   await input.store.setMessageId(input.companyId, id, messageId);
   return { id, messageId };
+}
+
+/**
+ * Posts a pending, live card again (a lost or buried card). The card gets a
+ * new token first, so the old card's buttons find no row; the router also
+ * refuses a tap on any message id other than the stored one. A send that
+ * fails leaves the card pending without a message: re-send it again.
+ */
+export async function resendGateCard(input: {
+  store: GateStore;
+  api: BotApi;
+  request: GateRequestRecord;
+  chatId: string;
+  mediaUrl?: string;
+  labels?: { approve?: string; deny?: string };
+  denyDecision?: GateDenyDecision;
+}): Promise<{ messageId: number }> {
+  const { request } = input;
+  const card = storedCard(request);
+  if (!card) throw new Error("The gate request has no stored card");
+  const token = newGateToken();
+  if (!(await input.store.rotateToken(request.companyId, request.id, gateTokenHash(token), input.chatId))) {
+    throw new Error("The gate request is no longer pending");
+  }
+  const message = await sendCard(input.api, {
+    chatId: input.chatId,
+    media: card.media,
+    mediaUrl: input.mediaUrl,
+    text: card.text,
+    buttons: gateButtons(token, input.labels, input.denyDecision),
+  });
+  await input.store.setMessageId(request.companyId, request.id, message.message_id);
+  return { messageId: message.message_id };
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +263,26 @@ function toRecord(value: unknown): Record<string, unknown> {
     }
   }
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+export const GATE_RECORD_COLUMNS = `id, company_id, brand_code, kind, status, chat_id, message_id, valid_until, payload,
+  decided_by_tg_user_id, decided_at, (valid_until > now()) AS live`;
+
+export function toGateRecord(row: Record<string, unknown>): GateRequestRecord {
+  return {
+    id: String(row.id),
+    companyId: String(row.company_id),
+    brandCode: String(row.brand_code),
+    kind: String(row.kind),
+    status: String(row.status) as GateStatus,
+    chatId: row.chat_id === null || row.chat_id === undefined ? null : String(row.chat_id),
+    messageId: toNumberOrNull(row.message_id),
+    validUntil: toDate(row.valid_until),
+    live: row.live === true,
+    payload: toRecord(row.payload),
+    decidedByTgUserId: toNumberOrNull(row.decided_by_tg_user_id),
+    decidedAt: row.decided_at ? toDate(row.decided_at) : null,
+  };
 }
 
 export function createSqlGateStore(
@@ -256,32 +328,29 @@ export function createSqlGateStore(
     // which is unique across the table. The row's company_id then scopes every
     // later statement.
     async findByTokenHash(tokenHash) {
-      const rows = await db.query<Record<string, unknown>>(
-        `SELECT id, company_id, brand_code, kind, status, chat_id, message_id, valid_until, payload,
-                decided_by_tg_user_id, decided_at, (valid_until > now()) AS live
-           FROM ${gate} WHERE token = $1 LIMIT 1`,
-        [tokenHash],
+      const rows = await db.query<Record<string, unknown>>(`SELECT ${GATE_RECORD_COLUMNS} FROM ${gate} WHERE token = $1 LIMIT 1`, [tokenHash]);
+      return rows[0] ? toGateRecord(rows[0]) : null;
+    },
+
+    async findById(companyId, id) {
+      const rows = await db.query<Record<string, unknown>>(`SELECT ${GATE_RECORD_COLUMNS} FROM ${gate} WHERE company_id = $1 AND id = $2 LIMIT 1`, [
+        companyId,
+        id,
+      ]);
+      return rows[0] ? toGateRecord(rows[0]) : null;
+    },
+
+    async rotateToken(companyId, id, tokenHash, chatId) {
+      const result = await db.execute(
+        `UPDATE ${gate} SET token = $3, chat_id = $4, message_id = NULL, updated_at = now()
+          WHERE company_id = $1 AND id = $2 AND status = 'pending' AND valid_until > now()`,
+        [companyId, id, tokenHash, chatId],
       );
-      const row = rows[0];
-      if (!row) return null;
-      return {
-        id: String(row.id),
-        companyId: String(row.company_id),
-        brandCode: String(row.brand_code),
-        kind: String(row.kind),
-        status: String(row.status) as GateStatus,
-        chatId: row.chat_id === null || row.chat_id === undefined ? null : String(row.chat_id),
-        messageId: toNumberOrNull(row.message_id),
-        validUntil: toDate(row.valid_until),
-        live: row.live === true,
-        payload: toRecord(row.payload),
-        decidedByTgUserId: toNumberOrNull(row.decided_by_tg_user_id),
-        decidedAt: row.decided_at ? toDate(row.decided_at) : null,
-      };
+      return result.rowCount === 1;
     },
 
     async decide(companyId, tokenHash, decision, tgUserId) {
-      if (decision !== "approved" && decision !== "denied") throw new Error("Invalid gate decision");
+      if (decision !== "approved" && decision !== "denied" && decision !== "skipped") throw new Error("Invalid gate decision");
       const result = await db.execute(
         `UPDATE ${gate}
             SET status = $3, decided_by_tg_user_id = $4, decided_at = now(), updated_at = now()

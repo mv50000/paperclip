@@ -47,7 +47,12 @@ import { isDryRun } from "../meta/types.js";
 import { adName, contentHash, publicationKey } from "./ad-name.js";
 import { buildCreativeBody, type CreativeBody } from "./creative.js";
 import { baseFinalUrl, buildFinalUrl } from "./final-url.js";
-import { onPublished as defaultOnPublished, type OnPublishedHook } from "./handoff.js";
+import {
+  onCreativeSwap as defaultOnCreativeSwap,
+  onPublished as defaultOnPublished,
+  type OnCreativeSwapHook,
+  type OnPublishedHook,
+} from "./handoff.js";
 import { prevalidate, PrevalidationError } from "./prevalidate.js";
 import type { CreativeRow, CreativeSource, PublicationPatch, PublicationStore } from "./store.js";
 import { PLACEMENTS, type PublicationMode, type PublicationPayload, type PublicationRecord, type PublicationText, type PublishSpec } from "./types.js";
@@ -241,6 +246,8 @@ export interface PublishServiceDeps {
   /** The launch gate (A4). Runs before the first Meta write of a run. */
   assertLaunchReady?(companyId: string, config: BrandConfig): Promise<void>;
   onPublished?: OnPublishedHook;
+  /** Runs before a swap's Meta write; a throw fails the swap (handoff.ts). */
+  onCreativeSwap?: OnCreativeSwapHook;
   now?: () => Date;
   video?: VideoOptions;
 }
@@ -257,6 +264,7 @@ const PUBLISHABLE_CREATIVE_STATUSES = new Set(["ready", "staged", "uploading", "
 export function createPublishService(deps: PublishServiceDeps) {
   const now = deps.now ?? (() => new Date());
   const handoff = deps.onPublished ?? defaultOnPublished;
+  const beforeSwap = deps.onCreativeSwap ?? defaultOnCreativeSwap;
   const running = new Map<string, Promise<void>>();
 
   async function enabledConfig(companyId: string): Promise<BrandConfig> {
@@ -534,8 +542,15 @@ export function createPublishService(deps: PublishServiceDeps) {
         adsetId: record.adsetId,
         campaignId: record.campaignId,
         creativeId: record.metaCreativeId,
+        contentHash: record.contentHash,
         finalUrl: record.payload.finalUrl,
         publishedAt: record.publishedAt ?? now().toISOString(),
+        preview: {
+          kind: record.payload.kind,
+          mediaUrl: record.payload.mediaUrl,
+          posterUrl: record.payload.thumbnailUrl ?? record.payload.posterUrl ?? null,
+          copy: record.payload.copy,
+        },
       });
     } catch (error) {
       // Give the claim back so the next call for this publication hands it off again.
@@ -607,6 +622,8 @@ export function createPublishService(deps: PublishServiceDeps) {
       if (record.mode === "swap") {
         const target = payload.targetAdId ?? record.metaAdId;
         if (!target) throw new Error("the swap has no target ad");
+        // Close the ad's open approvals first: an approval of the old preview must not put this creative live.
+        await beforeSwap({ companyId, adId: target, publicationId: id });
         adWriteSent = true;
         const swapped = await swapAdCreative(client, target, creativeId);
         if (isDryRun(swapped)) throw new Error("the write client is in dry-run mode");

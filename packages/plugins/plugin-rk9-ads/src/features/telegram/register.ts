@@ -1,3 +1,4 @@
+import { withActivationColumns } from "../../gate/gate-requests.js";
 import { createSqlGateStore } from "../../kit/gate/state-machine.js";
 import type { FeatureRuntime } from "../types.js";
 import { setTelegramController, TelegramController } from "./controller.js";
@@ -15,7 +16,8 @@ const CONFIG_PLAN_DELAY_MS = 500;
 export function register(runtime: FeatureRuntime): void {
   const { ctx } = runtime;
   const registry = resetGateRegistry();
-  const controller = new TelegramController(ctx, { store: createSqlGateStore(ctx.db), registry });
+  const store = withActivationColumns(createSqlGateStore(ctx.db), ctx.db);
+  const controller = new TelegramController(ctx, { store, registry });
   setTelegramController(controller);
 
   runtime.handleWebhook("telegram", (input) => controller.handleWebhook(input));

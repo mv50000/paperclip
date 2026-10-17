@@ -6,7 +6,7 @@ import type { BrandConfig } from "../../config.js";
 import { PLUGIN_ID } from "../../manifest.js";
 import { operatorMessage } from "../../meta/errors.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
-import type { OnPublishedHook } from "../../publish/handoff.js";
+import type { OnCreativeSwapHook, OnPublishedHook } from "../../publish/handoff.js";
 import { PrevalidationError } from "../../publish/prevalidate.js";
 import {
   createPublishService,
@@ -16,6 +16,7 @@ import {
   type VideoOptions,
 } from "../../publish/publish-service.js";
 import { sqlCreativeSource, sqlPublicationStore, type CreativeSource, type PublicationStore } from "../../publish/store.js";
+import { getActivationCards } from "../gate/runtime.js";
 import { brandClient, brandReadClient, sqlOnceStore, type Initiator, type OnceStore } from "../spend-guard/support.js";
 import type { FeatureRuntime } from "../types.js";
 
@@ -60,8 +61,25 @@ export interface PublishOverrides {
   /** Replaces the A4 launch gate; `null` skips it (tests). */
   assertLaunchReady?: ((companyId: string, config: BrandConfig) => Promise<void>) | null;
   onPublished?: OnPublishedHook;
+  onCreativeSwap?: OnCreativeSwapHook;
   video?: VideoOptions;
 }
+
+function activationCards() {
+  const cards = getActivationCards();
+  if (!cards) throw new Error("the activation gate is not running");
+  return cards;
+}
+
+/** The hand-off to the activation gate (G15, A9 RK9-517). */
+const gateOnPublished: OnPublishedHook = async (publication) => {
+  await activationCards().openActivationCard(publication);
+};
+
+/** A swap closes the ad's open activation cards first; without the gate it does not run. */
+const gateOnCreativeSwap: OnCreativeSwapHook = async (swap) => {
+  await activationCards().closeCardsForSwap(swap);
+};
 
 function initiatorOf(context: { actor: { userId?: string | null; agentId?: string | null; runId?: string | null } }): Initiator {
   return {
@@ -114,7 +132,8 @@ export function registerPublish(runtime: FeatureRuntime, overrides: PublishOverr
       overrides.writeClient ?? ((companyId, config, initiator) => brandClient({ ctx, ledger }, companyId, config, "live", { initiator })),
     readClient: overrides.readClient ?? ((companyId, config) => brandReadClient(ctx, companyId, config)),
     ...(gate ? { assertLaunchReady: gate } : {}),
-    ...(overrides.onPublished ? { onPublished: overrides.onPublished } : {}),
+    onPublished: overrides.onPublished ?? gateOnPublished,
+    onCreativeSwap: overrides.onCreativeSwap ?? gateOnCreativeSwap,
     ...(overrides.video ? { video: overrides.video } : {}),
   });
 

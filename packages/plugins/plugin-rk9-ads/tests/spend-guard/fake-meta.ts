@@ -15,6 +15,8 @@ export interface FakeObject {
   lifetime_budget?: string;
   campaign_id?: string;
   adset_id?: string;
+  /** An ad's creative; read as `creative{id}`. */
+  creative_id?: string;
 }
 
 export interface FakeCallRecord {
@@ -31,8 +33,9 @@ function json(status: number, body: unknown): Response {
 }
 
 /** Graph always sends effective_status; a fixture may leave it out. */
-function withEffective(object: FakeObject): FakeObject {
-  return { ...object, effective_status: object.effective_status ?? object.status };
+function withEffective(object: FakeObject): Record<string, unknown> {
+  const { creative_id, ...rest } = object;
+  return { ...rest, effective_status: object.effective_status ?? object.status, ...(creative_id ? { creative: { id: creative_id } } : {}) };
 }
 
 export class FakeMeta {
@@ -118,6 +121,9 @@ export class FakeMeta {
       if (path === `${act}/adsets`) return this.page(path, params, this.adsets);
       if (path === `${act}/ads`) return this.page(path, params, this.ads);
       const campaignAds = /^(\d+)\/ads$/.exec(path);
+      if (campaignAds && this.adsets.some((adset) => adset.id === campaignAds[1])) {
+        return this.page(path, params, this.ads.filter((ad) => ad.adset_id === campaignAds[1]));
+      }
       if (campaignAds) return this.page(path, params, this.ads.filter((ad) => ad.campaign_id === campaignAds[1]));
       const object = this.all().find((entry) => entry.id === path);
       if (!object) return json(400, { error: { message: "Unsupported get request", type: "GraphMethodException", code: 100 } });
@@ -128,7 +134,7 @@ export class FakeMeta {
         }
         return json(200, { id: object.id, account_id: this.foreign.has(object.id) ? "999" : this.accountId, adset_id: object.adset_id ?? "200" });
       }
-      return json(200, withEffective(object));
+      return json(200, { account_id: this.foreign.has(object.id) ? "999" : this.accountId, ...withEffective(object) });
     }
     if (method === "POST") {
       const create = new RegExp(`^${act}/(campaigns|adsets|ads)$`).exec(path);

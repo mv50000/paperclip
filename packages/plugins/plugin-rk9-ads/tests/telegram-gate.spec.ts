@@ -5,7 +5,6 @@ import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
 import { GATE_REQUEST_KINDS } from "../src/db.js";
 import { getTelegramController, TelegramController } from "../src/features/telegram/controller.js";
-import { registerGateHandler } from "../src/features/telegram/gates.js";
 import { createCallbackRouter, GATE_TEXT, type GateBrand } from "../src/kit/gate/callback-router.js";
 import { createGateRegistry, type GateHandlerInput } from "../src/kit/gate/registry.js";
 import {
@@ -897,13 +896,11 @@ describeDb("gate on real Postgres (migration 001, host SQL validators)", () => {
     harness.ctx.http.fetch = fake.fetch;
     const approvalsBefore = await testDb.adminQuery<{ n: number }>("SELECT count(*)::int AS n FROM approvals");
 
-    const handled: GateHandlerInput[] = [];
+    // The worker's own activate_ad handler (A9) runs: a card without an
+    // activation binding is refused by it before any Meta call.
+    const handled = () => harness.activity.filter((entry) => entry.message.startsWith("rk9-ads gate: activate_ad"));
     async function start() {
       await plugin.definition.setup(harness.ctx);
-      registerGateHandler("activate_ad", async (input) => {
-        handled.push(input);
-        return { statusText: "✅ Aktivoitu" };
-      });
       const controller = getTelegramController()!;
       await controller.whenPlanned();
       return controller;
@@ -919,13 +916,13 @@ describeDb("gate on real Postgres (migration 001, host SQL validators)", () => {
     });
     const tap = fake.callbackUpdate({ messageId: card.messageId, data: fake.buttons(card.messageId)[0]!, fromId: APPROVER });
     const tapId = fake.pushUpdate(BOT_A, tap);
-    await waitFor(() => handled.length === 1);
+    await waitFor(() => handled().length === 1);
     await controller.idle();
-    const [row] = await testDb.adminQuery<{ status: string; decided_by_tg_user_id: string; token: string }>(
-      `SELECT status, decided_by_tg_user_id, token FROM ${testDb.namespace}.gate_requests WHERE id = $1`,
+    const [row] = await testDb.adminQuery<{ status: string; decided_by_tg_user_id: string; token: string; outcome: Record<string, unknown> }>(
+      `SELECT status, decided_by_tg_user_id, token, outcome FROM ${testDb.namespace}.gate_requests WHERE id = $1`,
       [card.id],
     );
-    expect(row).toMatchObject({ status: "approved" });
+    expect(row).toMatchObject({ status: "denied", outcome: { handler: "done", reason: "invalid_binding" } });
     expect(Number(row!.decided_by_tg_user_id)).toBe(APPROVER);
     expect(row!.token).toMatch(/^[0-9a-f]{64}$/);
 
@@ -941,7 +938,7 @@ describeDb("gate on real Postgres (migration 001, host SQL validators)", () => {
     const restarted = await start();
     await waitFor(async () => (await stateOffsetStore(harness.ctx.state, BOT_A).load()) === tapId + 1);
     await restarted.idle();
-    expect(handled).toHaveLength(1);
+    expect(handled()).toHaveLength(1);
     const [processed] = await testDb.adminQuery<{ n: number }>(
       `SELECT count(*)::int AS n FROM ${testDb.namespace}.processed_updates WHERE update_id = $1`,
       [tapId],

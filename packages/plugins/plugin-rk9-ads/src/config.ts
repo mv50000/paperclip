@@ -58,6 +58,9 @@ export const TELEGRAM_MODES = ["poll", "webhook"] as const;
 export type TelegramMode = (typeof TELEGRAM_MODES)[number];
 
 export const ZERO_SPEND_MODES = ["message", "silent"] as const;
+/** Activation card validity (A9, RK9-517). */
+export const DEFAULT_GATE_TTL_HOURS = 24;
+export const MAX_GATE_TTL_HOURS = 168;
 export type ZeroSpendMode = (typeof ZERO_SPEND_MODES)[number];
 
 export {
@@ -113,6 +116,8 @@ export interface BrandConfig {
     webhookSecretRef?: SecretRef;
     /** Public https URL of the plugin webhook (only in webhook mode). */
     webhookUrl?: string;
+    /** How long an activation card can be approved (A9, RK9-517). Default 24. */
+    gateTtlHours: number;
   };
   schedule: {
     scheduledPause: { enabled: boolean; at: string };
@@ -264,6 +269,12 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
           type: "string",
           title: "Webhook URL (only in webhook mode)",
           description: "Public https URL of /api/plugins/<pluginId>/webhooks/telegram on this instance.",
+        },
+        gateTtlHours: {
+          type: "number",
+          title: "Activation card validity, hours (default 24)",
+          minimum: 1,
+          maximum: MAX_GATE_TTL_HOURS,
         },
       },
     },
@@ -632,17 +643,18 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
     telegramRaw !== undefined &&
     Object.entries(telegramRaw).some(([key, value]) => {
       if (value === undefined || value === null || value === "") return false;
-      if (key === "mode") return false;
+      if (key === "mode" || key === "gateTtlHours") return false;
       if (key === "allowedUserIds") return Array.isArray(value) && value.length > 0;
       return true;
     });
   if (telegramRaw && telegramTouched) {
-    c.known(telegramRaw, ["botTokenRef", "chatId", "allowedUserIds", "mode", "webhookSecretRef", "webhookUrl"], "telegram");
+    c.known(telegramRaw, ["botTokenRef", "chatId", "allowedUserIds", "mode", "webhookSecretRef", "webhookUrl", "gateTtlHours"], "telegram");
     const botTokenRef = c.secretRef(telegramRaw, "botTokenRef", "telegram", true);
     const chatId = c.string(telegramRaw, "chatId", "telegram", { required: true, pattern: /^-?\d+$/ });
     const allowedUserIds = c.stringArray(telegramRaw, "allowedUserIds", "telegram", { pattern: /^\d+$/ });
     if (allowedUserIds.length === 0) c.add("telegram.allowedUserIds", "must list at least one approver");
     const mode = c.enumValue(telegramRaw, "mode", "telegram", TELEGRAM_MODES, "poll");
+    const gateTtlHours = c.number(telegramRaw, "gateTtlHours", "telegram", { fallback: DEFAULT_GATE_TTL_HOURS, min: 1, max: MAX_GATE_TTL_HOURS });
     const webhookSecretRef = c.secretRef(telegramRaw, "webhookSecretRef", "telegram", mode === "webhook");
     let webhookUrl: string | undefined;
     if (telegramRaw.webhookUrl !== undefined && telegramRaw.webhookUrl !== "") {
@@ -652,12 +664,13 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
     } else if (mode === "webhook") {
       c.add("telegram.webhookUrl", "is required");
     }
-    if (botTokenRef && chatId && mode) {
+    if (botTokenRef && chatId && mode && gateTtlHours !== undefined) {
       telegram = {
         botTokenRef,
         chatId,
         allowedUserIds,
         mode,
+        gateTtlHours,
         ...(webhookSecretRef ? { webhookSecretRef } : {}),
         ...(webhookUrl ? { webhookUrl } : {}),
       };

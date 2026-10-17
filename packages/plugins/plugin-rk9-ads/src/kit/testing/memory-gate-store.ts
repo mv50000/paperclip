@@ -106,6 +106,21 @@ export function createMemoryGateStore(now: () => Date = () => new Date()): Memor
       writes.settle += 1;
       return true;
     },
+    async findById(companyId, id) {
+      const row = rows.get(id);
+      return row && row.companyId === companyId ? record(row) : null;
+    },
+    async rotateToken(companyId, id, tokenHash, chatId) {
+      const row = rows.get(id);
+      if (!row || row.companyId !== companyId || row.status !== "pending" || row.validUntil.getTime() <= now().getTime()) return false;
+      if (byToken.has(tokenHash)) throw new Error("duplicate key value violates gate_requests_token_key");
+      byToken.delete(row.tokenHash);
+      row.tokenHash = tokenHash;
+      row.chatId = chatId;
+      row.messageId = null;
+      byToken.set(tokenHash, id);
+      return true;
+    },
     async markUpdateProcessed(companyId, botKey, updateId) {
       const key = `${companyId}:${botKey}:${updateId}`;
       if (processed.has(key)) return false;

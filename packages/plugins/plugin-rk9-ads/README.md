@@ -480,8 +480,9 @@ ad set (G8). The steps:
    content never goes live without the activation gate (G1).
 6. **Hand-off**: after `published`, `onPublished(publication)` in
    `src/publish/handoff.ts` runs at most once per publication (a once-marker;
-   a hook that throws gives the marker back and runs on the next publish). It is a no-op
-   until the activation gate (A9, RK9-517) implements it. Nothing here
+   a hook that throws gives the marker back and runs on the next publish).
+   The activation gate (below) posts its card from it. A swap first calls
+   `onCreativeSwap`, which closes the ad's open cards. Nothing here
    activates an ad.
 
 Text variants belong to the publication (RK9-525): `text` overrides the
@@ -520,6 +521,54 @@ No token or secret goes into it.
 | `publish` | action | `{ creativeId \| manifest, text?, placement?, sizeBytes?, durationSec?, idempotencyKey?, dryRun?, confirm?, waitMs? }`. Dry run (the full planned payloads, no Meta call) unless `dryRun: false, confirm: true`. A real run needs `creativeId` and a launch-ready preflight |
 | `swap-creative` | action | The same plus `adId`: a new creative on a PAUSED ad that this company published; the ad stays PAUSED |
 | `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication |
+
+## Activation gate (RK9-517)
+
+The plugin's own spend gate (G1): `src/gate/` and `src/features/gate/`. No
+`ctx.approvals`, no core change, no scale_budget handler (G9).
+
+1. **Card.** After publish the hand-off posts a card to the brand's chat: the
+   photo or video preview, the copy, the ad name, the ad set, its daily budget
+   and MTD spend against `monthlyCapEur`, with "📣 Aktivoi mainos" and
+   "🗑 Ohita". The `gate_requests` row (kind `activate_ad`, `pending`) holds
+   the chat id, the message id, `valid_until` = now + `telegram.gateTtlHours`
+   (default 24) and the binding: publication, ad, ad set, campaign, Meta
+   creative id and content hash. A newer card of the same ad closes the older.
+2. **Tap.** The kit's router checks the chat and the approver list
+   (`telegram.allowedUserIds`, re-read from the saved config) and moves the
+   row pending -> approved with one conditional UPDATE, so a double tap acts
+   once. The `activate_ad` handler (`src/gate/activate-ad.ts`) then re-runs
+   the preflight, reads the ad set's ads, the ad set and the campaign, checks
+   that the ad still carries the creative the card showed, refuses ⚠ states
+   (ARCHIVED, DELETED, effective_status such as DISAPPROVED or WITH_ISSUES),
+   and runs the spend guard for each object it will activate. Any refusal
+   ends the card `denied` with the reason and no Meta write.
+3. **Writes.** The ad ACTIVE, every other ACTIVE ad of the ad set PAUSED
+   (newest wins), then the ad set and the campaign ACTIVE only if PAUSED.
+   Each write passes the spend guard hook again, and the hook lets ACTIVE
+   through only on those objects. A last read checks the creative again; a
+   swap that raced the activation pauses the ad. The card shows the ad id and
+   the paused ad ids. A failure part way ends the card `failed` with the step
+   reached and is not retried.
+4. **Skip, expiry, swap, re-send.** "🗑 Ohita" ends the card `skipped`. The
+   `gate-expiry` job (every 5 min) moves cards past `valid_until` to
+   `expired`; a tap checks `valid_until` itself. A creative swap closes the
+   ad's open cards and is refused while an approved activation of the ad is
+   running (30 min window). `resend_gate_card` re-posts a pending card with a
+   new token; the old card's buttons stop working. The ad stays PAUSED in
+   every case but an approval.
+
+Every decision stores `decided_by_tg_user_id`, `decided_at`, `outcome` and
+`paused_ad_ids`, and writes an activity entry (`entityType: "gate_request"`).
+The Telegram user is not mapped to a company member: the plugin has no
+pairing source (`outcome.decidedBy.memberUserId` is null).
+`tests/activation-sole-path.spec.ts` asserts that only the handler can set
+anything ACTIVE.
+
+| Key | Kind | What it does |
+|---|---|---|
+| `resend_gate_card` | action | `{ gateRequestId \| publicationId }`: posts a pending, unexpired activation card again |
+| `gate-expiry` | job | Expires pending cards past `valid_until` and removes their buttons |
 
 ## Brand config, preflight and provisioning (RK9-510)
 
