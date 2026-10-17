@@ -102,6 +102,41 @@ export function isLocalTimeAtOrAfter(instant: Date, hhmm: string, timeZone: stri
   return p.hour * 60 + p.minute >= Number(match[1]) * 60 + Number(match[2]);
 }
 
+function offsetMs(offset: string): number {
+  const match = /^([+-])(\d{2}):(\d{2})$/.exec(offset);
+  if (!match) return 0;
+  const minutes = Number(match[2]) * 60 + Number(match[3]);
+  return (match[1] === "-" ? -1 : 1) * minutes * 60_000;
+}
+
+/**
+ * The instant whose local wall-clock time in `timeZone` is the given date and
+ * time. `day` may run past the month's end (Date.UTC normalizes it). In a
+ * DST gap the result lands an hour off the wall time; Europe/Helsinki
+ * changes at 03:00/04:00, so morning and midnight times are unaffected.
+ */
+export function zonedInstant(year: number, month: number, day: number, hour: number, minute: number, timeZone: string = DEFAULT_TIME_ZONE): Date {
+  const wall = Date.UTC(year, month - 1, day, hour, minute);
+  let utc = wall - offsetMs(zonedParts(new Date(wall), timeZone).offset);
+  utc = wall - offsetMs(zonedParts(new Date(utc), timeZone).offset);
+  return new Date(utc);
+}
+
+/** The first instant after `instant` whose local wall-clock time is `hhmm`: today's when it is still ahead, else tomorrow's. */
+export function nextLocalTime(instant: Date, hhmm: string, timeZone: string = DEFAULT_TIME_ZONE): Date {
+  const match = HH_MM.exec(hhmm);
+  if (!match) throw new Error(`Invalid HH:MM time: ${hhmm}`);
+  const p = zonedParts(instant, timeZone);
+  const today = zonedInstant(p.year, p.month, p.day, Number(match[1]), Number(match[2]), timeZone);
+  return today.getTime() > instant.getTime() ? today : zonedInstant(p.year, p.month, p.day + 1, Number(match[1]), Number(match[2]), timeZone);
+}
+
+/** Local midnight on the first day of the month after the one that contains `instant`. */
+export function nextLocalMonthStart(instant: Date, timeZone: string = DEFAULT_TIME_ZONE): Date {
+  const p = zonedParts(instant, timeZone);
+  return p.month === 12 ? zonedInstant(p.year + 1, 1, 1, 0, 0, timeZone) : zonedInstant(p.year, p.month + 1, 1, 0, 0, timeZone);
+}
+
 export interface LocalMonthBounds {
   /** "YYYY-MM" */
   month: string;

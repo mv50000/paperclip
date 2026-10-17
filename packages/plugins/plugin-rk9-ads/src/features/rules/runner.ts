@@ -45,7 +45,7 @@ import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import type { MetaClientMode, MetaGraphClient } from "../../meta/graph.js";
 import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
-import { pauseAll, type PauseAllDeps } from "../spend-guard/killswitch.js";
+import { pauseAll, PauseListError, stopFailures, type PauseAllDeps } from "../spend-guard/killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, safeError, type Initiator, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { evaluateRules, type RuleAdDay, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
@@ -340,13 +340,13 @@ export async function runRulesForBrand(
         if (error) failures.push(`${config.brandCode} ${decision.ruleId}: ${error}`);
         if (result.auditError) failures.push(`${config.brandCode} ${decision.ruleId}: rule_actions insert failed (${result.auditError})`);
         // The pause stands either way, but open activation cards or a missing halt must not go unnoticed (RK9-561).
-        if (result.cardsError) failures.push(`${config.brandCode} ${decision.ruleId}: open activation cards were not closed (${result.cardsError})`);
-        if (result.haltError) failures.push(`${config.brandCode} ${decision.ruleId}: the standing halt was not stored (${result.haltError})`);
+        failures.push(...stopFailures(`${config.brandCode} ${decision.ruleId}`, result));
         if (result.telegram === "failed") failures.push(`${config.brandCode} ${decision.ruleId}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
       } catch (error) {
-        // pauseAll audited the failed listing itself.
+        // pauseAll audited the failed listing itself; the halt and card close ran before it (RK9-561).
         outcome.decisions.push({ ...decision, applied: false, error: safeError(error) });
         failures.push(`${config.brandCode} ${decision.ruleId}: ${safeError(error)}`);
+        if (error instanceof PauseListError) failures.push(...stopFailures(`${config.brandCode} ${decision.ruleId}`, error.stopped));
       }
       continue;
     }

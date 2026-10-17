@@ -1,8 +1,10 @@
 /**
  * A pause beats an open activation card (RK9-557, RK9-517 verifier): the
  * kill switch, the 90 % cap pause and the scheduled pause close the brand's
- * open activate_ad cards, and the kill switch leaves a standing halt that
- * refuses every activation until a board user clears it. The approval is
+ * open activate_ad cards and leave a halt that refuses every activation: the
+ * kill switch's until a board user clears it, the scheduled pause's until the
+ * next local morning, the cap pause's until the next local month (RK9-561).
+ * A real pauseAll that runs during an activation's writes wins. The approval is
  * also bound to the publication's contentHash. The Telegram controller is
  * the real one on a fake Bot API; Meta is a routing fake.
  */
@@ -30,7 +32,8 @@ import { telegramBotKey } from "../src/kit/telegram/bot-api.js";
 import type { PublishedPublication } from "../src/publish/handoff.js";
 import { memoryPublicationStore } from "../src/publish/store.js";
 import type { PublicationRecord } from "../src/publish/types.js";
-import { brandConfig, COMPANY_A, SECRET_A_BOT, SECRET_A_META, secretRef } from "./fixtures.js";
+import { nextLocalMonthStart, nextLocalTime } from "../src/kit/local-time.js";
+import { brandConfig, COMPANY_A, COMPANY_B, SECRET_A_BOT, SECRET_A_META, secretRef } from "./fixtures.js";
 import { FakeTelegram } from "./helpers/fake-telegram.js";
 import { memoryActivationRepo } from "./gate/memory-repo.js";
 import { FakeMeta } from "./spend-guard/fake-meta.js";
@@ -138,6 +141,7 @@ interface Rig {
   cards: StagingCards;
   notifier: FakeNotifier;
   publications: ReturnType<typeof memoryPublicationStore>;
+  repo: ReturnType<typeof memoryActivationRepo>;
 }
 
 const rigs: Rig[] = [];
@@ -192,7 +196,7 @@ async function rig(input: { meta?: FakeMeta; gate?: GateOverrides } = {}): Promi
   });
   await controller.replan();
   await waitFor(() => controller.summary()[0]?.loop === "running");
-  const out = { harness, runtime, meta, fake, store, controller, cards, notifier, publications };
+  const out = { harness, runtime, meta, fake, store, controller, cards, notifier, publications, repo };
   rigs.push(out);
   return out;
 }
@@ -230,6 +234,34 @@ function runPause(r: Rig, rule: PauseRule): Promise<PauseAllResult> {
 
 function haltOf(r: Rig): Promise<HaltState | null> {
   return readHalt(r.harness.ctx, COMPANY_A);
+}
+
+function statusOf(meta: FakeMeta, id: string): string | undefined {
+  return [...meta.campaigns, ...meta.adsets, ...meta.ads].find((object) => object.id === id)?.status;
+}
+
+/**
+ * Runs `pause` while the activation's ACTIVE write on `objectId` is in
+ * flight: before Meta applies it, or after Meta applied it and before the
+ * handler goes on. Returns whether the write was seen.
+ */
+function pauseDuringWrite(r: Rig, objectId: string, when: "before" | "after", pause: () => Promise<unknown>): () => boolean {
+  const original = r.harness.ctx.http.fetch;
+  let fired = false;
+  r.harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
+    const body = init?.body ? new URLSearchParams(String(init.body)) : null;
+    const hit = !fired && init?.method === "POST" && new URL(url).pathname.endsWith(`/${objectId}`) && body?.get("status") === "ACTIVE";
+    if (!hit) return original(url, init);
+    fired = true;
+    if (when === "before") {
+      await pause();
+      return original(url, init);
+    }
+    const response = await original(url, init);
+    await pause();
+    return response;
+  };
+  return () => fired;
 }
 
 describe("the kill switch closes open activation cards and leaves a standing halt", () => {
@@ -281,6 +313,26 @@ describe("the kill switch closes open activation cards and leaves a standing hal
     expect(await haltOf(r)).toMatchObject({ initiator: { source: "agent", agentId: "agent-1" } });
   });
 
+  it("a config that cannot be loaded still leaves the halt and closes the cards, then fails with nothing paused (RK9-561)", async () => {
+    const r = await rig();
+    const sent = await r.cards.openActivationCard(publication());
+    // No last valid config: pause-config has never run for the company.
+    r.harness.ctx.config.get = async () => {
+      throw new Error("config store down");
+    };
+    await expect(r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD)).rejects.toThrow(
+      /nothing was paused in Meta\. Standing halt set.*Closed 1 open activation card/,
+    );
+    expect(await haltOf(r)).toMatchObject({ rule: "kill_switch", brandCode: "?", reason: "hätä", initiator: { source: "ui", userId: "board-1" } });
+    expect(r.store.rows.get(sent.id)).toMatchObject({ status: "expired", outcome: { reason: "kill_switch" } });
+    expect(caption(r, sent.messageId)).toContain("⛔ Hätäkatkaisin painettu");
+    expect(r.meta.writes).toEqual([]);
+
+    const tool = await r.harness.executeTool<{ content?: string; error?: string }>("rk9ads_pause_all", { reason: "CPC karkasi" }, { companyId: COMPANY_A, agentId: "agent-1" });
+    expect(tool.error).toMatch(/nothing was paused in Meta\. Standing halt set/);
+    expect(await haltOf(r)).toMatchObject({ initiator: { source: "agent", agentId: "agent-1" } });
+  });
+
   it("a dry run of the kill switch closes nothing and sets no halt", async () => {
     const r = await rig();
     const sent = await r.cards.openActivationCard(publication());
@@ -308,8 +360,8 @@ describe("the kill switch closes open activation cards and leaves a standing hal
   it("a halt set while the activation writes pauses the ad again and fails the card", async () => {
     let reads = 0;
     const halt: HaltState = { brandCode: "OLL", rule: "kill_switch", since: "2026-10-21T09:00:00.000Z", reason: "hätä", initiator: { source: "ui" } };
-    // Clear for the check before the writes and for the ad's ACTIVE; set by the next ACTIVE write.
-    const r = await rig({ gate: { haltOf: async () => (++reads <= 2 ? null : halt) } });
+    // Clear for the card send, the check before the writes and the ad's ACTIVE; set by the next ACTIVE write.
+    const r = await rig({ gate: { haltOf: async () => (++reads <= 3 ? null : halt) } });
     const sent = await r.cards.openActivationCard(publication());
     await tap(r, sent.messageId);
     const row = r.store.rows.get(sent.id)!;
@@ -323,8 +375,8 @@ describe("the kill switch closes open activation cards and leaves a standing hal
   it("a halt seen only after the last write pauses again the campaign, the ad set and the ad", async () => {
     let reads = 0;
     const halt: HaltState = { brandCode: "OLL", rule: "kill_switch", since: "2026-10-21T09:00:00.000Z", reason: "hätä", initiator: { source: "ui" } };
-    // 1 before the writes, 3 ACTIVE writes (ad, ad set, campaign), then the final check.
-    const r = await rig({ gate: { haltOf: async () => (++reads <= 4 ? null : halt) } });
+    // The card send, 1 before the writes, 3 ACTIVE writes (ad, ad set, campaign), then the final check.
+    const r = await rig({ gate: { haltOf: async () => (++reads <= 5 ? null : halt) } });
     const sent = await r.cards.openActivationCard(publication());
     await tap(r, sent.messageId);
     expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "failed", step: "verify_halt" });
@@ -368,16 +420,17 @@ describe("the kill switch closes open activation cards and leaves a standing hal
 
 describe("the cap pause and the scheduled pause close open cards too", () => {
   it.each([
-    ["pause_all_cap", "⛔ Kulutuskatto 90 % ylittyi: kortti mitätöity"],
-    ["scheduled_pause", "⛔ Ajastettu pysäytys: kortti mitätöity"],
-  ] as const)("%s: open card, pause, tap: no Meta ACTIVE write and the card names the reason; no halt", async (rule, text) => {
+    ["pause_all_cap", "⛔ Kulutuskatto 90 % ylittyi: kortti mitätöity", "kulutuskatto 90 % ylittyi"],
+    ["scheduled_pause", "⛔ Ajastettu pysäytys: kortti mitätöity", "ajastettu pysäytys on päällä"],
+  ] as const)("%s: open card, pause, tap: no Meta ACTIVE write; a timed halt refuses new cards until it ends or the board clears it", async (rule, text, refusal) => {
     const r = await rig();
     const sent = await r.cards.openActivationCard(publication());
     const staleButton = r.fake.buttons(sent.messageId)[0]!;
+    const before = new Date();
     const result = await runPause(r, rule);
     expect(result.closedCardIds).toEqual([sent.id]);
     expect(result.cardsError).toBeUndefined();
-    expect(result.halt).toBeUndefined();
+    expect(result.haltError).toBeUndefined();
     expect(r.store.rows.get(sent.id)).toMatchObject({ status: "expired", outcome: { reason: rule } });
     expect(caption(r, sent.messageId)).toContain(text);
 
@@ -386,11 +439,54 @@ describe("the cap pause and the scheduled pause close open cards too", () => {
     expect(activeWrites(r.meta)).toEqual([]);
     expect(caption(r, sent.messageId)).toContain(text);
 
-    // Not a standing halt: the next card activates.
+    // A timed halt: the next local morning, or the next local month for the cap.
+    const halt = (await haltOf(r))!;
+    expect(halt).toMatchObject({ rule, brandCode: "OLL", id: expect.any(String) });
+    const expectedUntil = rule === "scheduled_pause" ? nextLocalTime(before, "06:00", "Europe/Helsinki") : nextLocalMonthStart(before, "Europe/Helsinki");
+    expect(Math.abs(Date.parse(halt.until!) - expectedUntil.getTime())).toBeLessThan(60_000);
+    expect(r.notifier.messages[0]!.text).toContain("Pysäytystila päällä");
+
+    // A card sent now says so, and its tap refuses with no Meta write.
+    const refused = await r.cards.openActivationCard(publication());
+    expect(caption(r, refused.messageId)).toContain("⛔ Pysäytystila päällä");
+    await tap(r, refused.messageId);
+    expect(r.store.rows.get(refused.id)!.outcome).toMatchObject({ result: "denied", reason: "halted" });
+    expect(caption(r, refused.messageId)).toContain(`⛔ Ei aktivoitu: ${refusal}`);
+    expect(activeWrites(r.meta)).toEqual([]);
+
+    // The halt ends when its time is up.
+    expect(await readHalt(r.harness.ctx, COMPANY_A, new Date(Date.parse(halt.until!) + 1))).toBeNull();
+
+    // A board user may lift it early; then the next card activates.
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, BOARD);
     expect(await haltOf(r)).toBeNull();
     const next = await r.cards.openActivationCard(publication());
+    expect(caption(r, next.messageId)).not.toContain("Pysäytystila päällä");
     await tap(r, next.messageId);
     expect(r.store.rows.get(next.id)!.outcome).toMatchObject({ result: "activated" });
+  });
+
+  it("a card whose close fails does not stop the others: the rest close and are edited, the result names the failure (RK9-561)", async () => {
+    const r = await rig();
+    const first = await r.cards.openActivationCard(publication());
+    const second = await r.cards.openActivationCard({ ...publication(), publicationId: SWAP_PUBLICATION_ID, adId: OLD_AD, adName: "OLL vanha" });
+    const close = r.repo.close.bind(r.repo);
+    r.repo.close = async (companyId, id, outcome) => {
+      if (id === first.id) throw new Error("row locked");
+      return close(companyId, id, outcome);
+    };
+    const result = await runPause(r, "scheduled_pause");
+    expect(result.closedCardIds).toEqual([second.id]);
+    expect(result.cardsError).toMatch(new RegExp(`1 card\\(s\\) not closed \\(${first.id}\\): Error: row locked`));
+    expect(result.halt).toMatchObject({ rule: "scheduled_pause" });
+    expect(r.store.rows.get(second.id)!.status).toBe("expired");
+    expect(caption(r, second.messageId)).toContain("⛔ Ajastettu pysäytys");
+    expect(r.store.rows.get(first.id)!.status).toBe("pending");
+    expect(r.notifier.messages[0]!.text).toContain("Avoimia aktivointikortteja ei voitu sulkea");
+    // The card left open still refuses: the halt is in force.
+    await tap(r, first.messageId);
+    expect(r.store.rows.get(first.id)!.outcome).toMatchObject({ reason: "halted" });
+    expect(activeWrites(r.meta)).toEqual([]);
   });
 
   it("the data gate leaves the cards open", async () => {
@@ -399,6 +495,32 @@ describe("the cap pause and the scheduled pause close open cards too", () => {
     const result = await runPause(r, "data_gate");
     expect(result.closedCardIds).toEqual([]);
     expect(r.store.rows.get(sent.id)!.status).toBe("pending");
+  });
+});
+
+describe("a real pause during an approved activation wins (RK9-561)", () => {
+  // "before": the pause lists before Meta applies the ad's ACTIVE, so its listing misses it.
+  // "after": the pause runs after the campaign's ACTIVE, the last write.
+  it.each([
+    ["kill_switch", AD, "before"],
+    ["kill_switch", CAMPAIGN, "after"],
+    ["scheduled_pause", AD, "before"],
+    ["scheduled_pause", CAMPAIGN, "after"],
+    ["pause_all_cap", AD, "before"],
+    ["pause_all_cap", CAMPAIGN, "after"],
+  ] as const)("%s during the ACTIVE write of %s (%s): nothing stays ACTIVE and the card fails", async (rule, objectId, when) => {
+    const r = await rig();
+    const sent = await r.cards.openActivationCard(publication());
+    let pause: PauseAllResult | null = null;
+    const fired = pauseDuringWrite(r, objectId, when, async () => {
+      pause = await runPause(r, rule);
+    });
+    await tap(r, sent.messageId);
+    expect(fired()).toBe(true);
+    expect(pause!).toMatchObject({ halt: { rule } });
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "failed", step: when === "before" ? "adset_active" : "verify_halt" });
+    for (const id of [AD, OLD_AD, ADSET, CAMPAIGN]) expect(statusOf(r.meta, id)).toBe("PAUSED");
+    expect(await haltOf(r)).toMatchObject({ rule });
   });
 });
 
@@ -420,7 +542,7 @@ describe("clearing the halt is board-only", () => {
     expect(r.store.rows.get(refused.id)!.outcome).toMatchObject({ reason: "halted" });
     expect(activeWrites(r.meta)).toEqual([]);
 
-    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, reason: "tarkistettu" }, BOARD)).toMatchObject({
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: data.halt!.since, reason: "tarkistettu" }, BOARD)).toMatchObject({
       dryRun: false,
       cleared: true,
     });
@@ -447,10 +569,77 @@ describe("clearing the halt is board-only", () => {
     expect(await haltOf(r)).toMatchObject({ reason: "toka" });
   });
 
+  it("a kill switch between the preview and the clear stays: the clear lifts only the halt it named", async () => {
+    const r = await rig();
+    await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "eka" }, BOARD);
+    const preview = await r.harness.performAction<{ halt: HaltState }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    // The clear reads the halt the preview named, then a kill switch stores a new one before the clear's write.
+    const state = r.harness.ctx.state;
+    const set = state.set.bind(state);
+    state.set = async (input, value) => {
+      if (input.stateKey.startsWith("halt-cleared:")) {
+        await setHalt(r.harness.ctx, COMPANY_A, { ...preview.halt, id: "newer-halt", since: "2099-01-01T00:00:00.000Z", reason: "toka" });
+      }
+      return set(input, value);
+    };
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD)).toMatchObject({
+      cleared: true,
+      halt: { reason: "eka" },
+      remaining: { reason: "toka" },
+    });
+    expect(await haltOf(r)).toMatchObject({ reason: "toka" });
+  });
+
+  it("a real clear needs `since`, and a system actor may not clear", async () => {
+    const r = await rig();
+    await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true }, BOARD)).rejects.toThrow(/needs `since`/);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: "" }, BOARD)).rejects.toThrow(/needs `since`/);
+    const halt = (await haltOf(r))!;
+    await expect(
+      r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, { companyId: COMPANY_A, actor: { type: "system" } }),
+    ).rejects.toThrow(/board-only/);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, { companyId: COMPANY_A })).rejects.toThrow(/board-only/);
+    expect(await haltOf(r)).toMatchObject({ reason: "hätä" });
+    expect(r.harness.activity.some((entry) => entry.message === HALT_CLEARED_ACTIVITY)).toBe(false);
+  });
+
+  it("another company neither sees nor clears the halt", async () => {
+    const r = await rig();
+    await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD);
+    const halt = (await haltOf(r))!;
+    const boardB = { companyId: COMPANY_B, actor: { type: "user" as const, userId: "board-b" } };
+    expect((await r.harness.getData<{ halt: HaltState | null }>(SPEND_GUARD_DATA_KEY, { companyId: COMPANY_B })).halt).toBeNull();
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, {}, boardB)).toMatchObject({ dryRun: true, halt: null });
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, boardB)).toEqual({
+      dryRun: false,
+      cleared: false,
+      halt: null,
+    });
+    expect(await haltOf(r)).toMatchObject({ since: halt.since, reason: "hätä" });
+    // And the cleared marker of company B does not touch company A.
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ reason: "halted" });
+  });
+
   it("a clear without a halt changes nothing", async () => {
     const r = await rig();
-    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true }, BOARD)).toEqual({ dryRun: false, cleared: false, halt: null });
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: "2026-10-21T09:00:00.000Z" }, BOARD)).toEqual({
+      dryRun: false,
+      cleared: false,
+      halt: null,
+    });
     expect(r.harness.activity.some((entry) => entry.message === HALT_CLEARED_ACTIVITY)).toBe(false);
+  });
+
+  it("a damaged halt record can be cleared by a board user with its `since`", async () => {
+    const r = await rig();
+    await setHalt(r.harness.ctx, COMPANY_A, { broken: true } as unknown as HaltState);
+    const preview = await r.harness.performAction<{ halt: HaltState }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    expect(preview.halt).toMatchObject({ since: "?" });
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
+    expect(await haltOf(r)).toBeNull();
   });
 
   it("a damaged halt record still refuses", async () => {

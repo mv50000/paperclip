@@ -9,12 +9,17 @@
  * - `closeCardsForPause`: the kill switch, the 90 % cap pause and the
  *   scheduled pause close every open card of the company, so a tap after a
  *   pause cannot undo it (RK9-557). The rows close at once; the card edits
- *   wait for `announce`, so Telegram never holds back the Meta pauses.
+ *   wait for `announce`, so Telegram never holds back the Meta pauses. A row
+ *   whose close fails does not stop the others: the result names the error
+ *   and the rows that did close (RK9-561).
  * - `expireDueCards`: the gate-expiry job. Cards past valid_until move to
  *   `expired` and lose their buttons. A tap re-checks valid_until itself, so
  *   the job's cadence never stretches a card's life.
  * - `resendActivationCard`: a lost card is posted again with a new token; the
  *   old card's buttons stop working.
+ *
+ * While a pause's halt is in force, a new card says so (RK9-561): its tap
+ * refuses until the halt ends or a board user clears it.
  *
  * Nothing here writes to Meta. Reads use the brand's read-only client.
  */
@@ -23,6 +28,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../config.js";
 import { DEFAULT_GATE_TTL_HOURS } from "../config.js";
 import { checkSpend as defaultCheckSpend, type GuardResult } from "../features/spend-guard/guard.js";
+import type { HaltState } from "../features/spend-guard/halt.js";
 import { safeError } from "../features/spend-guard/support.js";
 import { localDate, localTime } from "../kit/local-time.js";
 import { storedCard, type GateDenyDecision, type GateRequestRecord, type GateStore } from "../kit/gate/state-machine.js";
@@ -46,13 +52,15 @@ export type CardClosingPause = (typeof CARD_CLOSING_PAUSES)[number];
 /** Cards a pause closed. `announce` edits them and writes the audit entries; it never throws. */
 export interface PauseCardClose {
   ids: string[];
+  /** Set when some open cards could not be listed or closed; `ids` are the ones that did close. */
+  error?: string;
   announce(): Promise<void>;
 }
 
 const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
   kill_switch: "⛔ Hätäkatkaisin painettu: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty, kunnes board poistaa pysäytystilan.",
-  pause_all_cap: "⛔ Kulutuskatto 90 % ylittyi: kortti mitätöity. Mainos jäi PAUSED-tilaan.",
-  scheduled_pause: "⛔ Ajastettu pysäytys: kortti mitätöity. Mainos jäi PAUSED-tilaan.",
+  pause_all_cap: "⛔ Kulutuskatto 90 % ylittyi: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty kuun loppuun, ellei board poista pysäytystilaa.",
+  scheduled_pause: "⛔ Ajastettu pysäytys: kortti mitätöity. Mainos jäi PAUSED-tilaan. Aktivointi on estetty aamuun asti.",
 };
 const COPY_MAX_CHARS = 400;
 
@@ -83,6 +91,8 @@ export interface StagingCardDeps {
   transport(): GateCardTransport | null;
   loadConfig(companyId: string): Promise<{ ok: true; config: BrandConfig } | { ok: false; error: string }>;
   readClient(companyId: string, config: BrandConfig): MetaGraphClient;
+  /** The halt in force (spend-guard/halt.ts). A new card names it; a read failure only leaves the line out. */
+  haltOf?(companyId: string): Promise<HaltState | null>;
   checkSpend?: typeof defaultCheckSpend;
   now?: () => Date;
 }
@@ -116,7 +126,15 @@ export interface StagingCardFacts {
   copy: { message: string; title?: string };
   validUntil: Date;
   timeZone: string;
+  /** The halt in force when the card was sent. */
+  halt?: HaltState | null;
 }
+
+const HALT_RULE_TEXT: Record<string, string> = {
+  kill_switch: "hätäkatkaisin",
+  scheduled_pause: "ajastettu pysäytys",
+  pause_all_cap: "kulutuskatto 90 %",
+};
 
 /** The card text (Finnish). Pure: tests pin it. */
 export function stagingCardText(facts: StagingCardFacts): string {
@@ -132,6 +150,15 @@ export function stagingCardText(facts: StagingCardFacts): string {
     lines.push(`Kulutus tässä kuussa: ? / ${eur(facts.monthlyCapEur)}`);
   }
   if (facts.guard && !facts.guard.allow) lines.push(`⚠️ Kulutusvahti nyt: ${facts.guard.reason}. Aktivointi tarkistetaan uudelleen napautuksella.`);
+  if (facts.halt) {
+    const why = HALT_RULE_TEXT[facts.halt.rule] ?? facts.halt.rule;
+    const until = facts.halt.until ? new Date(facts.halt.until) : null;
+    lines.push(
+      until && Number.isFinite(until.getTime())
+        ? `⛔ Pysäytystila päällä (${why}) ${localDate(until, facts.timeZone)} klo ${localTime(until, facts.timeZone)} asti: napautus ei aktivoi ennen sitä, ellei board poista tilaa.`
+        : `⛔ Pysäytystila päällä (${why}): napautus ei aktivoi mitään, kunnes board poistaa tilan.`,
+    );
+  }
   lines.push("");
   if (facts.copy.title) lines.push(clip(facts.copy.title, 120));
   lines.push(clip(facts.copy.message, COPY_MAX_CHARS));
@@ -164,13 +191,28 @@ export function createStagingCards(deps: StagingCardDeps) {
     }
   }
 
-  /** Closes the given open activate_ad rows (no Telegram call). */
-  async function closeRows(companyId: string, open: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<GateRequestRecord[]> {
+  /**
+   * Closes the given open activate_ad rows (no Telegram call). A row whose
+   * close throws does not stop the others; `error` names the first failure.
+   */
+  async function closeRows(
+    companyId: string,
+    open: GateRequestRecord[],
+    outcome: Record<string, unknown>,
+    status: string,
+  ): Promise<{ closed: GateRequestRecord[]; error?: string }> {
     const closed: GateRequestRecord[] = [];
+    const failed: string[] = [];
+    let first: string | undefined;
     for (const request of open) {
-      if (await deps.repo.close(companyId, request.id, { handler: "not_run", ...outcome, statusText: status, closedAt: now().toISOString() })) closed.push(request);
+      try {
+        if (await deps.repo.close(companyId, request.id, { handler: "not_run", ...outcome, statusText: status, closedAt: now().toISOString() })) closed.push(request);
+      } catch (error) {
+        failed.push(request.id);
+        first ??= safeError(error);
+      }
     }
-    return closed;
+    return failed.length > 0 ? { closed, error: `${failed.length} card(s) not closed (${failed.join(", ")}): ${first}`.slice(0, 500) } : { closed };
   }
 
   /** Edits closed cards and audits them. Never throws. */
@@ -181,10 +223,11 @@ export function createStagingCards(deps: StagingCardDeps) {
     }
   }
 
-  /** Closes the given open activate_ad cards, then edits them. */
+  /** Closes the given open activate_ad cards, then edits the ones that closed. Throws when a close failed. */
   async function closeEach(companyId: string, open: GateRequestRecord[], outcome: Record<string, unknown>, status: string): Promise<string[]> {
-    const closed = await closeRows(companyId, open, outcome, status);
+    const { closed, error } = await closeRows(companyId, open, outcome, status);
     await announceClosed(companyId, closed, outcome, status);
+    if (error) throw new Error(error);
     return closed.map((request) => request.id);
   }
 
@@ -216,6 +259,13 @@ export function createStagingCards(deps: StagingCardDeps) {
       }
       // The card shows where the month stands; the tap checks again.
       const guard = await check({ config, client: read, now: now(), change: { objectId: publication.adsetId, level: "adset", activate: true } });
+      let halt: HaltState | null = null;
+      try {
+        halt = (await deps.haltOf?.(companyId)) ?? null;
+      } catch (error) {
+        // The tap reads the halt again and refuses when it cannot; the card only loses the line.
+        deps.ctx.logger.warn("rk9-ads gate: halt read for the card failed", { companyId, detail: safeError(error) });
+      }
 
       const validUntil = new Date(now().getTime() + (config.telegram.gateTtlHours ?? DEFAULT_GATE_TTL_HOURS) * 3_600_000);
       const binding: Omit<ActivationBinding, "media" | "mediaUrl"> = {
@@ -239,6 +289,7 @@ export function createStagingCards(deps: StagingCardDeps) {
         copy: publication.preview.copy,
         validUntil,
         timeZone: config.timeZone,
+        halt,
       });
 
       // Newest card wins: an older open card of the same ad stops working.
@@ -286,6 +337,7 @@ export function createStagingCards(deps: StagingCardDeps) {
         creativeId: publication.creativeId,
         validUntil: validUntil.toISOString(),
         guardReason: guard.reason,
+        ...(halt ? { halt: { rule: halt.rule, since: halt.since, until: halt.until ?? null } } : {}),
       });
       return sent;
     },
@@ -314,14 +366,19 @@ export function createStagingCards(deps: StagingCardDeps) {
     /**
      * The pause hook (RK9-557): closes every open card row of the company
      * now; `announce` edits the cards with the pause's reason later. A tap
-     * that approved a card before this close is not stopped here; for the
-     * kill switch the standing halt stops it (activate-ad.ts).
+     * that approved a card before this close is not stopped here; the pause's
+     * halt stops it (activate-ad.ts). Throws only when the open cards cannot
+     * be listed; a failed row close is in `error`.
      */
     async closeCardsForPause(companyId: string, input: { rule: CardClosingPause; reason: string }): Promise<PauseCardClose> {
       const outcome = { reason: input.rule, pauseReason: input.reason.slice(0, 300) };
       const status = PAUSE_CLOSE_TEXT[input.rule];
-      const closed = await closeRows(companyId, await deps.repo.openForCompany(companyId), outcome, status);
-      return { ids: closed.map((request) => request.id), announce: () => announceClosed(companyId, closed, outcome, status) };
+      const { closed, error } = await closeRows(companyId, await deps.repo.openForCompany(companyId), outcome, status);
+      return {
+        ids: closed.map((request) => request.id),
+        ...(error ? { error } : {}),
+        announce: () => announceClosed(companyId, closed, outcome, status),
+      };
     },
 
     /** The gate-expiry job. Returns the number of cards this run expired. */

@@ -101,7 +101,9 @@ const eur = (cents: number): number => Math.round(cents) / 100;
 
 export function haltView(halt: HaltState): UiHalt {
   return {
+    rule: halt.rule,
     since: halt.since,
+    until: halt.until ?? null,
     reason: halt.reason,
     source: halt.initiator?.source ?? "unknown",
     userId: halt.initiator?.userId ?? null,

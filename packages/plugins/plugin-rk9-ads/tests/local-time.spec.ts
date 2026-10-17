@@ -5,6 +5,9 @@ import {
   localDate,
   localMonth,
   localTime,
+  nextLocalMonthStart,
+  nextLocalTime,
+  zonedInstant,
   zonedParts,
 } from "../src/kit/local-time.js";
 
@@ -43,5 +46,31 @@ describe("local time (UTC host, Europe/Helsinki jobs)", () => {
     expect(daysInLocalMonth(new Date("2026-02-10T12:00:00Z"))).toBe(28);
     expect(daysInLocalMonth(new Date("2028-02-10T12:00:00Z"))).toBe(29);
     expect(daysInLocalMonth(new Date("2026-04-10T12:00:00Z"))).toBe(30);
+  });
+
+  it("maps a local wall time to the instant, on both sides of a DST change (RK9-561)", () => {
+    expect(zonedInstant(2026, 10, 21, 6, 0).toISOString()).toBe("2026-10-21T03:00:00.000Z"); // EEST
+    expect(zonedInstant(2026, 10, 26, 6, 0).toISOString()).toBe("2026-10-26T04:00:00.000Z"); // EET
+    expect(zonedInstant(2026, 10, 32, 0, 0).toISOString()).toBe("2026-10-31T22:00:00.000Z"); // day overflow -> 1.11. EET
+  });
+
+  it("finds the next local morning after an evening pause, also across the autumn DST change", () => {
+    // 21:30 EEST on 21.10. -> 06:00 EEST on 22.10.
+    expect(nextLocalTime(new Date("2026-10-21T18:30:00Z"), "06:00").toISOString()).toBe("2026-10-22T03:00:00.000Z");
+    // 21:30 EEST on 24.10. -> 06:00 EET on 25.10. (the clocks go back at 04:00)
+    expect(nextLocalTime(new Date("2026-10-24T18:30:00Z"), "06:00").toISOString()).toBe("2026-10-25T04:00:00.000Z");
+    // 05:00 local: the same morning; 06:00 sharp: the next one.
+    expect(nextLocalTime(new Date("2026-10-22T02:00:00Z"), "06:00").toISOString()).toBe("2026-10-22T03:00:00.000Z");
+    expect(nextLocalTime(new Date("2026-10-22T03:00:00Z"), "06:00").toISOString()).toBe("2026-10-23T03:00:00.000Z");
+    expect(() => nextLocalTime(new Date(), "6:00")).toThrow(/Invalid HH:MM/);
+  });
+
+  it("finds the start of the next local month, also over the year end", () => {
+    expect(nextLocalMonthStart(new Date("2026-10-21T18:30:00Z")).toISOString()).toBe("2026-10-31T22:00:00.000Z");
+    // 31.10. 23:30 local is still October.
+    expect(nextLocalMonthStart(new Date("2026-10-31T21:30:00Z")).toISOString()).toBe("2026-10-31T22:00:00.000Z");
+    expect(nextLocalMonthStart(new Date("2026-12-15T12:00:00Z")).toISOString()).toBe("2026-12-31T22:00:00.000Z");
+    // 1.12. 00:30 local (31.11. 22:30 UTC) is already December.
+    expect(nextLocalMonthStart(new Date("2026-11-30T22:30:00Z")).toISOString()).toBe("2026-12-31T22:00:00.000Z");
   });
 });

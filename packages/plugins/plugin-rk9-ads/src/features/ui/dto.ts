@@ -17,9 +17,12 @@ export interface UiBrand {
   monthlyCapEur: number | null;
 }
 
-/** The kill switch's standing halt (RK9-557): when, who and why. */
+/** The halt in force (RK9-557, RK9-561): which pause, when, until when, who and why. */
 export interface UiHalt {
+  rule: string;
   since: string;
+  /** The end of a timed halt (scheduled pause, cap pause); null for the kill switch's. */
+  until: string | null;
   reason: string;
   source: string;
   userId: string | null;

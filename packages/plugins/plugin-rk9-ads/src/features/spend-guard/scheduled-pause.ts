@@ -7,9 +7,12 @@
  *    failed send fails the run and is retried on the next check.
  * 2. Scheduled pause: when `schedule.scheduledPause.enabled` and the local
  *    time is at or after `at` (21:30 is right in both EET and EEST), once per
- *    local day. It also closes the open activation cards (RK9-557). The day's marker is written only after the Meta part
- *    succeeded, so a Meta failure is retried on the next tick (pauses are
- *    idempotent). Off by default.
+ *    local day. It also leaves a halt until the next local morning and closes
+ *    the open activation cards (RK9-557, RK9-561). The day's marker is
+ *    written once the Meta pauses succeeded, so a Meta failure is retried on
+ *    the next tick (pauses are idempotent). A card close or halt write that
+ *    failed fails the run once but is not retried: a retry would pause again
+ *    ads activated on purpose later that evening. Off by default.
  * 3. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
  *    (see data-gate.ts): a feed that cannot be read pauses nothing, but it
  *    fails the run so the broken feed is seen (RK9-523). When the predicate no
@@ -31,7 +34,7 @@ import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import { evaluateSpendAlerts } from "./alerts.js";
 import { evaluateDataGate, type FeedFetch } from "./data-gate.js";
 import { checkSpend } from "./guard.js";
-import { pauseAll, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
+import { pauseAll, PauseListError, stopFailures, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
@@ -121,19 +124,24 @@ async function runForCompany(
           initiator,
           notify: true,
         });
+        // The card close and the halt are reported, not retried (RK9-561).
+        failures.push(...stopFailures(`${brand} scheduled pause`, result));
         if (result.errors.length > 0) {
           failures.push(`${brand} scheduled pause: ${result.errors.length} pause(s) failed, retrying next tick`);
-        } else if (result.cardsError) {
-          // The day is not marked: the next tick closes the cards again (the pauses are idempotent).
-          failures.push(`${brand} scheduled pause: open activation cards not closed (${result.cardsError}), retrying next tick`);
         } else {
-          await deps.store.claim(companyId, key, SCHEDULED_PAUSE_KIND, { count: result.count, jobRunId: job.runId });
+          await deps.store.claim(companyId, key, SCHEDULED_PAUSE_KIND, {
+            count: result.count,
+            jobRunId: job.runId,
+            ...(result.cardsError ? { cardsError: result.cardsError } : {}),
+            ...(result.haltError ? { haltError: result.haltError } : {}),
+          });
           const tg = telegramFailure(`${brand} scheduled pause`, result);
           if (tg) failures.push(tg);
         }
       }
     } catch (error) {
       failures.push(`${brand} scheduled pause: ${safeError(error)}`);
+      if (error instanceof PauseListError) failures.push(...stopFailures(`${brand} scheduled pause`, error.stopped));
     }
   }
 
