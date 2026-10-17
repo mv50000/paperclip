@@ -13,8 +13,11 @@
  * when the host refused it before it ran (as with fatigue issues): any other
  * failure may have created the issue. The plugin has no issues.read, so the
  * marker is what "reuse" means: while it stands, no second issue is made.
- * The next successful token check clears both markers, so a later incident
- * is reported again.
+ * The next successful token check clears the Telegram marker only, so a later
+ * incident is messaged again. The issue marker stays, as with fatigue issues:
+ * the plugin cannot see whether the old issue is still open, and a missed
+ * issue beats a duplicate (RK9-538). A brand gets one token issue; the
+ * operator reopens it for a later incident.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -75,8 +78,8 @@ export function tokenIssueBody(config: BrandConfigDraft, error: MetaGraphError, 
       "Korjaus:",
       "1. Luo Business Settingsissä brändin system userille uusi token (ads_management, ads_read).",
       "2. Päivitä company secret, johon pluginin `meta.accessTokenRef` osoittaa.",
-      "3. Aja pluginin asetussivulla **Tarkista yhteys**. Onnistunut tarkistus nollaa tämän hälytyksen.",
-      "4. Sulje tämä issue.",
+      "3. Aja pluginin asetussivulla **Tarkista yhteys**. Onnistunut tarkistus nollaa Telegram-hälytyksen.",
+      "4. Sulje tämä issue. Brändillä on yksi token-issue: jos token vanhenee uudelleen, tulee Telegram-viesti, ja tämä issue avataan uudelleen.",
     ].join("\n"),
   };
 }
@@ -145,12 +148,15 @@ export async function reportTokenInvalid(
   return report;
 }
 
-/** A successful token check ends the incident: the next 190 is reported again. */
+/**
+ * A successful token check ends the incident: the next 190 is messaged again.
+ * The issue marker is kept (see the header): releasing it while the old issue
+ * may still be open would let the next 190 open a second issue.
+ */
 export async function clearTokenIncident(deps: Pick<TokenAlertDeps, "store" | "ctx">, companyId: string, brandCode: string): Promise<void> {
   try {
     await deps.store.release(companyId, tokenAlertKey(brandCode));
-    await deps.store.release(companyId, tokenIncidentKey(brandCode));
   } catch (error) {
-    deps.ctx.logger.warn("rk9-ads token alert: could not clear the incident markers", { companyId, error: safe(error) });
+    deps.ctx.logger.warn("rk9-ads token alert: could not clear the alert marker", { companyId, error: safe(error) });
   }
 }

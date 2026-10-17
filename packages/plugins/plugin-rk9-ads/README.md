@@ -486,7 +486,7 @@ secret ids.
 | Key | Kind | What it does |
 |---|---|---|
 | `verify-connection` | action | "Tarkista yhteys": the live preflight, cached in plugin state |
-| `provision` | action | `{ dryRun?, confirm?, dailyBudgetCents?, campaignId?, adSetId? }`; dry run unless `dryRun: false, confirm: true` |
+| `provision` | action | `{ dryRun?, confirm?, dailyBudgetCents?, campaignId?, adSetId? }`; dry run unless `dryRun: false, confirm: true`; a real run is board-only (an agent gets the dry run only) |
 | `preflight-status` | data | The cached preflight and `fresh`; no Meta call |
 
 The buttons belong to the operator UI (A12, G13). Until then an operator calls
@@ -529,17 +529,24 @@ preflight skips its later Meta checks. `reportTokenInvalid()`
 (`src/brand/token-alert.ts`) sends one Telegram message and creates one issue
 in the brand company with originKind `plugin:rk9-ads` and originId
 `rk9-ads:<brand>:token_invalid`. alert_dedupe markers make both once per
-incident; the next successful token check clears them. The plugin has no
-issues.read, so close the issue after rotating the token.
+incident. The next successful token check clears the Telegram marker, so a
+later 190 is messaged again. The issue marker stays: the plugin has no
+issues.read and cannot see whether the old issue is still open, so a brand
+gets one token issue (RK9-538). Close it after rotating the token, and reopen
+it for a later incident.
 
 ### Provision
 
 Creates one OUTCOME_TRAFFIC campaign and one ad set, both PAUSED and named
 `<namingPrefix>-traffic` (G8: permanent, no month in the name).
 
-- daily_budget = floor(monthlyCapEur * 100 / days in the local month) cents
-  (G3; Ololla in October: 322). A larger request is refused before any API
-  call; one below Meta's `min_daily_budget` before any write.
+- daily_budget = floor(monthlyCapEur * 100 / 31) cents (G3; Ololla: 322).
+  The ad set is permanent and provision sets its budget only when it creates
+  it, so the budget fits the longest month: a budget sized to a 30-day month
+  (333) would project above the cap on 1 December and the spend guard would
+  refuse its activation (RK9-538). A larger request is refused before any API
+  call; one below Meta's `min_daily_budget` before any write. An adopted or
+  reused ad set with a larger budget is reported as `adSetBudgetAboveCap`.
 - Ad set: LINK_CLICKS, IMPRESSIONS, LOWEST_COST_WITHOUT_CAP, destination
   WEBSITE, Finland, 18+, Advantage audience off. Campaign:
   `special_ad_categories` from the config (G6), no campaign budget and
@@ -548,7 +555,11 @@ Creates one OUTCOME_TRAFFIC campaign and one ad set, both PAUSED and named
 - Idempotent: an id given to the action or set in the config is verified
   (ad account, ad set under the campaign) and adopted; otherwise the
   brand_bindings row, then an exact name match, is reused. Only when nothing
-  matches does it create. Two campaigns with the brand name are refused.
+  matches does it create. Two campaigns with the brand name are refused. A
+  stored id falls back to the name match only when Graph says the object is
+  gone (code 100) or it is in another account, dead or under another
+  campaign; a 5xx or any other error fails the run, so a renamed object is
+  never duplicated.
 - A real run passes `assertLaunchReady`, writes through the spend-guarded
   brand client, logs one activity entry per created object and stores the ids
   in brand_bindings. One run per company at a time (in-process lock; one

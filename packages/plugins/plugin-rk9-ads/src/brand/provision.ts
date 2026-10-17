@@ -5,14 +5,17 @@
  * permanent (G8: the name has no month, `<namingPrefix>-traffic`). The monthly
  * limit comes from Meta's spend_cap and the spend guard, not from the name.
  *
- * - Budget (G3): daily_budget = floor(monthlyCapEur * 100 / days in the local
- *   month) cents. A requested budget above it, or below Meta's
- *   min_daily_budget, is refused before any write; above the cap is refused
- *   before any API call at all.
+ * - Budget (G3): daily_budget = floor(monthlyCapEur * 100 / 31) cents. The ad
+ *   set is permanent and its budget is set only when it is created, so it uses
+ *   the longest month: the spend guard then passes it in every month (RK9-538).
+ *   A requested budget above it, or below Meta's min_daily_budget, is refused
+ *   before any write; above the cap is refused before any API call at all.
  * - Lookup order per object: an id given to the action, `meta.campaignId` /
  *   `meta.adSetId` in the config (adopted, e.g. the Sunspot migration), the
  *   brand_bindings row (reused), then an exact name match (reused). Only when
- *   nothing matches is the object created. Ids are verified against the ad
+ *   nothing matches is the object created. A stored id falls through to the
+ *   name lookup only when it is shown to be stale (Graph code 100, another
+ *   account, a dead status); any other error fails the run. Ids are verified against the ad
  *   account (and the ad set against the campaign) before they are used.
  * - dryRun returns the planned Graph writes and changes nothing (the Meta
  *   client's dryRun mode: the write guard still runs, nothing is sent).
@@ -28,7 +31,6 @@ import type { BrandConfig } from "../config.js";
 import { dailyBudgetCents } from "../config.js";
 import type { Ledger } from "../db.js";
 import type { Initiator } from "../features/spend-guard/support.js";
-import { daysInLocalMonth } from "../kit/local-time.js";
 import { MetaGraphError, RateLimitError, TokenInvalidError, TokenResolveError } from "../meta/errors.js";
 import type { MetaGraphClient } from "../meta/graph.js";
 import {
@@ -102,7 +104,7 @@ export interface ProvisionResult {
   brandCode: string;
   campaign: ProvisionedObject;
   adSet: ProvisionedObject & { dailyBudgetCents: number | null };
-  /** The budget a new ad set gets (G3), cents. */
+  /** The budget a new ad set gets (G3, 31-day month), cents. */
   dailyBudgetCents: number;
   maxDailyBudgetCents: number;
   minDailyBudgetCents: number | null;
@@ -181,7 +183,6 @@ export function memoryBindingStore(): BindingStore & { rows: Map<string, BrandBi
 export interface ProvisionDeps {
   ctx: Pick<PluginContext, "activity" | "logger">;
   bindings: BindingStore;
-  now: () => Date;
   /** Read-only client of the brand. */
   readClient: MetaGraphClient;
   /** Spend-guarded client of the brand in `live` or `dryRun` mode. */
@@ -198,9 +199,16 @@ export function provisionNames(config: Pick<BrandConfig, "namingPrefix">): { cam
   return { campaign: name, adSet: name };
 }
 
-/** G3 maximum for the current local month. */
-export function maxDailyBudgetCents(config: Pick<BrandConfig, "monthlyCapEur" | "timeZone">, now: Date): number {
-  return dailyBudgetCents(config.monthlyCapEur, daysInLocalMonth(now, config.timeZone));
+/** The longest month. The permanent ad set's budget must fit it, whatever month it is created in. */
+export const PERMANENT_BUDGET_DAYS = 31;
+
+/**
+ * G3 maximum of the permanent ad set: floor(cap * 100 / 31). A budget sized to
+ * a shorter month (e.g. 333 c in a 30-day one) projects above the cap in the
+ * next 31-day month, and the spend guard would refuse its activation.
+ */
+export function maxDailyBudgetCents(config: Pick<BrandConfig, "monthlyCapEur">): number {
+  return dailyBudgetCents(config.monthlyCapEur, PERMANENT_BUDGET_DAYS);
 }
 
 export function campaignFields(config: Pick<BrandConfig, "meta">): Record<string, unknown> {
@@ -238,9 +246,22 @@ function optionalId(value: string | undefined, field: string): string | undefine
   return value;
 }
 
-/** Errors that must reach the caller unchanged: the token, throttling, or an unreadable token ref. */
-function mustPropagate(error: unknown): boolean {
-  return error instanceof TokenInvalidError || error instanceof TokenResolveError || error instanceof RateLimitError || !(error instanceof MetaGraphError);
+/** Graph code 100: the stored object does not exist (or cannot be read) any more. */
+const GRAPH_OBJECT_MISSING = 100;
+
+/**
+ * A stored binding id is stale only on proof: Graph code 100, or a ProvisionError
+ * (another ad account, DELETED/ARCHIVED, another campaign). A 5xx, throttling or
+ * a token error is not proof: falling through to the name lookup then could
+ * create a duplicate of a renamed object.
+ */
+function staleBinding(error: unknown): boolean {
+  if (error instanceof ProvisionError) return true;
+  return (
+    error instanceof MetaGraphError &&
+    !(error instanceof TokenInvalidError || error instanceof TokenResolveError || error instanceof RateLimitError) &&
+    error.code === GRAPH_OBJECT_MISSING
+  );
 }
 
 function safe(error: unknown): string {
@@ -252,9 +273,8 @@ function outcome(id: string | null, name: string, action: ObjectAction, source: 
 }
 
 export async function provision(deps: ProvisionDeps, companyId: string, config: BrandConfig, input: ProvisionInput): Promise<ProvisionResult> {
-  const now = deps.now();
   // Budget rules first: an invalid or over-cap request makes no API call.
-  const maxDaily = maxDailyBudgetCents(config, now);
+  const maxDaily = maxDailyBudgetCents(config);
   const requested = input.dailyBudgetCents ?? maxDaily;
   if (!Number.isSafeInteger(requested) || requested <= 0) {
     throw new ProvisionError("budget_invalid", "dailyBudgetCents must be a positive integer (cents)");
@@ -262,7 +282,7 @@ export async function provision(deps: ProvisionDeps, companyId: string, config: 
   if (requested > maxDaily) {
     throw new ProvisionError(
       "budget_above_cap",
-      `dailyBudgetCents ${requested} is above the cap ${maxDaily} (floor(${config.monthlyCapEur} EUR * 100 / ${daysInLocalMonth(now, config.timeZone)} days), G3)`,
+      `dailyBudgetCents ${requested} is above the cap ${maxDaily} (floor(${config.monthlyCapEur} EUR * 100 / ${PERMANENT_BUDGET_DAYS} days), G3)`,
     );
   }
   const campaignParam = optionalId(input.campaignId, "campaignId");
@@ -304,7 +324,7 @@ export async function provision(deps: ProvisionDeps, companyId: string, config: 
         campaign = outcome(detail.id, detail.name, campaignRef.source === "binding" ? "reused" : "adopted", campaignRef.source, detail);
       } catch (error) {
         // A stale binding (object deleted, account changed) falls through to the name lookup; a hand-entered id never does.
-        if (campaignRef.source !== "binding" || (mustPropagate(error) && !(error instanceof ProvisionError))) throw error;
+        if (campaignRef.source !== "binding" || !staleBinding(error)) throw error;
         deps.ctx.logger.warn("rk9-ads provision: stored campaign id is not usable; looking up by name", { companyId, error: safe(error) });
       }
     }
@@ -347,7 +367,7 @@ export async function provision(deps: ProvisionDeps, companyId: string, config: 
         }
         adSet = { ...outcome(detail.id, detail.name, adSetRef.source === "binding" ? "reused" : "adopted", adSetRef.source, detail), dailyBudgetCents: detail.dailyBudgetCents };
       } catch (error) {
-        if (adSetRef.source !== "binding" || (mustPropagate(error) && !(error instanceof ProvisionError))) throw error;
+        if (adSetRef.source !== "binding" || !staleBinding(error)) throw error;
         deps.ctx.logger.warn("rk9-ads provision: stored ad set id is not usable; looking up by name", { companyId, error: safe(error) });
       }
     }

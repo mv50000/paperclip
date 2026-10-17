@@ -12,9 +12,12 @@ import {
   type ProvisionDeps,
   type ProvisionInput,
 } from "../../src/brand/provision.js";
-import type { BrandConfig } from "../../src/config.js";
+import { dailyBudgetCents, type BrandConfig } from "../../src/config.js";
 import { createSpendGuardHook, unmodelledBudgetKeys } from "../../src/features/spend-guard/guard.js";
+import { setObjectStatus } from "../../src/meta/methods.js";
 import type { MetaClientMode } from "../../src/meta/graph.js";
+import { FakeMeta } from "../spend-guard/fake-meta.js";
+import { metaClient as guardMetaClient } from "../spend-guard/helpers.js";
 import { COMPANY, enabledConfig, graphError, happyRoutes, loadFixtureConfig, metaClient, NOW, rig, type FakeRoutes } from "./fake-routes.js";
 
 const ACT = "act_29231592883113369";
@@ -66,18 +69,21 @@ function provisionRoutes(config: BrandConfig, state: { campaigns: Array<Record<s
   return routes;
 }
 
-function setup(config: BrandConfig, options: { bindings?: BindingStore; state?: { campaigns: Array<Record<string, unknown>>; adsets: Array<Record<string, unknown>> } } = {}) {
+function setup(
+  config: BrandConfig,
+  options: { bindings?: BindingStore; state?: { campaigns: Array<Record<string, unknown>>; adsets: Array<Record<string, unknown>> }; now?: Date } = {},
+) {
+  const now = options.now ?? NOW;
   const r = rig();
   const state = options.state ?? { campaigns: [], adsets: [] };
   const routes = provisionRoutes(config, state);
   const bindings = options.bindings ?? memoryBindingStore();
-  const preflightDeps = { ctx: r.harness.ctx, store: r.store, pluginId: "rk9-ads", now: () => NOW, metaClient: () => metaClient(routes), telegram: { fetch: routes.fetch } };
+  const preflightDeps = { ctx: r.harness.ctx, store: r.store, pluginId: "rk9-ads", now: () => now, metaClient: () => metaClient(routes), telegram: { fetch: routes.fetch } };
   const readClient = metaClient(routes);
   let launchChecks = 0;
   const depsFor = (mode: MetaClientMode): ProvisionDeps => ({
     ctx: r.harness.ctx,
     bindings,
-    now: () => NOW,
     readClient,
     // The real write path: the spend guard hook in front of the client, as brandClient wires it.
     writeClient: metaClient(routes, { mode, guardedWrite: createSpendGuardHook({ config, readClient }) }),
@@ -262,6 +268,42 @@ describe("provision", () => {
     expect(second).toMatchObject({ status: "rejected", reason: { code: "in_progress" } });
   });
 
+  it("falls through to the name lookup when a stored id is gone (Graph code 100)", async () => {
+    const config = ollola();
+    const bindings = memoryBindingStore();
+    await bindings.save(COMPANY, config, { campaignId: "120000000000000099", adSetId: null, source: "provisioned", igUserId: null });
+    const state = { campaigns: [{ id: CAMPAIGN, name: "OLL-traffic", status: "PAUSED", effective_status: "PAUSED" }], adsets: [] };
+    const { routes, run } = setup(config, { bindings, state });
+    routes.on("GET 120000000000000099", graphError(100, "Unsupported get request. Object does not exist"));
+    const result = await run();
+    expect(result.campaign).toMatchObject({ id: CAMPAIGN, action: "reused", source: "name" });
+    expect(routes.writes().map((call) => call.key)).toEqual([`POST ${ACT}/adsets`]);
+  });
+
+  it.each([
+    ["a 5xx", () => ({ status: 500, body: { error: { message: "An unknown error occurred", type: "OAuthException", code: 1, is_transient: true } } })],
+    ["another Graph error", () => graphError(2, "Service temporarily unavailable")],
+  ])("does not fall through to the name lookup on %s for a stored id (a renamed object would be duplicated)", async (_label, reply) => {
+    const config = ollola();
+    const bindings = memoryBindingStore();
+    await bindings.save(COMPANY, config, { campaignId: CAMPAIGN, adSetId: ADSET, source: "provisioned", igUserId: null });
+    // The campaign was renamed in Ads Manager: the name lookup would find nothing and create a second one.
+    const state = {
+      campaigns: [{ id: CAMPAIGN, name: "Renamed", status: "PAUSED", effective_status: "PAUSED" }],
+      adsets: [{ id: ADSET, name: "Renamed", status: "PAUSED", effective_status: "PAUSED", campaign_id: CAMPAIGN, daily_budget: "300" }],
+    };
+    const { routes, run } = setup(config, { bindings, state });
+    routes.on(`GET ${CAMPAIGN}`, reply());
+    await expect(run()).rejects.toMatchObject({ name: "MetaGraphError" });
+    expect(routes.writes()).toEqual([]);
+
+    // The same for the ad set, once the campaign reads fine.
+    const adSetFails = setup(config, { bindings, state });
+    adSetFails.routes.on(`GET ${ADSET}`, reply());
+    await expect(adSetFails.run()).rejects.toMatchObject({ name: "MetaGraphError" });
+    expect(adSetFails.routes.writes()).toEqual([]);
+  });
+
   it("propagates a 190 from a write (the action reports it) and creates nothing more", async () => {
     const config = ollola();
     const { routes, run } = setup(config);
@@ -276,17 +318,10 @@ describe("provision helpers", () => {
     expect(provisionNames({ namingPrefix: "OLL" })).toEqual({ campaign: "OLL-traffic", adSet: "OLL-traffic" });
   });
 
-  it.each([
-    ["2026-02-15T10:00:00Z", 357],
-    ["2026-04-15T10:00:00Z", 333],
-    ["2026-10-17T09:00:00Z", 322],
-  ])("caps the daily budget with the Helsinki month length (G3) at %s", (iso, expected) => {
-    expect(maxDailyBudgetCents({ monthlyCapEur: 100, timeZone: "Europe/Helsinki" }, new Date(iso))).toBe(expected);
-  });
-
-  it("uses the Helsinki month, not the UTC one, at a month boundary", () => {
-    // 2026-04-30 22:30 UTC is already 1 May in Helsinki (31 days).
-    expect(maxDailyBudgetCents({ monthlyCapEur: 100, timeZone: "Europe/Helsinki" }, new Date("2026-04-30T22:30:00Z"))).toBe(322);
+  it("caps the permanent ad set's daily budget with the longest month: floor(cap * 100 / 31) (G3)", () => {
+    expect(maxDailyBudgetCents({ monthlyCapEur: 100 })).toBe(322);
+    expect(maxDailyBudgetCents({ monthlyCapEur: 100 })).toBe(dailyBudgetCents(100, 31));
+    expect(maxDailyBudgetCents({ monthlyCapEur: 250.5 })).toBe(808);
   });
 
   it("adds special_ad_category_country only with a real special category (G6)", () => {
@@ -301,5 +336,68 @@ describe("provision helpers", () => {
     expect(unmodelledBudgetKeys({ is_adset_budget_sharing_enabled: "false" })).toEqual([]);
     expect(unmodelledBudgetKeys({ is_adset_budget_sharing_enabled: true })).toEqual(["is_adset_budget_sharing_enabled"]);
     expect(unmodelledBudgetKeys({ budget_schedule_specs: "[]" })).toEqual(["budget_schedule_specs"]);
+  });
+});
+
+/**
+ * RK9-538: the ad set is permanent, so the budget it gets when it is created
+ * must pass the spend guard in every later month. Activation on the 1st of a
+ * 31-day month is the worst case: MTD 0 and 31 days of budget ahead.
+ */
+describe("permanent ad set budget across months (RK9-538)", () => {
+  /** The provisioned ad set, ACTIVE, with MTD 0 and Meta's spend_cap at the monthly cap. */
+  function freshMonth(adsetBudget: number): FakeMeta {
+    const meta = new FakeMeta();
+    meta.account = { ...meta.account, spend_cap: "10000", amount_spent: "0" };
+    meta.spend = () => "0.00";
+    meta.campaigns = [{ id: "100", name: "OLL-traffic", status: "ACTIVE" }];
+    meta.adsets = [{ id: "200", name: "OLL-traffic", status: "ACTIVE", campaign_id: "100", daily_budget: String(adsetBudget) }];
+    meta.ads = [{ id: "300", name: "OLL ad", status: "PAUSED", campaign_id: "100", adset_id: "200" }];
+    return meta;
+  }
+
+  async function activateAt(config: BrandConfig, adsetBudget: number, iso: string) {
+    const meta = freshMonth(adsetBudget);
+    const hook = createSpendGuardHook({ config, readClient: guardMetaClient(meta), now: () => new Date(iso), authorizeSpend: () => ({ allow: true }) });
+    await setObjectStatus(guardMetaClient(meta, "live", { guardedWrite: hook }), "300", "ACTIVE");
+    return meta.writes.length;
+  }
+
+  // Helsinki-local: 28-day February 2027, 30-day November 2026, 31-day October 2026,
+  // and the instants just after midnight Helsinki time that are still the previous month in UTC.
+  it.each([
+    ["28-day month", "2027-02-15T10:00:00Z"],
+    ["30-day month", "2026-11-15T10:00:00Z"],
+    ["31-day month", "2026-10-17T09:00:00Z"],
+    ["month boundary (Nov -> Dec in Helsinki)", "2026-11-30T22:30:00Z"],
+    ["month boundary (Feb -> Mar in Helsinki)", "2027-02-28T22:30:00Z"],
+  ])("a budget provisioned in a %s passes the guard on the 1st of a 31-day month", async (_label, provisionedAt) => {
+    const config = ollola();
+    const { routes, run } = setup(config, { now: new Date(provisionedAt) });
+    const result = await run();
+    expect(result.adSet.dailyBudgetCents).toBe(322);
+    expect(bodyOf(routes, `POST ${ACT}/adsets`)!.daily_budget).toBe("322");
+    // 1 December and 1 March (31 days each), Helsinki midnight.
+    expect(await activateAt(config, result.adSet.dailyBudgetCents!, "2026-11-30T22:00:00Z")).toBe(1);
+    expect(await activateAt(config, result.adSet.dailyBudgetCents!, "2027-02-28T22:00:00Z")).toBe(1);
+  });
+
+  it("the old per-month budgets (30-day 333 c, 28-day 357 c) are refused there, which is the bug", async () => {
+    const config = ollola();
+    await expect(activateAt(config, 333, "2026-11-30T22:00:00Z")).rejects.toThrow(/projection_exceeds_cap/);
+    await expect(activateAt(config, 357, "2027-02-28T22:00:00Z")).rejects.toThrow(/projection_exceeds_cap/);
+  });
+
+  it("flags an adopted ad set whose budget only fits a shorter month", async () => {
+    const config = ollola({ meta: { ...(loadFixtureConfig("ololla").meta as object), campaignId: CAMPAIGN, adSetId: ADSET } });
+    const state = {
+      campaigns: [{ id: CAMPAIGN, name: "OLL-traffic", status: "PAUSED", effective_status: "PAUSED" }],
+      adsets: [{ id: ADSET, name: "OLL-traffic", status: "PAUSED", effective_status: "PAUSED", campaign_id: CAMPAIGN, daily_budget: "333" }],
+    };
+    const { routes, run } = setup(config, { state });
+    const result = await run();
+    expect(result.adSetBudgetAboveCap).toBe(true);
+    expect(result.maxDailyBudgetCents).toBe(322);
+    expect(routes.writes()).toEqual([]);
   });
 });
