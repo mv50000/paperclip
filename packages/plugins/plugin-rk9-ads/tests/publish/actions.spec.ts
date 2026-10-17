@@ -61,6 +61,9 @@ describe("publish actions", () => {
     expect(plan.dryRun).toBe(true);
     expect(plan.ad.body).toMatchObject({ status: "PAUSED" });
     expect(routes.calls).toEqual([]);
+    // The real host adds renderEnvironment (null outside a launcher) to the params.
+    const hosted = await harness.performAction<PublishPlan>(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE, renderEnvironment: null }, UI);
+    expect(hosted.dryRun).toBe(true);
     await expect(harness.performAction(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE, dryRun: false }, UI)).rejects.toThrow(/confirm: true/);
     await expect(harness.performAction(PUBLISH_ACTION_KEY, { creativeId: "nope" }, UI)).rejects.toThrow(/invalid_request: creativeId/);
     await expect(harness.performAction(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE, status: "ACTIVE" }, UI)).rejects.toThrow(/invalid_request/);

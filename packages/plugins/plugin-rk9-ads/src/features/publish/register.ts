@@ -122,8 +122,8 @@ export function registerPublish(runtime: FeatureRuntime, overrides: PublishOverr
     const companyId = context.companyId;
     if (!companyId) throw new Error("company context is required");
     try {
-      // The host adds companyId to params; the company comes from the context only.
-      const { waitMs, companyId: _hostCompanyId, ...rest } = params;
+      // The host adds companyId and renderEnvironment to params; the company comes from the context only.
+      const { waitMs, companyId: _hostCompanyId, renderEnvironment: _renderEnvironment, ...rest } = params;
       const request = parsePublishRequest(rest);
       if (request.dryRun !== false) return await service.plan(companyId, request, mode);
       if (request.confirm !== true) throw new PublishError("invalid_request", "a real publish needs confirm: true; preview it with a dry run first");
