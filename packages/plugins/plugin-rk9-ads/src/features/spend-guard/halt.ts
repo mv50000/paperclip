@@ -28,8 +28,20 @@
  * company and rule, like the alert-check marker: one company runs one brand.
  * Each rule has its own key, so a timed halt never overwrites the kill
  * switch's.
+ *
+ * Every halt covers the whole company (RK9-565), also the scheduled pause's
+ * when `meta.campaignId` limits its pause to one campaign: while it is in
+ * force, no campaign of the brand activates before the morning. A halt that
+ * is too broad only delays an activation, never spends. A scheduled pause at
+ * a daytime `at` (07:00) therefore leaves a halt of about 23 hours every day;
+ * `at` is meant for the evening.
+ *
+ * The cap pause's halt also ends when the rules job sees the month back under
+ * the 90 % cap on two consecutive runs, e.g. after monthlyCapEur was raised
+ * (rules/runner.ts, RK9-565).
  */
 
+import { createHash } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { Initiator } from "./support.js";
 
@@ -52,6 +64,11 @@ export interface HaltState {
   until?: string;
   reason: string;
   initiator: Initiator;
+  /**
+   * The cap pause's month-to-date and cap when it paused (RK9-565). The rules
+   * job lifts that halt early only on a reading not below this MTD.
+   */
+  cap?: { mtdEur: number; monthlyCapEur: number };
 }
 
 type StateCtx = Pick<PluginContext, "state">;
@@ -82,7 +99,13 @@ function identity(halt: HaltState): string {
   return halt.id ?? halt.since;
 }
 
-/** A damaged record's id is its own content, so a clear of one damaged record never clears a later, different one. */
+/**
+ * A damaged record's id is a hash of all of its content, so a clear of one
+ * damaged record never clears a later, different one (RK9-565: the first 500
+ * characters were not enough). The very same damaged content written again
+ * after a clear reads as cleared; only corruption or a hand edit writes one,
+ * and every halt a pause stores is valid and carries a new id.
+ */
 function damagedId(value: unknown): string {
   let text: string;
   try {
@@ -90,7 +113,7 @@ function damagedId(value: unknown): string {
   } catch {
     text = String(value);
   }
-  return `damaged:${text.slice(0, 500)}`;
+  return `damaged:${createHash("sha256").update(text).digest("hex")}`;
 }
 
 /**
@@ -99,7 +122,7 @@ function damagedId(value: unknown): string {
  * no end, so a damaged row never lifts it; a damaged clear marker clears
  * nothing.
  */
-async function readRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule, now: Date): Promise<HaltState | null> {
+export async function readRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule, now: Date): Promise<HaltState | null> {
   const [value, cleared] = await Promise.all([ctx.state.get(haltKey(companyId, rule)), ctx.state.get(clearedKey(companyId, rule))]);
   if (value === null || value === undefined) return null;
   const halt: HaltState = isHalt(value)
@@ -128,6 +151,29 @@ export async function readHalt(ctx: StateCtx, companyId: string, now: Date = new
     if (!out || halt.until === undefined || (out.until !== undefined && Date.parse(halt.until) > Date.parse(out.until))) out = halt;
   }
   return out;
+}
+
+/**
+ * The rule's stored halt as written, also when it was cleared or has ended,
+ * and whether a board user cleared it. Null for no record or a damaged one.
+ */
+export async function storedRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule): Promise<{ halt: HaltState; cleared: boolean } | null> {
+  const [value, cleared] = await Promise.all([ctx.state.get(haltKey(companyId, rule)), ctx.state.get(clearedKey(companyId, rule))]);
+  if (!isHalt(value)) return null;
+  const halt = { ...value, rule };
+  return { halt, cleared: typeof cleared === "string" && cleared === identity(halt) };
+}
+
+/** Clears the rule's halt when it is the one named by `id` (or `since` for a halt without one). False when it is not in force. */
+export async function clearRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule, id: string, now: Date = new Date()): Promise<boolean> {
+  const halt = await readRuleHalt(ctx, companyId, rule, now);
+  if (!halt || identity(halt) !== id) return false;
+  await ctx.state.set(clearedKey(companyId, rule), id);
+  return true;
+}
+
+export function haltIdentity(halt: HaltState): string {
+  return identity(halt);
 }
 
 export async function setHalt(ctx: StateCtx, companyId: string, halt: HaltState): Promise<void> {

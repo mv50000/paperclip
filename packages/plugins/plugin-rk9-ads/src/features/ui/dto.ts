@@ -30,6 +30,14 @@ export interface UiHalt {
   tgUserId: number | null;
 }
 
+/** An activation undo Meta refused after a halt; retried while a halt is in force (RK9-565). */
+export interface UiPendingUndo {
+  kind: string;
+  objectId: string;
+  gateRequestId: string;
+  since: string;
+}
+
 export type UiSpendCapStatus = "set" | "missing" | "above_cap" | "unknown";
 
 export interface UiSpend {
@@ -111,6 +119,9 @@ export interface UiOverview {
   spendError?: string;
   halt: UiHalt | null;
   haltError?: string;
+  /** Clearing the halt acknowledges these: they are no longer retried. */
+  pendingUndo: UiPendingUndo[];
+  pendingUndoError?: string;
   publications: UiPublication[];
   publicationsError?: string;
   adsError?: string;

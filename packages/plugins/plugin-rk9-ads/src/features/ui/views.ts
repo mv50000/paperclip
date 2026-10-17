@@ -19,6 +19,7 @@ import { REDACTED, redactValue } from "../../meta/redact.js";
 import { linkCpc, linkCtr } from "../../metrics/cpc.js";
 import { toPublicationRecord } from "../../publish/store.js";
 import { readHalt, type HaltState } from "../spend-guard/halt.js";
+import { readPendingUndos } from "../spend-guard/pending-undo.js";
 import { spendSnapshot } from "../spend-guard/register.js";
 import { brandReadClient, safeError, type OnceStore } from "../spend-guard/support.js";
 import type {
@@ -143,6 +144,12 @@ async function readHaltSection(ctx: PluginContext, companyId: string, now: Date)
   return halt.ok ? { halt: halt.value ? haltView(halt.value) : null } : { halt: null, haltError: halt.error };
 }
 
+async function readPendingUndoSection(ctx: PluginContext, companyId: string): Promise<Pick<UiOverview, "pendingUndo" | "pendingUndoError">> {
+  const undo = await section(() => readPendingUndos(ctx, companyId));
+  if (!undo.ok) return { pendingUndo: [], pendingUndoError: undo.error };
+  return { pendingUndo: undo.value.map((entry) => ({ kind: entry.kind, objectId: entry.objectId, gateRequestId: entry.gateRequestId, since: entry.since })) };
+}
+
 async function pendingGates(deps: ViewDeps, companyId: string): Promise<UiGateCard[]> {
   const rows = await deps.ledger.select(companyId, "gate_requests", {
     where: { status: "pending" },
@@ -226,6 +233,7 @@ export async function buildOverview(deps: ViewDeps, companyId: string): Promise<
     preflightFresh: false,
     spend: null,
     ...(await readHaltSection(ctx, companyId, now())),
+    ...(await readPendingUndoSection(ctx, companyId)),
     publications: [],
     pendingGates: [],
     ruleLog: [],

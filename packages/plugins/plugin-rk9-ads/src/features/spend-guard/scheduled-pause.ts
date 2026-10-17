@@ -11,14 +11,25 @@
  *    the open activation cards (RK9-557, RK9-561). The day's marker is
  *    written once the Meta pauses succeeded and the halt is stored, so a Meta
  *    or halt failure is retried on the next tick (pauses are idempotent). A
- *    card close that failed fails the run once but is not retried: the halt
+ *    retry tick keeps the halt the day's first tick stored, and closes no
+ *    cards again, so a board user's clear stands (RK9-565). A run with only a
+ *    halt or card failure to report writes its audit row once per local day.
+ *    A card close that failed fails the run once but is not retried: the halt
  *    already refuses a tap on the card left open. Off by default.
- * 3. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
+ * 3. Re-checks and activation undos (RK9-565), on every tick: the second
+ *    listing of a kill switch or scheduled pause about a minute after it
+ *    (recheck.ts), and the PAUSED writes of an activation undo that Meta
+ *    refused (pending-undo.ts), until Meta confirms, a newer activation
+ *    supersedes it or a board user acknowledges it.
+ * 4. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
  *    (see data-gate.ts): a feed that cannot be read pauses nothing, but it
  *    fails the run so the broken feed is seen (RK9-523). When the predicate no
  *    longer holds it runs pauseAll, which is a no-op once everything is paused.
+ *    It leaves no halt: an activation approved while the predicate does not
+ *    hold is paused again on the next tick, at most 5 minutes later. A halt
+ *    would refuse every card whenever the feed's value is low.
  *
- * An invalid or unavailable config fails the run; the pause side (2 and 3)
+ * An invalid or unavailable config fails the run; the pause side (2 to 4)
  * still runs on the brand's last valid config (pause-config.ts).
  *
  * If a pause succeeded but its Telegram notice failed, the pauses stay, the
@@ -34,8 +45,11 @@ import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import { evaluateSpendAlerts } from "./alerts.js";
 import { evaluateDataGate, type FeedFetch } from "./data-gate.js";
 import { checkSpend } from "./guard.js";
-import { pauseAll, PauseListError, stopFailures, type PauseAllDeps, type PauseAllResult } from "./killswitch.js";
+import { haltIdentity, readRuleHalt, storedRuleHalt } from "./halt.js";
+import { haltUntil, pauseAll, PauseListError, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
+import { readPendingUndos, retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
+import { dropRecheck, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS } from "./recheck.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const SCHEDULED_PAUSE_JOB_KEY = "scheduled-pause";
@@ -46,7 +60,37 @@ export function scheduledPauseKey(brandCode: string, date: string): string {
   return `scheduled-pause:${brandCode}:${date}`;
 }
 
+/** The once-per-day marker of a scheduled pause's audit row that reports only a halt or card failure. */
+export function scheduledStopAuditKey(brandCode: string, date: string): string {
+  return `scheduled-pause-stop:${brandCode}:${date}`;
+}
+
+/**
+ * A retry tick's halt: the one the day's first tick stored (same end), if
+ * any. A cleared one stays cleared. Undefined when this tick must store one.
+ */
+async function dayHalt(ctx: PluginContext, companyId: string, config: BrandConfig, now: Date): Promise<StopActivations | undefined> {
+  let stored: Awaited<ReturnType<typeof storedRuleHalt>>;
+  try {
+    stored = await storedRuleHalt(ctx, companyId, "scheduled_pause");
+  } catch {
+    return undefined;
+  }
+  // The same night's halt from the same local day: an `at` moved past midnight starts a new one.
+  if (
+    !stored ||
+    stored.halt.until !== haltUntil("scheduled_pause", config.timeZone, now) ||
+    !Number.isFinite(Date.parse(stored.halt.since)) ||
+    localDate(new Date(stored.halt.since), config.timeZone) !== localDate(now, config.timeZone)
+  ) {
+    return undefined;
+  }
+  return { stopped: { closedCardIds: [], ...(stored.cleared ? {} : { halt: stored.halt }) }, announce: async () => undefined };
+}
+
 export interface ScheduledPauseDeps extends PauseAllDeps {
+  /** Ends a failed undo's retry (pending-undo.ts). */
+  newerActivation?: UndoRetryDeps["newerActivation"];
   ctx: PluginContext;
   ledger: Ledger;
   store: OnceStore;
@@ -117,14 +161,19 @@ async function runForCompany(
         failures.push(`${brand} scheduled pause: marker read failed (${safeError(error)}), paused anyway`);
       }
       if (!done) {
+        const day = localDate(now, config.timeZone);
+        const reused = await dayHalt(ctx, companyId, config, now);
         const result = await pauseAll(deps, companyId, config, {
           dryRun: false,
           rule: "scheduled_pause",
           reason: `scheduled pause at ${pause.at} ${config.timeZone}${fallbackMark}`,
           initiator,
           notify: true,
+          ...(reused ? { stopped: reused } : {}),
+          recordStopOnly: () => deps.store.claim(companyId, scheduledStopAuditKey(brand, day), SCHEDULED_PAUSE_KIND),
         });
         failures.push(...stopFailures(`${brand} scheduled pause`, result));
+        if (result.recheckError) failures.push(`${brand} scheduled pause: the re-check was not stored (${result.recheckError})`);
         if (result.errors.length > 0) {
           failures.push(`${brand} scheduled pause: ${result.errors.length} pause(s) failed, retrying next tick`);
         } else if (result.haltError) {
@@ -147,7 +196,15 @@ async function runForCompany(
     }
   }
 
-  // 3. Data gate
+  // 3. Re-checks and activation undos
+  failures.push(...(await runDueRechecks(deps, companyId, config, initiator, now)));
+  try {
+    failures.push(...(await retryPendingUndos(deps, companyId, config, initiator, now)));
+  } catch (error) {
+    failures.push(`${brand} activation undo: ${safeError(error)}`);
+  }
+
+  // 4. Data gate
   const gate = config.schedule.dataGate;
   if (gate) {
     try {
@@ -178,13 +235,88 @@ async function runForCompany(
   return failures;
 }
 
+/** The tick: runs each due re-check of the company. Returns the run's failure lines. */
+export async function runDueRechecks(
+  deps: PauseAllDeps,
+  companyId: string,
+  config: BrandConfig,
+  initiator: Initiator,
+  now: Date,
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (const rule of RECHECK_RULES) {
+    const prefix = `${config.brandCode} ${rule} re-check`;
+    try {
+      const recheck = await readRecheck(deps.ctx, companyId, rule);
+      if (!recheck) continue;
+      const due = Date.parse(recheck.dueAt);
+      if (Number.isFinite(due) && due > now.getTime()) continue;
+      const drop = () => dropRecheck(deps.ctx, companyId, rule);
+      if (!Number.isFinite(due) || now.getTime() - due > RECHECK_WINDOW_MS) {
+        deps.ctx.logger.warn("rk9-ads pause: re-check past its window, dropped", { companyId, rule, dueAt: recheck.dueAt });
+        await drop();
+        // The second listing never ran: the run fails once so it is seen.
+        failures.push(`${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`);
+        continue;
+      }
+      if (recheck.haltId !== null) {
+        const halt = await readRuleHalt(deps.ctx, companyId, rule, now);
+        if (!halt || haltIdentity(halt) !== recheck.haltId) {
+          deps.ctx.logger.info("rk9-ads pause: halt no longer in force, re-check dropped", { companyId, rule });
+          await drop();
+          continue;
+        }
+      }
+      try {
+        const result = await pauseAll(deps, companyId, config, {
+          dryRun: false,
+          rule,
+          reason: `${recheck.reason} (re-check)`.slice(0, 300),
+          initiator,
+          notify: true,
+          note: "Uudelleentarkistus: Metan listaus näytti nämä ACTIVE-tilassa vasta viiveellä.",
+          // The halt and the card close stand from the pause itself.
+          stopped: { stopped: { closedCardIds: [] }, announce: async () => undefined },
+          recheck: true,
+        });
+        if (result.errors.length > 0) {
+          failures.push(`${prefix}: ${result.errors.length} pause(s) failed, retrying next tick`);
+          continue;
+        }
+        await drop();
+        if (result.telegram === "failed") failures.push(`${prefix}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
+      } catch (error) {
+        failures.push(`${prefix}: ${safeError(error)}, retrying next tick`);
+        if (error instanceof PauseListError) failures.push(...stopFailures(prefix, error.stopped));
+      }
+    } catch (error) {
+      failures.push(`${prefix}: ${safeError(error)}`);
+    }
+  }
+  return failures;
+}
+
+/** Open activation undos of a company the job skips: without a brand config there is no Meta client to retry them with. */
+async function orphanedUndos(ctx: ScheduledPauseDeps["ctx"], companyId: string): Promise<string[]> {
+  try {
+    const open = await readPendingUndos(ctx, companyId);
+    if (open.length === 0) return [];
+    return [`company ${companyId}: ${open.length} activation undo(s) open (${open.map((entry) => `${entry.kind} ${entry.objectId}`).join(", ")}) but no brand config to retry them; pause them by hand in Meta`];
+  } catch (error) {
+    return [`company ${companyId}: open activation undos not read (${safeError(error)})`];
+  }
+}
+
 export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
   return async (job: PluginJobContext): Promise<void> => {
     const { ctx } = deps;
     const now = deps.now?.() ?? new Date();
     const failures: string[] = [];
     for (const { companyId, result } of await listCompanyConfigs(ctx)) {
-      if (result.state === "absent") continue;
+      if (result.state === "absent") {
+        failures.push(...(await orphanedUndos(ctx, companyId)));
+        continue;
+      }
       // README ADR 3: a pause is never skipped silently. An invalid or
       // unavailable config runs the pause side on the last valid config, and
       // the run fails either way so the broken config is seen.
@@ -193,6 +325,7 @@ export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
         // A disabled brand (monthlyCapEur unset, e.g. the AUR read-only
         // config) that was never enabled is a normal state, not a failure.
         ctx.logger.info("rk9-ads scheduled-pause: brand disabled and never enabled; skipped", { companyId });
+        failures.push(...(await orphanedUndos(ctx, companyId)));
         continue;
       }
       if (!loaded.ok) {

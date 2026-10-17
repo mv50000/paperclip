@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { DataTable, KeyValueList, Spinner, usePluginAction, usePluginData, usePluginToast } from "@paperclipai/plugin-sdk/ui";
 import type { PluginPageProps } from "@paperclipai/plugin-sdk/ui";
-import type { UiGateCard, UiHalt, UiOverview, UiPauseAdResult, UiPublication, UiSpend } from "../features/ui/dto.js";
+import type { UiGateCard, UiHalt, UiOverview, UiPauseAdResult, UiPendingUndo, UiPublication, UiSpend } from "../features/ui/dto.js";
 import type { HaltState } from "../features/spend-guard/halt.js";
 import type { PauseAllResult } from "../features/spend-guard/killswitch.js";
 import { AdStatusBadge, Button, CapGauge, EmptyState, ErrorText, FatigueBadge, Muted, Section, TypedConfirm } from "./components.js";
@@ -19,6 +19,9 @@ const HALT_RULE_LABEL: Record<string, string> = {
 
 /** The word the operator types before lifting the standing halt. */
 export const CLEAR_HALT_WORD = "POISTA";
+export const ACK_UNDO_WORD = "KUITTAA";
+
+const UNDO_KIND_LABEL: Record<string, string> = { campaign: "kampanja", adset: "ad set", ad: "mainos" };
 
 const SPEND_CAP_TEXT: Record<UiSpend["spendCapStatus"], string> = {
   set: "asetettu",
@@ -68,7 +71,12 @@ function SpendHeader(props: { overview: UiOverview }) {
   );
 }
 
-function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?: string; onChanged: () => void }) {
+function HaltBanner(props: {
+  halt: UiHalt | null;
+  haltError?: string;
+  timeZone?: string;
+  onChanged: () => void;
+}) {
   const clearHalt = usePluginAction(ACTION.clearHalt);
   const toast = usePluginToast();
   const [preview, setPreview] = useState<HaltState | null>(null);
@@ -106,13 +114,16 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
     setError(null);
     try {
       // `since` from the preview: the worker refuses if a newer kill switch set the halt again.
-      const result = (await clearHalt({ dryRun: false, confirm: true, since: preview.since })) as { remaining?: HaltState };
+      const result = (await clearHalt({ dryRun: false, confirm: true, since: preview.since })) as { cleared?: boolean; remaining?: HaltState };
       setPreview(null);
+      // `cleared: false`: the halt ended between the preview and the clear, so nothing was cleared (RK9-565).
       // Another pause's halt may still be in force (e.g. the scheduled pause's under a cleared kill switch).
       toast(
-        result.remaining
-          ? { title: "Pysäytystila poistettu, mutta toinen pysäytystila on yhä päällä", tone: "warn" }
-          : { title: "Pysäytystila poistettu", tone: "success" },
+        result.cleared === false
+          ? { title: "Pysäytystila oli jo päättynyt, mitään ei poistettu", tone: "info" }
+          : result.remaining
+            ? { title: "Pysäytystila poistettu, mutta toinen pysäytystila on yhä päällä", tone: "warn" }
+            : { title: "Pysäytystila poistettu", tone: "success" },
       );
       props.onChanged();
     } catch (cause) {
@@ -151,6 +162,85 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
           Poista pysäytystila
         </Button>
       )}
+      {error ? <ErrorText>{error}</ErrorText> : null}
+    </div>
+  );
+}
+
+/**
+ * The activation undos that Meta refused (RK9-565): the job retries PAUSED
+ * every 5 minutes, with or without a halt. A board user can stop the retry
+ * of the entries the preview lists, with a typed confirmation.
+ */
+function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoError?: string; onChanged: () => void }) {
+  const clearHalt = usePluginAction(ACTION.clearHalt);
+  const toast = usePluginToast();
+  const [keys, setKeys] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const undo = props.pendingUndo ?? [];
+  if (undo.length === 0 && !props.pendingUndoError) return null;
+
+  async function startAck() {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = (await clearHalt({ dryRun: true })) as { pendingUndo?: Array<{ key: string }>; pendingUndoError?: string };
+      if (result.pendingUndoError) throw new Error(result.pendingUndoError);
+      const open = (result.pendingUndo ?? []).map((entry) => entry.key);
+      if (open.length === 0) {
+        props.onChanged();
+        return;
+      }
+      setKeys(open);
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmAck() {
+    if (!keys) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Only the keys from the preview: an undo that failed after it keeps its retry.
+      const result = (await clearHalt({ dryRun: false, confirm: true, acknowledgeUndos: keys })) as { acknowledgedUndos?: number };
+      setKeys(null);
+      toast({ title: `Kuitattu ${result.acknowledgedUndos ?? 0} peruutusta`, tone: "success" });
+      props.onChanged();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div role="status" className="space-y-2 rounded-md border border-destructive p-3">
+      {undo.length > 0 ? (
+        <ErrorText>
+          Aktivoinnin peruutus epäonnistui, voi olla yhä ACTIVE:{" "}
+          {undo.map((entry) => `${UNDO_KIND_LABEL[entry.kind] ?? entry.kind} ${entry.objectId}`).join(", ")}. Peruutusta yritetään uudelleen 5 minuutin
+          välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen.
+        </ErrorText>
+      ) : null}
+      {props.pendingUndoError ? <ErrorText>Keskeneräisiä peruutuksia ei voitu lukea: {props.pendingUndoError}</ErrorText> : null}
+      {keys ? (
+        <TypedConfirm
+          word={ACK_UNDO_WORD}
+          prompt={`Kuittaus lopettaa ${keys.length} peruutuksen uudelleenyrityksen. Kohteet voivat jäädä ACTIVE-tilaan kuluttamaan: tarkista ja pysäytä ne Metassa.`}
+          confirmLabel="Kuittaa peruutukset"
+          busy={busy}
+          onConfirm={confirmAck}
+          onCancel={() => setKeys(null)}
+        />
+      ) : undo.length > 0 ? (
+        <Button variant="destructive" onClick={startAck} disabled={busy}>
+          Kuittaa peruutukset
+        </Button>
+      ) : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
     </div>
   );
@@ -412,6 +502,7 @@ export function AdsPage(props: PluginPageProps) {
       <main className="space-y-4">
         <h1 className="text-xl font-semibold">{title}</h1>
         {data.halt || data.haltError ? <HaltBanner halt={data.halt} haltError={data.haltError} onChanged={overview.refresh} /> : null}
+        <PendingUndoNotice pendingUndo={data.pendingUndo} pendingUndoError={data.pendingUndoError} onChanged={overview.refresh} />
         {data.state !== "absent" ? (
           <Section title="Hätäkatkaisin">
             <Muted>Mainokset voivat olla yhä käynnissä. Hätäkatkaisin käyttää viimeisintä toimivaa konfiguraatiota, jos sellainen on tallessa.</Muted>
@@ -435,6 +526,7 @@ export function AdsPage(props: PluginPageProps) {
           <KillSwitchButton onDone={overview.refresh} />
         </div>
         <HaltBanner halt={data.halt} haltError={data.haltError} timeZone={timeZone} onChanged={overview.refresh} />
+        <PendingUndoNotice pendingUndo={data.pendingUndo} pendingUndoError={data.pendingUndoError} onChanged={overview.refresh} />
         {data.state === "disabled" ? <EmptyState title="Brändi on pois päältä." detail={data.error} /> : null}
         <SpendHeader overview={data} />
       </header>

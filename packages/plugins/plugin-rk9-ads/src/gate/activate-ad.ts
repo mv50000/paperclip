@@ -28,10 +28,16 @@
  * 7. the halt once more: a pause that started during the writes set
  *    it before its own first pause, so either its listing sees this run's
  *    ACTIVE objects, or this read sees the halt. A halt seen during or after
- *    the writes pauses again everything this run set ACTIVE.
+ *    the writes pauses again everything this run set ACTIVE (an ad that was
+ *    ACTIVE already is not this run's, RK9-565). When Meta refuses one of
+ *    those PAUSED writes, the object is stored for the scheduled-pause job's
+ *    retry and one Telegram alert goes out (spend-guard/pending-undo.ts).
+ *    The retry goes on after the halt ends, until Meta confirms, a newer
+ *    activation supersedes it or a board user acknowledges it.
  *
  * A refusal in 1-4 makes no Meta write and ends the card `denied`. A failed
- * write ends it `failed` with the step reached; nothing is retried. Meta's
+ * write ends it `failed` with the step reached; nothing is retried, except a
+ * failed undo after a halt (step 7). Meta's
  * steps are not one transaction, so a failure part way can leave two ads of
  * the ad set ACTIVE or the ad ACTIVE under a PAUSED ad set: the card and the
  * outcome name exactly what was done.
@@ -41,7 +47,8 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../config.js";
 import type { Ledger } from "../db.js";
 import { checkSpend as defaultCheckSpend, type GuardResult, type ProposedChange } from "../features/spend-guard/guard.js";
-import type { HaltState } from "../features/spend-guard/halt.js";
+import type { HaltRule, HaltState } from "../features/spend-guard/halt.js";
+import type { UndoFailure, UndoReport } from "../features/spend-guard/pending-undo.js";
 import { brandClient, safeError, type Initiator } from "../features/spend-guard/support.js";
 import type { GateHandler, GateHandlerResult } from "../kit/gate/registry.js";
 import type { GateRequestRecord } from "../kit/gate/state-machine.js";
@@ -86,6 +93,15 @@ export interface ActivateAdDeps {
   haltOf(companyId: string): Promise<HaltState | null>;
   /** The latest published or swapped publication of the ad, or null. */
   publicationOf(companyId: string, adId: string): Promise<AdOwner | null>;
+  /**
+   * An undo PAUSED write after a halt failed: store the objects for the
+   * retry and alert (spend-guard/pending-undo.ts). Must not throw.
+   */
+  onUndoFailed?(
+    companyId: string,
+    config: BrandConfig,
+    input: { gateRequestId: string; haltRule: HaltRule | null; failed: readonly UndoFailure[] },
+  ): Promise<UndoReport>;
   checkSpend?: typeof defaultCheckSpend;
   now?: () => Date;
 }
@@ -160,8 +176,15 @@ export function blockedStates(ad: StatusRow, adset: StatusRow, campaign: StatusR
   return out;
 }
 
-/** The halt was set (or could not be read) after the first write began. */
-class HaltedError extends Error {}
+/** The halt was set (or could not be read: `halt` null) after the first write began. */
+class HaltedError extends Error {
+  constructor(
+    message: string,
+    readonly halt: HaltState | null,
+  ) {
+    super(message);
+  }
+}
 
 function haltLine(halt: HaltState): string {
   return `Pysäytystila ${halt.since}${halt.until ? `–${halt.until}` : ""}: ${halt.reason}`.slice(0, 300);
@@ -335,7 +358,7 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       try {
         return await deps.haltOf(companyId);
       } catch (error) {
-        throw new HaltedError(`the halt could not be read (${safeError(error)})`);
+        throw new HaltedError(`the halt could not be read (${safeError(error)})`, null);
       }
     };
     try {
@@ -353,7 +376,7 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     }
     const assertNotHalted = async () => {
       const halt = await haltNow();
-      if (halt) throw new HaltedError(`the ${halt.rule} halt was set during the activation (${halt.since})`);
+      if (halt) throw new HaltedError(`the ${halt.rule} halt was set during the activation (${halt.since})`, halt);
     };
 
     const initiator: Initiator = { source: "telegram", tgUserId };
@@ -369,8 +392,11 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     };
     let creativeAfter: string | null | undefined;
     try {
-      if (target.status !== "ACTIVE") await setStatus(target.id, "ACTIVE");
-      done.push("ad_active");
+      // An ad that was ACTIVE already is not this run's: an undo leaves it as it was.
+      if (target.status !== "ACTIVE") {
+        await setStatus(target.id, "ACTIVE");
+        done.push("ad_active");
+      }
       step = "pause_others";
       for (const other of ads) {
         if (other.id === target.id || other.status !== "ACTIVE") continue;
@@ -412,20 +438,30 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       done.push("verify_halt");
     } catch (error) {
       let detail = safeError(error);
+      const undoFailed: UndoFailure[] = [];
+      let undoReport: UndoReport | null = null;
       if (error instanceof HaltedError) {
         // A pause won the race: pause what this run set ACTIVE (campaign first),
         // rather than leave it to the pause's listing, which may have run before these writes.
-        const undo: Array<[string, string]> = [];
-        if (done.includes("campaign_active") && campaign) undo.push(["campaign", campaign.id]);
-        if (done.includes("adset_active")) undo.push(["ad set", adset.id]);
-        if (done.includes("ad_active")) undo.push(["ad", target.id]);
-        for (const [label, objectId] of undo) {
+        const undo: Array<[string, UndoFailure["kind"], string]> = [];
+        if (done.includes("campaign_active") && campaign) undo.push(["campaign", "campaign", campaign.id]);
+        if (done.includes("adset_active")) undo.push(["ad set", "adset", adset.id]);
+        if (done.includes("ad_active")) undo.push(["ad", "ad", target.id]);
+        for (const [label, kind, objectId] of undo) {
           try {
             await setStatus(objectId, "PAUSED");
             detail = `${detail}; the ${label} was paused again`;
           } catch (pauseError) {
             detail = `${detail}; pausing the ${label} ${objectId} failed too (${safeError(pauseError)})`;
+            undoFailed.push({ kind, objectId, error: safeError(pauseError) });
           }
+        }
+        // It may stay ACTIVE: the pause that won does not run again (RK9-565).
+        if (undoFailed.length > 0) {
+          const report = deps.onUndoFailed?.(companyId, config, { gateRequestId: request.id, haltRule: error.halt?.rule ?? null, failed: undoFailed });
+          undoReport = report
+            ? await report.catch((reportError: unknown): UndoReport => ({ stored: false, telegram: "failed", error: safeError(reportError) }))
+            : { stored: false, telegram: "skipped", error: "no undo retry is wired" };
         }
       }
       await saveSafely(request, pausedAdIds);
@@ -440,16 +476,26 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
         adId: target.id,
         pausedAdIds,
         creativeId: binding.creativeId,
+        ...(undoFailed.length > 0 ? { undoFailed, undoRetry: undoReport } : {}),
       };
-      deps.ctx.logger.error("rk9-ads gate: activation failed part way", { companyId, gateRequestId: request.id, step, done, detail });
+      deps.ctx.logger.error("rk9-ads gate: activation failed part way", { companyId, gateRequestId: request.id, step, done, detail, undoFailed, undoRetry: undoReport });
       await audit(request, "failed", outcome);
+      const undoLines =
+        undoFailed.length === 0
+          ? ["Tarkista tila Metassa. Mitään ei yritetä uudelleen automaattisesti."]
+          : [
+              `⚠️ Peruutus epäonnistui, voi olla yhä ACTIVE: ${undoFailed.map((entry) => entry.objectId).join(", ")}`,
+              undoReport?.stored
+                ? "Peruutusta yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen. Tarkista tila Metassa."
+                : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
+            ];
       return {
         status: "failed",
         statusText: [
           `⚠️ Aktivointi keskeytyi vaiheessa ${step}: ${detail.slice(0, 200)}`,
           `Tehty: ${done.length > 0 ? done.join(", ") : "ei mitään"}`,
           `Pysäytetyt mainokset: ${pausedAdIds.length > 0 ? pausedAdIds.join(", ") : "ei yhtään"}`,
-          "Tarkista tila Metassa. Mitään ei yritetä uudelleen automaattisesti.",
+          ...undoLines,
         ].join("\n"),
         outcome,
         error: `${step}: ${detail}`.slice(0, 300),

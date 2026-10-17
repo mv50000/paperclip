@@ -277,7 +277,9 @@ the core chat-channels bot is never shared. See
   company (`expired`), so a tap cannot undo the pause. The cards are edited
   with the reason after the Meta pauses, so a slow Telegram does not delay
   them. A row whose close fails does not stop the others. The data gate
-  leaves the cards open and sets no halt. While a halt is in force,
+  leaves the cards open and sets no halt: an activation approved while its
+  predicate does not hold is paused again on the next tick, at most 5 min
+  later (RK9-565). While a halt is in force,
   `activate_ad` refuses (also a card sent later, which says so), and it reads
   the halt again before every ACTIVE write and after the last write; a halt
   seen during or after the writes pauses again what the run set ACTIVE. So an
@@ -294,6 +296,34 @@ the core chat-channels bot is never shared. See
   no Telegram button for it. A failed halt write or card close does not stop
   the pause: the result (`haltError`, `cardsError`) and the audit row name
   it.
+  Every halt covers the whole company, also a scheduled pause's that
+  `meta.campaignId` limits to one campaign; a daytime `at` (07:00) gives a
+  halt of about 23 hours (RK9-565). The cap pause's halt also ends when the
+  rules job reads the month under the 90 % cap on two consecutive runs at
+  least 30 min apart (e.g. after `monthlyCapEur` was raised); a run at or over
+  the cap, or without a reading, starts the count again.
+- **Re-check and failed undos** (RK9-565, `recheck.ts`, `pending-undo.ts`).
+  A live kill switch or scheduled pause stores a re-check: the first
+  `scheduled-pause` tick at least 60 s later lists the ACTIVE objects again
+  and pauses what Meta's listing showed late. It runs only while that pause's
+  halt is in force and within 15 min of its due time. When an activation
+  that lost the race to a pause cannot pause again what it set ACTIVE (Meta
+  refuses the PAUSED write), it stores the objects, fails the card and sends
+  one Telegram alert (`alert_dedupe`). Each `scheduled-pause` tick pauses them
+  again and fails its run until Meta confirms, whether a halt is still in
+  force or not: a scheduled halt that ends at 06:00 or a cap halt that ends
+  with the month must not leave the object spending. An entry ends only when
+  Meta confirms (one audit row), when no halt is in force and a newer card
+  of the same object or publication was approved and activated after the
+  failure (one audit row, one alert), or when a board user acknowledges it.
+  A halt or newer-card lookup that cannot be read pauses anyway; while a
+  newer card's handler still runs, the tick leaves the entry alone. A
+  company whose config was removed with entries open fails the run and
+  names them (no Meta client to retry with). The `clear-halt` preview
+  lists the entries with their keys, and a real call with
+  `acknowledgeUndos` (no `since` needed) removes those (activity log). The
+  Ads page shows them with a typed "KUITTAA" confirmation; clearing a halt
+  does not acknowledge them.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
@@ -305,7 +335,10 @@ the core chat-channels bot is never shared. See
   or after `schedule.scheduledPause.at` (off by default). The day is marked
   once the Meta pauses succeeded; a failed card close or halt write fails the
   run once and is not retried, so ads activated on purpose later that evening
-  stay on. It also runs the
+  stay on. A retry tick keeps the halt the day's first tick stored and closes
+  no cards again, so a board user's clear stands; a run that has only a halt
+  or card failure to report writes its audit row once per local day. It also
+  runs the re-checks and the failed undos (above) and the
   data gate when `schedule.dataGate` is set. The gate's predicate `value
   <operator> threshold` is the condition for the ads to keep running. A JSON
   pointer to an array counts its items. An unreadable feed pauses nothing
@@ -586,7 +619,9 @@ The plugin's own spend gate (G1): `src/gate/` and `src/features/gate/`. No
    through only on those objects. A last read checks the creative again; a
    swap that raced the activation pauses the ad. The card shows the ad id and
    the paused ad ids. A failure part way ends the card `failed` with the step
-   reached and is not retried.
+   reached and is not retried, except an undo after a halt that Meta refused
+   (RK9-565, see the spend guard's failed undos). An ad that was ACTIVE
+   before the run is not paused by that undo.
 4. **Skip, expiry, swap, re-send.** "🗑 Ohita" ends the card `skipped`. The
    `gate-expiry` job (every 5 min) moves cards past `valid_until` to
    `expired`; a tap checks `valid_until` itself. A creative swap closes the

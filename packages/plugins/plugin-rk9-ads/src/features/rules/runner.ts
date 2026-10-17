@@ -25,6 +25,16 @@
  *      It pauses only ACTIVE objects, audits itself and notifies only when
  *      it paused something.
  *
+ * The cap pause's halt (spend-guard/halt.ts) is lifted when two consecutive
+ * runs, at least CAP_HEADROOM_MIN_GAP_MS apart, read the month under the 90 %
+ * cap, e.g. after monthlyCapEur was raised (RK9-565). Spend only grows within
+ * a month, so a reading below the MTD the halt stored is a bad reading (an
+ * empty or partial insights answer reads as 0) and counts as none, also a
+ * downward correction by Meta; a halt without those figures waits for the
+ * board. A first reading more than CAP_HEADROOM_MAX_GAP_MS old counts as none. A run that reads the month at
+ * or over the cap, or cannot read it or the status, starts the count again.
+ * The release is audited like a board user's clear and announced in Telegram.
+ *
  * A brand whose config is invalid, unavailable or disabled (monthlyCapEur
  * cleared) runs only the built-in cap rule, on the last valid config (A6's
  * loadPauseConfig, README ADR 3), and fails the run so the broken config is
@@ -45,11 +55,12 @@ import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import type { MetaClientMode, MetaGraphClient } from "../../meta/graph.js";
 import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
+import { clearRuleHalt, HALT_NAMESPACE, haltIdentity, readRuleHalt } from "../spend-guard/halt.js";
 import { pauseAll, PauseListError, stopFailures, type PauseAllDeps } from "../spend-guard/killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, safeError, type Initiator, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { evaluateRules, type RuleAdDay, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
-import { BUILTIN_PAUSE_ALL_CAP_RULE_ID, builtinPauseAllCap, type RuleSet, type ThresholdPauseRule } from "./schema.js";
+import { BUILTIN_PAUSE_ALL_CAP_PCT, BUILTIN_PAUSE_ALL_CAP_RULE_ID, builtinPauseAllCap, type RuleSet, type ThresholdPauseRule } from "./schema.js";
 import type { RulesStore } from "./store.js";
 
 export const RULES_JOB_KEY = "rules-evaluate";
@@ -59,6 +70,11 @@ const LIST_MAX_PAGES = 100;
 const NOTICE_MAX = 3900;
 /** Local time by which insights-daily-close must have finalised yesterday. */
 const CLOSE_DEADLINE = "06:00";
+/** The second run that sees headroom must come at least this long after the first (the job is hourly). */
+export const CAP_HEADROOM_MIN_GAP_MS = 30 * 60_000;
+/** A first reading older than this (runs skipped, e.g. an unreadable config) counts as none. Two credible readings at most this far apart are needed. */
+export const CAP_HEADROOM_MAX_GAP_MS = 2 * 60 * 60_000;
+export const CAP_HALT_RELEASED_ACTIVITY = "rk9-ads spend guard: cap halt released";
 
 export interface RulesDeps {
   ctx: PluginContext;
@@ -284,6 +300,73 @@ export function capOnlyRules(lastValid: BrandConfig): RuleSet {
   return { liveMode: stored?.liveMode === true, list: [cap ?? builtinPauseAllCap()] };
 }
 
+function capHeadroomKey(companyId: string) {
+  return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `cap-headroom:${companyId}` };
+}
+
+/**
+ * Lifts the cap pause's halt on the second consecutive run that reads the
+ * month under the cap. Never throws; a failure is a failure line.
+ */
+async function releaseCapHalt(
+  deps: RulesDeps,
+  companyId: string,
+  config: BrandConfig,
+  spend: RuleSnapshots["spend"],
+  initiator: Initiator,
+  now: Date,
+  failures: string[],
+): Promise<void> {
+  const { ctx } = deps;
+  const key = capHeadroomKey(companyId);
+  try {
+    const halt = await readRuleHalt(ctx, companyId, "pause_all_cap", now);
+    const stored = halt?.cap;
+    // A damaged or missing figure waits for the board.
+    const credible = spend !== null && typeof stored?.mtdEur === "number" && Number.isFinite(stored.mtdEur) && spend.mtdEur >= stored.mtdEur;
+    if (!halt || !spend || !credible || spend.pctUsed >= BUILTIN_PAUSE_ALL_CAP_PCT) {
+      // No halt to lift, or no headroom seen: the count starts again.
+      await ctx.state.delete(key);
+      return;
+    }
+    const id = haltIdentity(halt);
+    const seen = (await ctx.state.get(key)) as { haltId?: unknown; at?: unknown } | null;
+    const gap = typeof seen?.at === "string" ? now.getTime() - Date.parse(seen.at) : Number.NaN;
+    if (!seen || seen.haltId !== id || !(gap <= CAP_HEADROOM_MAX_GAP_MS)) {
+      await ctx.state.set(key, { haltId: id, at: now.toISOString(), pctUsed: spend.pctUsed });
+      return;
+    }
+    if (!(gap >= CAP_HEADROOM_MIN_GAP_MS)) return;
+    const released = await clearRuleHalt(ctx, companyId, "pause_all_cap", id, now);
+    await ctx.state.delete(key);
+    if (!released) return;
+    const metadata = {
+      halt,
+      clearedBy: { rulesJob: initiator.jobRunId ?? null },
+      reason: `month-to-date ${spend.mtdEur} EUR is ${spend.pctUsed} % of the ${spend.monthlyCapEur} EUR cap (< ${BUILTIN_PAUSE_ALL_CAP_PCT} %) on two consecutive runs`,
+      firstSeenAt: seen.at,
+    };
+    try {
+      await ctx.activity.log({ companyId, message: CAP_HALT_RELEASED_ACTIVITY, entityType: "rk9_ads_brand", entityId: config.brandCode, metadata });
+    } catch (error) {
+      ctx.logger.warn("rk9-ads rules: cap halt release not logged", { companyId, detail: safeError(error) });
+    }
+    ctx.logger.info("rk9-ads rules: cap halt released", { companyId, since: halt.since, pctUsed: spend.pctUsed });
+    try {
+      await deps.notifier.sendMessage(
+        companyId,
+        config,
+        `▶️ ${config.displayName || config.brandCode}`.slice(0, 120) +
+          `: kulutuskaton pysäytystila poistettu, koska kulutus on ${spend.pctUsed} % katosta (${spend.mtdEur} / ${spend.monthlyCapEur} €). Aktivointikortit toimivat taas; pysäytettyjä mainoksia ei käynnistetä automaattisesti.`,
+      );
+    } catch (error) {
+      failures.push(`${config.brandCode}: cap halt released but the Telegram notice failed (${safeError(error)})`);
+    }
+  } catch (error) {
+    failures.push(`${config.brandCode}: cap halt release check failed (${safeError(error)})`);
+  }
+}
+
 /**
  * Evaluates one brand. `persist: false` is the dry run: the same reads and
  * decisions, but no rule_actions row, no activity entry, no Meta write and
@@ -298,12 +381,22 @@ export async function runRulesForBrand(
   const now = deps.now();
   const failures: string[] = [];
   const outcome: BrandRulesOutcome = { brandCode: config.brandCode, decisions: [], changed: 0, telegram: "skipped", failures };
-  const { snapshots, status, rules } = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
+  let inputs: Awaited<ReturnType<typeof readInputs>>;
+  try {
+    inputs = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
+  } catch (error) {
+    // No reading: the cap halt's headroom count starts again.
+    if (options.persist) await deps.ctx.state.delete(capHeadroomKey(companyId)).catch(() => undefined);
+    throw error;
+  }
+  const { snapshots, status, rules } = inputs;
   const decisions = evaluateRules(snapshots, status, rules, now);
   if (!options.persist) {
     outcome.decisions = decisions.map((decision) => ({ ...decision, applied: false, error: null }));
     return outcome;
   }
+
+  await releaseCapHalt(deps, companyId, config, snapshots.spend, options.initiator, now, failures);
 
   const names = new Map(status.ads.map((ad) => [ad.id, ad.name ?? ""]));
   const paused: AppliedDecision[] = [];

@@ -38,6 +38,26 @@ export function memoryActivationRepo(store: MemoryGateStore, now: () => Date): A
           (row.decidedAt?.getTime() ?? 0) > since,
       );
     },
+    async newerActivation(companyId, input) {
+      const original = store.rows.get(input.gateRequestId);
+      const publicationId = original && original.companyId === companyId ? activationOf(original)?.publicationId : undefined;
+      const inFlightSince = now().getTime() - Math.max(1, Math.trunc(input.inFlightMinutes)) * 60_000;
+      const hits = [...store.rows.values()]
+        .filter((row) => {
+          if (row.companyId !== companyId || row.kind !== "activate_ad" || row.id === input.gateRequestId || row.status !== "approved") return false;
+          const decided = row.decidedAt?.getTime() ?? 0;
+          if (decided <= input.since.getTime()) return false;
+          const running = row.outcome === null || row.outcome.handler === "started";
+          if (row.outcome?.result !== "activated" && !(running && decided > inFlightSince)) return false;
+          const binding = activationOf(row);
+          const outcome = row.outcome ?? {};
+          const ids = [binding?.adId, binding?.adsetId, binding?.campaignId, outcome.adId, outcome.adsetId, outcome.campaignId];
+          return ids.includes(input.objectId) || (publicationId !== undefined && binding?.publicationId === publicationId);
+        })
+        .map((row) => ({ id: row.id, inFlight: row.outcome?.result !== "activated", decided: row.decidedAt?.getTime() ?? 0 }))
+        .sort((a, b) => Number(b.inFlight) - Number(a.inFlight) || b.decided - a.decided);
+      return hits[0] ? { id: hits[0].id, inFlight: hits[0].inFlight } : null;
+    },
     async close(companyId, id, outcome) {
       const row = store.rows.get(id);
       if (!row || row.companyId !== companyId || row.status !== "pending") return false;

@@ -129,6 +129,44 @@ describeDb("activation gate SQL on real Postgres", () => {
     expect(row).toEqual({ paused_ad_ids: ["1", "2"], status: "denied" });
   });
 
+  it("finds a newer activation of the object or the card's publication, a running one first, per company (RK9-565)", async () => {
+    const repo = sqlActivationGateRepo(testDb.client);
+    const ad = "120200000000000313";
+    const failed = await card({ adId: ad });
+    const since = new Date(Date.now() - 60_000);
+    const query = { objectId: ad, gateRequestId: failed.id, since, inFlightMinutes: 30 };
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+
+    // Approved, the handler not finished: still activating.
+    const newer = await card({ adId: ad });
+    expect(await store.decide(companyA, newer.tokenHash, "approved", 4242)).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: newer.id, inFlight: true });
+    // Ended without activating: the retry goes on.
+    expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { handler: "done", result: "failed" } })).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+    expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { handler: "done", result: "activated", campaignId: "120200000000000777" } })).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: newer.id, inFlight: false });
+    // Any object of the failed card's publication matches; without the publication, the outcome's campaign (the binding has none) does.
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000999" })).toEqual({ id: newer.id, inFlight: false });
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET publication_id = NULL WHERE id = $1`, [newer.id]);
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000777" })).toEqual({ id: newer.id, inFlight: false });
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000999" })).toBeNull();
+    // Decided before the failure: not newer.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = $2 WHERE id = $1`, [newer.id, new Date(since.getTime() - 1_000).toISOString()]);
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = now() WHERE id = $1`, [newer.id]);
+    // The failed card itself never counts, and another company sees nothing.
+    expect(await repo.newerActivation(companyA, { ...query, gateRequestId: newer.id })).toBeNull();
+    expect(await repo.newerActivation(companyB, query)).toBeNull();
+
+    // A handler that never finished stops counting as running after the window.
+    const stuck = await card({ adId: ad });
+    expect(await store.decide(companyA, stuck.tokenHash, "approved", 4242)).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: stuck.id, inFlight: true });
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = now() - interval '31 minutes' WHERE id = $1`, [stuck.id]);
+    expect(await repo.newerActivation(companyA, { ...query, since: new Date(Date.now() - 3_600_000) })).toEqual({ id: newer.id, inFlight: false });
+  });
+
   it("sweeps only cards past valid_until, and the kit's expire moves each one once", async () => {
     const repo = sqlActivationGateRepo(testDb.client);
     const live = await card({ adId: "120200000000000313" });

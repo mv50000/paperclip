@@ -12,6 +12,8 @@
  *   company (the kill switch, the cap pause and the scheduled pause close
  *   them, RK9-557);
  * - whether an approved activation of an ad may still be running;
+ * - a newer completed activation of an object or a publication, which ends
+ *   the retry of a failed undo (RK9-565);
  * - cards past valid_until for the expiry job;
  * - paused_ad_ids of a decided card.
  *
@@ -93,11 +95,32 @@ export interface ActivationGateRepo {
   activationInFlight(companyId: string, adId: string, withinMinutes: number): Promise<boolean>;
   /** pending -> expired with an outcome (superseded, creative swapped, paused). True when this call won. */
   close(companyId: string, id: string, outcome: Record<string, unknown>): Promise<boolean>;
+  /**
+   * An activate_ad card other than `gateRequestId`, approved after `since`,
+   * that names the object (as its ad, ad set or campaign, in the binding or
+   * in the handler's outcome) or the publication of `gateRequestId`'s card:
+   * one that activated (outcome.result activated), or one whose handler is
+   * still running (approved within `inFlightMinutes`, `inFlight: true`,
+   * listed first). Null when there is none.
+   */
+  newerActivation(companyId: string, input: NewerActivationQuery): Promise<NewerActivation | null>;
   /** Pending cards of every company whose valid_until has passed, oldest first. */
   dueForExpiry(limit: number): Promise<DueCard[]>;
   /** The pending activate_ad card of a publication, newest first. */
   pendingForPublication(companyId: string, publicationId: string): Promise<GateRequestRecord | null>;
   setPausedAdIds(companyId: string, id: string, adIds: readonly string[]): Promise<void>;
+}
+
+export interface NewerActivationQuery {
+  objectId: string;
+  gateRequestId: string;
+  since: Date;
+  inFlightMinutes: number;
+}
+
+export interface NewerActivation {
+  id: string;
+  inFlight: boolean;
 }
 
 const IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -161,6 +184,22 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateR
         [companyId, adId, Math.max(1, Math.trunc(withinMinutes))],
       );
       return Number(rows[0]?.n ?? 0) > 0;
+    },
+
+    async newerActivation(companyId, input) {
+      const rows = await db.query<{ id: unknown; in_flight: unknown }>(
+        `SELECT g.id, (g.outcome->>'result' IS DISTINCT FROM 'activated') AS in_flight FROM ${gate} g
+          WHERE g.company_id = $1 AND g.kind = 'activate_ad' AND g.status = 'approved'
+            AND g.decided_at > $3 AND g.id::text <> $2
+            AND (g.outcome->>'result' = 'activated'
+              OR ((g.outcome IS NULL OR g.outcome->>'handler' = 'started') AND g.decided_at > now() - make_interval(mins => $5)))
+            AND (g.ad_id = $4 OR g.adset_id = $4 OR g.payload->'activation'->>'campaignId' = $4
+              OR g.outcome->>'adId' = $4 OR g.outcome->>'adsetId' = $4 OR g.outcome->>'campaignId' = $4
+              OR g.publication_id = (SELECT o.publication_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2))
+          ORDER BY in_flight DESC, g.decided_at DESC LIMIT 1`,
+        [companyId, input.gateRequestId, input.since.toISOString(), input.objectId, Math.max(1, Math.trunc(input.inFlightMinutes))],
+      );
+      return rows[0] ? { id: String(rows[0].id), inFlight: rows[0].in_flight === true } : null;
     },
 
     async close(companyId, id, outcome) {

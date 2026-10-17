@@ -10,7 +10,8 @@ import { PLUGIN_ID } from "../../manifest.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { sqlPublicationStore, type PublicationStore } from "../../publish/store.js";
 import { readHalt } from "../spend-guard/halt.js";
-import { brandReadClient, safeError, sqlOnceStore } from "../spend-guard/support.js";
+import { reportUndoFailure } from "../spend-guard/pending-undo.js";
+import { brandReadClient, controllerNotifier, safeError, sqlOnceStore, type OnceStore, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { getTelegramController } from "../telegram/controller.js";
 import { registerGateHandler } from "../telegram/gates.js";
 import type { FeatureRuntime } from "../types.js";
@@ -32,7 +33,9 @@ import { setActivationCards } from "./runtime.js";
  * The kill switch, the cap pause and the scheduled pause close the open
  * cards through the same runtime (closeCardsForPause), and their halts
  * refuse every activation while in force (RK9-557, RK9-561,
- * spend-guard/halt.ts).
+ * spend-guard/halt.ts). An undo that Meta refused after a halt is stored for
+ * the scheduled-pause job's retry and alerted (spend-guard/pending-undo.ts,
+ * RK9-565).
  *
  * No scale_budget handler (G9) and no ctx.approvals (G1).
  */
@@ -51,6 +54,9 @@ export interface GateOverrides {
   checkSpend?: ActivateAdDeps["checkSpend"];
   haltOf?: ActivateAdDeps["haltOf"];
   publications?: Pick<PublicationStore, "findByAd">;
+  /** The failed-undo alert's Telegram and dedupe markers. */
+  notifier?: SpendGuardNotifier;
+  onceStore?: OnceStore;
   now?: () => Date;
 }
 
@@ -69,7 +75,9 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
   const repo = overrides.repo ?? sqlActivationGateRepo(ctx.db);
   const loadConfig = overrides.loadConfig ?? ((companyId: string) => loadEnabled(ctx, companyId));
   const readClient = overrides.readClient ?? ((companyId: string, config: BrandConfig) => brandReadClient(ctx, companyId, config));
+  const onceStore = overrides.onceStore ?? sqlOnceStore(ledger);
   const preflightDeps = { ctx, store: sqlOnceStore(ledger), pluginId: PLUGIN_ID, now };
+  const undoDeps = { ctx, store: onceStore, notifier: overrides.notifier ?? controllerNotifier };
   const publications = overrides.publications ?? sqlPublicationStore(ledger);
 
   registerGateHandler(
@@ -93,6 +101,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
         const owner = await publications.findByAd(companyId, adId);
         return owner ? { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId } : null;
       },
+      onUndoFailed: (companyId, config, input) => reportUndoFailure(undoDeps, companyId, config, input, now()),
       ...(overrides.checkSpend ? { checkSpend: overrides.checkSpend } : {}),
       now,
     }),
