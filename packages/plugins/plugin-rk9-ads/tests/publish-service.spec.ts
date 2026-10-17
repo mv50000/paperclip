@@ -368,6 +368,26 @@ describe("swap mode", () => {
     expect(handoffs).toHaveLength(1);
   });
 
+  it("previews the exact swap body, and fails (keeping the creative) when Meta does not confirm the swap", async () => {
+    const { service, routes, store } = serviceRig();
+    routes.on("GET 5001", { body: { id: "5001", account_id: "29231592883113369", adset_id: ADSET, status: "PAUSED", effective_status: "PAUSED" } });
+    await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await service.settled();
+    const request = { creativeId: CREATIVE_IMAGE, adId: "5001", text: { copy: { message: "Uusi teksti" } } };
+    const preview = await service.plan(COMPANY, request, "swap");
+    expect(preview.ad).toMatchObject({ method: "POST", path: "5001", body: { creative: {}, status: "PAUSED" } });
+    expect(Object.keys(preview.ad.body).sort()).toEqual(["creative", "status"]);
+
+    routes.on(`POST ${ACT}/adcreatives`, { body: { id: "7002" } });
+    routes.on("POST 5001", { body: { success: false } });
+    const outcome = await service.swap(COMPANY, request, UI);
+    await service.settled();
+    const swap = store.rows.find((row) => row.id === outcome.publication.id)!;
+    expect(swap).toMatchObject({ status: "failed", metaCreativeId: "7002" });
+    expect(swap.error).toMatch(/did not confirm the creative swap/);
+    expect(routes.calls.some((call) => call.key === "DELETE 7002")).toBe(false);
+  });
+
   it("refuses an ad that no publication of this company made, before any read or write", async () => {
     const { service, routes } = serviceRig();
     routes.on("GET 5001", { body: { id: "5001", account_id: "29231592883113369", adset_id: ADSET, status: "PAUSED", effective_status: "PAUSED" } });

@@ -11,7 +11,8 @@
  * - Every ad is created PAUSED (`createAd` hard-codes it, and the spend
  *   guarded client refuses anything else). No code path here sends ACTIVE or
  *   touches an ad set or campaign status; activation is A9's Telegram gate.
- * - Swap mode sends only `{ creative: { creative_id } }` to the existing ad.
+ * - Swap mode sends only `{ creative: { creative_id }, status: "PAUSED" }`, and
+ *   only to a PAUSED ad that a publication of this company made.
  * - A publications row is written as `pending` before the first Meta write,
  *   and every Meta id is stored right after the write that made it, so a re-run
  *   with the same key resumes and never creates a second creative or ad.
@@ -164,7 +165,7 @@ export interface PublishPlan {
   creative: { method: "POST"; path: string; body: CreativeBody };
   ad:
     | { method: "POST"; path: string; body: { name: string; adset_id: string; creative: { creative_id: string }; status: "PAUSED" } }
-    | { method: "POST"; path: string; body: { creative: { creative_id: string } } };
+    | { method: "POST"; path: string; body: { creative: { creative_id: string }; status: "PAUSED" } };
   warnings: string[];
 }
 
@@ -449,7 +450,7 @@ export function createPublishService(deps: PublishServiceDeps) {
     });
     const ad: PublishPlan["ad"] =
       mode === "swap"
-        ? { method: "POST", path: resolved.targetAdId!, body: { creative: { creative_id: PLACEHOLDER.creativeId } } }
+        ? { method: "POST", path: resolved.targetAdId!, body: { creative: { creative_id: PLACEHOLDER.creativeId }, status: "PAUSED" } }
         : {
             method: "POST",
             path: `${account}/ads`,
@@ -609,6 +610,8 @@ export function createPublishService(deps: PublishServiceDeps) {
         adWriteSent = true;
         const swapped = await swapAdCreative(client, target, creativeId);
         if (isDryRun(swapped)) throw new Error("the write client is in dry-run mode");
+        // Unknown outcome: keep the creative on the row; the re-run retries the swap with it.
+        if (!swapped.success) throw new Error(`Meta did not confirm the creative swap on ad ${target}; run the swap again`);
         createdCreativeId = null;
         await logActivity(companyId, id, "ad creative swapped", { metaObjectId: target, creativeId, step: "ads_update" });
         await save(companyId, id, { status: "swapped", error: null, publishedAt: now(), ...(await clearedCleanup(companyId, id)) });
@@ -737,7 +740,7 @@ export function createPublishService(deps: PublishServiceDeps) {
     /** Records the publication and starts its run in the background. Returns at once. */
     publish: (companyId: string, request: PublishRequest, initiator: Initiator) => submit(companyId, request, "publish", initiator),
 
-    /** Replaces the creative of an existing ad (`adId`). Never touches its status. */
+    /** Replaces the creative of a PAUSED ad (`adId`) that this company published. The ad stays PAUSED. */
     swap: (companyId: string, request: PublishRequest, initiator: Initiator) => submit(companyId, request, "swap", initiator),
 
     async get(companyId: string, id: string): Promise<PublicationView | null> {
