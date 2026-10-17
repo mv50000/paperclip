@@ -32,6 +32,7 @@ const nonServerProjects = [
   "@paperclipai/plugin-daytona",
   "@paperclipai/plugin-sdk",
   "@paperclipai/create-paperclip-plugin",
+  "@paperclipai/plugin-rk9-ads",
   "@paperclipai/ui",
   "paperclipai",
 ];
