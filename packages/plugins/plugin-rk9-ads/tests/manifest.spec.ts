@@ -117,7 +117,11 @@ describe("manifest", () => {
 
   it("resolves every UI slot to a named export of the UI entry", () => {
     const source = readFileSync(new URL("../src/ui/index.tsx", import.meta.url), "utf8");
-    const exported = new Set(Array.from(source.matchAll(/export function (\w+)/g), (m) => m[1]));
+    const exported = new Set([
+      ...Array.from(source.matchAll(/export function (\w+)/g), (m) => m[1]),
+      // Re-exports of the page modules: export { AdsPage } from "./AdsPage.js".
+      ...Array.from(source.matchAll(/export \{([^}]+)\} from/g)).flatMap((m) => m[1]!.split(",").map((name) => name.trim())),
+    ]);
     for (const slot of manifest.ui?.slots ?? []) {
       expect(exported, slot.exportName).toContain(slot.exportName);
     }

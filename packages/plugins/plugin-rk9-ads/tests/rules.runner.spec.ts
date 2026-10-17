@@ -37,7 +37,9 @@ function accountMeta(): FakeMeta {
   return meta;
 }
 
-function setup(input: { rules?: Record<string, unknown>; meta?: FakeMeta; companies?: Record<string, Record<string, unknown>>; days?: RuleAdDay[]; closed?: boolean } = {}) {
+function setup(
+  input: { rules?: Record<string, unknown>; meta?: FakeMeta; companies?: Record<string, Record<string, unknown>>; days?: RuleAdDay[]; closed?: boolean; closeCardsError?: Error } = {},
+) {
   const harness = createTestHarness({ manifest });
   const configs = input.companies ?? { [COMPANY_A]: brandConfig({ telegram: telegramBlock(), ...(input.rules ? { rules: input.rules } : {}) }) };
   harness.seed({ companies: Object.keys(configs).map((id, index) => ({ id, name: `Brand ${index}` }) as Company) });
@@ -59,8 +61,16 @@ function setup(input: { rules?: Record<string, unknown>; meta?: FakeMeta; compan
     onConfigChanged() {},
     onShutdown() {},
   };
-  registerRules(runtime, { store, notifier, now: () => clock.now, fatigue: async () => [] });
+  const cardCloses: Array<{ companyId: string; rule: string }> = [];
+  // The gate is not registered here: a stub stands in for its card closer.
+  const closeCards = async (companyId: string, close: { rule: string }) => {
+    if (input.closeCardsError) throw input.closeCardsError;
+    cardCloses.push({ companyId, rule: close.rule });
+    return { ids: [], announce: async () => undefined };
+  };
+  registerRules(runtime, { store, notifier, now: () => clock.now, fatigue: async () => [], closeCards });
   return {
+    cardCloses,
     harness,
     /** Mutable: a test changes a company's saved config between runs. */
     configs,
@@ -191,10 +201,20 @@ describe("rules-evaluate job (A11)", () => {
     expect(r.ledgerRuleActions()).toEqual([
       expect.objectContaining({ rule_id: "pause_all_cap", mode: "live", dry_run: false, applied: true, metrics: expect.objectContaining({ pctUsed: 90, mtdEur: 90 }) }),
     ]);
+    expect(r.cardCloses).toEqual([{ companyId: COMPANY_A, rule: "pause_all_cap" }]);
     // Below 90 % nothing happens.
     const quiet = setup({ rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] } });
     await quiet.harness.runJob(RULES_JOB_KEY);
     expect(quiet.meta.writes).toHaveLength(0);
+  });
+
+  it("fails the run when the cap pause could not close the open activation cards (RK9-561)", async () => {
+    const meta = accountMeta();
+    meta.spend = () => "90.00";
+    const r = setup({ meta, rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] }, closeCardsError: new Error("gate store down") });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/pause_all_cap: open activation cards were not closed \(Error: gate store down\)/);
+    // The pause itself stands.
+    expect(r.meta.writes.map((call) => call.body.status)).toEqual(["PAUSED", "PAUSED", "PAUSED"]);
   });
 
   it("propose_scale never calls Meta (G9)", async () => {
