@@ -14,8 +14,21 @@ export function AdsWidget(props: PluginWidgetProps) {
   if (widget.error) return <ErrorText>Mainonta: {widget.error.message}</ErrorText>;
   const data = widget.data;
   if (!data || data.state === "error") return <ErrorText>Mainonta: {data?.error ?? "tyhjä vastaus"}</ErrorText>;
-  if (data.state === "absent" || data.state === "invalid" || data.state === "unavailable") {
-    return <EmptyState title="Mainonta ei ole käytössä." detail={data.state === "absent" ? undefined : data.error} />;
+  if (data.state === "absent") return <EmptyState title="Mainonta ei ole käytössä." />;
+  if (data.state === "invalid" || data.state === "unavailable") {
+    // A broken config does not stop running ads; say so and keep the halt and the way to the kill switch.
+    return (
+      <div className="space-y-2">
+        <ErrorText>
+          Mainonnan asetukset ovat {data.state === "invalid" ? "virheelliset" : "lukukelvottomat"}: mainokset voivat olla yhä käynnissä.
+          {data.error ? ` ${data.error}` : ""}
+        </ErrorText>
+        {data.halted ? <ErrorText>Pysäytystila päällä: aktivointi estetty.</ErrorText> : null}
+        <a className="text-sm font-medium underline underline-offset-4" {...navigation.linkProps("/ads")}>
+          Avaa mainonta
+        </a>
+      </div>
+    );
   }
 
   return (

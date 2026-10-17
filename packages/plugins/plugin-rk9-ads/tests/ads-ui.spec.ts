@@ -225,6 +225,7 @@ describe("operator UI (RK9-518)", () => {
     await render(createElement(AdsPage, { context: CONTEXT }));
     expect(container.textContent).toContain("RK9 Ads ei ole käytössä");
     expect(container.querySelector("a")?.getAttribute("href")).toBe("/OLL/company/settings/ads");
+    expect(buttons("Pysäytä kaikki")).toHaveLength(0);
 
     await render(createElement(SettingsPage, { context: CONTEXT }));
     expect(container.querySelector("a")?.getAttribute("href")).toBe("/OLL/company/settings/instance/plugins/rk9-ads");
@@ -303,6 +304,30 @@ describe("operator UI (RK9-518)", () => {
     expect(bridge.actionCalls.map((call) => call.params)).toEqual([{ dryRun: true }, { dryRun: false, confirm: true }]);
     const alerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
     expect(alerts).toEqual(expect.arrayContaining([expect.stringContaining("Pysäytystilaa EI tallennettu: state write failed"), expect.stringContaining("aktivointikortteja EI suljettu: gate store down")]));
+  });
+
+  it("keeps the kill switch on a broken config, runs it on the fallback config, and the widget warns", async () => {
+    bridge.data.set(DATA.overview, { ...ollolaOverview(), state: "invalid", error: "rules.list[0]: bad threshold" });
+    const base = { rule: "kill_switch", scope: "account", campaignPaused: true, list: [], telegram: "sent", closedCardIds: [], fallbackConfig: "invalid" };
+    bridge.actions.set(ACTION.pauseAll, async (params) =>
+      params.dryRun !== false
+        ? { ...base, dryRun: true, pausedAds: [{ id: "301", name: "a" }], pausedCampaigns: [], count: 1, errors: [{ id: "list:ads", error: "Meta 500" }] }
+        : { ...base, dryRun: false, pausedAds: [{ id: "301", name: "a" }], pausedCampaigns: [], count: 1, errors: [] },
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    expect(container.textContent).toContain("Brändin asetukset ovat virheelliset.");
+    await click("Pysäytä kaikki");
+    const previewAlerts = Array.from(container.querySelectorAll('[role="alert"]')).map((node) => node.textContent);
+    expect(previewAlerts).toEqual(expect.arrayContaining([expect.stringContaining("viimeisintä toimivaa"), expect.stringContaining("list:ads (Meta 500)")]));
+    await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
+    await click("Pysäytä kaikki");
+    expect(bridge.actionCalls.map((call) => call.params)).toEqual([{ dryRun: true }, { dryRun: false, confirm: true }]);
+
+    bridge.data.set(DATA.widget, { state: "invalid", error: "rules.list[0]: bad threshold", brandCode: null, mtdEur: null, monthlyCapEur: null, pctUsed: null, pendingGates: null, halted: true } satisfies UiWidget);
+    await render(createElement(AdsWidget, { context: CONTEXT }));
+    expect(container.textContent).toContain("mainokset voivat olla yhä käynnissä");
+    expect(container.textContent).toContain("Pysäytystila päällä");
+    expect(container.querySelector("a")?.getAttribute("href")).toBe("/OLL/ads");
   });
 
   it("shows the standing halt and clears it with the preview's since", async () => {

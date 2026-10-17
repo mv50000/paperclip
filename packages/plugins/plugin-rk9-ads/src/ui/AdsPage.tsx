@@ -141,8 +141,8 @@ function HaltBanner(props: { halt: UiHalt | null; haltError?: string; timeZone?:
 /** The kill switch ("Pysäytä kaikki"): dry-run preview, typed confirmation, then the live pause with confirm: true. */
 export function KillSwitchButton(props: { onDone: () => void }) {
   const pauseAll = usePluginAction(ACTION.pauseAll);
-  const [preview, setPreview] = useState<PauseAllResult | null>(null);
-  const [result, setResult] = useState<PauseAllResult | null>(null);
+  const [preview, setPreview] = useState<KillSwitchOutcome | null>(null);
+  const [result, setResult] = useState<KillSwitchOutcome | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -151,7 +151,7 @@ export function KillSwitchButton(props: { onDone: () => void }) {
     setError(null);
     setResult(null);
     try {
-      setPreview((await pauseAll({ dryRun: true })) as PauseAllResult);
+      setPreview((await pauseAll({ dryRun: true })) as KillSwitchOutcome);
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -163,7 +163,7 @@ export function KillSwitchButton(props: { onDone: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const live = (await pauseAll({ dryRun: false, confirm: true })) as PauseAllResult;
+      const live = (await pauseAll({ dryRun: false, confirm: true })) as KillSwitchOutcome;
       setPreview(null);
       setResult(live);
       props.onDone();
@@ -176,6 +176,12 @@ export function KillSwitchButton(props: { onDone: () => void }) {
 
   return (
     <div className="space-y-2">
+      {preview ? <FallbackNote state={preview.fallbackConfig} /> : null}
+      {preview && preview.errors.length > 0 ? (
+        <ErrorText>
+          Esikatselu ei saanut kaikkia kohteita: {preview.errors.map((entry) => `${entry.id} (${entry.error})`).join(", ")}
+        </ErrorText>
+      ) : null}
       {preview ? (
         <TypedConfirm
           word={PAUSE_WORD}
@@ -196,11 +202,20 @@ export function KillSwitchButton(props: { onDone: () => void }) {
   );
 }
 
+/** pause-all adds `fallbackConfig` when it ran on the last valid config (spend-guard/register.ts). */
+type KillSwitchOutcome = PauseAllResult & { fallbackConfig?: string };
+
+function FallbackNote(props: { state?: string }) {
+  if (!props.state) return null;
+  return <ErrorText>Nykyiset asetukset ovat {props.state === "invalid" ? "virheelliset" : "lukukelvottomat"}: hätäkatkaisin käyttää viimeisintä toimivaa konfiguraatiota.</ErrorText>;
+}
+
 /** The live result; every partial failure shows as an error, not as a footnote (RK9-561). */
-export function KillSwitchResult(props: { result: PauseAllResult }) {
+export function KillSwitchResult(props: { result: KillSwitchOutcome }) {
   const { result } = props;
   return (
     <div className="space-y-1">
+      <FallbackNote state={result.fallbackConfig} />
       <p className="text-sm">
         Pysäytetty {result.pausedAds.length} mainosta ja {result.pausedCampaigns.length} kampanjaa.
         {result.halt ? " Pysäytystila on päällä." : ""}
@@ -375,6 +390,12 @@ export function AdsPage(props: PluginPageProps) {
       <main className="space-y-4">
         <h1 className="text-xl font-semibold">{title}</h1>
         {data.halt || data.haltError ? <HaltBanner halt={data.halt} haltError={data.haltError} onChanged={overview.refresh} /> : null}
+        {data.state !== "absent" ? (
+          <Section title="Hätäkatkaisin">
+            <Muted>Mainokset voivat olla yhä käynnissä. Hätäkatkaisin toimii viimeisimmällä toimivalla konfiguraatiolla.</Muted>
+            <KillSwitchButton onDone={overview.refresh} />
+          </Section>
+        ) : null}
         <EmptyState
           title={data.state === "absent" ? "RK9 Ads ei ole käytössä tässä yrityksessä." : data.state === "invalid" ? "Brändin asetukset ovat virheelliset." : "Asetuksia ei voitu lukea."}
           detail={data.error}

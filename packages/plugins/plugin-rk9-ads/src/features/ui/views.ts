@@ -144,7 +144,8 @@ async function readHaltSection(ctx: PluginContext, companyId: string): Promise<{
 async function pendingGates(deps: ViewDeps, companyId: string): Promise<UiGateCard[]> {
   const rows = await deps.ledger.select(companyId, "gate_requests", {
     where: { status: "pending" },
-    orderBy: { column: "valid_until", direction: "asc" },
+    // Newest valid_until first: a backlog of expired rows the expiry job has not moved yet cannot push live cards past the limit.
+    orderBy: { column: "valid_until", direction: "desc" },
     limit: GATE_ROWS,
   });
   const now = deps.now().getTime();
@@ -155,7 +156,8 @@ async function pendingGates(deps: ViewDeps, companyId: string): Promise<UiGateCa
     if (!validUntil || Date.parse(validUntil) <= now) continue;
     out.push({ id: String(row.id), kind: String(row.kind), adId: str(row.ad_id), publicationId: str(row.publication_id), validUntil });
   }
-  return out;
+  // Show the soonest-expiring card first.
+  return out.reverse();
 }
 
 interface AdTotals {
