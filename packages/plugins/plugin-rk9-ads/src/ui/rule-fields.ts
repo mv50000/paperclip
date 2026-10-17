@@ -83,6 +83,49 @@ export function fromEditor(rule: EditorRule): Record<string, unknown> {
 
 export type RulesBlock = { liveMode: boolean; list: ReadonlyArray<Record<string, unknown>> };
 
+/**
+ * Copy of features/rules/schema.ts DEFAULT_RULES: what runs when the saved
+ * config has no `rules.list` (RK9-566). A test pins it.
+ */
+export const EDITOR_DEFAULT_RULES: ReadonlyArray<Record<string, unknown>> = Object.freeze([
+  {
+    ruleId: "cpc-ceiling",
+    type: "threshold_pause",
+    enabled: true,
+    mode: "shadow",
+    metric: "cpc",
+    operator: "gt",
+    threshold: 0.5,
+    days: 7,
+    aggregate: "window_total",
+    minImpressions: 0,
+    minClicks: 0,
+    minSpendEur: 3,
+    cooldownHours: 24,
+  },
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A saved config's `rules` block as the weakening check reads it, with the
+ * schema's defaults: liveMode false, and the default rules when `list` is
+ * missing (RK9-566). The browser and the worker both read it this way.
+ */
+export function savedRulesBlock(configJson: Record<string, unknown>): RulesBlock {
+  const rules = configJson.rules;
+  if (!isRecord(rules)) return { liveMode: false, list: EDITOR_DEFAULT_RULES };
+  const list = rules.list === undefined || rules.list === null ? EDITOR_DEFAULT_RULES : Array.isArray(rules.list) ? rules.list.filter(isRecord) : [];
+  return { liveMode: rules.liveMode === true, list };
+}
+
+/** True when the save turns the brand's live mode on: it needs the typed word LIVE. */
+export function liveModeTurnedOn(saved: RulesBlock, next: RulesBlock): boolean {
+  return next.liveMode && !saved.liveMode;
+}
+
 /** The rule's identity across saves: the built-in cap by its type, the others by ruleId. */
 function ruleKey(rule: Record<string, unknown>): string {
   return rule.type === "pause_all_cap" ? BUILTIN_CAP_RULE_ID : String(rule.ruleId ?? "");
@@ -93,19 +136,84 @@ function ruleLabel(rule: Record<string, unknown>): string {
   return type === "pause_all_cap" ? (RULE_TYPE_LABEL[type] ?? type) : `${RULE_TYPE_LABEL[type] ?? type} ${String(rule.ruleId ?? "")}`;
 }
 
+/** The list with the built-in cap the schema appends when no entry names it (shadow, 24 h). */
+function withCap(list: ReadonlyArray<Record<string, unknown>>): ReadonlyArray<Record<string, unknown>> {
+  return list.some((rule) => rule.type === "pause_all_cap") ? list : [...list, { type: "pause_all_cap", mode: "shadow", cooldownHours: 24 }];
+}
+
+/** A number field with the schema's default when it is missing. */
+function num(rule: Record<string, unknown>, key: string, fallback: number): number {
+  const value = rule[key];
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const UPWARD = new Set(["gt", "gte"]);
+
+/**
+ * The parameter changes of a live rule that make it fire less (RK9-566).
+ * A change whose direction is not clear counts as weakening.
+ * - metric: any change;
+ * - operator: a turn of direction (gt/gte <-> lt/lte), or gte -> gt and
+ *   lte -> lt (equal values no longer fire);
+ * - threshold, with the same operator direction: up for gt/gte, down for lt/lte;
+ * - days: up with aggregate each_day (every day must break it), any change
+ *   with window_total; aggregate: any change;
+ * - minImpressions, minClicks, minSpendEur, cooldownHours: up.
+ */
+function parameterChanges(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const up = (key: string, label: string, fallback: number) => {
+    const from = num(before, key, fallback);
+    const to = num(after, key, fallback);
+    if (to > from) out.push(`${label} ${from} → ${to}`);
+  };
+  if (before.type === "threshold_pause") {
+    const metric = [String(before.metric ?? ""), String(after.metric ?? "")];
+    const operator = [String(before.operator ?? ""), String(after.operator ?? "")];
+    const sameDirection = UPWARD.has(operator[0]!) === UPWARD.has(operator[1]!);
+    if (metric[0] !== metric[1]) out.push(`mittari ${metric[0]} → ${metric[1]}`);
+    if (!sameDirection || (operator[0] === "gte" && operator[1] === "gt") || (operator[0] === "lte" && operator[1] === "lt")) {
+      out.push(`vertailu ${operator[0]} → ${operator[1]}`);
+    }
+    if (metric[0] === metric[1] && sameDirection) {
+      const from = num(before, "threshold", Number.NaN);
+      const to = num(after, "threshold", Number.NaN);
+      if (UPWARD.has(operator[1]!) ? !(to <= from) : !(to >= from)) out.push(`kynnys ${from} → ${to}`);
+    }
+    const aggregate = [String(before.aggregate ?? "each_day"), String(after.aggregate ?? "each_day")];
+    if (aggregate[0] !== aggregate[1]) out.push(`laskenta ${aggregate[0]} → ${aggregate[1]}`);
+    const days = [num(before, "days", 1), num(after, "days", 1)];
+    if (aggregate[1] === "each_day" && aggregate[0] === aggregate[1] ? days[1]! > days[0]! : days[1] !== days[0]) out.push(`päivät ${days[0]} → ${days[1]}`);
+    up("minImpressions", "väh. näytöt", 0);
+    up("minClicks", "väh. linkkiklikit", 0);
+    up("minSpendEur", "väh. kulutus €", 0);
+  }
+  up("cooldownHours", "cooldown h", 24);
+  return out;
+}
+
 /**
  * The changes from the saved rules to the prepared ones that weaken the
- * automatic spend protection (RK9-562): live mode off, a live rule to
- * shadow, an enabled rule removed or disabled. Each needs a typed
- * confirmation.
+ * automatic spend protection (RK9-562, RK9-566): live mode off, a live rule
+ * to shadow, an enabled rule removed or disabled, and a live rule's
+ * parameter changed so that it fires less (parameterChanges). Each needs a
+ * typed confirmation. A shadow rule pauses nothing, so tuning its
+ * parameters is not weakening; that is what shadow mode is for.
  * propose_scale is not edited here and is always off. Defaults follow
- * features/rules/schema.ts: mode "shadow", enabled true.
+ * features/rules/schema.ts: mode "shadow", enabled true, the built-in cap
+ * appended when the list has none.
+ *
+ * The strings are the confirmation: the worker (rules.prepareSave) and the
+ * browser's save (host-config.ts) compare them with what the operator
+ * confirmed, so both build them with this function.
  */
 export function weakeningChanges(saved: RulesBlock, next: RulesBlock): string[] {
   const out: string[] = [];
   if (saved.liveMode && !next.liveMode) out.push("Live-tila pois: yksikään sääntö ei enää pysäytä mainoksia Metassa.");
-  const nextByKey = new Map(next.list.map((rule) => [ruleKey(rule), rule]));
-  for (const rule of saved.list) {
+  const nextByKey = new Map(withCap(next.list).map((rule) => [ruleKey(rule), rule]));
+  for (const rule of withCap(saved.list)) {
     // A disabled rule protects nothing: removing it weakens nothing.
     if (rule.type === "propose_scale" || rule.enabled === false) continue;
     const label = ruleLabel(rule);
@@ -116,6 +224,10 @@ export function weakeningChanges(saved: RulesBlock, next: RulesBlock): string[] 
     }
     if (after.enabled === false) out.push(`${label}: kytketään pois päältä.`);
     else if (rule.mode === "live" && after.mode !== "live") out.push(`${label}: live-tilasta varjotilaan.`);
+    else if (rule.mode === "live") {
+      const changes = parameterChanges(rule, after);
+      if (changes.length > 0) out.push(`${label}: ${changes.join(", ")}.`);
+    }
   }
   return out;
 }

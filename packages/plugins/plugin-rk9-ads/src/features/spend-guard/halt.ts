@@ -41,7 +41,7 @@
  * (rules/runner.ts, RK9-565).
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { Initiator } from "./support.js";
 
@@ -199,4 +199,94 @@ export async function clearHalt(
     return { cleared: halt, current: await readHalt(ctx, companyId, now) };
   }
   return { cleared: null, current: await readHalt(ctx, companyId, now) };
+}
+
+/**
+ * The pause-ad halt (RK9-566): a pause of one ad from the UI leaves a short
+ * halt for that ad before it closes the ad's cards and writes PAUSED.
+ * activate_ad reads it with the company's halts, before every ACTIVE write
+ * and after the writes, so an activation approved just before the pause
+ * either sees it and pauses again what it set ACTIVE, or finished its
+ * writes before the pause's own PAUSED write. It lasts AD_HALT_MINUTES, as
+ * long as an approved activation counts as running
+ * (gate/staging-card.ts ACTIVATION_IN_FLIGHT_MINUTES), so a new card of the
+ * ad tapped in that time is refused too. A board user clears it early with
+ * `clear-halt` and `adId`.
+ *
+ * Stored like the company's halts, one key per ad. A damaged record holds
+ * with no end, like theirs.
+ */
+export const AD_HALT_RULE = "pause_ad";
+export const AD_HALT_MINUTES = 30;
+const AD_ID_RE = /^\d{1,30}$/;
+
+export interface AdHaltState {
+  brandCode: string;
+  rule: typeof AD_HALT_RULE;
+  adId: string;
+  id: string;
+  since: string;
+  until: string;
+  reason: string;
+  initiator: Initiator;
+}
+
+function adKeys(companyId: string, adId: string) {
+  if (!AD_ID_RE.test(adId)) throw new Error(`invalid ad id for a halt: ${adId.slice(0, 40)}`);
+  return {
+    halt: { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `halt:${companyId}:ad:${adId}` },
+    cleared: { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `halt-cleared:${companyId}:ad:${adId}` },
+  };
+}
+
+function isAdHalt(value: unknown): value is AdHaltState {
+  if (value === null || typeof value !== "object") return false;
+  const halt = value as Partial<AdHaltState>;
+  return (
+    typeof halt.brandCode === "string" &&
+    typeof halt.adId === "string" &&
+    typeof halt.id === "string" &&
+    typeof halt.since === "string" &&
+    typeof halt.until === "string" &&
+    Number.isFinite(Date.parse(halt.until))
+  );
+}
+
+/** A new pause-ad halt for the ad, from now for AD_HALT_MINUTES. */
+export function newAdHalt(input: { brandCode: string; adId: string; reason: string; initiator: Initiator; now: Date }): AdHaltState {
+  return {
+    brandCode: input.brandCode,
+    rule: AD_HALT_RULE,
+    adId: input.adId,
+    id: randomUUID(),
+    since: input.now.toISOString(),
+    until: new Date(input.now.getTime() + AD_HALT_MINUTES * 60_000).toISOString(),
+    reason: input.reason.slice(0, 300),
+    initiator: input.initiator,
+  };
+}
+
+export async function setAdHalt(ctx: StateCtx, companyId: string, halt: AdHaltState): Promise<void> {
+  await ctx.state.set(adKeys(companyId, halt.adId).halt, halt);
+}
+
+/** The ad's pause-ad halt in force, or null. Throws when the state cannot be read. */
+export async function readAdHalt(ctx: StateCtx, companyId: string, adId: string, now: Date = new Date()): Promise<AdHaltState | null> {
+  const keys = adKeys(companyId, adId);
+  const [value, cleared] = await Promise.all([ctx.state.get(keys.halt), ctx.state.get(keys.cleared)]);
+  if (value === null || value === undefined) return null;
+  const halt: AdHaltState = isAdHalt(value)
+    ? { ...value, rule: AD_HALT_RULE }
+    : { brandCode: "?", rule: AD_HALT_RULE, adId, id: damagedId(value), since: "?", until: "", reason: "unreadable halt record", initiator: { source: "job" } };
+  if (typeof cleared === "string" && cleared === halt.id) return null;
+  if (halt.until !== "" && Date.parse(halt.until) <= now.getTime()) return null;
+  return halt;
+}
+
+/** Clears the ad's halt when it is the one named by `id`. Null when it is not in force. Throws when the state cannot be read or written. */
+export async function clearAdHalt(ctx: StateCtx, companyId: string, adId: string, id: string, now: Date = new Date()): Promise<AdHaltState | null> {
+  const halt = await readAdHalt(ctx, companyId, adId, now);
+  if (!halt || halt.id !== id) return null;
+  await ctx.state.set(adKeys(companyId, adId).cleared, id);
+  return halt;
 }

@@ -2,6 +2,7 @@ import type { BrandConfig } from "../../config.js";
 import type { PauseCardClose } from "../../gate/staging-card.js";
 import { getAdOwner, getObjectStatus, setObjectStatus } from "../../meta/methods.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
+import { newAdHalt, setAdHalt, type AdHaltState } from "../spend-guard/halt.js";
 import { loadPauseConfig, pauseReason } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, recordAction, safeError, sqlOnceStore, type Initiator, type OnceStore } from "../spend-guard/support.js";
 import { getActivationCards } from "../gate/runtime.js";
@@ -20,8 +21,11 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  * - action `pause-ad`: pauses one ad of the brand's ad account. Dry run by
  *   default; a real pause needs `confirm: true` and a board user (an agent may
  *   only preview it). It writes rule_actions and the activity log. Before the
- *   Meta write it closes the ad's open activation cards, so an old card
- *   cannot activate the ad again (RK9-562); a failed close is `cardsError`.
+ *   Meta write it stores the ad's short pause-ad halt (RK9-566,
+ *   spend-guard/halt.ts), so an activation approved just before the pause
+ *   pauses the ad again, and closes the ad's open activation cards, so an
+ *   old card cannot activate it again (RK9-562); a failed close is
+ *   `cardsError`, a halt that was not stored `haltError`.
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
@@ -44,7 +48,7 @@ export interface UiOverrides {
   /** Tests: replaces the brand's Meta clients. */
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "readOnly", initiator: Initiator | null) => MetaGraphClient;
   /** Tests: replaces the running gate's card closer. */
-  closeAdCards?: (companyId: string, adId: string, input: { reason: string }) => Promise<PauseCardClose>;
+  closeAdCards?: (companyId: string, adId: string, input: { reason: string; halted?: boolean }) => Promise<PauseCardClose>;
 }
 
 function reasonText(value: unknown, fallback: string): string {
@@ -116,16 +120,26 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       runId: context.actor.runId,
     };
     const reason = pauseReason(loaded, reasonText(params.reason, "Pysäytä mainos (UI)"));
-    // The ad's open cards close first, so no tap after this point activates it again.
+    // The halt first: an activation already approved sees it before its next ACTIVE write or after its writes.
+    let adHalt: AdHaltState | null = newAdHalt({ brandCode: config.brandCode, adId, reason, initiator, now: deps.now() });
+    let haltError: string | undefined;
+    try {
+      await setAdHalt(ctx, companyId, adHalt);
+    } catch (cause) {
+      haltError = safeError(cause);
+      adHalt = null;
+      ctx.logger.error("rk9-ads ui: the pause-ad halt was not stored", { companyId, adId, detail: haltError });
+    }
+    // Then the ad's open cards close, so no tap after this point activates it again.
     let closedCardIds: string[] = [];
     let cardsError: string | undefined;
-    let announce: () => Promise<void> = async () => undefined;
+    let announce: (paused?: boolean) => Promise<void> = async () => undefined;
     const close = overrides.closeAdCards ?? getActivationCards()?.closeCardsForAdPause;
     if (!close) {
       cardsError = "the activation gate is not running; open cards were not closed";
     } else {
       try {
-        const closed = await close(companyId, adId, { reason });
+        const closed = await close(companyId, adId, { reason, halted: adHalt !== null });
         closedCardIds = closed.ids;
         cardsError = closed.error;
         announce = closed.announce;
@@ -157,19 +171,26 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
         dryRun: false,
         applied: paused,
         reason,
-        metrics: { previousStatus: before.status, name: before.name, closedCardIds, ...(cardsError ? { cardsError } : {}) },
+        metrics: {
+          previousStatus: before.status,
+          name: before.name,
+          closedCardIds,
+          ...(adHalt ? { adHalt: { id: adHalt.id, until: adHalt.until } } : {}),
+          ...(cardsError ? { cardsError } : {}),
+          ...(haltError ? { haltError } : {}),
+        },
         initiator,
         error,
         message: `ui ${paused ? "paused" : "could not pause"} ad ${adId}`,
       },
     );
     try {
-      await announce();
+      await announce(paused);
     } catch (cause) {
       ctx.logger.warn("rk9-ads ui: closed activation cards not edited", { companyId, adId, detail: safeError(cause) });
     }
     if (!paused) {
-      const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}`;
+      const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}${haltError ? `; the pause-ad halt was not stored: ${haltError}` : ""}`;
       throw new Error(`The pause of ad ${adId} failed: ${error}. ${cards}`);
     }
     return sanitize({
@@ -180,7 +201,9 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       status: "PAUSED",
       paused: true,
       closedCardIds,
+      ...(adHalt ? { adHalt: { id: adHalt.id, until: adHalt.until } } : {}),
       ...(cardsError ? { cardsError } : {}),
+      ...(haltError ? { haltError } : {}),
       ...(auditError ? { auditError } : {}),
     });
   });

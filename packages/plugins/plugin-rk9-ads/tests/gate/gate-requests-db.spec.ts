@@ -91,6 +91,15 @@ describeDb("activation gate SQL on real Postgres", () => {
     expect(await store.findById(companyA, id)).toMatchObject({ status: "expired" });
   });
 
+  it("finds an open card whose ad column is empty by its binding (RK9-566)", async () => {
+    const repo = sqlActivationGateRepo(testDb.client);
+    const { id } = await card({ adId: "120200000000000312" });
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET ad_id = NULL WHERE id = $1`, [id]);
+    expect((await repo.openForAd(companyA, "120200000000000312")).map((entry) => entry.id)).toEqual([id]);
+    expect(await repo.openForAd(companyA, "120200000000000313")).toEqual([]);
+    expect(await repo.openForAd(companyB, "120200000000000312")).toEqual([]);
+  });
+
   it("lists the company's open activation cards for a pause, and reads a closer's status line back (RK9-557)", async () => {
     const repo = sqlActivationGateRepo(testDb.client);
     const first = await card({ adId: "120200000000000321" });

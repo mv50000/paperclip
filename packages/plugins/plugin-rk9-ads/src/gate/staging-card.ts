@@ -57,7 +57,8 @@ export interface PauseCardClose {
   ids: string[];
   /** Set when some open cards could not be listed or closed; `ids` are the ones that did close. */
   error?: string;
-  announce(): Promise<void>;
+  /** Edits the closed cards. pause-ad passes whether Meta confirmed its pause (RK9-566); the pauses pass nothing. */
+  announce(paused?: boolean): Promise<void>;
 }
 
 const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
@@ -67,6 +68,8 @@ const PAUSE_CLOSE_TEXT: Record<CardClosingPause, string> = {
 };
 /** The card status after a pause of the ad from the UI (RK9-562). */
 export const AD_PAUSE_CLOSE_TEXT = "⛔ Mainos pysäytetään käyttöliittymästä: kortti mitätöity. Aktivointi vaatii uuden kortin.";
+/** The closed card's text when Meta did not confirm the pause from the UI (RK9-566). */
+export const AD_PAUSE_FAILED_CLOSE_TEXT = "⛔ Kortti mitätöity, mutta mainoksen pysäytys käyttöliittymästä epäonnistui: tarkista mainoksen tila. Aktivointi vaatii uuden kortin.";
 const COPY_MAX_CHARS = 400;
 
 /** The part of the Telegram controller the card life cycle uses. */
@@ -388,26 +391,30 @@ export function createStagingCards(deps: StagingCardDeps) {
 
     /**
      * The pause-ad hook (RK9-562): closes the open card rows of one ad now;
-     * `announce` edits the cards later. A tap that approved a card before
-     * this close is not stopped here: `error` then says that an approved
-     * activation of the ad may still be running. Throws only when the open
-     * cards cannot be listed.
+     * `announce` edits the cards later, with the pause's result. A tap that
+     * approved a card before this close is not stopped here. When the
+     * pause-ad halt was stored (`halted`, RK9-566), that activation sees it
+     * and pauses again what it set ACTIVE; without it, `error` says that an
+     * approved activation of the ad may still be running. Throws only when
+     * the open cards cannot be listed.
      */
-    async closeCardsForAdPause(companyId: string, adId: string, input: { reason: string }): Promise<PauseCardClose> {
+    async closeCardsForAdPause(companyId: string, adId: string, input: { reason: string; halted?: boolean }): Promise<PauseCardClose> {
       const outcome = { reason: "ad_paused", pauseReason: input.reason.slice(0, 300) };
       const { closed, error } = await closeRows(companyId, await deps.repo.openForAd(companyId, adId), outcome, AD_PAUSE_CLOSE_TEXT);
       const errors = error ? [error] : [];
-      try {
-        if (await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
-          errors.push(`an approved activation of ad ${adId} is running; check the ad's status after it has finished`);
+      if (!input.halted) {
+        try {
+          if (await deps.repo.activationInFlight(companyId, adId, ACTIVATION_IN_FLIGHT_MINUTES)) {
+            errors.push(`an approved activation of ad ${adId} is running; check the ad's status after it has finished`);
+          }
+        } catch (cause) {
+          errors.push(`running activations could not be read: ${safeError(cause)}`);
         }
-      } catch (cause) {
-        errors.push(`running activations could not be read: ${safeError(cause)}`);
       }
       return {
         ids: closed.map((request) => request.id),
         ...(errors.length > 0 ? { error: errors.join("; ").slice(0, 500) } : {}),
-        announce: () => announceClosed(companyId, closed, outcome, AD_PAUSE_CLOSE_TEXT),
+        announce: (paused) => announceClosed(companyId, closed, outcome, paused === false ? AD_PAUSE_FAILED_CLOSE_TEXT : AD_PAUSE_CLOSE_TEXT),
       };
     },
 

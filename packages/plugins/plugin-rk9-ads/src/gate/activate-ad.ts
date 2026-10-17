@@ -16,8 +16,9 @@
  *    outside the allowed set) refuse and are reported, never fixed;
  * 4. the spend guard (checkSpend) for every object this run activates;
  *    then the halt in force (RK9-557, RK9-561): the kill switch's, the
- *    scheduled pause's or the cap pause's. While one is set, or when the
- *    halts cannot be read, nothing is written;
+ *    scheduled pause's or the cap pause's, and the ad's own pause-ad halt
+ *    (RK9-566). While one is set, or when the halts cannot be read, nothing
+ *    is written;
  * 5. writes: the ad ACTIVE, every other ACTIVE ad of the ad set PAUSED
  *    (newest wins), the ad set and then the campaign ACTIVE when PAUSED.
  *    Each write passes the spend guard hook again, and the hook lets
@@ -47,7 +48,7 @@ import type { PluginContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../config.js";
 import type { Ledger } from "../db.js";
 import { checkSpend as defaultCheckSpend, type GuardResult, type ProposedChange } from "../features/spend-guard/guard.js";
-import type { HaltRule, HaltState } from "../features/spend-guard/halt.js";
+import { AD_HALT_RULE, type AdHaltState, type HaltRule, type HaltState } from "../features/spend-guard/halt.js";
 import type { UndoFailure, UndoReport } from "../features/spend-guard/pending-undo.js";
 import { brandClient, safeError, type Initiator } from "../features/spend-guard/support.js";
 import type { GateHandler, GateHandlerResult } from "../kit/gate/registry.js";
@@ -91,6 +92,8 @@ export interface ActivateAdDeps {
   activationClient(companyId: string, config: BrandConfig, initiator: Initiator, allowed: ReadonlySet<string>): MetaGraphClient;
   /** The halt in force (spend-guard/halt.ts). Throws when it cannot be read. */
   haltOf(companyId: string): Promise<HaltState | null>;
+  /** The ad's pause-ad halt in force (spend-guard/halt.ts readAdHalt). Throws when it cannot be read. */
+  adHaltOf?(companyId: string, adId: string): Promise<AdHaltState | null>;
   /** The latest published or swapped publication of the ad, or null. */
   publicationOf(companyId: string, adId: string): Promise<AdOwner | null>;
   /**
@@ -154,6 +157,7 @@ const REASON_TEXT: Record<string, string> = {
   halted: "hätäkatkaisin on painettu: pysäytystila on päällä, kunnes board poistaa sen",
   "halted:scheduled_pause": "ajastettu pysäytys on päällä: pysäytystila on voimassa aamuun asti, ellei board poista sitä",
   "halted:pause_all_cap": "kulutuskatto 90 % ylittyi: pysäytystila on voimassa kuun loppuun, ellei board poista sitä",
+  "halted:pause_ad": "mainos pysäytettiin käyttöliittymästä: sen pysäytystila on voimassa hetken, ellei board poista sitä",
   halt_unreadable: "pysäytystilaa ei voitu lukea",
   blocked_state: "mainoksen, ad setin tai kampanjan tila estää aktivoinnin",
   spend_guard: "kulutusvahti esti aktivoinnin",
@@ -180,13 +184,13 @@ export function blockedStates(ad: StatusRow, adset: StatusRow, campaign: StatusR
 class HaltedError extends Error {
   constructor(
     message: string,
-    readonly halt: HaltState | null,
+    readonly halt: HaltState | AdHaltState | null,
   ) {
     super(message);
   }
 }
 
-function haltLine(halt: HaltState): string {
+function haltLine(halt: HaltState | AdHaltState): string {
   return `Pysäytystila ${halt.since}${halt.until ? `–${halt.until}` : ""}: ${halt.reason}`.slice(0, 300);
 }
 
@@ -353,10 +357,10 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       }
     }
 
-    // The kill switch's standing halt, read right before the first write.
-    const haltNow = async (): Promise<HaltState | null> => {
+    // The company's halts and the ad's own, read right before the first write.
+    const haltNow = async (): Promise<HaltState | AdHaltState | null> => {
       try {
-        return await deps.haltOf(companyId);
+        return (await deps.haltOf(companyId)) ?? (deps.adHaltOf ? await deps.adHaltOf(companyId, binding.adId) : null);
       } catch (error) {
         throw new HaltedError(`the halt could not be read (${safeError(error)})`, null);
       }
@@ -458,7 +462,9 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
         }
         // It may stay ACTIVE: the pause that won does not run again (RK9-565).
         if (undoFailed.length > 0) {
-          const report = deps.onUndoFailed?.(companyId, config, { gateRequestId: request.id, haltRule: error.halt?.rule ?? null, failed: undoFailed });
+          // The pause-ad halt is the operator's manual stop: its undo rows are kill_switch rows, like the pause's own (ui-pause-ad).
+          const haltRule = error.halt ? (error.halt.rule === AD_HALT_RULE ? "kill_switch" : error.halt.rule) : null;
+          const report = deps.onUndoFailed?.(companyId, config, { gateRequestId: request.id, haltRule, failed: undoFailed });
           undoReport = report
             ? await report.catch((reportError: unknown): UndoReport => ({ stored: false, telegram: "failed", error: safeError(reportError) }))
             : { stored: false, telegram: "skipped", error: "no undo retry is wired" };

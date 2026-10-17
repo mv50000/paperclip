@@ -664,18 +664,37 @@ anything ACTIVE.
   brand's ad account. `dryRun` defaults to true. A real pause needs
   `confirm: true` and a board user. It writes a `rule_actions` row
   (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
-  activity entry. Before the Meta write it closes the ad's open activation
-  cards (`closedCardIds`), so an old card cannot activate the ad again
-  (RK9-562). `cardsError` names cards that did not close, or an approved
-  activation that may still run; the page shows it as an error. There is no
-  activate, resume or scale action (G1, G9).
+  activity entry. Before the Meta write it stores a 30-minute halt for the
+  ad (`adHalt`, RK9-566), then closes the ad's open activation cards
+  (`closedCardIds`), also those whose ad column is empty, found by the
+  card's binding. `activate_ad` reads the ad's halt with the company's
+  halts, before every ACTIVE write and after the writes, so an activation
+  approved just before the pause pauses the ad again, and a card of the ad
+  tapped while the halt holds is refused. A board user lifts it early with
+  `clear-halt` `{ adId, id }` (the page offers it after the pause).
+  `cardsError` names cards that did not close; `haltError` a halt that was
+  not stored, and then an approved activation that may still run is named
+  too. The page keeps these per ad. The closed cards say whether Meta
+  confirmed the pause. There is no activate, resume or scale action (G1, G9).
 - **Money actions in the UI** (the kill switch, pause-ad, the halt clear,
   provision, switching the rules to live) need a dry-run preview and a typed
   word before the live call.
 - **Weakening rule saves** need the typed word `HEIKENNÄ` (RK9-562): live mode
-  off, a live rule or the cap to shadow, an enabled rule removed or disabled.
-  The confirmation lists the changes. The save checks them again against the
-  config read right before the POST. Threshold changes are not checked.
+  off, a live rule or the cap to shadow, an enabled rule removed or disabled,
+  and a live rule's parameter changed so that it fires less (RK9-566): the
+  metric, the operator's direction or gte -> gt / lte -> lt, the threshold
+  in the operator's direction, more `days` (`each_day`) or any change of the
+  window (`window_total`) or of `aggregate`, a higher `minImpressions`,
+  `minClicks`, `minSpendEur` or `cooldownHours` (also the cap's). A shadow
+  rule's tuning is not checked. `rules.prepareSave` compares the draft with
+  the config saved now and refuses an unconfirmed weakening or live-mode
+  save, naming the changes (`confirm`); the page then asks `HEIKENNÄ`, and
+  `LIVE` too when the save also turns live mode on. The browser's save
+  checks both again against the config read right before the POST. A config
+  without `rules.list` counts as the default rules. These checks guard
+  against an operator's mistake, not against an instance admin: the host's
+  own config form saves any schema-valid config (also `liveMode: false`)
+  without asking the plugin, and the host route has no compare-and-swap.
 - The kill switch stays on the page when the config is invalid or
   unavailable; `pause-all` then runs on the last valid config.
 

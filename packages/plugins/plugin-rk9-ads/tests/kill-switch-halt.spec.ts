@@ -15,7 +15,7 @@ import type { Company } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
 import { createLedger } from "../src/db.js";
 import { registerGate, type GateOverrides } from "../src/features/gate/register.js";
-import { HALT_NAMESPACE, readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
+import { HALT_NAMESPACE, newAdHalt, readAdHalt, readHalt, setAdHalt, setHalt, type AdHaltState, type HaltState } from "../src/features/spend-guard/halt.js";
 import { pauseAll, type PauseAllResult, type PauseRule } from "../src/features/spend-guard/killswitch.js";
 import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_DATA_KEY, UNDO_ACKNOWLEDGED_ACTIVITY } from "../src/features/spend-guard/register.js";
 import { addPendingUndos, readPendingUndos, reportUndoFailure, type PendingUndo } from "../src/features/spend-guard/pending-undo.js";
@@ -828,6 +828,47 @@ describe("clearing the halt is board-only", () => {
     await tap(r, next.messageId);
     expect(r.store.rows.get(next.id)!.outcome).toMatchObject({ result: "activated" });
     expect(activeWrites(r.meta).map((call) => call.path)).toContain(AD);
+  });
+
+  it("the pause-ad halt of one ad: an agent previews, a board user clears it by its id, then the ad activates (RK9-566)", async () => {
+    const r = await rig();
+    const first = newAdHalt({ brandCode: "OLL", adId: AD, reason: "UI", initiator: { source: "ui", userId: "board-1" }, now: new Date() });
+    await setAdHalt(r.harness.ctx, COMPANY_A, first);
+    // The company's halt is not set: the page's banner stays clear.
+    expect(await haltOf(r)).toBeNull();
+
+    const preview = await r.harness.performAction<{ adHalt: AdHaltState | null }>(CLEAR_HALT_ACTION_KEY, { adId: AD }, AGENT);
+    expect(preview.adHalt).toMatchObject({ id: first.id, adId: AD });
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD, id: first.id }, AGENT)).rejects.toThrow(/board-only/);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD }, BOARD)).rejects.toThrow(/needs `id`/);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { adId: "act_1" }, BOARD)).rejects.toThrow(/digits only/);
+    // Another company's call does not see the halt.
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { adId: AD }, { ...BOARD, companyId: "other-company" })).toMatchObject({ adHalt: null });
+
+    // A newer pause of the ad between the preview and the clear stays.
+    const second = newAdHalt({ brandCode: "OLL", adId: AD, reason: "UI 2", initiator: { source: "ui", userId: "board-1" }, now: new Date() });
+    await setAdHalt(r.harness.ctx, COMPANY_A, second);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD, id: first.id }, BOARD)).rejects.toThrow(/newer pause of the ad/);
+    expect(await readAdHalt(r.harness.ctx, COMPANY_A, AD)).toMatchObject({ id: second.id });
+
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD, id: second.id, reason: "ok" }, BOARD)).toMatchObject({ cleared: true });
+    expect(await readAdHalt(r.harness.ctx, COMPANY_A, AD)).toBeNull();
+    expect(r.harness.activity.find((entry) => entry.message === HALT_CLEARED_ACTIVITY)).toMatchObject({ metadata: { adHalt: { id: second.id }, clearedBy: { userId: "board-1" } } });
+    expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, adId: AD, id: second.id }, BOARD)).toMatchObject({ cleared: false });
+
+    const next = await r.cards.openActivationCard(publication());
+    await tap(r, next.messageId);
+    expect(r.store.rows.get(next.id)!.outcome).toMatchObject({ result: "activated" });
+  });
+
+  it("a damaged pause-ad halt record still refuses", async () => {
+    const r = await rig();
+    await r.harness.ctx.state.set({ scopeKind: "instance", namespace: HALT_NAMESPACE, stateKey: `halt:${COMPANY_A}:ad:${AD}` }, "garbage");
+    expect(await readAdHalt(r.harness.ctx, COMPANY_A, AD)).toMatchObject({ reason: "unreadable halt record" });
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "halted" });
+    expect(activeWrites(r.meta)).toEqual([]);
   });
 
   it("a clear refuses when a newer kill switch set the halt after the preview", async () => {

@@ -8,7 +8,8 @@
  *   the pending insert (a second statement) and before the card is sent. A
  *   swap that lists the ad's cards between the two misses that card; the
  *   creative check at tap time still refuses it;
- * - open cards of one ad (a creative swap closes them) and of the whole
+ * - open cards of one ad (a creative swap and pause-ad close them; a row
+ *   without the ad column is found by its binding) and of the whole
  *   company (the kill switch, the cap pause and the scheduled pause close
  *   them, RK9-557);
  * - whether an approved activation of an ad may still be running;
@@ -82,7 +83,11 @@ export interface DueCard {
 }
 
 export interface ActivationGateRepo {
-  /** Pending activate_ad cards of one ad, live or not. */
+  /**
+   * Pending activate_ad cards of one ad, live or not: by the ad column, or by
+   * the card's binding when the column is empty (a row from before the
+   * column, or one between the insert and the column write; RK9-566).
+   */
   openForAd(companyId: string, adId: string): Promise<GateRequestRecord[]>;
   /** Pending activate_ad cards of the company, live or not, oldest first. */
   openForCompany(companyId: string): Promise<GateRequestRecord[]>;
@@ -158,7 +163,8 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateR
     async openForAd(companyId, adId) {
       const rows = await db.query<Record<string, unknown>>(
         `SELECT ${GATE_RECORD_COLUMNS} FROM ${gate}
-          WHERE company_id = $1 AND kind = 'activate_ad' AND status = 'pending' AND ad_id = $2
+          WHERE company_id = $1 AND kind = 'activate_ad' AND status = 'pending'
+            AND (ad_id = $2 OR (ad_id IS NULL AND payload->'activation'->>'adId' = $2))
           ORDER BY created_at`,
         [companyId, adId],
       );

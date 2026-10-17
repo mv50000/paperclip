@@ -11,9 +11,16 @@
  * (RK9-562): a change that weakens the spend protection against what is
  * saved now, and that the operator did not confirm, refuses the save. So a
  * rule added elsewhere after the page loaded is not removed unconfirmed.
+ * Live mode on is checked the same way (RK9-566): a session that turned it
+ * off after this page loaded is not overridden without the word LIVE.
+ *
+ * The host route has no compare-and-swap: a config change saved between the
+ * GET and the POST is lost (RK9-563). These checks guard against an
+ * operator's mistake, not against an instance admin, who can save any
+ * schema-valid config on the host's own form.
  */
 import { PLUGIN_KEY } from "./keys.js";
-import { weakeningChanges, type RulesBlock } from "./rule-fields.js";
+import { liveModeTurnedOn, savedRulesBlock, weakeningChanges } from "./rule-fields.js";
 
 const BASE = `/api/plugins/${PLUGIN_KEY}/config`;
 
@@ -27,23 +34,14 @@ async function readError(response: Response): Promise<string> {
   return `HTTP ${response.status}`;
 }
 
-/** The saved config's `rules` block as the weakening check reads it (schema defaults: liveMode false, no rules). */
-function savedRules(configJson: Record<string, unknown>): RulesBlock {
-  const rules = configJson.rules;
-  if (typeof rules !== "object" || rules === null || Array.isArray(rules)) return { liveMode: false, list: [] };
-  const block = rules as { liveMode?: unknown; list?: unknown };
-  const list = Array.isArray(block.list)
-    ? block.list.filter((rule): rule is Record<string, unknown> => typeof rule === "object" && rule !== null && !Array.isArray(rule))
-    : [];
-  return { liveMode: block.liveMode === true, list };
-}
-
 export async function saveRulesBlock(
   companyId: string,
   rules: { liveMode: boolean; list: Array<Record<string, unknown>> },
   fetcher: typeof fetch = fetch,
   /** The weakening changes the operator confirmed with the typed word (rule-fields.ts weakeningChanges). */
   confirmedWeakening: readonly string[] = [],
+  /** The operator typed LIVE for this save. */
+  confirmedLive = false,
 ): Promise<void> {
   const current = await fetcher(`${BASE}?companyId=${encodeURIComponent(companyId)}`, { credentials: "include" });
   if (!current.ok) throw new Error(`The saved config could not be read: ${await readError(current)}`);
@@ -52,7 +50,9 @@ export async function saveRulesBlock(
     ? (record.configJson as Record<string, unknown>)
     : null;
   if (!configJson || Object.keys(configJson).length === 0) throw new Error("This company has no saved RK9 Ads config to add rules to");
-  const unconfirmed = weakeningChanges(savedRules(configJson), rules).filter((change) => !confirmedWeakening.includes(change));
+  const savedNow = savedRulesBlock(configJson);
+  const unconfirmed = weakeningChanges(savedNow, rules).filter((change) => !confirmedWeakening.includes(change));
+  if (liveModeTurnedOn(savedNow, rules) && !confirmedLive) unconfirmed.push("Live-tila päälle.");
   if (unconfirmed.length > 0) {
     throw new Error(`The saved rules changed after this page loaded; reload and confirm again. Unconfirmed: ${unconfirmed.join(" ")}`.slice(0, 600));
   }

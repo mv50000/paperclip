@@ -9,7 +9,7 @@ import { createSqlGateStore, type GateStore } from "../../kit/gate/state-machine
 import { PLUGIN_ID } from "../../manifest.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { sqlPublicationStore, type PublicationStore } from "../../publish/store.js";
-import { readHalt } from "../spend-guard/halt.js";
+import { readAdHalt, readHalt } from "../spend-guard/halt.js";
 import { reportUndoFailure } from "../spend-guard/pending-undo.js";
 import { brandReadClient, controllerNotifier, safeError, sqlOnceStore, type OnceStore, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { getTelegramController } from "../telegram/controller.js";
@@ -53,6 +53,7 @@ export interface GateOverrides {
   assertLaunchReady?: ActivateAdDeps["assertLaunchReady"];
   checkSpend?: ActivateAdDeps["checkSpend"];
   haltOf?: ActivateAdDeps["haltOf"];
+  adHaltOf?: ActivateAdDeps["adHaltOf"];
   publications?: Pick<PublicationStore, "findByAd">;
   /** The failed-undo alert's Telegram and dedupe markers. */
   notifier?: SpendGuardNotifier;
@@ -71,6 +72,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
   const { ctx, ledger } = runtime;
   const now = overrides.now ?? (() => new Date());
   const haltOf = overrides.haltOf ?? ((companyId: string) => readHalt(ctx, companyId, now()));
+  const adHaltOf = overrides.adHaltOf ?? ((companyId: string, adId: string) => readAdHalt(ctx, companyId, adId, now()));
   const store = overrides.store ?? withActivationColumns(createSqlGateStore(ctx.db), ctx.db);
   const repo = overrides.repo ?? sqlActivationGateRepo(ctx.db);
   const loadConfig = overrides.loadConfig ?? ((companyId: string) => loadEnabled(ctx, companyId));
@@ -97,6 +99,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
         overrides.activationClient ??
         ((companyId, config, initiator, allowed) => createActivationClient({ ctx, ledger }, companyId, config, initiator, allowed)),
       haltOf,
+      adHaltOf,
       publicationOf: async (companyId, adId) => {
         const owner = await publications.findByAd(companyId, adId);
         return owner ? { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId } : null;

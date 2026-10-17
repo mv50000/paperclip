@@ -92,17 +92,26 @@ export async function embeddedPostgresSupport(): Promise<{ supported: boolean; r
   }
 }
 
+/** True when CI is set to anything but empty, "0" or "false" (RK9-566: CI=0 is a local run). */
+export function isCiRun(env: Record<string, string | undefined> = process.env): boolean {
+  const value = (env.CI ?? "").trim().toLowerCase();
+  return value !== "" && value !== "0" && value !== "false";
+}
+
 /**
  * `describe` when embedded Postgres can start here. Otherwise a local run
- * skips the suite with a warning, and a CI run (process.env.CI set) throws:
- * the money-protection tests on real Postgres must not skip silently in CI
- * (RK9-562).
+ * skips the suite with a warning, and a CI run (isCiRun) throws: the
+ * money-protection tests on real Postgres must not skip silently in CI
+ * (RK9-562). `deps` is for this helper's own test.
  */
-export async function describeEmbeddedPostgres(suite: string): Promise<typeof describe | typeof describe.skip> {
-  const support = await embeddedPostgresSupport();
+export async function describeEmbeddedPostgres(
+  suite: string,
+  deps: { support?: () => Promise<{ supported: boolean; reason?: string }>; env?: Record<string, string | undefined> } = {},
+): Promise<typeof describe | typeof describe.skip> {
+  const support = await (deps.support ?? embeddedPostgresSupport)();
   if (support.supported) return describe;
   const reason = support.reason ?? "unsupported environment";
-  if (process.env.CI && process.env.CI !== "false") throw new Error(`Embedded Postgres is required in CI for the ${suite} tests: ${reason}`);
+  if (isCiRun(deps.env)) throw new Error(`Embedded Postgres is required in CI for the ${suite} tests: ${reason}`);
   console.warn(`Skipping embedded Postgres ${suite} tests: ${reason}`);
   return describe.skip;
 }

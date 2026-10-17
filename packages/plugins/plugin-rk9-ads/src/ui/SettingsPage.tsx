@@ -20,7 +20,6 @@ import {
   NUMBER_FIELDS,
   RULE_TYPE_LABEL,
   toEditor,
-  weakeningChanges,
   type EditorRule,
 } from "./rule-fields.js";
 
@@ -46,17 +45,31 @@ interface PreparedRules {
   ok: boolean;
   errors?: string[];
   rules?: { liveMode: boolean; list: Array<Record<string, unknown>> };
+  /** What the save must confirm, against the config saved now (RK9-566). */
+  confirm?: { weakening: string[]; liveOn: boolean };
 }
 
-/** A prepared save that waits for the typed word. */
+/**
+ * A save that waits for the typed words: HEIKENNÄ for the weakening changes,
+ * then LIVE when it also turns live mode on (RK9-566).
+ */
 interface PendingSave {
-  rules: NonNullable<PreparedRules["rules"]>;
-  word: string;
-  prompt: string;
+  list: Array<Record<string, unknown>>;
+  liveMode: boolean;
   /** Weakening changes the word confirms; empty for a plain shadow -> live switch. */
   weakening: string[];
   liveOn: boolean;
+  words: string[];
+  /** The index of the word asked now. */
+  step: number;
 }
+
+function pendingFor(list: PendingSave["list"], liveMode: boolean, confirm: NonNullable<PreparedRules["confirm"]>): PendingSave {
+  const words = [...(confirm.weakening.length > 0 ? [WEAKEN_WORD] : []), ...(confirm.liveOn ? [LIVE_WORD] : [])];
+  return { list, liveMode, weakening: confirm.weakening, liveOn: confirm.liveOn, words, step: 0 };
+}
+
+const LIVE_PROMPT = "Live-tilassa säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.";
 
 interface DryRunResult {
   error?: string;
@@ -324,39 +337,34 @@ function RuleEditor(props: { companyId: string | null }) {
       </Section>
     );
   }
-  const savedLive = rules.data.liveMode === true;
-
-  const savedRules = { liveMode: savedLive, list: rules.data.rules ?? [] };
-
-  async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[]) {
-    await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening);
+  async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[], confirmedLive: boolean) {
+    await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening, confirmedLive);
     setPending(null);
     toast({ title: "Säännöt tallennettu", tone: "success" });
     rules.refresh();
   }
 
-  /** Prepares the draft; a save that weakens the protection or turns live mode on waits for the typed word. */
+  /**
+   * Prepares the draft. The worker compares it with the config saved now: a
+   * save that weakens the protection or turns live mode on comes back with
+   * the changes to confirm and waits for the typed words.
+   */
   async function save() {
     if (!props.companyId) return;
     setBusy(true);
     setErrors([]);
     try {
-      const prepared = (await prepare({ liveMode, list: draft!.map(fromEditor) })) as PreparedRules;
-      if (!prepared.ok || !prepared.rules) {
-        setErrors(prepared.errors ?? ["Säännöt eivät kelpaa"]);
+      const list = draft!.map(fromEditor);
+      const prepared = (await prepare({ liveMode, list })) as PreparedRules;
+      if (prepared.ok && prepared.rules) {
+        await write(prepared.rules, [], false);
         return;
       }
-      const weakening = weakeningChanges(savedRules, prepared.rules);
-      const liveOn = prepared.rules.liveMode && !savedLive;
-      if (weakening.length > 0) {
-        setPending({ rules: prepared.rules, word: WEAKEN_WORD, prompt: "Tallennus heikentää automaattista kulusuojaa:", weakening, liveOn });
+      if (prepared.confirm && (prepared.confirm.weakening.length > 0 || prepared.confirm.liveOn)) {
+        setPending(pendingFor(list, liveMode, prepared.confirm));
         return;
       }
-      if (liveOn) {
-        setPending({ rules: prepared.rules, word: LIVE_WORD, prompt: "Live-tilassa säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.", weakening, liveOn });
-        return;
-      }
-      await write(prepared.rules, []);
+      setErrors(prepared.errors ?? ["Säännöt eivät kelpaa"]);
     } catch (cause) {
       setErrors([errorText(cause)]);
     } finally {
@@ -364,12 +372,28 @@ function RuleEditor(props: { companyId: string | null }) {
     }
   }
 
+  /** One typed word; after the last one the worker checks the confirmed changes again and the save goes out. */
   async function confirmPending() {
     if (!pending) return;
+    if (pending.step < pending.words.length - 1) {
+      setPending({ ...pending, step: pending.step + 1 });
+      return;
+    }
     setBusy(true);
     setErrors([]);
     try {
-      await write(pending.rules, pending.weakening);
+      const prepared = (await prepare({ liveMode: pending.liveMode, list: pending.list, confirmedWeakening: pending.weakening, confirmLive: pending.liveOn })) as PreparedRules;
+      if (prepared.ok && prepared.rules) {
+        await write(prepared.rules, pending.weakening, pending.liveOn);
+        return;
+      }
+      if (prepared.confirm && (prepared.confirm.weakening.length > 0 || prepared.confirm.liveOn)) {
+        // The saved rules changed after the list was shown: confirm the new list.
+        setPending(pendingFor(pending.list, pending.liveMode, prepared.confirm));
+        setErrors(["Tallennetut säännöt muuttuivat vahvistuksen aikana. Tarkista muutokset ja vahvista uudelleen."]);
+        return;
+      }
+      setErrors(prepared.errors ?? ["Säännöt eivät kelpaa"]);
     } catch (cause) {
       setErrors([errorText(cause)]);
     } finally {
@@ -428,18 +452,22 @@ function RuleEditor(props: { companyId: string | null }) {
       </div>
       {pending ? (
         <div className="space-y-2">
-          {pending.weakening.length > 0 || pending.liveOn ? (
+          {pending.weakening.length > 0 ? (
             <ul aria-label="Vahvistettavat muutokset" className="list-disc space-y-1 pl-5 text-sm">
               {pending.weakening.map((change) => (
                 <li key={change}>{change}</li>
               ))}
-              {pending.weakening.length > 0 && pending.liveOn ? <li>Live-tila päälle: säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.</li> : null}
+              {pending.liveOn ? <li>Live-tila päälle: säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.</li> : null}
             </ul>
           ) : null}
+          {pending.words.length > 1 ? <Muted>Vahvistus {pending.step + 1}/{pending.words.length}</Muted> : null}
           <TypedConfirm
-            word={pending.word}
-            prompt={pending.prompt}
-            confirmLabel={pending.weakening.length > 0 ? "Tallenna heikennetyt säännöt" : "Tallenna live-tilassa"}
+            key={`${pending.step}-${pending.words[pending.step]}`}
+            word={pending.words[pending.step]!}
+            prompt={pending.words[pending.step] === WEAKEN_WORD ? "Tallennus heikentää automaattista kulusuojaa:" : LIVE_PROMPT}
+            confirmLabel={
+              pending.step < pending.words.length - 1 ? "Jatka" : pending.weakening.length > 0 ? "Tallenna heikennetyt säännöt" : "Tallenna live-tilassa"
+            }
             busy={busy}
             onConfirm={() => void confirmPending()}
             onCancel={() => setPending(null)}

@@ -17,7 +17,8 @@ import { getActivationCards, setActivationCards } from "../src/features/gate/run
 import { TelegramController } from "../src/features/telegram/controller.js";
 import { gateRegistry, resetGateRegistry } from "../src/features/telegram/gates.js";
 import type { FeatureRuntime } from "../src/features/types.js";
-import { AD_PAUSE_CLOSE_TEXT, stagingCardText, type StagingCards } from "../src/gate/staging-card.js";
+import { AD_PAUSE_CLOSE_TEXT, AD_PAUSE_FAILED_CLOSE_TEXT, stagingCardText, type StagingCards } from "../src/gate/staging-card.js";
+import { newAdHalt, readAdHalt, setAdHalt } from "../src/features/spend-guard/halt.js";
 import { GATE_TEXT } from "../src/kit/gate/callback-router.js";
 import { createMemoryGateStore, type MemoryGateStore } from "../src/kit/testing/memory-gate-store.js";
 import { recordedOutput, useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
@@ -675,15 +676,32 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     r.meta.fail = (call) => (call.body.status === "PAUSED" ? new Error("Meta 500") : null);
     await expect(pauseAd(r)).rejects.toThrow(/The pause of ad .* failed: .*1 activation card\(s\) of the ad closed/);
     expect(r.store.rows.get(sent.id)!.status).toBe("expired");
-    expect(caption(r, sent.messageId)).toContain(AD_PAUSE_CLOSE_TEXT);
+    // The card does not claim the ad is being paused (RK9-566).
+    expect(caption(r, sent.messageId)).toContain(AD_PAUSE_FAILED_CLOSE_TEXT);
+    expect(caption(r, sent.messageId)).not.toContain(AD_PAUSE_CLOSE_TEXT);
   });
 
-  it("reports an approved activation that may still run", async () => {
+  it("with the ad's halt stored, a running activation is no warning: the halt stops it (RK9-566)", async () => {
     const r = await rig();
     registerUi(r.runtime);
     r.repo.activationInFlight = async () => true;
     const result = await pauseAd(r);
-    expect(result).toMatchObject({ paused: true, closedCardIds: [] });
+    expect(result).toMatchObject({ paused: true, closedCardIds: [], adHalt: { id: expect.any(String), until: expect.any(String) } });
+    expect(result.cardsError).toBeUndefined();
+  });
+
+  it("reports an approved activation that may still run when the ad's halt was not stored", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    r.repo.activationInFlight = async () => true;
+    const set = r.harness.ctx.state.set.bind(r.harness.ctx.state);
+    r.harness.ctx.state.set = async (key, value) => {
+      if (key.stateKey.includes(":ad:")) throw new Error("state down");
+      return set(key, value);
+    };
+    const result = await pauseAd(r);
+    expect(result).toMatchObject({ paused: true, closedCardIds: [], haltError: expect.stringContaining("state down") });
+    expect(result.adHalt).toBeUndefined();
     expect(result.cardsError).toMatch(/approved activation of ad .* is running/);
   });
 
@@ -694,5 +712,78 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     const result = await pauseAd(r);
     expect(result).toMatchObject({ paused: true });
     expect(result.cardsError).toMatch(/activation gate is not running/);
+  });
+});
+
+describe("pause-ad leaves a short halt for the ad (RK9-566)", () => {
+  const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-user-1" } };
+
+  async function pauseAd(r: Rig): Promise<UiPauseAdResult> {
+    return (await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD, dryRun: false, confirm: true }, BOARD)) as UiPauseAdResult;
+  }
+
+  it("stores the halt before the Meta write, and a card of the ad tapped while it holds is denied with no ACTIVE write", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const result = await pauseAd(r);
+    const halt = await readAdHalt(r.harness.ctx, COMPANY_A, AD);
+    expect(halt).toMatchObject({ rule: "pause_ad", adId: AD, brandCode: "OLL", initiator: { source: "ui", userId: "board-user-1" } });
+    expect(result.adHalt).toEqual({ id: halt!.id, until: halt!.until });
+    expect(Date.parse(halt!.until) - Date.parse(halt!.since)).toBe(30 * 60_000);
+
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId, 0);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "halted" });
+    expect(caption(r, sent.messageId)).toContain("mainos pysäytettiin käyttöliittymästä");
+    expect(statusWrites(r.meta, "ACTIVE")).toHaveLength(0);
+  });
+
+  it("an activation approved before the pause and still writing pauses the ad again and fails", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const sent = await r.cards.openActivationCard(publication());
+    const original = r.harness.ctx.http.fetch;
+    let fired = false;
+    r.harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
+      const body = init?.body ? new URLSearchParams(String(init.body)) : null;
+      const hit = !fired && init?.method === "POST" && new URL(url).pathname.endsWith(`/${AD}`) && body?.get("status") === "ACTIVE";
+      const response = await original(url, init);
+      if (hit) {
+        fired = true;
+        // The pause from the UI lands right after Meta applied the activation's ACTIVE.
+        expect(await pauseAd(r)).toMatchObject({ paused: true });
+      }
+      return response;
+    };
+    await tap(r, sent.messageId, 0);
+    expect(fired).toBe(true);
+    const outcome = r.store.rows.get(sent.id)!.outcome as { result: string; detail: string };
+    expect(outcome.result).toBe("failed");
+    expect(outcome.detail).toContain("the pause_ad halt was set during the activation");
+    expect(outcome.detail).toContain("the ad was paused again");
+    expect(statusWrites(r.meta).filter((call) => call.path.endsWith(AD)).at(-1)!.body.status).toBe("PAUSED");
+  });
+
+  it("the halt of another ad does not stop this one, and an ended halt stops nothing", async () => {
+    const r = await rig();
+    await setAdHalt(r.harness.ctx, COMPANY_A, newAdHalt({ brandCode: "OLL", adId: OLD_AD, reason: "muu", initiator: { source: "ui" }, now: new Date() }));
+    await setAdHalt(r.harness.ctx, COMPANY_A, newAdHalt({ brandCode: "OLL", adId: AD, reason: "vanha", initiator: { source: "ui" }, now: new Date(Date.now() - 31 * 60_000) }));
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId, 0);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "activated" });
+  });
+
+  it("a halt that cannot be read refuses the activation", async () => {
+    const r = await rig({
+      overrides: {
+        adHaltOf: async () => {
+          throw new Error("state unavailable");
+        },
+      },
+    });
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId, 0);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "halt_unreadable" });
+    expect(statusWrites(r.meta, "ACTIVE")).toHaveLength(0);
   });
 });
