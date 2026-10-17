@@ -14,9 +14,30 @@ import {
   TokenInvalidError,
   WriteRefusedError,
 } from "../../src/meta/errors.js";
+import { pausedOnlyWrites, type WritePlan } from "../../src/meta/graph.js";
 import { deleteObject, listAdSetAds, swapAdCreative } from "../../src/meta/methods.js";
 import { FakeRoutes, graphError, metaClient } from "../brand/fake-routes.js";
 import { formOf } from "./rig.js";
+
+describe("pausedOnlyWrites and the creative swap", () => {
+  const node = (fields: Record<string, unknown>): WritePlan => ({ companyId: "c", mode: "live", method: "POST", path: "5001", fields });
+
+  it("allows a node POST whose only field is a numeric creative reference", () => {
+    expect(pausedOnlyWrites(node({ creative: { creative_id: "7001" } }))).toEqual({ allow: true });
+  });
+
+  it.each([
+    ["a status next to the creative", { creative: { creative_id: "7001" }, status: "ACTIVE" }],
+    ["a PAUSED status next to the creative", { creative: { creative_id: "7001" }, status: "PAUSED" }],
+    ["a name next to the creative", { creative: { creative_id: "7001" }, name: "x" }],
+    ["an extra key inside the creative", { creative: { creative_id: "7001", object_story_spec: {} } }],
+    ["a non-numeric creative id", { creative: { creative_id: "abc" } }],
+    ["a numeric (not string) creative id", { creative: { creative_id: 7001 } }],
+    ["an inline creative", { creative: { object_story_spec: { page_id: "1" } } }],
+  ])("refuses %s", (_label, fields) => {
+    expect(pausedOnlyWrites(node(fields as Record<string, unknown>)).allow).toBe(false);
+  });
+});
 
 describe("publishing methods", () => {
   it("swapAdCreative sends only the creative, deleteObject a bare DELETE, listAdSetAds reads the ad set edge", async () => {
