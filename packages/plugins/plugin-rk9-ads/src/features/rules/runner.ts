@@ -72,7 +72,7 @@ const NOTICE_MAX = 3900;
 const CLOSE_DEADLINE = "06:00";
 /** The second run that sees headroom must come at least this long after the first (the job is hourly). */
 export const CAP_HEADROOM_MIN_GAP_MS = 30 * 60_000;
-/** A first reading older than this (runs skipped, e.g. an unreadable config) counts as none: two runs in a row are needed. */
+/** A first reading older than this (runs skipped, e.g. an unreadable config) counts as none. Two credible readings at most this far apart are needed. */
 export const CAP_HEADROOM_MAX_GAP_MS = 2 * 60 * 60_000;
 export const CAP_HALT_RELEASED_ACTIVITY = "rk9-ads spend guard: cap halt released";
 

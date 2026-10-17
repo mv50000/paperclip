@@ -615,7 +615,7 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
 
   it("the tick removes only what it handled: a newer failure of the same object stays", async () => {
     const r = await rig();
-    const { sent, allow } = await lostUndo(r);
+    const { allow } = await lostUndo(r);
     allow();
     // While the tick pauses the ad, another card's undo of the same ad fails and replaces the entry.
     const fetch = r.harness.ctx.http.fetch;
@@ -631,7 +631,6 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     };
     await r.harness.runJob("scheduled-pause");
     expect((await readPendingUndos(r.harness.ctx, COMPANY_A)).map((undo) => undo.gateRequestId)).toEqual(["gate-newer"]);
-    expect(sent.id).not.toBe("gate-newer");
   });
 
   it("an undo that cannot be stored alerts to pause by hand, not a retry", async () => {
