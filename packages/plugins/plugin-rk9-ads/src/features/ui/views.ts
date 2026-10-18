@@ -15,13 +15,13 @@ import { addDays } from "../../insights/mtd.js";
 import { createInsightsStore } from "../../insights/store.js";
 import { localDate } from "../../kit/local-time.js";
 import { listAds } from "../../meta/methods.js";
-import { REDACTED, redactValue } from "../../meta/redact.js";
 import { linkCpc, linkCtr } from "../../metrics/cpc.js";
 import { toPublicationRecord } from "../../publish/store.js";
 import { readHalt, type HaltState } from "../spend-guard/halt.js";
 import { readPendingUndos, undoAttempts, undoOrigin } from "../spend-guard/pending-undo.js";
 import { spendSnapshot } from "../spend-guard/register.js";
 import { brandReadClient, safeError, type OnceStore } from "../spend-guard/support.js";
+import { sanitize } from "./sanitize.js";
 import type {
   UiBrand,
   UiGateCard,
@@ -41,9 +41,6 @@ export const PUBLICATION_ROWS = 50;
 export const RULE_LOG_HOURS = 7 * 24;
 const GATE_ROWS = 50;
 
-/** Telegram bot token shape (`<bot id>:<secret>`); redactText covers Meta tokens. */
-const BOT_TOKEN_RE = /\b\d{6,}:[A-Za-z0-9_-]{30,}\b/g;
-
 export interface ViewDeps {
   ctx: PluginContext;
   ledger: Ledger;
@@ -51,13 +48,18 @@ export interface ViewDeps {
   now: () => Date;
 }
 
-/** Last pass over a DTO: token shapes are redacted even in free text (errors, Meta details). */
-export function sanitize<T>(dto: T): T {
-  const redacted = redactValue(dto);
-  return JSON.parse(JSON.stringify(redacted).replace(BOT_TOKEN_RE, REDACTED)) as T;
-}
+export { sanitize };
 
-/** `companyId` from the host-merged params; never another source. */
+/**
+ * `companyId` from the host-merged params; never another source.
+ *
+ * The SDK's getData puts the host-authorized company over `params.companyId`
+ * (worker-rpc-host handleGetData) and gives a data handler no other context.
+ * Only a bridge call without a company keeps the caller's own value, and the
+ * host lets only an instance admin make one (assertPluginBridgeScope). The
+ * worker cannot tell the two apart without a core change (RK9-563, G1), so
+ * that admin can read any company's views, as on the host's own forms.
+ */
 export function companyOf(params: Record<string, unknown>): string | null {
   return typeof params.companyId === "string" && params.companyId !== "" ? params.companyId : null;
 }
@@ -114,13 +116,14 @@ export function haltView(halt: HaltState): UiHalt {
 }
 
 export function spendView(snapshot: Awaited<ReturnType<typeof spendSnapshot>>): UiSpend {
+  // Meta's spend_cap is lifetime: what it still allows (headroom) is compared with what is left of the month (RK9-563).
   const spendCapStatus =
     snapshot.mtdEur === null && snapshot.spendCapEur === null
       ? "unknown"
       : snapshot.spendCapEur === null
         ? "missing"
-        : snapshot.spendCapEur > snapshot.monthlyCapEur
-          ? "above_cap"
+        : snapshot.headroomEur !== null && snapshot.remainingEur !== null && snapshot.headroomEur > 0 && snapshot.headroomEur > snapshot.remainingEur
+          ? "headroom_above_remaining"
           : "set";
   return {
     month: snapshot.month,
@@ -131,6 +134,8 @@ export function spendView(snapshot: Awaited<ReturnType<typeof spendSnapshot>>): 
     dailyBudgetSumEur: snapshot.dailyBudgetSumEur,
     remainingDays: snapshot.remainingDays,
     spendCapEur: snapshot.spendCapEur,
+    headroomEur: snapshot.headroomEur,
+    remainingEur: snapshot.remainingEur,
     spendCapStatus,
     allow: snapshot.allow,
     reason: snapshot.reason,
@@ -163,20 +168,20 @@ async function readPendingUndoSection(ctx: PluginContext, companyId: string): Pr
 async function pendingGates(deps: ViewDeps, companyId: string): Promise<UiGateCard[]> {
   const rows = await deps.ledger.select(companyId, "gate_requests", {
     where: { status: "pending" },
-    // Newest valid_until first: a backlog of expired rows the expiry job has not moved yet cannot push live cards past the limit.
-    orderBy: { column: "valid_until", direction: "desc" },
+    // A pending card past valid_until is expired; the gate-expiry job only has not moved it yet.
+    // The database drops it, so a backlog of expired rows cannot push live cards past the limit (RK9-563).
+    afterNow: "valid_until",
+    // The soonest-expiring card first.
+    orderBy: { column: "valid_until", direction: "asc" },
     limit: GATE_ROWS,
   });
-  const now = deps.now().getTime();
   const out: UiGateCard[] = [];
   for (const row of rows) {
     const validUntil = iso(row.valid_until);
-    // A pending card past valid_until is expired; the gate-expiry job only has not moved it yet.
-    if (!validUntil || Date.parse(validUntil) <= now) continue;
+    if (!validUntil) continue;
     out.push({ id: String(row.id), kind: String(row.kind), adId: str(row.ad_id), publicationId: str(row.publication_id), validUntil });
   }
-  // Show the soonest-expiring card first.
-  return out.reverse();
+  return out;
 }
 
 interface AdTotals {

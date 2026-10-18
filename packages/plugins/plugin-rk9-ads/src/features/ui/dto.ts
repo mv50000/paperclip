@@ -49,7 +49,7 @@ export interface UiPendingUndo {
   permanentError?: string;
 }
 
-export type UiSpendCapStatus = "set" | "missing" | "above_cap" | "unknown";
+export type UiSpendCapStatus = "set" | "missing" | "headroom_above_remaining" | "unknown";
 
 export interface UiSpend {
   month: string;
@@ -60,12 +60,17 @@ export interface UiSpend {
   dailyBudgetSumEur: number | null;
   remainingDays: number;
   spendCapEur: number | null;
-  /** Meta's account spend_cap against the plugin cap: missing, set, or higher than the cap. */
+  /** What Meta still allows: spend_cap - amount_spent (the spend_cap is lifetime). */
+  headroomEur: number | null;
+  /** What is left of the monthly cap: monthlyCapEur - MTD. */
+  remainingEur: number | null;
+  /** Meta's account spend_cap: missing, set, or its headroom above what is left of the monthly cap. */
   spendCapStatus: UiSpendCapStatus;
   /** The spend guard would allow a spend-raising write now. */
   allow: boolean;
   reason: string;
   detail: string;
+  /** Standing risks (spend-guard/guard.ts SPEND_RISKS), shown as warnings. */
   risks: string[];
 }
 
@@ -200,6 +205,8 @@ export interface UiPauseAdResult {
   /** Status after the call; equals previousStatus in a dry run. */
   status: string;
   paused: boolean;
+  /** A repeat of a live pause with the same idempotencyKey on an ad already PAUSED: nothing was written (RK9-563). */
+  duplicate?: boolean;
   /** Activation cards of the ad a live pause closed (RK9-562). */
   closedCardIds?: string[];
   /** The ad's open cards could not be listed or closed (all or some), or running activations could not be read; the pause itself stands. */

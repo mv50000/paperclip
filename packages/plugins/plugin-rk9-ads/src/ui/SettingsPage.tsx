@@ -6,7 +6,7 @@ import type { ProvisionResult } from "../brand/provision.js";
 import type { UiSettings } from "../features/ui/dto.js";
 import { Button, EmptyState, ErrorText, Muted, Section, TypedConfirm } from "./components.js";
 import { errorText, fmtDateTime, fmtEur } from "./format.js";
-import { saveRulesBlock } from "./host-config.js";
+import { readConfigVersion, saveRulesBlock } from "./host-config.js";
 import { ACTION, DATA, HOST_CONFIG_PATH } from "./keys.js";
 import {
   BUILTIN_CAP_RULE_ID,
@@ -44,9 +44,10 @@ interface RulesData {
 interface PreparedRules {
   ok: boolean;
   errors?: string[];
-  rules?: { liveMode: boolean; list: Array<Record<string, unknown>> };
-  /** What the save must confirm, against the config saved now (RK9-566). */
-  confirm?: { weakening: string[]; liveOn: boolean };
+  /** `list` is left out when the save keeps the default rules (features/rules/editor.ts). */
+  rules?: { liveMode: boolean; list?: Array<Record<string, unknown>> };
+  /** What the save must confirm, against the config saved now (RK9-566); `live` lists what starts pausing ads (RK9-563). */
+  confirm?: { weakening: string[]; liveOn: boolean; live?: string[] };
 }
 
 /**
@@ -59,6 +60,8 @@ interface PendingSave {
   /** Weakening changes the word confirms; empty for a plain shadow -> live switch. */
   weakening: string[];
   liveOn: boolean;
+  /** What the word LIVE confirms: live mode on, or a rule becoming live (RK9-563). */
+  live: string[];
   words: string[];
   /** The index of the word asked now. */
   step: number;
@@ -66,7 +69,7 @@ interface PendingSave {
 
 function pendingFor(list: PendingSave["list"], liveMode: boolean, confirm: NonNullable<PreparedRules["confirm"]>): PendingSave {
   const words = [...(confirm.weakening.length > 0 ? [WEAKEN_WORD] : []), ...(confirm.liveOn ? [LIVE_WORD] : [])];
-  return { list, liveMode, weakening: confirm.weakening, liveOn: confirm.liveOn, words, step: 0 };
+  return { list, liveMode, weakening: confirm.weakening, liveOn: confirm.liveOn, live: confirm.live ?? [], words, step: 0 };
 }
 
 const LIVE_PROMPT = "Live-tilassa säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.";
@@ -318,13 +321,27 @@ function RuleEditor(props: { companyId: string | null }) {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingSave | null>(null);
   const [dry, setDry] = useState<DryRunResult | null>(null);
+  /** `updatedAt` of the saved config this draft started from; the save refuses a newer one (RK9-563). Null until it was read. */
+  const [version, setVersion] = useState<{ updatedAt: string | null } | null>(null);
 
   useEffect(() => {
     if (!rules.data || rules.data.state !== "enabled") return;
     // propose_scale stays off and is not edited here; the worker keeps the saved entries (G9).
     setDraft((rules.data.rules ?? []).filter((rule) => rule.type !== "propose_scale").map(toEditor));
     setLiveMode(rules.data.liveMode === true);
-  }, [rules.data]);
+    if (!props.companyId) return;
+    let current = true;
+    setVersion(null);
+    readConfigVersion(props.companyId).then(
+      (updatedAt) => {
+        if (current) setVersion({ updatedAt });
+      },
+      () => undefined,
+    );
+    return () => {
+      current = false;
+    };
+  }, [rules.data, props.companyId]);
 
   // A confirmation covers the draft it listed; an edit after it asks again.
   useEffect(() => setPending(null), [draft, liveMode]);
@@ -338,7 +355,9 @@ function RuleEditor(props: { companyId: string | null }) {
     );
   }
   async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[], confirmedLive: boolean) {
-    await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening, confirmedLive);
+    // Without the loaded version a newer config could be overwritten: no save (RK9-563).
+    if (!version) throw new Error("Tallennetun configin versiota ei ole luettu. Lataa sivu uudelleen ja tallenna sitten.");
+    setVersion({ updatedAt: await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening, confirmedLive, version.updatedAt) });
     setPending(null);
     toast({ title: "Säännöt tallennettu", tone: "success" });
     rules.refresh();
@@ -452,12 +471,11 @@ function RuleEditor(props: { companyId: string | null }) {
       </div>
       {pending ? (
         <div className="space-y-2">
-          {pending.weakening.length > 0 ? (
+          {pending.weakening.length + pending.live.length > 0 ? (
             <ul aria-label="Vahvistettavat muutokset" className="list-disc space-y-1 pl-5 text-sm">
-              {pending.weakening.map((change) => (
+              {[...pending.weakening, ...pending.live].map((change) => (
                 <li key={change}>{change}</li>
               ))}
-              {pending.liveOn ? <li>Live-tila päälle: säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.</li> : null}
             </ul>
           ) : null}
           {pending.words.length > 1 ? <Muted>Vahvistus {pending.step + 1}/{pending.words.length}</Muted> : null}

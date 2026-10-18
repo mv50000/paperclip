@@ -587,7 +587,10 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
 - **Action** `rules.prepareSave` (A12, RK9-518): validates an edited
   `{ liveMode, list }` with `parseRules()`. It refuses `propose_scale` and
   keeps the stored `propose_scale` entries. It writes nothing: the UI saves
-  the returned block through the host config route (instance admin).
+  the returned block through the host config route (instance admin). When
+  the saved config has no `rules.list` and the draft is exactly the shipped
+  defaults, the block leaves `list` out, so the defaults are not frozen into
+  the config (RK9-563).
 - A live cap pause whose card close or halt write failed fails the run
   (`cardsError`, `haltError`), the same as a failed audit row.
 
@@ -664,7 +667,7 @@ No token or secret goes into it.
 |---|---|---|
 | `publish` | action | `{ creativeId \| manifest, text?, placement?, sizeBytes?, durationSec?, idempotencyKey?, dryRun?, confirm?, waitMs? }`. Dry run (the full planned payloads, no Meta call) unless `dryRun: false, confirm: true`. A real run needs `creativeId` and a launch-ready preflight |
 | `swap-creative` | action | The same plus `adId`: a new creative on a PAUSED ad that this company published; the ad stays PAUSED |
-| `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication |
+| `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication. The stored error goes through `sanitize()` again when it is read (RK9-563) |
 
 ## Activation gate (RK9-517)
 
@@ -726,20 +729,33 @@ anything ACTIVE.
 `src/ui/` (slots in the manifest) and `src/features/ui/` (worker views).
 
 - **Mainonta page** (`/ads`): MTD spend against `monthlyCapEur` with the
-  projection and the `spend_cap` status, the standing halt (when, who, why)
+  projection and the `spend_cap` status, the standing spend risks
+  (`spend.risks`) as warnings (RK9-563), the standing halt (when, who, why)
   with a board-only clear, the kill switch, the publications with their Meta
   status, CTR, CPC and fatigue, the pending activation cards (resend), the
-  rule log of 7 days, 14 days of spend, and a digest preview.
+  rule log of 7 days, 14 days of spend, and a digest preview. Meta's
+  `spend_cap` is lifetime: the status compares its headroom
+  (`spend_cap - amount_spent`, `headroomEur`) with what is left of the month
+  (`remainingEur`), not the cap itself with `monthlyCapEur` (RK9-563). The
+  pending cards are read with `valid_until > now()` in SQL, soonest-expiring
+  first, at most 50.
 - **Settings** (company settings, `ads`): a redacted config summary with a
   link to the host config form, the preflight checks with a re-run, the
   provision dry run, and the rule editor (pause rules only).
 - **Dashboard widget**: MTD against the cap, pending cards, and the halt.
 - **Data** `ads-overview`, `ads-widget`, `ads-settings`: allowlist DTOs
   (`dto.ts`). They never carry raw config, secret refs or tokens; every value
-  goes through `sanitize()`. The company comes from the host context only.
-- **Action** `pause-ad` `{ adId, dryRun?, confirm? }`: pauses one ad of the
-  brand's ad account. `dryRun` defaults to true. A real pause needs
-  `confirm: true` and a board user. It writes a `rule_actions` row
+  goes through `sanitize()`. The company comes from the host-merged
+  `params.companyId`. The SDK gives a data handler no other context, so a
+  bridge call without a company (instance admin only) keeps the caller's
+  value; the worker cannot tell it apart without a core change (RK9-563).
+- **Action** `pause-ad` `{ adId, dryRun?, confirm?, idempotencyKey? }`: pauses
+  one ad of the brand's ad account. `dryRun` defaults to true. A real pause
+  needs `confirm: true`, a board user and `idempotencyKey` (8-100 of
+  `A-Za-z0-9_-`, the page sends one per confirmation, RK9-563). A repeat with
+  the same key on an ad that is already PAUSED writes nothing and returns
+  `duplicate: true`; on an ad that still runs it pauses again. A failed
+  pause gives the key back. It writes a `rule_actions` row
   (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
   activity entry. Before the Meta write it stores a 30-minute halt for the
   ad (`adHalt`, RK9-566), then closes the ad's open activation cards
@@ -767,9 +783,14 @@ anything ACTIVE.
   rule's tuning is not checked. `rules.prepareSave` compares the draft with
   the config saved now and refuses an unconfirmed weakening or live-mode
   save, naming the changes (`confirm`); the page then asks `HEIKENNÄ`, and
-  `LIVE` too when the save also turns live mode on. The browser's save
-  checks both again against the config read right before the POST. A config
-  without `rules.list` counts as the default rules. These checks guard
+  `LIVE` too when the save also turns live mode on, or, with live mode on,
+  makes a rule live (from shadow, switched on, or new; `confirm.live`,
+  RK9-563). The browser's save checks both again against the config read
+  right before the POST. That read must also show the `updatedAt` the editor
+  loaded: a config saved since, on the host's form or in another tab,
+  refuses the save, and the page does not save before that version was read
+  (RK9-563). A config without `rules.list` counts as the
+  default rules. These checks guard
   against an operator's mistake, not against an instance admin: the host's
   own config form saves any schema-valid config (also `liveMode: false`)
   without asking the plugin, and the host route has no compare-and-swap.

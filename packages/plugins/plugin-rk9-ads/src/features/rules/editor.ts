@@ -11,16 +11,21 @@
  * editor is refused.
  *
  * A block that weakens the spend protection against the config saved now
- * (ui/rule-fields.ts weakeningChanges), or turns live mode on, is refused
- * until the call names those changes in `confirmedWeakening` and sets
- * `confirmLive` (RK9-566): the refusal's `confirm` lists them for the UI's
- * typed words. The browser checks again right before its POST
+ * (ui/rule-fields.ts weakeningChanges), turns live mode on, or makes a rule
+ * live while live mode is on (liveChanges, RK9-563), is refused until the
+ * call names those changes in `confirmedWeakening` and sets `confirmLive`
+ * (RK9-566): the refusal's `confirm` lists them for the UI's typed words.
+ *
+ * A config without `rules.list` runs the shipped default rules. A save that
+ * keeps exactly those defaults leaves `list` out, so the defaults are not
+ * frozen into the config and a later release's defaults still apply
+ * (RK9-563). The browser checks again right before its POST
  * (ui/host-config.ts). Both guard against an operator's mistake, not
  * against an instance admin: the host's config route saves any
  * schema-valid config without asking this worker.
  */
 
-import { liveModeTurnedOn, savedRulesBlock, weakeningChanges } from "../../ui/rule-fields.js";
+import { liveChanges, savedRulesBlock, weakeningChanges } from "../../ui/rule-fields.js";
 import { UI_PAUSE_RULE_ID } from "../ui/register.js";
 import { parseRules, type RuleSet } from "./schema.js";
 
@@ -28,17 +33,40 @@ export const EDITABLE_RULE_TYPES = ["threshold_pause", "pause_all_cap", "pause_v
 export const MAX_EDITED_RULES = 50;
 
 export type PreparedRules =
-  | { ok: true; rules: { liveMode: boolean; list: Array<Record<string, unknown>> }; effective: RuleSet }
+  /** `rules.list` is left out when the save keeps the default rules of a config that has no list. */
+  | { ok: true; rules: { liveMode: boolean; list?: Array<Record<string, unknown>> }; effective: RuleSet }
   | { ok: false; errors: string[]; confirm?: RulesConfirmation };
 
 /** What a weakening or live-mode save must confirm (RK9-566). */
 export interface RulesConfirmation {
   weakening: string[];
+  /** True when `live` is not empty: the save needs LIVE. */
   liveOn: boolean;
+  /** What starts pausing ads in Meta (ui/rule-fields.ts liveChanges). */
+  live: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Stable JSON text: keys sorted, so a parsed rule equals the same rule written in another key order. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** True when the saved config has no `rules.list`: it runs the shipped defaults. */
+function savedWithoutList(rawConfig: Record<string, unknown>): boolean {
+  const rules = rawConfig.rules;
+  return !isRecord(rules) || rules.list === undefined || rules.list === null;
 }
 
 /** propose_scale entries of the saved config, unchanged. */
@@ -78,7 +106,8 @@ export function prepareRules(
   const parsed = parseRules(block);
   if (parsed.errors.length > 0) return { ok: false, errors: parsed.errors };
   const saved = savedRulesBlock(rawConfig);
-  const confirm: RulesConfirmation = { weakening: weakeningChanges(saved, block), liveOn: liveModeTurnedOn(saved, block) };
+  const live = liveChanges(saved, block);
+  const confirm: RulesConfirmation = { weakening: weakeningChanges(saved, block), liveOn: live.length > 0, live };
   const confirmed = Array.isArray(input.confirmedWeakening) ? input.confirmedWeakening.filter((entry): entry is string => typeof entry === "string") : [];
   const unconfirmed = confirm.weakening.filter((change) => !confirmed.includes(change));
   const liveUnconfirmed = confirm.liveOn && input.confirmLive !== true;
@@ -87,10 +116,13 @@ export function prepareRules(
       ok: false,
       errors: [
         ...(unconfirmed.length > 0 ? [`The save weakens the spend protection and needs confirmation: ${unconfirmed.join(" ")}`] : []),
-        ...(liveUnconfirmed ? ["The save turns live mode on and needs confirmation"] : []),
+        ...(liveUnconfirmed ? [`The save starts pausing ads in Meta and needs confirmation: ${live.join(" ")}`] : []),
       ],
       confirm,
     };
+  }
+  if (savedWithoutList(rawConfig) && canonical(parsed.rules.list) === canonical(parseRules({ liveMode: block.liveMode }).rules.list)) {
+    return { ok: true, rules: { liveMode: block.liveMode }, effective: parsed.rules };
   }
   return { ok: true, rules: block, effective: parsed.rules };
 }

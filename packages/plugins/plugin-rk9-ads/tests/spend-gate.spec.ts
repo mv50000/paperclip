@@ -4,6 +4,7 @@
  * fake Bot API; Meta is a routing fake; every activation write goes through
  * the real spend guard hook. No real chat, no real ad account.
  */
+import { randomUUID } from "node:crypto";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
@@ -12,6 +13,7 @@ import manifest from "../src/manifest.js";
 import { createLedger } from "../src/db.js";
 import { registerGate, type GateOverrides } from "../src/features/gate/register.js";
 import { PAUSE_AD_ACTION_KEY, registerUi } from "../src/features/ui/register.js";
+import { memoryOnceStore } from "../src/features/spend-guard/support.js";
 import type { UiPauseAdResult } from "../src/features/ui/dto.js";
 import { getActivationCards, setActivationCards } from "../src/features/gate/runtime.js";
 import { TelegramController } from "../src/features/telegram/controller.js";
@@ -621,12 +623,12 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
   const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-user-1" } };
 
   async function pauseAd(r: Rig): Promise<UiPauseAdResult> {
-    return (await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD, dryRun: false, confirm: true }, BOARD)) as UiPauseAdResult;
+    return (await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD, dryRun: false, confirm: true, idempotencyKey: randomUUID() }, BOARD)) as UiPauseAdResult;
   }
 
   it("an old card tapped after pause-ad makes no ACTIVE write, and the card says why", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const sent = await r.cards.openActivationCard(publication());
     const oldData = r.fake.buttons(sent.messageId)[0]!;
 
@@ -649,7 +651,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("a dry run closes no card", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const sent = await r.cards.openActivationCard(publication());
     await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD }, BOARD);
     expect(r.store.rows.get(sent.id)!.status).toBe("pending");
@@ -658,7 +660,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("pauses the ad even when a card does not close, and reports cardsError", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const sent = await r.cards.openActivationCard(publication());
     r.repo.close = async () => {
       throw new Error("row locked");
@@ -671,7 +673,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("a failed Meta pause still closes the cards, and the error says so", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const sent = await r.cards.openActivationCard(publication());
     r.meta.fail = (call) => (call.body.status === "PAUSED" ? new Error("Meta 500") : null);
     await expect(pauseAd(r)).rejects.toThrow(/The pause of ad .* failed: .*1 activation card\(s\) of the ad closed/);
@@ -683,7 +685,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("with the ad's halt stored, a running activation is still named, with the halt that stops it (RK9-566)", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     r.repo.activationInFlight = async () => true;
     const result = await pauseAd(r);
     expect(result).toMatchObject({ paused: true, closedCardIds: [], activationRunning: true, adHalt: { id: expect.any(String), until: expect.any(String) } });
@@ -693,7 +695,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("a failed Meta pause names an activation that may still run", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     r.repo.activationInFlight = async () => true;
     r.meta.fail = (call) => (call.body.status === "PAUSED" ? new Error("Meta 500") : null);
     await expect(pauseAd(r)).rejects.toThrow(/approved activation of the ad may still be running/);
@@ -701,7 +703,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("reports an approved activation that may still run when the ad's halt was not stored", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     r.repo.activationInFlight = async () => true;
     const set = r.harness.ctx.state.set.bind(r.harness.ctx.state);
     r.harness.ctx.state.set = async (key, value) => {
@@ -717,7 +719,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("tries the ad's halt once more before it pauses without it (RK9-567)", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const set = r.harness.ctx.state.set.bind(r.harness.ctx.state);
     let refused = 0;
     r.harness.ctx.state.set = async (key, value) => {
@@ -736,7 +738,7 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
 
   it("reports cardsError when the activation gate is not running", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     setActivationCards(null);
     const result = await pauseAd(r);
     expect(result).toMatchObject({ paused: true });
@@ -748,12 +750,12 @@ describe("pause-ad leaves a short halt for the ad (RK9-566)", () => {
   const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-user-1" } };
 
   async function pauseAd(r: Rig): Promise<UiPauseAdResult> {
-    return (await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD, dryRun: false, confirm: true }, BOARD)) as UiPauseAdResult;
+    return (await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: AD, dryRun: false, confirm: true, idempotencyKey: randomUUID() }, BOARD)) as UiPauseAdResult;
   }
 
   it("stores the halt before the Meta write, and a card of the ad tapped while it holds is denied with no ACTIVE write", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const result = await pauseAd(r);
     const halt = await readAdHalt(r.harness.ctx, COMPANY_A, AD);
     expect(halt).toMatchObject({ rule: "pause_ad", adId: AD, brandCode: "OLL", initiator: { source: "ui", userId: "board-user-1" } });
@@ -769,7 +771,7 @@ describe("pause-ad leaves a short halt for the ad (RK9-566)", () => {
 
   it("an activation approved before the pause and still writing pauses the ad again and fails", async () => {
     const r = await rig();
-    registerUi(r.runtime);
+    registerUi(r.runtime, { store: memoryOnceStore() });
     const sent = await r.cards.openActivationCard(publication());
     const original = r.harness.ctx.http.fetch;
     let fired = false;

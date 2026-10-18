@@ -3,6 +3,7 @@
  * allowlisted DTOs, pause-ad and the kill switch, no activate path, and a
  * secret scan over every data and action response and over the UI bundle.
  */
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,8 @@ import { RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY, RULES_PREPARE_SAVE_ACTION_KEY
 import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../src/features/spend-guard/register.js";
 import type { UiOverview, UiSettings, UiWidget } from "../src/features/ui/dto.js";
 import { OVERVIEW_DATA_KEY, PAUSE_AD_ACTION_KEY, SETTINGS_DATA_KEY, UI_PAUSE_RULE_ID, WIDGET_DATA_KEY } from "../src/features/ui/register.js";
+import { PUBLICATION_DATA_KEY } from "../src/features/publish/register.js";
+import { sanitize } from "../src/features/ui/sanitize.js";
 import { addDays } from "../src/insights/mtd.js";
 import { localDate } from "../src/kit/local-time.js";
 import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
@@ -38,8 +41,8 @@ const PUB_A = "aaaaaaaa-1111-4111-8111-000000000001";
 const PUB_B = "bbbbbbbb-1111-4111-8111-000000000001";
 const GATE_A = "aaaaaaaa-2222-4222-8222-000000000001";
 
-/** The patterns of the AC: a Meta token, a Telegram bot token, and the harness's resolved values. */
-const SECRET_PATTERNS = [/EAA[A-Za-z0-9]+/, /\b\d{6,}:[A-Za-z0-9_-]{30,}\b/];
+/** The patterns of the AC: a Meta token, a Telegram bot token (also inside a Bot API URL), and the harness's resolved values. */
+const SECRET_PATTERNS = [/EAA[A-Za-z0-9]+/, /\d{6,}:[A-Za-z0-9_-]{30,}/];
 
 function assertNoSecrets(label: string, text: string) {
   for (const pattern of SECRET_PATTERNS) expect(pattern.test(text), `${label} matches ${pattern}`).toBe(false);
@@ -157,6 +160,24 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
     return [];
   };
 
+  // The harness's execute reports rowCount 0; the pause-ad idempotency marker (alert_dedupe) needs a real ON CONFLICT answer (RK9-563).
+  const dedupe = new Set<string>();
+  const execute = harness.ctx.db.execute.bind(harness.ctx.db);
+  harness.ctx.db.execute = async (sql: string, params?: unknown[]) => {
+    const result = await execute(sql, params);
+    if (/INSERT INTO \S+\.alert_dedupe .* ON CONFLICT DO NOTHING/s.test(sql)) {
+      const key = `${String(params?.[0])}|${String(params?.[2])}`;
+      if (dedupe.has(key)) return { rowCount: 0 };
+      dedupe.add(key);
+      return { rowCount: 1 };
+    }
+    if (/DELETE FROM \S+\.alert_dedupe WHERE/.test(sql)) {
+      dedupe.delete(`${String(params?.[0])}|${String(params?.[1])}`);
+      return { rowCount: 1 };
+    }
+    return result;
+  };
+
   const actionKeys: string[] = [];
   const dataKeys: string[] = [];
   const registerAction = harness.ctx.actions.register.bind(harness.ctx.actions);
@@ -233,7 +254,16 @@ describe("operator UI handlers (RK9-518)", () => {
     const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
     expect(overview.state).toBe("enabled");
     expect(overview.brand).toEqual({ brandCode: "OLL", displayName: "Ololla", timeZone: "Europe/Helsinki", monthlyCapEur: 100 });
-    expect(overview.spend).toMatchObject({ mtdEur: 12.34, monthlyCapEur: 100, spendCapEur: 100, spendCapStatus: "set" });
+    // spend_cap 100 € with nothing spent: Meta still allows 100 €, but only 87.66 € of the month is left (RK9-563).
+    expect(overview.spend).toMatchObject({
+      mtdEur: 12.34,
+      monthlyCapEur: 100,
+      spendCapEur: 100,
+      headroomEur: 100,
+      remainingEur: 87.66,
+      spendCapStatus: "headroom_above_remaining",
+      risks: ["spend_cap_headroom_exceeds_remaining"],
+    });
     expect(overview.publications).toEqual([
       expect.objectContaining({ id: PUB_A, adName: "OLL kesä 1", metaAdId: "301", adStatus: "ACTIVE", spendEur: 4, impressions: 1800, linkClicks: 15 }),
     ]);
@@ -248,6 +278,35 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(text).not.toContain("gate-token-hash");
     expect(text).not.toContain(SECRET_A_META);
     expect(text).not.toContain("accessTokenRef");
+  });
+
+  it("a lifetime spend_cap above the monthly cap is fine when its headroom fits what is left (RK9-563)", async () => {
+    // 5000 € lifetime cap, 4950 € spent over the account's life: Meta allows 50 €, 87.66 € of the month is left.
+    r.meta.account = { ...r.meta.account, spend_cap: "500000", amount_spent: "495000" };
+    const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    expect(overview.spend).toMatchObject({ spendCapEur: 5000, headroomEur: 50, remainingEur: 87.66, spendCapStatus: "set", risks: [] });
+  });
+
+  it("pending cards: the database keeps only live ones, soonest-expiring first, so expired rows cannot fill the limit (RK9-563)", async () => {
+    r.queries.length = 0;
+    await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    const gates = r.queries.filter((query) => /FROM \S+\.gate_requests WHERE/.test(query.sql));
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.sql).toMatch(/WHERE company_id = \$1 AND status = \$2 AND valid_until > now\(\) ORDER BY valid_until ASC LIMIT 50$/);
+    expect(gates[0]!.params).toEqual([COMPANY_A, "pending"]);
+  });
+
+  it("the publication data key redacts a stored error again when it is read (RK9-563)", async () => {
+    r = await rig({ poisoned: true });
+    const read = await r.harness.getData<{ state: string; publication: { error: string | null } }>(PUBLICATION_DATA_KEY, { companyId: COMPANY_A, publicationId: PUB_A });
+    expect(read.state).toBe("ok");
+    expect(read.publication.error).toBe("Graph 400 for token [REDACTED] via bot [REDACTED]");
+    assertNoSecrets("publication", JSON.stringify(read));
+  });
+
+  it("sanitize redacts a bot token inside a Bot API URL, where no word boundary precedes it (RK9-563)", () => {
+    const out = sanitize({ error: `POST https://api.telegram.org/bot${BOT_TOKEN}/sendMessage failed` });
+    expect(out.error).toBe("POST https://api.telegram.org/bot[REDACTED]/sendMessage failed");
   });
 
   it("every UI data handler requires a company and serves only that company", async () => {
@@ -291,7 +350,7 @@ describe("operator UI handlers (RK9-518)", () => {
     await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false }, UI)).rejects.toThrow(/confirm: true/);
     await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true }, AGENT)).rejects.toThrow(/board-only/);
     expect(await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301" }, AGENT)).toMatchObject({ dryRun: true });
-    await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "302", dryRun: false, confirm: true }, UI)).rejects.toThrow(/not in this company's ad account/);
+    await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "302", dryRun: false, confirm: true, idempotencyKey: randomUUID() }, UI)).rejects.toThrow(/not in this company's ad account/);
     await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "act_1; DROP" }, UI)).rejects.toThrow(/digits only/);
     await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301" }, { ...UI, companyId: COMPANY_UNCONFIGURED })).rejects.toThrow(/not configured/);
     expect(r.meta.writes).toEqual([]);
@@ -299,7 +358,7 @@ describe("operator UI handlers (RK9-518)", () => {
   });
 
   it("pause-ad pauses on Meta, writes rule_actions and the activity log, and the overview then shows PAUSED", async () => {
-    const result = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true }, UI);
+    const result = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: randomUUID() }, UI);
     expect(result).toMatchObject({ dryRun: false, adId: "301", previousStatus: "ACTIVE", status: "PAUSED", paused: true });
     expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
     expect(r.ruleActionInserts()).toEqual([
@@ -310,6 +369,47 @@ describe("operator UI handlers (RK9-518)", () => {
     );
     const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
     expect(overview.publications[0]).toMatchObject({ metaAdId: "301", adStatus: "PAUSED" });
+  });
+
+  it("pause-ad: a live pause needs an idempotency key, and a repeat of the same key writes nothing (RK9-563)", async () => {
+    await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true }, UI)).rejects.toThrow(/idempotencyKey/);
+    await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: "short" }, UI)).rejects.toThrow(/idempotencyKey/);
+    expect(r.meta.writes).toEqual([]);
+    const key = randomUUID();
+    const first = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(first).toMatchObject({ paused: true, status: "PAUSED" });
+    expect(first).not.toHaveProperty("duplicate");
+    const activity = r.harness.activity.length;
+    const again = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(again).toEqual({ dryRun: false, adId: "301", name: "OLL kesä 1", previousStatus: "PAUSED", status: "PAUSED", paused: true, duplicate: true });
+    expect(r.meta.writes).toHaveLength(1);
+    expect(r.ruleActionInserts()).toHaveLength(1);
+    expect(r.harness.activity).toHaveLength(activity);
+  });
+
+  it("pause-ad: a repeat whose key is taken but whose ad still runs pauses again (verifier H1, RK9-563)", async () => {
+    const key = randomUUID();
+    // A first call that is still running, or that died before it gave the key back.
+    await r.harness.ctx.db.execute(
+      "INSERT INTO plugin_ns.alert_dedupe (company_id, id, dedupe_key, kind, metadata) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+      [COMPANY_A, randomUUID(), `pause-ad:301:${key}`, "ui_pause_ad", "{}"],
+    );
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).toMatchObject({ paused: true, status: "PAUSED", previousStatus: "ACTIVE" });
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
+    expect(r.ruleActionInserts()).toHaveLength(1);
+  });
+
+  it("pause-ad: a failed pause gives its key back, so the same confirmation can retry (RK9-563)", async () => {
+    const key = randomUUID();
+    r.meta.fail = (call) => (call.method !== "GET" ? new Response(JSON.stringify({ error: { message: "Invalid parameter", code: 100 } }), { status: 400 }) : null);
+    await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI)).rejects.toThrow(/The pause of ad 301 failed/);
+    r.meta.fail = () => null;
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).toMatchObject({ paused: true, status: "PAUSED" });
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(r.ruleActionInserts().map((row) => row.applied)).toEqual([false, true]);
   });
 
   it("the kill switch (pause-all) needs confirm and pauses every active object with ledger and activity", async () => {
