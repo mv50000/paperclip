@@ -20,7 +20,9 @@
  *    listing of a kill switch or scheduled pause about a minute after it
  *    (recheck.ts), and the PAUSED writes of an activation undo that Meta
  *    refused (pending-undo.ts), until Meta confirms, a newer activation
- *    supersedes it or a board user acknowledges it.
+ *    supersedes it or a board user acknowledges it. The same retry pauses
+ *    what a kill switch, scheduled pause, cap pause or re-check could not
+ *    pause during its halt (RK9-568).
  * 4. Data gate: when `schedule.dataGate` is set, on every tick. It fails open
  *    (see data-gate.ts): a feed that cannot be read pauses nothing, but it
  *    fails the run so the broken feed is seen (RK9-523). When the predicate no
@@ -46,10 +48,10 @@ import { evaluateSpendAlerts } from "./alerts.js";
 import { evaluateDataGate, type FeedFetch } from "./data-gate.js";
 import { checkSpend } from "./guard.js";
 import { haltIdentity, readRuleHalt, storedRuleHalt } from "./halt.js";
-import { haltUntil, pauseAll, PauseListError, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
+import { haltUntil, pauseAll, PauseListError, retryFailures, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
 import { readPendingUndos, retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
-import { dropRecheck, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS } from "./recheck.js";
+import { dropRecheck, noteRecheckFailure, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS } from "./recheck.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const SCHEDULED_PAUSE_JOB_KEY = "scheduled-pause";
@@ -175,7 +177,8 @@ async function runForCompany(
         failures.push(...stopFailures(`${brand} scheduled pause`, result));
         if (result.recheckError) failures.push(`${brand} scheduled pause: the re-check was not stored (${result.recheckError})`);
         if (result.errors.length > 0) {
-          failures.push(`${brand} scheduled pause: ${result.errors.length} pause(s) failed, retrying next tick`);
+          failures.push(...retryFailures(`${brand} scheduled pause`, result));
+          failures.push(`${brand} scheduled pause: retrying the listing next tick`);
         } else if (result.haltError) {
           // Without the halt an open card could undo the pause: the next tick stores it and closes the cards again.
           failures.push(`${brand} scheduled pause: retrying the halt next tick`);
@@ -253,10 +256,14 @@ export async function runDueRechecks(
       if (Number.isFinite(due) && due > now.getTime()) continue;
       const drop = () => dropRecheck(deps.ctx, companyId, rule);
       if (!Number.isFinite(due) || now.getTime() - due > RECHECK_WINDOW_MS) {
-        deps.ctx.logger.warn("rk9-ads pause: re-check past its window, dropped", { companyId, rule, dueAt: recheck.dueAt });
+        deps.ctx.logger.warn("rk9-ads pause: re-check past its window, dropped", { companyId, rule, dueAt: recheck.dueAt, attempts: recheck.attempts ?? 0 });
         await drop();
-        // The second listing never ran: the run fails once so it is seen.
-        failures.push(`${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`);
+        // The run fails once so it is seen, and says whether the ticks ran (RK9-568).
+        failures.push(
+          recheck.attempts
+            ? `${prefix}: ran ${recheck.attempts} time(s) within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt} but PAUSED failed and the pause retry could not be stored (last error: ${recheck.lastError ?? "unknown"}), dropped; pause the objects by hand in Meta`
+            : `${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`,
+        );
         continue;
       }
       if (recheck.haltId !== null) {
@@ -278,11 +285,21 @@ export async function runDueRechecks(
           // The halt and the card close stand from the pause itself.
           stopped: { stopped: { closedCardIds: [] }, announce: async () => undefined },
           recheck: true,
+          haltId: recheck.haltId,
         });
-        if (result.errors.length > 0) {
-          failures.push(`${prefix}: ${result.errors.length} pause(s) failed, retrying next tick`);
+        failures.push(...retryFailures(prefix, result));
+        if (result.errors.length > 0 && !result.retry?.stored) {
+          // The objects are not in the retry: the re-check stays and counts the failure.
+          failures.push(`${prefix}: retrying next tick`);
+          try {
+            await noteRecheckFailure(deps.ctx, companyId, recheck, result.errors.at(-1)!.error);
+          } catch (error) {
+            // The drop at the window's end cannot tell that this run ran: this line does.
+            failures.push(`${prefix}: this failed run was not counted (${safeError(error)})`);
+          }
           continue;
         }
+        // The listing ran; what it could not pause is in the pause retry.
         await drop();
         if (result.telegram === "failed") failures.push(`${prefix}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
       } catch (error) {

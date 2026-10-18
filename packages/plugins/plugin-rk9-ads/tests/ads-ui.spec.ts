@@ -391,6 +391,21 @@ describe("operator UI (RK9-518)", () => {
     expect(container.textContent).not.toContain("Aktivoinnin peruutus epäonnistui");
   });
 
+  it("names a pause's failed PAUSED write apart from an activation undo, with its attempts (RK9-568)", async () => {
+    bridge.data.set(
+      DATA.overview,
+      ollolaOverview({
+        pendingUndo: [
+          { kind: "ad", objectId: "120200000000000301", gateRequestId: "kill_switch:halt-1", since: "2026-10-17T08:00:05.000Z", origin: "pause", attempts: 4 },
+        ],
+      }),
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    expect(container.textContent).toContain("Pysäytys epäonnistui pysäytystilan aikana, voi olla yhä ACTIVE: mainos 120200000000000301 (4 epäonnistunutta yritystä)");
+    expect(container.textContent).not.toContain("Aktivoinnin peruutus epäonnistui");
+    expect(buttons("Kuittaa peruutukset")).toHaveLength(1);
+  });
+
   it("the widget shows MTD against the cap and the pending gate count", async () => {
     bridge.data.set(DATA.widget, { state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 2, halted: false } satisfies UiWidget);
     await render(createElement(AdsWidget, { context: CONTEXT }));

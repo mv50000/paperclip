@@ -1,6 +1,6 @@
 import { loadCompanyConfig } from "../../company-configs.js";
 import { createInsightsStore } from "../../insights/store.js";
-import { controllerNotifier, safeError } from "../spend-guard/support.js";
+import { controllerNotifier, safeError, sqlOnceStore } from "../spend-guard/support.js";
 import type { FeatureRuntime } from "../types.js";
 import { prepareRules } from "./editor.js";
 import { createRulesJob, RULES_JOB_KEY, runRulesForBrand, type RulesDeps } from "./runner.js";
@@ -31,6 +31,7 @@ export function registerRules(runtime: FeatureRuntime, overrides: Partial<RulesD
     ledger,
     store: createRulesStore(ctx.db),
     notifier: controllerNotifier,
+    onceStore: sqlOnceStore(ledger),
     now: () => new Date(),
     ...overrides,
   };

@@ -324,6 +324,21 @@ the core chat-channels bot is never shared. See
   `acknowledgeUndos` (no `since` needed) removes those (activity log). The
   Ads page shows them with a typed "KUITTAA" confirmation; clearing a halt
   does not acknowledge them.
+- **Failed pauses during a halt** (RK9-568, same list). When Meta refuses the
+  PAUSED write of an ACTIVE object in a live kill switch, scheduled pause,
+  cap pause or re-check (an error, or a reply without `success`), pauseAll
+  stores the object with origin `pause` and sends one Telegram alert, with
+  one `alert_dedupe` marker per object (`pause-failed:<brand>:<rule>:<halt
+  id>:<object id>`); a failed send gives the marker back and the next tick
+  sends it. The tick retries it like a failed undo and ends it by the same
+  rules. A re-check whose objects went to the retry is done: its listing
+  ran. Only when the retry cannot be stored does the re-check stay, and its
+  drop at the end of the window says how often it ran and Meta's last
+  error instead of "no tick ran". Every entry counts its failed PAUSED
+  writes and keeps the last error (redacted); the run's failure line, the
+  alert and the Ads page show them. A re-check that finds the object no
+  longer ACTIVE still drops silently. The data gate and dry runs store
+  nothing.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
