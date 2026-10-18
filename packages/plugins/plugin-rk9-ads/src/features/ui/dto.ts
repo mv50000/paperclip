@@ -205,7 +205,7 @@ export interface UiPauseAdResult {
   /** Status after the call; equals previousStatus in a dry run. */
   status: string;
   paused: boolean;
-  /** A repeat of a live pause with the same idempotencyKey: nothing was written, `status` is the ad's status now (RK9-563). */
+  /** A repeat of a live pause with the same idempotencyKey on an ad already PAUSED: nothing was written (RK9-563). */
   duplicate?: boolean;
   /** Activation cards of the ad a live pause closed (RK9-562). */
   closedCardIds?: string[];

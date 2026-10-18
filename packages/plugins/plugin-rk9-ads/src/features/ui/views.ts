@@ -122,7 +122,7 @@ export function spendView(snapshot: Awaited<ReturnType<typeof spendSnapshot>>): 
       ? "unknown"
       : snapshot.spendCapEur === null
         ? "missing"
-        : snapshot.risks.includes("spend_cap_headroom_exceeds_remaining")
+        : snapshot.headroomEur !== null && snapshot.remainingEur !== null && snapshot.headroomEur > 0 && snapshot.headroomEur > snapshot.remainingEur
           ? "headroom_above_remaining"
           : "set";
   return {

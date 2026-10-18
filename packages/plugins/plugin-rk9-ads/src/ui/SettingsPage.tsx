@@ -321,8 +321,8 @@ function RuleEditor(props: { companyId: string | null }) {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingSave | null>(null);
   const [dry, setDry] = useState<DryRunResult | null>(null);
-  /** `updatedAt` of the saved config this draft started from; the save refuses a newer one (RK9-563). */
-  const [version, setVersion] = useState<string | null>(null);
+  /** `updatedAt` of the saved config this draft started from; the save refuses a newer one (RK9-563). Null until it was read. */
+  const [version, setVersion] = useState<{ updatedAt: string | null } | null>(null);
 
   useEffect(() => {
     if (!rules.data || rules.data.state !== "enabled") return;
@@ -331,9 +331,13 @@ function RuleEditor(props: { companyId: string | null }) {
     setLiveMode(rules.data.liveMode === true);
     if (!props.companyId) return;
     let current = true;
-    void readConfigVersion(props.companyId).then((updatedAt) => {
-      if (current) setVersion(updatedAt);
-    });
+    setVersion(null);
+    readConfigVersion(props.companyId).then(
+      (updatedAt) => {
+        if (current) setVersion({ updatedAt });
+      },
+      () => undefined,
+    );
     return () => {
       current = false;
     };
@@ -351,7 +355,9 @@ function RuleEditor(props: { companyId: string | null }) {
     );
   }
   async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[], confirmedLive: boolean) {
-    setVersion(await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening, confirmedLive, version));
+    // Without the loaded version a newer config could be overwritten: no save (RK9-563).
+    if (!version) throw new Error("Tallennetun configin versiota ei ole luettu. Lataa sivu uudelleen ja tallenna sitten.");
+    setVersion({ updatedAt: await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening, confirmedLive, version.updatedAt) });
     setPending(null);
     toast({ title: "Säännöt tallennettu", tone: "success" });
     rules.refresh();

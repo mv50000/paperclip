@@ -27,9 +27,12 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   old card cannot activate it again (RK9-562); a failed close is
  *   `cardsError`, a halt that was not stored after AD_HALT_WRITE_ATTEMPTS
  *   writes `haltError` (RK9-567). A live pause carries `idempotencyKey`
- *   (one per confirmation in the UI): a repeat with the same key writes
- *   nothing and returns the ad's status now with `duplicate: true`
- *   (RK9-563). A failed pause gives the key back, so a retry runs.
+ *   (one per confirmation in the UI): a repeat with the same key, on an ad
+ *   that is already PAUSED, writes nothing and returns `duplicate: true`
+ *   (RK9-563). On an ad that is not PAUSED the repeat pauses again: the
+ *   first call may still run, have died, or have failed after the browser
+ *   gave up on it, and a second audit row beats an ad that keeps spending.
+ *   A failed pause gives the key back.
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
@@ -128,10 +131,11 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     const onceKey = `pause-ad:${adId}:${idempotencyKey}`;
     let claimed = false;
     try {
-      if (!(await deps.store.claim(companyId, onceKey, "ui_pause_ad", { adId }))) {
-        return sanitize({ dryRun: false, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: before.status === "PAUSED", duplicate: true });
+      claimed = await deps.store.claim(companyId, onceKey, "ui_pause_ad", { adId });
+      // Only a pause that took effect ends the repeat; an ad still running is paused again.
+      if (!claimed && before.status === "PAUSED") {
+        return sanitize({ dryRun: false, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: true, duplicate: true });
       }
-      claimed = true;
     } catch (cause) {
       // A pause stops spend: it goes on without the duplicate check rather than not at all.
       ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker could not be claimed", { companyId, adId, detail: safeError(cause) });

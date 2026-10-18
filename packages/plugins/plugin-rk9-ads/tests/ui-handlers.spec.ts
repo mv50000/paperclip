@@ -387,6 +387,20 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(r.harness.activity).toHaveLength(activity);
   });
 
+  it("pause-ad: a repeat whose key is taken but whose ad still runs pauses again (verifier H1, RK9-563)", async () => {
+    const key = randomUUID();
+    // A first call that is still running, or that died before it gave the key back.
+    await r.harness.ctx.db.execute(
+      "INSERT INTO plugin_ns.alert_dedupe (company_id, id, dedupe_key, kind, metadata) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+      [COMPANY_A, randomUUID(), `pause-ad:301:${key}`, "ui_pause_ad", "{}"],
+    );
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).toMatchObject({ paused: true, status: "PAUSED", previousStatus: "ACTIVE" });
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
+    expect(r.ruleActionInserts()).toHaveLength(1);
+  });
+
   it("pause-ad: a failed pause gives its key back, so the same confirmation can retry (RK9-563)", async () => {
     const key = randomUUID();
     r.meta.fail = (call) => (call.method !== "GET" ? new Response(JSON.stringify({ error: { message: "Invalid parameter", code: 100 } }), { status: 400 }) : null);

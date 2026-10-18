@@ -519,7 +519,7 @@ function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void;
     try {
       const result = (await pauseAd({ adId, dryRun: false, confirm: true, idempotencyKey })) as UiPauseAdResult;
       if (result.duplicate) {
-        toast({ title: `Pysäytys oli jo lähetetty: mainoksen ${result.name ?? adId} tila nyt ${result.status}`, tone: result.paused ? "success" : "warn" });
+        toast({ title: `Pysäytys oli jo lähetetty: mainoksen ${result.name ?? adId} tila nyt ${result.status}`, tone: "success" });
         props.onPaused(result);
         return;
       }

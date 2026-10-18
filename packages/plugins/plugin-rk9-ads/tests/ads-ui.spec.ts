@@ -774,7 +774,19 @@ describe("operator UI (RK9-518)", () => {
       await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], false, loaded)).resolves.toBe("2026-10-18T10:00:00.000Z");
       expect(posts).toHaveLength(1);
       const failing = (async () => new Response("nope", { status: 500 })) as typeof fetch;
-      expect(await readConfigVersion(COMPANY_ID, failing)).toBeNull();
+      await expect(readConfigVersion(COMPANY_ID, failing)).rejects.toThrow(/could not be read/);
+    });
+
+    it("no save while the loaded config version is unknown (RK9-563)", async () => {
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") posts.push({});
+        return new Response("down", { status: 503 });
+      }) as typeof fetch;
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(container.textContent).toContain("Tallennetun configin versiota ei ole luettu");
     });
 
     it("a save that keeps the shipped defaults of a config without rules.list leaves list out (RK9-563)", () => {

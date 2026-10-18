@@ -17,7 +17,8 @@
  * A rule that becomes live while live mode is on needs LIVE too (RK9-563).
  *
  * Version check (RK9-563): the editor reads the saved config's `updatedAt`
- * when it loads (`readConfigVersion`) and passes it here. The GET right
+ * when it loads (`readConfigVersion`) and passes it here; it does not save
+ * until that read succeeded. The GET right
  * before the POST must show the same `updatedAt`; a config saved since, on
  * the host's form or in another tab, refuses the save instead of being
  * overwritten. The host route has no compare-and-swap, so a save between
@@ -59,14 +60,9 @@ async function readRecord(companyId: string, fetcher: typeof fetch): Promise<Con
   return recordOf(await current.json());
 }
 
-/** The saved config's `updatedAt`, read when the editor loads; null when there is none or it cannot be read. */
+/** The saved config's `updatedAt`, read when the editor loads; null when the host returns none. Throws when it cannot be read. */
 export async function readConfigVersion(companyId: string, fetcher: typeof fetch = fetch): Promise<string | null> {
-  try {
-    return (await readRecord(companyId, fetcher)).updatedAt;
-  } catch {
-    // The save reads the config again and reports its own error.
-    return null;
-  }
+  return (await readRecord(companyId, fetcher)).updatedAt;
 }
 
 /** Saves the block; returns the saved config's new `updatedAt` (null when the host did not return one). */
