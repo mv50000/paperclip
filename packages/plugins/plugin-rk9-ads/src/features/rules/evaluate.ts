@@ -18,7 +18,8 @@
  *   day is a day without delivery and adds nothing.
  *
  * Spend without a link click is an infinite CPC: it breaks a CPC threshold
- * from above, never from below.
+ * from above, never from below. No spend is no CPC, also with clicks, so a
+ * `cpc lt` rule never fires on an ad that spent nothing (RK9-541).
  *
  * Minimum-data gates: a threshold rule fires only when the window's total
  * impressions are at least `minImpressions`, its total link clicks at least
@@ -29,6 +30,9 @@
  *
  * Only objects whose configured status is ACTIVE get a decision: a paused ad
  * needs no pause. An ad that is not in the status listing is skipped too.
+ * When the status listing could not be read (`status.unread`), the cap rule
+ * still decides on the month position alone: pauseAll lists its own targets
+ * and pauses only what is ACTIVE (RK9-541).
  *
  * Cooldown: a rule does not decide on the same object again while an earlier
  * decision of the same rule and object is younger than `cooldownHours`. Shadow
@@ -88,6 +92,8 @@ export interface RuleStatus {
   adAccountId: string;
   ads: ReadonlyArray<{ id: string; name?: string; status: string }>;
   campaigns: ReadonlyArray<{ id: string; name?: string; status: string }>;
+  /** True when the listing failed: `ads` and `campaigns` are empty and only the cap rule may decide. */
+  unread?: boolean;
 }
 
 export type RuleObjectType = "account" | "ad";
@@ -130,8 +136,9 @@ interface Totals {
 export function metricValue(metric: RuleMetric, totals: Totals, frequency: number | null = null): number | null {
   switch (metric) {
     case "cpc":
-      // Spend without a single link click is the worst CPC there is.
-      if (totals.inlineLinkClicks === 0 && totals.spendCents > 0) return Number.POSITIVE_INFINITY;
+      // Spend without a single link click is the worst CPC there is; no spend is no CPC.
+      if (totals.spendCents <= 0) return null;
+      if (totals.inlineLinkClicks === 0) return Number.POSITIVE_INFINITY;
       return linkCpc(totals.spendCents, totals.inlineLinkClicks);
     case "ctr":
       return linkCtr(totals.inlineLinkClicks, totals.impressions);
@@ -303,7 +310,7 @@ export function evaluateRules(snapshots: RuleSnapshots, status: RuleStatus, rule
       case "pause_all_cap": {
         const spend = snapshots.spend;
         if (!spend || spend.pctUsed < BUILTIN_PAUSE_ALL_CAP_PCT) break;
-        const anythingActive = activeAds.length > 0 || status.campaigns.some((campaign) => campaign.status === "ACTIVE");
+        const anythingActive = status.unread === true || activeAds.length > 0 || status.campaigns.some((campaign) => campaign.status === "ACTIVE");
         if (!anythingActive) break;
         push(
           "account",

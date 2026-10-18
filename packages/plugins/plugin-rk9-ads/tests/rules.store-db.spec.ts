@@ -113,6 +113,27 @@ describeDb("rules store on real Postgres", () => {
     ]);
   });
 
+  it("counts a pause_all row marked settled as applied, also with a Telegram error (RK9-541)", async () => {
+    const store = createRulesStore(testDb.client);
+    const company = await testDb.createCompany("Settled");
+    const cap = { ruleId: "pause_all_cap", ruleType: "pause_all_cap", objectType: "account" as const, action: "pause_all" as const, mode: "live" as const, dryRun: false };
+    // Everything paused, only the notice failed.
+    await store.insertAction(company, action({ ...cap, objectId: "1", applied: true, metrics: { settled: true }, error: "telegram: 502" }));
+    // Nothing paused, the failed object went to the pause retry.
+    await store.insertAction(company, action({ ...cap, objectId: "2", applied: false, metrics: { settled: true }, error: "200: (#2) failed" }));
+    // An object left ACTIVE without the retry stays retryable.
+    await store.insertAction(company, action({ ...cap, objectId: "3", applied: true, metrics: { settled: false }, error: "200: (#2) failed" }));
+    // `settled` counts only for pause_all rows.
+    await store.insertAction(company, action({ mode: "live", dryRun: false, applied: false, metrics: { settled: true }, error: "x" }));
+    const prior = await store.priorActions(company, ["cpc-ceiling", "pause_all_cap"], new Date("2026-10-20T09:00:00Z"));
+    expect(prior.sort((a, b) => `${a.ruleId}${a.objectId}`.localeCompare(`${b.ruleId}${b.objectId}`))).toEqual([
+      { ruleId: "cpc-ceiling", objectId: "301", mode: "live", applied: false, decidedAt: "2026-10-21T08:00:00.000Z" },
+      { ruleId: "pause_all_cap", objectId: "1", mode: "live", applied: true, decidedAt: "2026-10-21T08:00:00.000Z" },
+      { ruleId: "pause_all_cap", objectId: "2", mode: "live", applied: true, decidedAt: "2026-10-21T08:00:00.000Z" },
+      { ruleId: "pause_all_cap", objectId: "3", mode: "live", applied: false, decidedAt: "2026-10-21T08:00:00.000Z" },
+    ]);
+  });
+
   it("reads the creative validUntil of each ad's latest published publication, per company", async () => {
     const ledger = createLedger(testDb.client);
     async function creative(companyId: string, key: string, validUntil: string | null) {

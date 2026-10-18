@@ -166,6 +166,16 @@ describe("evaluateRules (A11)", () => {
       expect(evaluateRules(snapshots({ days: idle }), status(), ruleSet([{ ...CPC, minClicks: 0 }]), NOW)).toEqual([]);
     });
 
+    it("never fires a cpc floor on an ad that spent nothing, also with clicks (RK9-541)", () => {
+      const floor = { ...CPC, operator: "lt", threshold: 0.2, minImpressions: 0, minClicks: 0 };
+      const free = [day("1", "2026-10-19", 0, 300, 5), day("1", "2026-10-20", 0, 300, 5)];
+      expect(evaluateRules(snapshots({ days: free }), status(), ruleSet([floor]), NOW)).toEqual([]);
+      expect(evaluateRules(snapshots({ days: free }), status(), ruleSet([{ ...floor, aggregate: "window_total" }]), NOW)).toEqual([]);
+      // With spend the floor still works.
+      const cheap = [day("1", "2026-10-19", 0.5, 300, 5), day("1", "2026-10-20", 0.5, 300, 5)];
+      expect(evaluateRules(snapshots({ days: cheap }), status(), ruleSet([floor]), NOW)).toHaveLength(1);
+    });
+
     it("counts the 25-hour day of 2026-10-25 (EEST -> EET) as one day", () => {
       const rules = ruleSet([{ ...CPC, days: 3 }]);
       const days = badCpcDays("1", ["2026-10-23", "2026-10-24", "2026-10-25"]);
@@ -273,6 +283,12 @@ describe("evaluateRules (A11)", () => {
       expect(evaluateRules(snapshots({ spend: spend(95) }), status([["1", "PAUSED"]], [["100", "PAUSED"]]), rules, NOW)).toEqual([]);
       // An ACTIVE campaign alone is enough.
       expect(evaluateRules(snapshots({ spend: spend(95) }), status([], [["100", "ACTIVE"]]), rules, NOW)).toHaveLength(1);
+    });
+
+    it("decides on the month position alone when the status listing failed (RK9-541)", () => {
+      const unread = { ...status([], []), unread: true };
+      expect(evaluateRules(snapshots({ spend: spend(95) }), unread, ruleSet([]), NOW)).toEqual([expect.objectContaining({ ruleId: "pause_all_cap", action: "pause_all" })]);
+      expect(evaluateRules(snapshots({ spend: spend(89) }), unread, ruleSet([]), NOW)).toEqual([]);
     });
   });
 

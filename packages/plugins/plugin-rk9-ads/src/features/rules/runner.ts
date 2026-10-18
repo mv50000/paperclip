@@ -3,7 +3,9 @@
  * brand config:
  *
  * 1. Read the live status of the brand's ads and campaigns (read-only client).
- *    A failed read pauses nothing (fail-open) and fails the run.
+ *    A failed read fails the run and switches off every rule but the built-in
+ *    cap rule, which decides on the month position alone: pauseAll lists its
+ *    own targets and pauses only what is ACTIVE (RK9-541).
  * 2. Read the month position from the spend guard (checkSpend, the same MTD
  *    as the digest, RK9-526). Unreadable: the cap rule makes no decision.
  * 3. Read completed ad-days from insights_daily, creative validUntil, A10's
@@ -11,9 +13,14 @@
  *    rule_actions the cooldowns need. Each read is isolated (RK9-536): a
  *    failed one fails the run and switches off only the rules that need it,
  *    never the built-in cap rule. Without the earlier rule_actions only the
- *    cap rule runs, without its cooldown (its pause is idempotent).
+ *    cap rule runs, and the start of its halt stands in for its cooldown
+ *    (RK9-541), so an object the operator restarted is not paused again
+ *    every hour.
  *    Threshold rules wait for insights-daily-close; still waiting at 06:00
- *    local time fails the run, so a broken close is seen.
+ *    local time fails the run, so a broken close is seen. When the ad account
+ *    reports in another time zone than the brand's, the insights dates and
+ *    the close marker are not the brand's days, so threshold rules do not run
+ *    (the spend guard refuses that state too).
  * 4. evaluateRules() decides.
  * 5. Every decision goes to rule_actions and the activity log:
  *    - shadow: dry_run=true, no Meta write. The morning digest lists the
@@ -37,8 +44,12 @@
  *
  * A brand whose config is invalid, unavailable or disabled (monthlyCapEur
  * cleared) runs only the built-in cap rule, on the last valid config (A6's
- * loadPauseConfig, README ADR 3), and fails the run so the broken config is
- * seen. A brand saved disabled and never enabled is skipped quietly.
+ * loadPauseConfig, README ADR 3), with that config's liveMode and ad
+ * account: a broken edit is not read. An invalid or unavailable config fails
+ * every run so it is seen; a disabled one is an operator's choice and fails
+ * only the first run of each local day (RK9-541). Deleting the brand config
+ * stops the fallback. A brand saved disabled and never enabled is skipped
+ * quietly.
  *
  * One brand's failure does not stop the others. The run throws at the end
  * when anything failed, so the host shows it.
@@ -192,8 +203,8 @@ export function liveNoticeText(config: BrandConfig, paused: readonly AppliedDeci
 
 /**
  * The snapshots evaluateRules needs, and the rules that can run on them. A
- * status read failure throws (fail-open: nothing is decided). Any other read
- * failure is a failure line, and its rules get no input, so they decide nothing.
+ * read failure is a failure line, and its rules get no input, so they decide
+ * nothing; a status read failure leaves only the cap rule.
  */
 async function readInputs(
   deps: RulesDeps,
@@ -205,8 +216,9 @@ async function readInputs(
   failures: string[],
 ): Promise<{ snapshots: RuleSnapshots; status: RuleStatus; rules: RuleSet }> {
   const brand = config.brandCode;
-  const enabled = rules.list.filter((rule) => rule.enabled);
   const readClient = clientFor(deps, companyId, config, "readOnly", initiator);
+  const capOnly = (set: RuleSet): RuleSet => ({ ...set, list: set.list.filter((rule) => rule.type === "pause_all_cap") });
+  let runnable = rules;
 
   let status: RuleStatus;
   try {
@@ -216,13 +228,20 @@ async function readInputs(
     ]);
     status = { adAccountId: config.meta.adAccountId, ads, campaigns };
   } catch (error) {
-    throw new Error(`${brand}: Meta status read failed, nothing paused (fail-open): ${safeError(error)}`);
+    // The other rules need the ad status (fail-open). The cap rule does not:
+    // pauseAll lists its own targets (RK9-541).
+    status = { adAccountId: config.meta.adAccountId, ads: [], campaigns: [], unread: true };
+    runnable = capOnly(runnable);
+    failures.push(`${brand}: Meta status read failed (${safeError(error)}), only pause_all_cap evaluated (fail-open)`);
   }
+  const enabled = runnable.list.filter((rule) => rule.enabled);
 
   let spend: RuleSnapshots["spend"] = null;
+  let zoneMismatch = false;
   if (enabled.some((rule) => rule.type === "pause_all_cap")) {
     try {
       const figures = await checkSpend({ config, client: readClient, now });
+      zoneMismatch = figures.reason === "account_timezone_mismatch";
       // The cap is in EUR: a figure in another currency is no basis for a pause.
       if (figures.pctUsed === null || figures.mtdEur === null || figures.currency !== "EUR") {
         failures.push(`${brand}: month-to-date not read (${figures.reason}: ${figures.detail}), pause_all_cap skipped (fail-open)`);
@@ -241,7 +260,10 @@ async function readInputs(
   // Yesterday's rows are partial until insights-daily-close finalised them
   // (shortly after local midnight); until then threshold rules wait.
   let days: RuleAdDay[] = [];
-  if (maxDays > 0) {
+  if (maxDays > 0 && zoneMismatch) {
+    // Insights dates and the close marker are ad-account-local days.
+    failures.push(`${brand}: the ad account reports in another time zone than ${config.timeZone}, threshold rules skipped`);
+  } else if (maxDays > 0) {
     try {
       if (await deps.store.dayClosed(companyId, today)) {
         days = await deps.store.adDays(companyId, addDays(yesterday, -(maxDays - 1)), yesterday);
@@ -276,19 +298,47 @@ async function readInputs(
 
   const maxCooldownHours = Math.max(0, ...enabled.map((rule) => rule.cooldownHours));
   let priorActions: RuleSnapshots["priorActions"] = [];
-  let runnable = rules;
   if (maxCooldownHours > 0) {
     try {
       priorActions = await deps.store.priorActions(companyId, enabled.map((rule) => rule.ruleId), new Date(now.getTime() - maxCooldownHours * 3_600_000));
     } catch (error) {
       // Without their cooldowns the other rules would decide again every
       // hour. The cap rule still runs: pauseAll pauses only what is ACTIVE.
-      runnable = { ...rules, list: rules.list.filter((rule) => rule.type === "pause_all_cap") };
-      failures.push(`${brand}: earlier rule actions not read (${safeError(error)}), only pause_all_cap ran`);
+      runnable = capOnly(runnable);
+      const cooldown = await capHaltCooldown(deps, companyId, config, runnable, now);
+      priorActions = cooldown.prior;
+      failures.push(`${brand}: earlier rule actions not read (${safeError(error)}), only pause_all_cap evaluated, ${cooldown.note}`);
     }
   }
 
   return { snapshots: { timeZone: config.timeZone, days, creatives, fatigue, spend, priorActions }, status, rules: runnable };
+}
+
+/**
+ * The cap rule's cooldown when rule_actions cannot be read: a live cap pause
+ * stores its halt before any Meta call, so the halt's start is the latest cap
+ * pause (RK9-541). Without a halt in force (none, cleared or expired) the
+ * rule has no cooldown, as before; its pause is idempotent.
+ */
+async function capHaltCooldown(
+  deps: RulesDeps,
+  companyId: string,
+  config: BrandConfig,
+  rules: RuleSet,
+  now: Date,
+): Promise<{ prior: RuleSnapshots["priorActions"]; note: string }> {
+  const cap = rules.list.find((rule) => rule.type === "pause_all_cap");
+  if (!cap) return { prior: [], note: "no cooldown" };
+  try {
+    const halt = await readRuleHalt(deps.ctx, companyId, "pause_all_cap", now);
+    if (!halt || !Number.isFinite(Date.parse(halt.since))) return { prior: [], note: "no cap halt in force, no cooldown" };
+    return {
+      prior: [{ ruleId: cap.ruleId, objectId: config.meta.adAccountId, mode: "live", applied: true, decidedAt: new Date(Date.parse(halt.since)).toISOString() }],
+      note: `cooldown from the cap halt of ${halt.since}`,
+    };
+  } catch (error) {
+    return { prior: [], note: `no cooldown (cap halt not read: ${safeError(error)})` };
+  }
 }
 
 /**
@@ -387,7 +437,7 @@ export async function runRulesForBrand(
   try {
     inputs = await readInputs(deps, companyId, config, config.rules, now, options.initiator, failures);
   } catch (error) {
-    // No reading: the cap halt's headroom count starts again.
+    // No reading (an unexpected throw): the cap halt's headroom count starts again.
     if (options.persist) await deps.ctx.state.delete(capHeadroomKey(companyId)).catch(() => undefined);
     throw error;
   }
@@ -398,7 +448,12 @@ export async function runRulesForBrand(
     return outcome;
   }
 
-  await releaseCapHalt(deps, companyId, config, snapshots.spend, options.initiator, now, failures);
+  if (status.unread) {
+    // No status reading: the cap halt's headroom count starts again.
+    await deps.ctx.state.delete(capHeadroomKey(companyId)).catch(() => undefined);
+  } else {
+    await releaseCapHalt(deps, companyId, config, snapshots.spend, options.initiator, now, failures);
+  }
 
   const names = new Map(status.ads.map((ad) => [ad.id, ad.name ?? ""]));
   const paused: AppliedDecision[] = [];
@@ -478,6 +533,30 @@ export async function runRulesForBrand(
   return outcome;
 }
 
+function fallbackReportKey(companyId: string) {
+  return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `rules-fallback-reported:${companyId}` };
+}
+
+/**
+ * True when the run reports the brand's fallback as a failure. A disabled
+ * config (monthlyCapEur cleared) is the operator's choice: it fails only the
+ * first run of each local day, so it does not hide the other brands' real
+ * failures every hour (RK9-541). An invalid or unavailable config is always
+ * reported, and so is anything when the marker cannot be read or written.
+ */
+async function reportFallback(deps: RulesDeps, companyId: string, config: BrandConfig, state: "invalid" | "disabled" | "unavailable"): Promise<boolean> {
+  if (state !== "disabled") return true;
+  const key = fallbackReportKey(companyId);
+  const mark = `${state}:${localDate(deps.now(), config.timeZone)}`;
+  try {
+    if ((await deps.ctx.state.get(key)) === mark) return false;
+    await deps.ctx.state.set(key, mark);
+  } catch (error) {
+    deps.ctx.logger.warn("rk9-ads rules: fallback report marker failed", { companyId, error: safeError(error) });
+  }
+  return true;
+}
+
 export function createRulesJob(deps: RulesDeps) {
   return async (job: PluginJobContext): Promise<void> => {
     const { ctx } = deps;
@@ -499,17 +578,22 @@ export function createRulesJob(deps: RulesDeps) {
         continue;
       }
       let config = loaded.config;
-      if (loaded.fallback) {
-        failures.push(`${config.brandCode}: the brand config is ${loaded.fallback.state}; only pause_all_cap ran, on the last valid config`);
-        config = { ...config, rules: capOnlyRules(config) };
-      }
+      if (loaded.fallback) config = { ...config, rules: capOnlyRules(config) };
       brands += 1;
+      let ran = false;
       try {
         const outcome = await runRulesForBrand(deps, companyId, config, { initiator: { source: "job", jobRunId: job.runId }, persist: true, fallback: loaded.fallback });
         failures.push(...outcome.failures);
+        ran = true;
       } catch (error) {
         ctx.logger.warn("rk9-ads rules: brand failed", { companyId, error: safeError(error) });
         failures.push(`${config.brandCode}: ${safeError(error)}`);
+      }
+      // After the run, so the line says what happened (RK9-541).
+      if (loaded.fallback) {
+        const line = `${config.brandCode}: the brand config is ${loaded.fallback.state}; only pause_all_cap ${ran ? "ran" : "was to run"}, on the last valid config`;
+        if (await reportFallback(deps, companyId, config, loaded.fallback.state)) failures.push(line);
+        else ctx.logger.info(`rk9-ads rules: ${line} (reported today already)`, { companyId });
       }
     }
     ctx.logger.info("rk9-ads rules-evaluate done", { runId: job.runId, brands, failures: failures.length });
