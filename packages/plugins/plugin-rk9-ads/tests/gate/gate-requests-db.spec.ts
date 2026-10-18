@@ -212,7 +212,7 @@ describeDb("activation gate SQL on real Postgres", () => {
     const campaign = "120200000000000888";
     const failed = await card({ adId: "120200000000000315" });
     const since = new Date(Date.now() - 60_000);
-    const query = { objectId: campaign, gateRequestId: failed.id, since, inFlightMinutes: 30 };
+    const query = { objectId: campaign, objectKind: "campaign" as const, gateRequestId: failed.id, since, inFlightMinutes: 30 };
     // A swap card of another ad in the same ad set names no campaign in its binding.
     await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET publication_id = NULL WHERE id = $1`, [failed.id]);
     const swap = await card({ adId: "120200000000000316" });
@@ -220,6 +220,9 @@ describeDb("activation gate SQL on real Postgres", () => {
     expect(await repo.newerActivation(companyA, query)).toBeNull();
     expect(await store.decide(companyA, swap.tokenHash, "approved", 4242)).toBe(true);
     expect(await repo.newerActivation(companyA, query)).toEqual({ id: swap.id, inFlight: true, ageMinutes: 0 });
+    // An ad of the failed card is not held by a sibling ad's running card: that card can never end its retry (verifier High).
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000315", objectKind: "ad" })).toBeNull();
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000315", objectKind: undefined })).toBeNull();
     // Without the failed card's ad set (a pause's own entry names no card), an earlier activation's outcome ties the ad set to the campaign.
     const pauseQuery = { ...query, gateRequestId: "kill_switch:halt-1" };
     expect(await repo.newerActivation(companyA, pauseQuery)).toBeNull();

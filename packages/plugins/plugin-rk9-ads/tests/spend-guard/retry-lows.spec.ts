@@ -99,6 +99,7 @@ describe("a newer card approved during the retry's reads (L1, L2)", () => {
     expect(await tick(r, "2026-10-21T10:05:00Z")).toBeNull();
     expect(queries).toHaveLength(2);
     expect(queries[1]).toEqual(queries[0]);
+    expect(queries[0]).toMatchObject({ objectId: AD, objectKind: "ad", gateRequestId: CARD });
     expect(pauses(r.meta, AD)).toBe(1);
     expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
     const overlap = alerts(r, "uudelleenyritys pysäytti kohteen");
@@ -182,6 +183,17 @@ describe("a PAUSED write that Meta refuses for good (L5)", () => {
     mode = "ok";
     expect(await tick(r, "2026-10-21T10:25:00Z")).toBeNull();
     expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
+  });
+
+  it("without Telegram there is no alert, so every tick's run still fails", async () => {
+    const r = rig({ meta: activeMeta(), config: brandConfig(), overrides: { newerActivation: async () => null } });
+    await addPendingUndos(r.harness.ctx, COMPANY_A, [
+      { objectId: AD, kind: "ad", gateRequestId: CARD, brandCode: "OLL", haltRule: "kill_switch", since: "2026-10-21T10:00:00.000Z", error: "rate limited" },
+    ]);
+    refusePause(r.meta, AD, { message: "Error validating access token", code: 190, type: "OAuthException" });
+    expect(await tick(r, "2026-10-21T10:05:00Z")).toMatch(/for good \(token_invalid/);
+    expect(await tick(r, "2026-10-21T10:10:00Z")).toMatch(/for good \(token_invalid/);
+    expect(r.notifier.messages).toHaveLength(0);
   });
 
   it("a deleted object (code 100, subcode 33) counts as permanent, and the UI's overview names it", async () => {

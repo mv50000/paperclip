@@ -636,7 +636,7 @@ export async function retryPendingUndos(
     let newer: NewerActivation | null = null;
     // Only an activation approved after the latest failed pause or undo of the object ends it (RK9-568).
     const since = new Date(entry.failedAt ?? entry.since);
-    const query: NewerActivationQuery = { objectId: entry.objectId, gateRequestId: entry.gateRequestId, since, inFlightMinutes: UNDO_IN_FLIGHT_MINUTES };
+    const query: NewerActivationQuery = { objectId: entry.objectId, objectKind: entry.kind, gateRequestId: entry.gateRequestId, since, inFlightMinutes: UNDO_IN_FLIGHT_MINUTES };
     const lookup = !haltInForce && deps.newerActivation !== undefined && Number.isFinite(since.getTime()) ? deps.newerActivation : null;
     if (lookup) {
       try {
@@ -672,7 +672,8 @@ export async function retryPendingUndos(
       const detail = safeError(error);
       const permanent = permanentErrorClass(error);
       stillFailing.push({ entry, error: detail, permanent });
-      if (permanent && entry.permanentError) {
+      // Without Telegram the run's failure is the only signal: it stays loud.
+      if (permanent && entry.permanentError && config.telegram) {
         // Alerted and reported already: the entry waits for a board user without failing every run (RK9-567).
         deps.ctx.logger.info("rk9-ads pause retry: Meta still refuses the PAUSED write for good", { companyId, objectId: entry.objectId, class: permanent });
         continue;

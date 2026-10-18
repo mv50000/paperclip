@@ -109,10 +109,11 @@ export interface ActivationGateRepo {
    * end. Of those, one approved within `inFlightMinutes` is still running
    * (`inFlight: true`); an older one has an unknown result (`unknown: true`):
    * its worker died, or its outcome was not stored (RK9-567). Running first,
-   * then activated, then unknown. A card with no recorded end also matches
-   * by its ad set when that ad set is `gateRequestId`'s or is known (from
-   * any card) to be under the object: a swap card's binding names no
-   * campaign (RK9-567). `since` is on the worker's clock; the query moves it
+   * then activated, then unknown. For a campaign (`objectKind`), a card with
+   * no recorded end also matches by its ad set when that ad set is
+   * `gateRequestId`'s or is known (from any card) to be under the campaign:
+   * a swap card's binding names no campaign (RK9-567). An ad or ad set
+   * never matches a sibling's running card, which cannot end its retry. `since` is on the worker's clock; the query moves it
    * to the database's clock, which `decided_at` uses (RK9-567).
    */
   newerActivation(companyId: string, input: NewerActivationQuery): Promise<NewerActivation | null>;
@@ -125,6 +126,8 @@ export interface ActivationGateRepo {
 
 export interface NewerActivationQuery {
   objectId: string;
+  /** The object's level. Only a campaign matches a running card by its ad set (RK9-567). */
+  objectKind?: "campaign" | "adset" | "ad";
   gateRequestId: string;
   since: Date;
   inFlightMinutes: number;
@@ -222,14 +225,14 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient, options: { now?:
              AND (g.ad_id = $4 OR g.adset_id = $4 OR g.payload->'activation'->>'campaignId' = $4
                OR g.outcome->>'adId' = $4 OR g.outcome->>'adsetId' = $4 OR g.outcome->>'campaignId' = $4
                OR g.publication_id = (SELECT o.publication_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2)
-               OR ((g.outcome IS NULL OR g.outcome->>'handler' = 'started') AND g.adset_id IS NOT NULL
+               OR ($7 = 'campaign' AND (g.outcome IS NULL OR g.outcome->>'handler' = 'started') AND g.adset_id IS NOT NULL
                  AND (g.adset_id = (SELECT o.adset_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2)
                    OR g.adset_id IN (SELECT o.adset_id FROM ${gate} o
                      WHERE o.company_id = $1 AND o.kind = 'activate_ad' AND o.adset_id IS NOT NULL
                        AND (o.payload->'activation'->>'campaignId' = $4 OR o.outcome->>'campaignId' = $4)))))
          ) hits
          ORDER BY CASE state WHEN 'in_flight' THEN 0 WHEN 'activated' THEN 1 ELSE 2 END, decided_at DESC LIMIT 1`,
-        [companyId, input.gateRequestId, input.since.toISOString(), input.objectId, Math.max(1, Math.trunc(input.inFlightMinutes)), workerNow().toISOString()],
+        [companyId, input.gateRequestId, input.since.toISOString(), input.objectId, Math.max(1, Math.trunc(input.inFlightMinutes)), workerNow().toISOString(), input.objectKind ?? null],
       );
       const row = rows[0];
       if (!row) return null;

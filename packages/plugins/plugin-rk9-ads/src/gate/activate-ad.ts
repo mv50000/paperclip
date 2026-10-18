@@ -369,7 +369,9 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     // The company's halts and the ad's own, read right before the first write.
     const haltNow = async (): Promise<HaltState | AdHaltState | null> => {
       try {
-        return (await deps.haltOf(companyId, startedAt)) ?? (deps.adHaltOf ? await deps.adHaltOf(companyId, binding.adId, startedAt) : null);
+        // The earlier of the start and now: a worker clock stepped back must not skip a halt that is in force now.
+        const since = new Date(Math.min(startedAt.getTime(), now().getTime()));
+        return (await deps.haltOf(companyId, since)) ?? (deps.adHaltOf ? await deps.adHaltOf(companyId, binding.adId, since) : null);
       } catch (error) {
         throw new HaltedError(`the halt could not be read (${safeError(error)})`, null);
       }

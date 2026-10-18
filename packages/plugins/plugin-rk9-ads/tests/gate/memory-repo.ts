@@ -62,7 +62,8 @@ export function memoryActivationRepo(store: MemoryGateStore, now: () => Date): A
           const binding = activationOf(row);
           const outcome = row.outcome ?? {};
           const ids = [binding?.adId, binding?.adsetId, binding?.campaignId, outcome.adId, outcome.adsetId, outcome.campaignId];
-          const byAdset = running && binding !== null && (binding.adsetId === own?.adsetId || adsetsOfObject.has(binding.adsetId));
+          const byAdset =
+            input.objectKind === "campaign" && running && binding !== null && ((own !== null && binding.adsetId === own.adsetId) || adsetsOfObject.has(binding.adsetId));
           return ids.includes(input.objectId) || (publicationId !== undefined && binding?.publicationId === publicationId) || byAdset;
         })
         .map((row) => {

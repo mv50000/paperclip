@@ -354,8 +354,9 @@ the core chat-channels bot is never shared. See
   board user acknowledges it. A transient error makes it loud again. Drop
   alerts have one marker per object. The newer-card lookup moves the
   failure's time from the worker's clock to the database's, which
-  `decided_at` uses, and also counts a running card of the failed card's
-  ad set (a swap card's binding names no campaign). A config that cannot be
+  `decided_at` uses. For a campaign it also counts a running card of the
+  failed card's ad set (a swap card's binding names no campaign); an ad or
+  ad set never waits for a sibling's card. A config that cannot be
   loaded names the open entries. activate_ad reads every halt as of its own
   start, so a run that stalls past the 30-minute pause-ad halt still sees
   it. The callback router tries the handler's final outcome write twice more
