@@ -121,11 +121,6 @@ export function savedRulesBlock(configJson: Record<string, unknown>): RulesBlock
   return { liveMode: rules.liveMode === true, list };
 }
 
-/** True when the save turns the brand's live mode on: it needs the typed word LIVE. */
-export function liveModeTurnedOn(saved: RulesBlock, next: RulesBlock): boolean {
-  return next.liveMode && !saved.liveMode;
-}
-
 /** The rule's identity across saves: the built-in cap by its type, the others by ruleId. */
 function ruleKey(rule: Record<string, unknown>): string {
   return rule.type === "pause_all_cap" ? BUILTIN_CAP_RULE_ID : String(rule.ruleId ?? "");
@@ -139,6 +134,29 @@ function ruleLabel(rule: Record<string, unknown>): string {
 /** The list with the built-in cap the schema appends when no entry names it (shadow, 24 h). */
 function withCap(list: ReadonlyArray<Record<string, unknown>>): ReadonlyArray<Record<string, unknown>> {
   return list.some((rule) => rule.type === "pause_all_cap") ? list : [...list, { type: "pause_all_cap", mode: "shadow", cooldownHours: 24 }];
+}
+
+export const LIVE_MODE_ON_TEXT = "Live-tila päälle: säännöt pysäyttävät mainoksia Metassa ilman erillistä hyväksyntää.";
+
+/**
+ * What the save starts pausing ads in Meta with: live mode turned on, or,
+ * with live mode already on, a rule that becomes live (from shadow, switched
+ * on, or new). Each needs the typed word LIVE (RK9-566, RK9-563). With live
+ * mode off a live rule still runs in shadow, so nothing is listed.
+ */
+export function liveChanges(saved: RulesBlock, next: RulesBlock): string[] {
+  if (!next.liveMode) return [];
+  if (!saved.liveMode) return [LIVE_MODE_ON_TEXT];
+  const savedByKey = new Map(withCap(saved.list).map((rule) => [ruleKey(rule), rule]));
+  const out: string[] = [];
+  for (const rule of withCap(next.list)) {
+    if (rule.type === "propose_scale" || rule.enabled === false || rule.mode !== "live") continue;
+    const before = savedByKey.get(ruleKey(rule));
+    if (!before || before.type !== rule.type) out.push(`${ruleLabel(rule)}: uusi sääntö live-tilassa.`);
+    else if (before.enabled === false) out.push(`${ruleLabel(rule)}: kytketään päälle live-tilassa.`);
+    else if (before.mode !== "live") out.push(`${ruleLabel(rule)}: varjotilasta live-tilaan.`);
+  }
+  return out;
 }
 
 /** A number field with the schema's default when it is missing. */

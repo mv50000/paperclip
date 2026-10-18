@@ -26,9 +26,23 @@ const UNDO_KIND_LABEL: Record<string, string> = { campaign: "kampanja", adset: "
 const SPEND_CAP_TEXT: Record<UiSpend["spendCapStatus"], string> = {
   set: "asetettu",
   missing: "puuttuu: Metan katto ei suojaa",
-  above_cap: "korkeampi kuin pluginin kuukausikatto",
+  headroom_above_remaining: "sallii enemmän kuin kuukausikatosta on jäljellä",
   unknown: "ei luettu",
 };
+
+/** A standing spend risk (spend-guard/guard.ts SPEND_RISKS) as the warning the page shows (RK9-563). */
+export function riskText(spend: UiSpend, risk: string): string {
+  switch (risk) {
+    case "no_spend_cap":
+      return "Metan spend_cap puuttuu: Meta ei pysäytä kulutusta katossa.";
+    case "spend_cap_headroom_exceeds_remaining":
+      return `Metan spend_cap sallii vielä ${fmtEur(spend.headroomEur)}, mutta kuukausikatosta on jäljellä ${fmtEur(spend.remainingEur)}: Meta ei pysäytä ajoissa.`;
+    case "projection_exceeds_cap":
+      return `Nykyisillä budjeteilla kuun loppuun arvio ${fmtEur(spend.projectedMonthEndEur)} ylittää kuukausikaton ${fmtEur(spend.monthlyCapEur)}.`;
+    default:
+      return `Kulutusriski: ${risk}.`;
+  }
+}
 
 function SpendHeader(props: { overview: UiOverview }) {
   const { overview } = props;
@@ -42,6 +56,13 @@ function SpendHeader(props: { overview: UiOverview }) {
         <Muted>Kuukauden kulutusta ei ole luettu{overview.brand?.monthlyCapEur === null ? ": kuukausikatto puuttuu, brändi on pois päältä." : "."}</Muted>
       )}
       {overview.spendError ? <ErrorText>Kulutuslukuja ei voitu lukea: {overview.spendError}</ErrorText> : null}
+      {spend && spend.risks.length > 0 ? (
+        <ul aria-label="Kulutusriskit" role="alert" className="list-disc space-y-1 pl-5 text-sm text-destructive">
+          {spend.risks.map((risk) => (
+            <li key={risk}>{riskText(spend, risk)}</li>
+          ))}
+        </ul>
+      ) : null}
       <KeyValueList
         pairs={[
           {
@@ -52,7 +73,9 @@ function SpendHeader(props: { overview: UiOverview }) {
           },
           {
             label: "Metan spend_cap",
-            value: spend ? `${fmtEur(spend.spendCapEur)}: ${SPEND_CAP_TEXT[spend.spendCapStatus]}` : "–",
+            value: spend
+              ? `${fmtEur(spend.spendCapEur)}: ${SPEND_CAP_TEXT[spend.spendCapStatus] ?? spend.spendCapStatus}${spend.headroomEur === null ? "" : ` (vielä ${fmtEur(spend.headroomEur)})`}`
+              : "–",
           },
           {
             label: "Spend guard",
@@ -474,6 +497,8 @@ function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void;
   const [preview, setPreview] = useState<UiPauseAdResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** One key per confirmation: a retry of it writes no second rule_actions row (RK9-563). */
+  const [idempotencyKey] = useState(() => globalThis.crypto.randomUUID());
   const adId = props.publication.metaAdId!;
 
   async function load() {
@@ -492,7 +517,12 @@ function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void;
     setBusy(true);
     setError(null);
     try {
-      const result = (await pauseAd({ adId, dryRun: false, confirm: true })) as UiPauseAdResult;
+      const result = (await pauseAd({ adId, dryRun: false, confirm: true, idempotencyKey })) as UiPauseAdResult;
+      if (result.duplicate) {
+        toast({ title: `Pysäytys oli jo lähetetty: mainoksen ${result.name ?? adId} tila nyt ${result.status}`, tone: result.paused ? "success" : "warn" });
+        props.onPaused(result);
+        return;
+      }
       const closed = result.closedCardIds?.length ?? 0;
       toast({ title: `Mainos ${result.name ?? adId} pysäytetty${closed > 0 ? `, ${closed} aktivointikorttia suljettu` : ""}`, tone: "success" });
       if (result.auditError) toast({ title: "Kirjanpitoriviä ei tallennettu", body: result.auditError, tone: "warn" });

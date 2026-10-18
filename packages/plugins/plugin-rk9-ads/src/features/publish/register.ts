@@ -17,6 +17,7 @@ import {
 } from "../../publish/publish-service.js";
 import { sqlCreativeSource, sqlPublicationStore, type CreativeSource, type PublicationStore } from "../../publish/store.js";
 import { getActivationCards } from "../gate/runtime.js";
+import { sanitize } from "../ui/sanitize.js";
 import { brandClient, brandReadClient, sqlOnceStore, type Initiator, type OnceStore } from "../spend-guard/support.js";
 import type { FeatureRuntime } from "../types.js";
 
@@ -32,7 +33,8 @@ import type { FeatureRuntime } from "../types.js";
  *   `pending` with the publication id to poll.
  * - action `swap-creative`: the same for a new creative on an existing ad
  *   (`adId`); the ad's status is never touched.
- * - data `publication`: one publication by id, for polling.
+ * - data `publication`: one publication by id, for polling. Its stored error
+ *   text goes through the UI's `sanitize` again when it is read (RK9-563).
  *
  * Every handler takes the company from the host's invocation context.
  */
@@ -169,7 +171,7 @@ export function registerPublish(runtime: FeatureRuntime, overrides: PublishOverr
     const id = typeof params.publicationId === "string" ? params.publicationId : null;
     if (!id) return { state: "error", error: "publicationId is required" };
     const publication = await service.get(companyId, id);
-    return publication ? { state: "ok", publication } : { state: "not_found" };
+    return publication ? { state: "ok", publication: sanitize(publication) } : { state: "not_found" };
   });
 
   runtime.onShutdown(async () => {

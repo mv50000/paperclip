@@ -26,7 +26,10 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   pauses the ad again, and closes the ad's open activation cards, so an
  *   old card cannot activate it again (RK9-562); a failed close is
  *   `cardsError`, a halt that was not stored after AD_HALT_WRITE_ATTEMPTS
- *   writes `haltError` (RK9-567).
+ *   writes `haltError` (RK9-567). A live pause carries `idempotencyKey`
+ *   (one per confirmation in the UI): a repeat with the same key writes
+ *   nothing and returns the ad's status now with `duplicate: true`
+ *   (RK9-563). A failed pause gives the key back, so a retry runs.
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
@@ -41,6 +44,7 @@ export const PAUSE_AD_ACTION_KEY = "pause-ad";
 export const UI_PAUSE_RULE_ID = "ui-pause-ad";
 
 const AD_ID_RE = /^\d{1,30}$/;
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9_-]{8,100}$/;
 const REASON_MAX = 300;
 /** Writes of the pause-ad halt before the pause goes on without it (RK9-567). */
 export const AD_HALT_WRITE_ATTEMPTS = 2;
@@ -98,6 +102,10 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     if (!dryRun && context.actor.type !== "user") {
       throw new Error("Pausing an ad from the UI is board-only; an agent can run it with dryRun only");
     }
+    const idempotencyKey = typeof params.idempotencyKey === "string" ? params.idempotencyKey : "";
+    if (!dryRun && !IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
+      throw new Error("A live pause needs idempotencyKey (8-100 characters A-Z, a-z, 0-9, _ or -), one per confirmation");
+    }
     // Stopping works on the last valid config too (pause-config.ts).
     const loaded = await loadPauseConfig(ctx, companyId);
     if (!loaded.ok) throw new Error(loaded.error);
@@ -114,6 +122,19 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     }
     if (dryRun) {
       return sanitize({ dryRun: true, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: false });
+    }
+
+    // A repeat of the same confirmation (a double click, a retry after a lost response) writes no second row.
+    const onceKey = `pause-ad:${adId}:${idempotencyKey}`;
+    let claimed = false;
+    try {
+      if (!(await deps.store.claim(companyId, onceKey, "ui_pause_ad", { adId }))) {
+        return sanitize({ dryRun: false, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: before.status === "PAUSED", duplicate: true });
+      }
+      claimed = true;
+    } catch (cause) {
+      // A pause stops spend: it goes on without the duplicate check rather than not at all.
+      ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker could not be claimed", { companyId, adId, detail: safeError(cause) });
     }
 
     const initiator: Initiator = {
@@ -205,6 +226,13 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       ctx.logger.warn("rk9-ads ui: closed activation cards not edited", { companyId, adId, detail: safeError(cause) });
     }
     if (!paused) {
+      if (claimed) {
+        try {
+          await deps.store.release(companyId, onceKey);
+        } catch (cause) {
+          ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker was not released", { companyId, adId, detail: safeError(cause) });
+        }
+      }
       const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}${haltError ? `; the pause-ad halt was not stored: ${haltError}` : ""}${activationRunning ? "; an approved activation of the ad may still be running and set it ACTIVE: check the ad's status" : ""}`;
       throw new Error(`The pause of ad ${adId} failed: ${error}. ${cards}`);
     }

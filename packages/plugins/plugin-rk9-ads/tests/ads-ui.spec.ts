@@ -11,11 +11,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { UiOverview, UiPublication, UiSettings, UiWidget } from "../src/features/ui/dto.js";
 import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
 import { ACK_UNDO_WORD, ackPrompt, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
-import { saveRulesBlock } from "../src/ui/host-config.js";
+import { readConfigVersion, saveRulesBlock } from "../src/ui/host-config.js";
 import { ACTION, DATA } from "../src/ui/keys.js";
-import { EDITOR_DEFAULT_RULES, savedRulesBlock, weakeningChanges } from "../src/ui/rule-fields.js";
+import { EDITOR_DEFAULT_RULES, fromEditor, liveChanges, savedRulesBlock, toEditor, weakeningChanges } from "../src/ui/rule-fields.js";
 import { prepareRules } from "../src/features/rules/editor.js";
-import { DEFAULT_RULES } from "../src/features/rules/schema.js";
+import { DEFAULT_RULES, parseRules } from "../src/features/rules/schema.js";
 import { LIVE_WORD, WEAKEN_WORD } from "../src/ui/SettingsPage.js";
 
 const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
@@ -153,6 +153,8 @@ function ollolaOverview(overrides: Partial<UiOverview> = {}): UiOverview {
       dailyBudgetSumEur: 3.22,
       remainingDays: 14,
       spendCapEur: 100,
+      headroomEur: 80,
+      remainingEur: 87.66,
       spendCapStatus: "set",
       allow: true,
       reason: "ok",
@@ -286,11 +288,45 @@ describe("operator UI (RK9-518)", () => {
     await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
     await click("Pysäytä mainos");
 
-    expect(bridge.actionCalls[1]).toEqual({ key: ACTION.pauseAd, params: { adId: "301", dryRun: false, confirm: true } });
+    expect(bridge.actionCalls[1]).toEqual({ key: ACTION.pauseAd, params: { adId: "301", dryRun: false, confirm: true, idempotencyKey: expect.stringMatching(/^[A-Za-z0-9_-]{8,100}$/) } });
     expect(bridge.refreshes).toContain(DATA.overview);
     expect(container.querySelector('[data-badge="PAUSED"]')).not.toBeNull();
     expect(buttons("Pysäytä")).toEqual([]);
     expect(bridge.toasts.map((toast) => toast.title)).toContain("Mainos OLL kesä 1 pysäytetty");
+  });
+
+  it("shows the standing spend risks as warnings, with Meta's headroom against what is left of the month (RK9-563)", async () => {
+    bridge.data.set(DATA.overview, ollolaOverview());
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    expect(container.querySelector('ul[aria-label="Kulutusriskit"]')).toBeNull();
+    const spend = ollolaOverview().spend!;
+    bridge.data.set(
+      DATA.overview,
+      ollolaOverview({
+        spend: { ...spend, headroomEur: 100, spendCapStatus: "headroom_above_remaining", projectedMonthEndEur: 140, risks: ["spend_cap_headroom_exceeds_remaining", "projection_exceeds_cap"] },
+      }),
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    const risks = Array.from(container.querySelectorAll('ul[aria-label="Kulutusriskit"] li')).map((node) => node.textContent ?? "");
+    expect(risks).toHaveLength(2);
+    expect(risks[0]).toMatch(/^Metan spend_cap sallii vielä 100,00\s€, mutta kuukausikatosta on jäljellä 87,66\s€: Meta ei pysäytä ajoissa\.$/);
+    expect(risks[1]).toMatch(/^Nykyisillä budjeteilla kuun loppuun arvio 140,00\s€ ylittää kuukausikaton 100,00\s€\.$/);
+    expect(container.textContent).toMatch(/sallii enemmän kuin kuukausikatosta on jäljellä \(vielä 100,00\s€\)/);
+  });
+
+  it("a repeated pause names the ad's status now instead of a second pause (RK9-563)", async () => {
+    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.actions.set(ACTION.pauseAd, async (params) =>
+      params.dryRun !== false
+        ? { dryRun: true, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "ACTIVE", paused: false }
+        : { dryRun: false, adId: "301", name: "OLL kesä 1", previousStatus: "PAUSED", status: "PAUSED", paused: true, duplicate: true },
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    await click("Pysäytä");
+    await click("Tarkista ja jatka");
+    await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
+    await click("Pysäytä mainos");
+    expect(bridge.toasts.map((toast) => toast.title)).toEqual(["Pysäytys oli jo lähetetty: mainoksen OLL kesä 1 tila nyt PAUSED"]);
   });
 
   it("the kill switch previews, needs the typed word, and shows halt and card failures as errors", async () => {
@@ -670,6 +706,91 @@ describe("operator UI (RK9-518)", () => {
       expect(posts).toHaveLength(1);
     });
 
+    it("a rule switched to live while live mode is on needs LIVE; no POST without it (RK9-563)", async () => {
+      const shadow = { ...CPC, mode: "shadow" };
+      savedConfig.rules.list = [shadow, CAP];
+      bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: [shadow, CAP] });
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      const mode = container.querySelectorAll<HTMLSelectElement>('select[aria-label="Tila"]')[0]!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(mode, "live");
+        mode.dispatchEvent(new Event("change", { bubbles: true }));
+        await flush();
+      });
+      await click("Tallenna säännöt");
+      expect(changes()).toEqual(["Kynnyspysäytys cpc-ceiling: varjotilasta live-tilaan."]);
+      expect(posts).toEqual([]);
+      await type(`Kirjoita ${LIVE_WORD}`, LIVE_WORD);
+      await click("Tallenna live-tilassa");
+      expect(prepares.at(-1)).toMatchObject({ confirmLive: true });
+      expect(posts).toHaveLength(1);
+    });
+
+    it("liveChanges: a rule becoming live counts only while live mode is on", () => {
+      const shadow = { ...CPC, mode: "shadow" };
+      const on = (list: Array<Record<string, unknown>>) => ({ liveMode: true, list });
+      expect(liveChanges(on([shadow, CAP]), on([CPC, CAP]))).toEqual(["Kynnyspysäytys cpc-ceiling: varjotilasta live-tilaan."]);
+      expect(liveChanges(on([{ ...CPC, enabled: false }, CAP]), on([CPC, CAP]))).toEqual(["Kynnyspysäytys cpc-ceiling: kytketään päälle live-tilassa."]);
+      expect(liveChanges(on([CAP]), on([CAP, { ...CPC, ruleId: "new-rule" }]))).toEqual(["Kynnyspysäytys new-rule: uusi sääntö live-tilassa."]);
+      expect(liveChanges(on([CPC, CAP]), on([CPC, CAP]))).toEqual([]);
+      expect(liveChanges({ liveMode: false, list: [shadow] }, { liveMode: false, list: [CPC] })).toEqual([]);
+      expect(liveChanges({ liveMode: false, list: [CPC] }, on([CPC]))).toHaveLength(1);
+      // The built-in cap the schema appends in shadow: naming it live is a change.
+      expect(liveChanges(on([CPC]), on([CPC, CAP]))).toEqual(["Kuukausikatto 90 % (sisäänrakennettu): varjotilasta live-tilaan."]);
+    });
+
+    it("a config saved elsewhere after the page loaded refuses the save, with no POST (RK9-563)", async () => {
+      let updatedAt = "2026-10-18T08:00:00.000Z";
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          updatedAt = "2026-10-18T09:30:00.000Z";
+          return new Response(JSON.stringify({ configJson: savedConfig, updatedAt }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ configJson: savedConfig, updatedAt }), { status: 200 });
+      }) as typeof fetch;
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      // The host's form saved the config after the editor loaded.
+      updatedAt = "2026-10-18T09:00:00.000Z";
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(container.textContent).toContain("saved elsewhere after this page loaded");
+    });
+
+    it("saveRulesBlock compares updatedAt with the loaded one and returns the new one", async () => {
+      let updatedAt = "2026-10-18T08:00:00.000Z";
+      const fetcher = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push({});
+          updatedAt = "2026-10-18T10:00:00.000Z";
+        }
+        return new Response(JSON.stringify({ configJson: savedConfig, updatedAt }), { status: 200 });
+      }) as typeof fetch;
+      const loaded = await readConfigVersion(COMPANY_ID, fetcher);
+      expect(loaded).toBe("2026-10-18T08:00:00.000Z");
+      await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], false, "2026-10-18T07:00:00.000Z")).rejects.toThrow(/saved elsewhere/);
+      expect(posts).toEqual([]);
+      await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], false, loaded)).resolves.toBe("2026-10-18T10:00:00.000Z");
+      expect(posts).toHaveLength(1);
+      const failing = (async () => new Response("nope", { status: 500 })) as typeof fetch;
+      expect(await readConfigVersion(COMPANY_ID, failing)).toBeNull();
+    });
+
+    it("a save that keeps the shipped defaults of a config without rules.list leaves list out (RK9-563)", () => {
+      // The editor shows the effective rules (defaults plus the built-in cap) and sends them back unchanged.
+      const shown = parseRules(undefined).rules.list.map((rule) => fromEditor(toEditor(rule as unknown as Record<string, unknown>)));
+      const raw = { brandCode: "OLL" };
+      expect(prepareRules(raw, { liveMode: false, list: shown })).toMatchObject({ ok: true, rules: { liveMode: false } });
+      expect((prepareRules(raw, { liveMode: false, list: shown }) as { rules: Record<string, unknown> }).rules).not.toHaveProperty("list");
+      // A changed threshold is the operator's own list.
+      const tuned = shown.map((rule) => (rule.ruleId === "cpc-ceiling" ? { ...rule, threshold: 0.4 } : rule));
+      expect((prepareRules(raw, { liveMode: false, list: tuned }) as { rules: { list?: unknown[] } }).rules.list).toHaveLength(2);
+      // A config with a saved list keeps saving it, defaults or not.
+      const listed = { brandCode: "OLL", rules: { liveMode: false, list: [...DEFAULT_RULES] } };
+      expect((prepareRules(listed, { liveMode: false, list: shown }) as { rules: { list?: unknown[] } }).rules.list).toHaveLength(2);
+    });
+
     it("a change that does not weaken the protection saves without a word", async () => {
       await render(createElement(SettingsPage, { context: CONTEXT }));
       await type("Kynnys", "0.6");
@@ -689,7 +810,7 @@ describe("operator UI (RK9-518)", () => {
       }) as typeof fetch;
       await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [])).rejects.toThrow(/Kynnyspysäytys cpm-ceiling: poistetaan/);
       expect(posts).toEqual([]);
-      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, ["Kynnyspysäytys cpm-ceiling: poistetaan."])).resolves.toBeUndefined();
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, ["Kynnyspysäytys cpm-ceiling: poistetaan."])).resolves.toBeNull();
       expect(posts).toHaveLength(1);
     });
 
@@ -703,7 +824,7 @@ describe("operator UI (RK9-518)", () => {
       }) as typeof fetch;
       await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [])).rejects.toThrow(/Live-tila päälle/);
       expect(posts).toEqual([]);
-      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [], true)).resolves.toBeUndefined();
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [], true)).resolves.toBeNull();
       expect(posts).toHaveLength(1);
     });
 

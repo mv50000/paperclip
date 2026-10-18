@@ -71,6 +71,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export interface SelectOptions<T extends LedgerTable> {
   where?: LedgerWhere<T>;
+  /** Only rows whose timestamp column is later than now() by the database clock, e.g. a live card's valid_until. */
+  afterNow?: LedgerColumn<T>;
   orderBy?: { column: LedgerColumn<T>; direction?: "asc" | "desc" };
   limit?: number;
 }
@@ -136,6 +138,10 @@ export function createLedger(db: PluginDatabaseClient) {
       assertCompanyId(companyId);
       const params: unknown[] = [];
       let statement = `SELECT * FROM ${qualified(table)} WHERE ${whereClause(table, companyId, options.where, params)}`;
+      if (options.afterNow !== undefined) {
+        assertColumn(table, options.afterNow);
+        statement += ` AND ${options.afterNow} > now()`;
+      }
       if (options.orderBy) {
         assertColumn(table, options.orderBy.column);
         statement += ` ORDER BY ${options.orderBy.column} ${options.orderBy.direction === "desc" ? "DESC" : "ASC"}`;
