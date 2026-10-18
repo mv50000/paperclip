@@ -307,7 +307,10 @@ export async function runDueRechecks(
           // The ticks ran and failed: the objects the late listing would show may still spend (RK9-570).
           const alertError = await alertDroppedRecheck(deps, companyId, config, recheck);
           if (alertError) {
-            failures.push(`${prefix}: past its window, but the alert failed (${alertError}); kept to send it next tick`);
+            // With Telegram down the run's failure is the only signal: it carries what the drop line would.
+            failures.push(
+              `${prefix}: ran ${recheck.attempts} time(s) within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt} and failed each time (last error: ${recheck.lastError ?? "unknown"}); check Meta and pause by hand what is still ACTIVE. The alert failed (${alertError}): kept to send it next tick`,
+            );
             continue;
           }
         }
@@ -336,8 +339,9 @@ export async function runDueRechecks(
           continue;
         }
       }
+      let result: PauseAllResult;
       try {
-        const result = await pauseAll(deps, companyId, config, {
+        result = await pauseAll(deps, companyId, config, {
           dryRun: false,
           rule,
           reason: `${recheck.reason} (re-check)`.slice(0, 300),
@@ -349,21 +353,22 @@ export async function runDueRechecks(
           recheck: true,
           haltId: recheck.haltId,
         });
-        failures.push(...retryFailures(prefix, result));
-        if (result.errors.length > 0 && !result.retry?.stored) {
-          // The objects are not in the retry: the re-check stays and counts the failure.
-          failures.push(`${prefix}: retrying next tick`);
-          await noteFailure(`PAUSED failed and the pause retry could not be stored: ${result.errors.at(-1)!.error}`);
-          continue;
-        }
-        // The listing ran; what it could not pause is in the pause retry.
-        await drop();
-        if (result.telegram === "failed") failures.push(`${prefix}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
       } catch (error) {
         failures.push(`${prefix}: ${safeError(error)}, retrying next tick`);
         if (error instanceof PauseListError) failures.push(...stopFailures(prefix, error.stopped));
         await noteFailure(`${error instanceof PauseListError ? "listing failed" : "pause failed"}: ${safeError(error)}`);
+        continue;
       }
+      failures.push(...retryFailures(prefix, result));
+      if (result.errors.length > 0 && !result.retry?.stored) {
+        // The objects are not in the retry: the re-check stays and counts the failure.
+        failures.push(`${prefix}: retrying next tick`);
+        await noteFailure(`PAUSED failed and the pause retry could not be stored: ${result.errors.at(-1)!.error}`);
+        continue;
+      }
+      // The listing ran; what it could not pause is in the pause retry. A failed drop is no failed run: the outer catch reports it.
+      await drop();
+      if (result.telegram === "failed") failures.push(`${prefix}: paused ${result.count} but the Telegram notice failed (${result.telegramError})`);
     } catch (error) {
       failures.push(`${prefix}: ${safeError(error)}`);
     }

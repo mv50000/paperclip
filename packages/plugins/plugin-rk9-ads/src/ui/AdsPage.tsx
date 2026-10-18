@@ -168,12 +168,6 @@ function HaltBanner(props: {
 }
 
 /**
- * The activation undos (RK9-565) and the pauses' own PAUSED writes during a
- * halt (RK9-568) that Meta refused: the job retries PAUSED every 5 minutes,
- * with or without a halt. A board user can stop the retry of the entries the
- * preview lists, with a typed confirmation.
- */
-/**
  * What the acknowledgement stops, by origin: an activation undo or a pause's
  * own PAUSED write (RK9-570). Absent origin: an activation undo.
  */
@@ -184,6 +178,12 @@ export function ackPrompt(entries: ReadonlyArray<{ origin?: string }>): string {
   return `Kuittaus lopettaa ${what} uudelleenyrityksen. Kohteet voivat jäädä ACTIVE-tilaan kuluttamaan: tarkista ja pysäytä ne Metassa.`;
 }
 
+/**
+ * The activation undos (RK9-565) and the pauses' own PAUSED writes during a
+ * halt (RK9-568) that Meta refused: the job retries PAUSED every 5 minutes,
+ * with or without a halt. A board user can stop the retry of the entries the
+ * preview lists, with a typed confirmation.
+ */
 function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoError?: string; onChanged: () => void }) {
   const clearHalt = usePluginAction(ACTION.clearHalt);
   const toast = usePluginToast();

@@ -260,6 +260,26 @@ describe("a re-check whose every run fails within its window (RK9-568 verifier L
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toMatchObject({ attempts: 1, lastError: "halt not read: Error: state down" });
   });
 
+  it("a run whose pause ran but whose drop failed is not counted as failed", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    reactivate(r.meta);
+    const state = r.harness.ctx.state;
+    const del = state.delete.bind(state);
+    let refuse = true;
+    state.delete = async (input) => {
+      if (refuse && input.stateKey === `recheck:${COMPANY_A}:kill_switch`) {
+        refuse = false;
+        throw new Error("state down");
+      }
+      return del(input);
+    };
+    expect(await failingTick(r, "2026-10-21T10:05:00Z")).toMatch(/OLL kill_switch re-check: Error: state down/);
+    const kept = await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch");
+    expect(kept?.attempts).toBeUndefined();
+    expect(r.meta.ads[0]!.status).toBe("PAUSED");
+  });
+
   it("a failed alert keeps the re-check, and the next tick sends it and drops it", async () => {
     const r = rig({ meta: activeMeta() });
     await killSwitch(r);
@@ -267,7 +287,9 @@ describe("a re-check whose every run fails within its window (RK9-568 verifier L
     r.meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/campaigns") ? new Error("graph down") : null);
     await failingTick(r, "2026-10-21T10:05:00Z");
     r.notifier.fail = new Error("Telegram 502");
-    expect(await failingTick(r, "2026-10-21T10:20:00Z")).toMatch(/kill_switch re-check: past its window, but the alert failed \(.*Telegram 502.*\); kept to send it next tick/);
+    expect(await failingTick(r, "2026-10-21T10:20:00Z")).toMatch(
+      /kill_switch re-check: ran 1 time\(s\) within 15 min .* and failed each time \(last error: listing failed: .*graph down.*\); check Meta and pause by hand what is still ACTIVE\. The alert failed \(.*Telegram 502.*\): kept to send it next tick/,
+    );
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).not.toBeNull();
     expect(r.store.keys().some((key) => key.includes("recheck-dropped:"))).toBe(false);
     r.notifier.fail = null;
