@@ -51,7 +51,7 @@ import { haltIdentity, readRuleHalt, storedRuleHalt } from "./halt.js";
 import { haltUntil, pauseAll, PauseListError, retryFailures, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
 import { readPendingUndos, retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
-import { dropRecheck, noteRecheckFailure, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS } from "./recheck.js";
+import { dropRecheck, noteRecheckFailure, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS, type Recheck, type RecheckRule } from "./recheck.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const SCHEDULED_PAUSE_JOB_KEY = "scheduled-pause";
@@ -238,9 +238,47 @@ async function runForCompany(
   return failures;
 }
 
+const RECHECK_RULE_TEXT: Record<RecheckRule, string> = { kill_switch: "hätäkatkaisimen", scheduled_pause: "ajastetun pysäytyksen" };
+
+/** The marker of a dropped re-check's alert: one per re-check (RK9-570). */
+export function recheckDroppedKey(brandCode: string, rule: RecheckRule, dueAt: string): string {
+  return `recheck-dropped:${brandCode}:${rule}:${dueAt}`;
+}
+
+/**
+ * The alert of a re-check whose every run failed within its window (RK9-570):
+ * its listing, its halt read or its PAUSED writes, with no pause retry
+ * stored. Claimed before the send and given back when it fails. Returns the
+ * failure that keeps the re-check for the next tick, or null.
+ */
+async function alertDroppedRecheck(deps: RecheckDeps, companyId: string, config: BrandConfig, recheck: Recheck): Promise<string | null> {
+  if (!config.telegram) return null;
+  const key = recheckDroppedKey(config.brandCode, recheck.rule, recheck.dueAt);
+  try {
+    if (!(await deps.store.claim(companyId, key, "recheck_dropped", { rule: recheck.rule, dueAt: recheck.dueAt }))) return null;
+  } catch (error) {
+    return `alert marker not claimed (${safeError(error)})`;
+  }
+  const name = config.displayName || config.brandCode;
+  const text = [
+    `⚠️ ${name}: ${RECHECK_RULE_TEXT[recheck.rule]} uudelleentarkistus epäonnistui ${recheck.attempts} kertaa ${RECHECK_WINDOW_MS / 60_000} minuutin aikana ja lopetettiin`,
+    `Viimeisin virhe: ${(recheck.lastError ?? "tuntematon").slice(0, 300)}`,
+    "Metan listaus on voinut näyttää viiveellä ACTIVE-kohteita, joita ei pysäytetty. Tarkista Metassa ja pysäytä käsin kohteet, jotka ovat yhä ACTIVE.",
+  ].join("\n");
+  try {
+    await deps.notifier.sendMessage(companyId, config, text);
+    return null;
+  } catch (error) {
+    await deps.store.release(companyId, key).catch(() => undefined);
+    return safeError(error);
+  }
+}
+
+type RecheckDeps = PauseAllDeps & { store: OnceStore };
+
 /** The tick: runs each due re-check of the company. Returns the run's failure lines. */
 export async function runDueRechecks(
-  deps: PauseAllDeps,
+  deps: RecheckDeps,
   companyId: string,
   config: BrandConfig,
   initiator: Initiator,
@@ -255,19 +293,43 @@ export async function runDueRechecks(
       const due = Date.parse(recheck.dueAt);
       if (Number.isFinite(due) && due > now.getTime()) continue;
       const drop = () => dropRecheck(deps.ctx, companyId, rule);
+      /** One more failed run, so the drop at the window's end can say the ticks ran (RK9-568, RK9-570). */
+      const noteFailure = async (error: string) => {
+        try {
+          await noteRecheckFailure(deps.ctx, companyId, recheck, error);
+        } catch (noteError) {
+          // The drop at the window's end cannot tell that this run ran: this line does.
+          failures.push(`${prefix}: this failed run was not counted (${safeError(noteError)})`);
+        }
+      };
       if (!Number.isFinite(due) || now.getTime() - due > RECHECK_WINDOW_MS) {
+        if (recheck.attempts) {
+          // The ticks ran and failed: the objects the late listing would show may still spend (RK9-570).
+          const alertError = await alertDroppedRecheck(deps, companyId, config, recheck);
+          if (alertError) {
+            failures.push(`${prefix}: past its window, but the alert failed (${alertError}); kept to send it next tick`);
+            continue;
+          }
+        }
         deps.ctx.logger.warn("rk9-ads pause: re-check past its window, dropped", { companyId, rule, dueAt: recheck.dueAt, attempts: recheck.attempts ?? 0 });
         await drop();
         // The run fails once so it is seen, and says whether the ticks ran (RK9-568).
         failures.push(
           recheck.attempts
-            ? `${prefix}: ran ${recheck.attempts} time(s) within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt} but PAUSED failed and the pause retry could not be stored (last error: ${recheck.lastError ?? "unknown"}), dropped; pause the objects by hand in Meta`
+            ? `${prefix}: ran ${recheck.attempts} time(s) within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt} and failed each time (last error: ${recheck.lastError ?? "unknown"}), dropped; check Meta and pause by hand what is still ACTIVE`
             : `${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`,
         );
         continue;
       }
       if (recheck.haltId !== null) {
-        const halt = await readRuleHalt(deps.ctx, companyId, rule, now);
+        let halt: Awaited<ReturnType<typeof readRuleHalt>>;
+        try {
+          halt = await readRuleHalt(deps.ctx, companyId, rule, now);
+        } catch (error) {
+          failures.push(`${prefix}: halt not read (${safeError(error)}), retrying next tick`);
+          await noteFailure(`halt not read: ${safeError(error)}`);
+          continue;
+        }
         if (!halt || haltIdentity(halt) !== recheck.haltId) {
           deps.ctx.logger.info("rk9-ads pause: halt no longer in force, re-check dropped", { companyId, rule });
           await drop();
@@ -291,12 +353,7 @@ export async function runDueRechecks(
         if (result.errors.length > 0 && !result.retry?.stored) {
           // The objects are not in the retry: the re-check stays and counts the failure.
           failures.push(`${prefix}: retrying next tick`);
-          try {
-            await noteRecheckFailure(deps.ctx, companyId, recheck, result.errors.at(-1)!.error);
-          } catch (error) {
-            // The drop at the window's end cannot tell that this run ran: this line does.
-            failures.push(`${prefix}: this failed run was not counted (${safeError(error)})`);
-          }
+          await noteFailure(`PAUSED failed and the pause retry could not be stored: ${result.errors.at(-1)!.error}`);
           continue;
         }
         // The listing ran; what it could not pause is in the pause retry.
@@ -305,6 +362,7 @@ export async function runDueRechecks(
       } catch (error) {
         failures.push(`${prefix}: ${safeError(error)}, retrying next tick`);
         if (error instanceof PauseListError) failures.push(...stopFailures(prefix, error.stopped));
+        await noteFailure(`${error instanceof PauseListError ? "listing failed" : "pause failed"}: ${safeError(error)}`);
       }
     } catch (error) {
       failures.push(`${prefix}: ${safeError(error)}`);

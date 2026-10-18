@@ -704,14 +704,15 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     const r = await rig();
     const { sent } = await lostUndo(r);
     const preview = await r.harness.performAction<{ halt: HaltState; pendingUndo?: Array<{ objectId: string; key: string }> }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
-    expect(preview.pendingUndo).toMatchObject([{ objectId: AD, key: `${AD}|${sent.id}` }]);
+    const since = (await readPendingUndos(r.harness.ctx, COMPANY_A))[0]!.since;
+    expect(preview.pendingUndo).toMatchObject([{ objectId: AD, key: `${AD}|${sent.id}|${since}` }]);
     await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: preview.halt.since }, BOARD);
     expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toHaveLength(1);
     await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`activation undo: pausing ad ${AD} failed again`));
 
     // An agent may not acknowledge.
-    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, acknowledgeUndos: [`${AD}|${sent.id}`] }, AGENT)).rejects.toThrow(/board-only/);
-    const result = await r.harness.performAction<{ acknowledgedUndos?: number }>(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, acknowledgeUndos: [`${AD}|${sent.id}`, "unknown|key"] }, BOARD);
+    await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, acknowledgeUndos: [`${AD}|${sent.id}|${since}`] }, AGENT)).rejects.toThrow(/board-only/);
+    const result = await r.harness.performAction<{ acknowledgedUndos?: number }>(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, acknowledgeUndos: [`${AD}|${sent.id}|${since}`, "unknown|key"] }, BOARD);
     expect(result).toMatchObject({ cleared: false, acknowledgedUndos: 1 });
     expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
     expect(r.harness.activity.filter((entry) => entry.message === UNDO_ACKNOWLEDGED_ACTIVITY)).toMatchObject([

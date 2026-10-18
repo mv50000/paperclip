@@ -365,6 +365,21 @@ the core chat-channels bot is never shared. See
   the old worker before it starts a new one, and a server restart kills its
   workers (systemd `KillMode=control-group`, worker exits on stdin close);
   two servers on one database are not supported.
+- **Retry keys, counts and alert length** (RK9-570, same list). An entry's
+  key (`<object>|<gate request or pause>|<failedAt ?? since>`) names its
+  latest failure, so an acknowledgement from an older preview takes neither
+  a new entry of the same object and pause nor a failure merged after the
+  preview; two merges in one tick get keys 1 ms apart. A failed retry
+  changes no key and counts on the entry it read even when a pause failure
+  was merged into it during the tick. The Ads page shows an
+  acknowledgement that took fewer entries than the preview listed as an
+  error and asks for a new one; its prompt names activation undos and
+  pause retries apart. Alerts stay under 3900 characters with the heading
+  and the instruction whole; the object and error lines are cut with a
+  note. A re-check counts a failed listing or halt read as a failed run
+  too, and when a re-check whose runs all failed is dropped at the end of
+  its window it sends one Telegram alert (`recheck-dropped:<brand>:<rule>:<due
+  time>`); a failed send keeps the re-check for the next tick.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above

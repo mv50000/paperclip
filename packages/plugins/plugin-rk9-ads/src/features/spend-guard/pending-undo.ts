@@ -64,10 +64,10 @@
  * that failed. The tick retries it and ends it like an undo: Meta confirms,
  * a newer activation is approved after the halt ended, or a board user
  * acknowledges it. A failure of an object that already has an open entry
- * adds one attempt to that entry, which keeps its identity and so its alert
- * marker. Every entry counts its failed PAUSED writes and keeps the last
- * error (redacted), so the run's failure lines and the alerts tell how often
- * and why Meta refused.
+ * adds one attempt to that entry, which keeps its gate request (and so its
+ * alert marker) but gets a new `failedAt`. Every entry counts its failed
+ * PAUSED writes and keeps the last error (redacted), so the run's failure
+ * lines and the alerts tell how often and why Meta refused.
  *
  * Stored in plugin_state (no migration, G11), one key per company. The gate
  * handlers and the job run in one worker process, so a per-company lock
@@ -81,10 +81,12 @@
  * restart kills the old workers too. Two servers on one database would each
  * run a worker and break this lock; Paperclip supports one node per database
  * (doc/plugins/PLUGIN_SPEC.md). The job removes only the
- * entries it handled (undoEntryKey: object, gate request and the merged
+ * entries it handled (undoEntryKey: object, gate request and the latest
  * failure's time), so a newer failure of the same object that arrived
  * during its Meta calls stays, and only a removed entry gets the
- * superseded audit row and alert.
+ * superseded audit row and alert. A board acknowledgement names entries by
+ * the same key. A failed retry changes no key: it counts on the entry it
+ * read even when a pause failure was merged into it meanwhile (RK9-570).
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -162,13 +164,32 @@ function undoKey(companyId: string) {
 }
 
 /**
- * An entry's identity for removal and acknowledgement. A merged pause
- * failure sets `failedAt`, which changes the key: a tick or a board
- * acknowledgement that read the entry before that failure no longer names
- * it, so the newer failure stays (RK9-568 verifier).
+ * An entry's identity for removal and acknowledgement: the object, the gate
+ * request and the latest failure's time. A merged pause failure sets a new
+ * `failedAt`, and a new entry of the same object and gate request has a new
+ * `since`, so a tick or a board acknowledgement that read the entry before
+ * that failure no longer names it, and the newer failure stays (RK9-568
+ * verifier, RK9-570). A failed retry changes no key.
  */
-export function undoEntryKey(entry: Pick<PendingUndo, "objectId" | "gateRequestId" | "failedAt">): string {
-  return `${entry.objectId}|${entry.gateRequestId}${typeof entry.failedAt === "string" ? `|${entry.failedAt}` : ""}`;
+export function undoEntryKey(entry: Pick<PendingUndo, "objectId" | "gateRequestId" | "since" | "failedAt">): string {
+  return `${entry.objectId}|${entry.gateRequestId}|${typeof entry.failedAt === "string" ? entry.failedAt : entry.since}`;
+}
+
+/** An entry's identity across merged pause failures: they keep its object, gate request and `since` (RK9-570). */
+function undoBaseKey(entry: Pick<PendingUndo, "objectId" | "gateRequestId" | "since">): string {
+  return `${entry.objectId}|${entry.gateRequestId}|${entry.since}`;
+}
+
+/**
+ * A merged failure's `failedAt`: its own time, or 1 ms after the entry's
+ * latest failure when that is not earlier. Two pauses of one tick (the
+ * scheduled pause and its re-check share `now`) then give two keys (RK9-570).
+ */
+function nextFailedAt(open: Pick<PendingUndo, "since" | "failedAt">, at: string): string {
+  const latest = Date.parse(open.failedAt ?? open.since);
+  const own = Date.parse(at);
+  if (!Number.isFinite(latest) || !Number.isFinite(own) || own > latest) return at;
+  return new Date(latest + 1).toISOString();
 }
 
 /**
@@ -249,7 +270,7 @@ async function addPauseFailures(ctx: StateCtx, companyId: string, entries: reado
         attempts: undoAttempts(open) + 1,
         lastError: entry.error,
         lastAttemptAt: entry.since,
-        failedAt: entry.since,
+        failedAt: nextFailedAt(open, entry.since),
       };
       next[index] = merged;
       out.push(merged);
@@ -265,14 +286,18 @@ interface RetryFailure {
   permanent: PermanentErrorClass | null;
 }
 
-/** One more failed attempt on each entry still open (by object and gate request), and whether it failed for good. */
+/**
+ * One more failed attempt on each entry still open, and whether it failed
+ * for good. Matched by undoBaseKey: a pause failure merged into the entry
+ * during the tick changed its key, but this attempt still counts (RK9-570).
+ */
 async function noteRetryFailures(ctx: StateCtx, companyId: string, failed: readonly RetryFailure[], now: Date): Promise<void> {
   if (failed.length === 0) return;
   await withLock(companyId, async () => {
-    const byKey = new Map(failed.map((item) => [undoEntryKey(item.entry), item]));
+    const byKey = new Map(failed.map((item) => [undoBaseKey(item.entry), item]));
     let changed = false;
     const next = (await readPendingUndos(ctx, companyId)).map((open): PendingUndo => {
-      const item = byKey.get(undoEntryKey(open));
+      const item = byKey.get(undoBaseKey(open));
       if (item === undefined) return open;
       changed = true;
       const { permanentError: _class, permanentSince, ...rest } = open;
@@ -342,63 +367,114 @@ function errorLine(entry: AlertEntry): string {
   return `• ${KIND_TEXT[entry.kind] ?? entry.kind} ${entry.objectId}: PAUSED epäonnistui ${undoAttempts(entry)} kertaa${error ? `, viimeisin virhe: ${error.slice(0, 200)}` : ""}`;
 }
 
+/** Telegram allows 4096 characters; the alerts stay under this, like the pause notice. */
+export const ALERT_MAX_CHARS = 3900;
+
+/** An alert's lines: `head` and `tail` stay whole, `body` (the objects and their errors) is cut to fit. */
+interface AlertParts {
+  head: string[];
+  body: string[];
+  tail: string[];
+}
+
+/**
+ * Joins an alert within ALERT_MAX_CHARS. The heading and the instruction at
+ * the end always go out; the object and error lines between them are cut
+ * where they no longer fit, and `cutNote` says so. Many failed objects used
+ * to push the instruction past the limit (RK9-570).
+ */
+export function fitAlert(parts: AlertParts, cutNote: string, max = ALERT_MAX_CHARS): string {
+  const all = [...parts.head, ...parts.body, ...parts.tail].join("\n");
+  if (all.length <= max) return all;
+  const fixed = [...parts.head, cutNote, ...parts.tail].join("\n").length;
+  let room = max - fixed;
+  const body: string[] = [];
+  for (const line of parts.body) {
+    if (line.length + 1 <= room) {
+      body.push(line);
+      room -= line.length + 1;
+      continue;
+    }
+    // A long object list keeps its start; a line too short to be worth cutting is left out.
+    if (room > 40) body.push(`${line.slice(0, room - 2)}…`);
+    break;
+  }
+  return [...parts.head, ...body, cutNote, ...parts.tail].join("\n").slice(0, max);
+}
+
 /** The overlap and permanent alerts (RK9-567), the same for both origins. */
-function retryAlertText(name: string, kind: "overlap" | "permanent", entries: readonly AlertEntry[], newer?: OverlapCard): string[] {
+function retryAlertText(name: string, kind: "overlap" | "permanent", entries: readonly AlertEntry[], newer?: OverlapCard): AlertParts {
   if (kind === "overlap") {
-    return [
-      newer?.unknown
-        ? `⚠️ ${name}: uudelleenyritys pysäytti kohteen, vaikka uudempi kortti ${newer.id} hyväksyttiin; kortin tulosta ei tallennettu, joten aktivointi on voinut onnistua`
-        : `⚠️ ${name}: uudelleenyritys pysäytti kohteen, jonka uudempi kortti ${newer?.id ?? "?"} hyväksyttiin sen aikana`,
-      `Nyt PAUSED: ${objectList(entries)}. Kortti voi näyttää "aktivoitu", vaikka kohde on pysäytetty.`,
-      "Jos mainoksen pitää olla käynnissä, lähetä uusi kortti ja hyväksy se. Tarkista tila Metassa.",
-    ];
+    return {
+      head: [
+        newer?.unknown
+          ? `⚠️ ${name}: uudelleenyritys pysäytti kohteen, vaikka uudempi kortti ${newer.id} hyväksyttiin; kortin tulosta ei tallennettu, joten aktivointi on voinut onnistua`
+          : `⚠️ ${name}: uudelleenyritys pysäytti kohteen, jonka uudempi kortti ${newer?.id ?? "?"} hyväksyttiin sen aikana`,
+      ],
+      body: [`Nyt PAUSED: ${objectList(entries)}.`],
+      tail: [`Kortti voi näyttää "aktivoitu", vaikka kohde on pysäytetty.`, "Jos mainoksen pitää olla käynnissä, lähetä uusi kortti ja hyväksy se. Tarkista tila Metassa."],
+    };
   }
   const reason = entries[0]?.permanentError;
-  return [
-    `⚠️ ${name}: Meta hylkää pysäytyksen pysyvästi${reason ? ` (${PERMANENT_TEXT[reason] ?? reason})` : ""}`,
-    `Voi olla yhä ACTIVE: ${objectList(entries)}`,
-    ...entries.map(errorLine),
-    "Uudelleenyritys jatkuu 5 minuutin välein ilman uusia hälytyksiä, mutta onnistuu vasta korjauksen jälkeen. Pysäytä kohde käsin Metassa tai korjaa token ja oikeudet, ja kuittaa merkintä boardissa.",
-  ];
+  return {
+    head: [`⚠️ ${name}: Meta hylkää pysäytyksen pysyvästi${reason ? ` (${PERMANENT_TEXT[reason] ?? reason})` : ""}`],
+    body: [`Voi olla yhä ACTIVE: ${objectList(entries)}`, ...entries.map(errorLine)],
+    tail: [
+      "Uudelleenyritys jatkuu 5 minuutin välein ilman uusia hälytyksiä, mutta onnistuu vasta korjauksen jälkeen. Pysäytä kohde käsin Metassa tai korjaa token ja oikeudet, ja kuittaa merkintä boardissa.",
+    ],
+  };
 }
 
 /** A pause failure's alert (RK9-568): the objects, how often Meta refused and its last error. */
-function pauseAlertText(name: string, kind: "failed" | "dropped", entries: readonly AlertEntry[], stored: boolean): string[] {
+function pauseAlertText(name: string, kind: "failed" | "dropped", entries: readonly AlertEntry[], stored: boolean): AlertParts {
   if (kind === "dropped") {
-    return [
-      `ℹ️ ${name}: pysäytyksen uudelleenyritys lopetettiin, koska pysäytystilan päätyttyä uudempi aktivointi hyväksyttiin`,
-      `Ei enää pysäytetä: ${objectList(entries)}. Tarkista tila Metassa.`,
-    ];
+    return {
+      head: [`ℹ️ ${name}: pysäytyksen uudelleenyritys lopetettiin, koska pysäytystilan päätyttyä uudempi aktivointi hyväksyttiin`],
+      body: [`Ei enää pysäytetä: ${objectList(entries)}.`],
+      tail: ["Tarkista tila Metassa."],
+    };
   }
   const rule = entries[0]?.haltRule;
-  return [
-    `⚠️ ${name}: pysäytys epäonnistui pysäytystilan aikana${rule ? ` (${RULE_TEXT[rule] ?? rule})` : ""}`,
-    `Voi olla yhä ACTIVE: ${objectList(entries)}`,
-    ...entries.map(errorLine),
-    stored
-      ? "Pysäytystä yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa sen, board kuittaa sen tai pysäytystilan päätyttyä uudempi aktivointi hyväksytään. Tarkista tila Metassa."
-      : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
-  ];
+  return {
+    head: [`⚠️ ${name}: pysäytys epäonnistui pysäytystilan aikana${rule ? ` (${RULE_TEXT[rule] ?? rule})` : ""}`],
+    body: [`Voi olla yhä ACTIVE: ${objectList(entries)}`, ...entries.map(errorLine)],
+    tail: [
+      stored
+        ? "Pysäytystä yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa sen, board kuittaa sen tai pysäytystilan päätyttyä uudempi aktivointi hyväksytään. Tarkista tila Metassa."
+        : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
+    ],
+  };
+}
+
+/** An activation undo's alert (RK9-565). */
+function activationAlertText(name: string, kind: "failed" | "dropped", entries: readonly AlertEntry[], stored: boolean): AlertParts {
+  if (kind === "dropped") {
+    return {
+      head: [`ℹ️ ${name}: aktivoinnin peruutuksen uudelleenyritys lopetettiin, koska uudempi aktivointi hyväksyttiin`],
+      body: [`Ei enää pysäytetä: ${objectList(entries)}.`],
+      tail: ["Tarkista tila Metassa."],
+    };
+  }
+  return {
+    head: [`⚠️ ${name}: aktivoinnin peruutus epäonnistui pysäytyksen aikana`],
+    body: [`Voi olla yhä ACTIVE-tilassa: ${objectList(entries)}`],
+    tail: [
+      stored
+        ? "Peruutusta yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen. Tarkista tila Metassa."
+        : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
+    ],
+  };
 }
 
 export function undoAlertText(config: BrandConfig, kind: UndoAlertKind, entries: readonly AlertEntry[], stored = true, newer?: OverlapCard): string {
   const name = config.displayName || config.brandCode;
-  if (kind === "overlap" || kind === "permanent") return retryAlertText(name, kind, entries, newer).join("\n").slice(0, 3900);
-  if (entries[0] && undoOrigin(entries[0]) === "pause") return pauseAlertText(name, kind, entries, stored).join("\n").slice(0, 3900);
-  const lines =
-    kind === "failed"
-      ? [
-          `⚠️ ${name}: aktivoinnin peruutus epäonnistui pysäytyksen aikana`,
-          `Voi olla yhä ACTIVE-tilassa: ${objectList(entries)}`,
-          stored
-            ? "Peruutusta yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen. Tarkista tila Metassa."
-            : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
-        ]
-      : [
-          `ℹ️ ${name}: aktivoinnin peruutuksen uudelleenyritys lopetettiin, koska uudempi aktivointi hyväksyttiin`,
-          `Ei enää pysäytetä: ${objectList(entries)}. Tarkista tila Metassa.`,
-        ];
-  return lines.join("\n").slice(0, 3900);
+  const parts =
+    kind === "overlap" || kind === "permanent"
+      ? retryAlertText(name, kind, entries, newer)
+      : entries[0] && undoOrigin(entries[0]) === "pause"
+        ? pauseAlertText(name, kind, entries, stored)
+        : activationAlertText(name, kind, entries, stored);
+  return fitAlert(parts, `… viesti lyhennetty Telegramin pituusrajaan: ${entries.length} kohdetta yhteensä.`);
 }
 
 interface AlertDeps {

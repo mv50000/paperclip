@@ -152,7 +152,7 @@ describe("a re-check whose PAUSED write Meta keeps refusing (RK9-568, AC 5a)", (
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toMatchObject({ attempts: 1, lastError: expect.stringContaining("rate limited") });
     await failingTick(r, "2026-10-21T10:10:00Z");
     const dropped = await failingTick(r, "2026-10-21T10:20:00Z");
-    expect(dropped).toMatch(/kill_switch re-check: ran 2 time\(s\) within 15 min .* but PAUSED failed and the pause retry could not be stored \(last error: .*rate limited.*\), dropped; pause the objects by hand in Meta/);
+    expect(dropped).toMatch(/kill_switch re-check: ran 2 time\(s\) within 15 min .* and failed each time \(last error: PAUSED failed and the pause retry could not be stored: .*rate limited.*\), dropped; check Meta and pause by hand what is still ACTIVE/);
     expect(dropped).not.toContain("no tick ran");
     expect(dropped).not.toContain(META_TOKEN);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
@@ -361,7 +361,7 @@ describe("after the halt ends, the RK9-565 drop rule holds (RK9-568, AC 5d)", ()
   it("the board's acknowledgement of the previewed entry ends it", async () => {
     const { r, halt } = await failedKillSwitch(() => null);
     const preview = await r.harness.performAction<{ pendingUndo?: Array<{ key: string; origin?: string }> }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
-    expect(preview.pendingUndo).toMatchObject([{ key: `${AD}|kill_switch:${halt.id}`, origin: "pause" }]);
+    expect(preview.pendingUndo).toMatchObject([{ key: `${AD}|kill_switch:${halt.id}|2026-10-21T10:00:00.000Z`, origin: "pause" }]);
     await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since, acknowledgeUndos: [preview.pendingUndo![0]!.key] }, BOARD);
     expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toEqual([]);
     const writes = adPauses(r.meta);

@@ -10,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { UiOverview, UiPublication, UiSettings, UiWidget } from "../src/features/ui/dto.js";
 import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
-import { ACK_UNDO_WORD, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
+import { ACK_UNDO_WORD, ackPrompt, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
 import { saveRulesBlock } from "../src/ui/host-config.js";
 import { ACTION, DATA } from "../src/ui/keys.js";
 import { EDITOR_DEFAULT_RULES, savedRulesBlock, weakeningChanges } from "../src/ui/rule-fields.js";
@@ -374,21 +374,49 @@ describe("operator UI (RK9-518)", () => {
     const pendingUndo = [{ kind: "campaign", objectId: "120200000000000101", gateRequestId: "gate-9", since: "2026-10-17T08:00:05.000Z" }];
     bridge.data.set(DATA.overview, ollolaOverview({ pendingUndo }));
     bridge.actions.set(ACTION.clearHalt, async (params) => {
-      if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: null, pendingUndo: [{ ...pendingUndo[0], key: "120200000000000101|gate-9" }] };
+      if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: null, pendingUndo: [{ ...pendingUndo[0], key: "120200000000000101|gate-9|2026-10-17T08:00:05.000Z" }] };
       bridge.data.set(DATA.overview, ollolaOverview());
       return { dryRun: false, cleared: false, halt: null, acknowledgedUndos: 1 };
     });
     await render(createElement(AdsPage, { context: CONTEXT }));
     expect(container.textContent).not.toContain("Pysäytystila päällä");
     expect(container.textContent).toContain("Aktivoinnin peruutus epäonnistui, voi olla yhä ACTIVE: kampanja 120200000000000101");
-    await click("Kuittaa peruutukset");
-    expect(container.textContent).toContain("Kuittaus lopettaa 1 peruutuksen uudelleenyrityksen");
-    expect(buttons("Kuittaa peruutukset")[0]!.disabled).toBe(true);
+    await click("Kuittaa uudelleenyritykset");
+    expect(container.textContent).toContain("Kuittaus lopettaa 1 aktivoinnin peruutuksen uudelleenyrityksen");
+    expect(buttons("Kuittaa uudelleenyritykset")[0]!.disabled).toBe(true);
     await type(`Kirjoita ${ACK_UNDO_WORD}`, ACK_UNDO_WORD);
-    await click("Kuittaa peruutukset");
-    expect(bridge.actionCalls.map((call) => call.params)).toEqual([{ dryRun: true }, { dryRun: false, confirm: true, acknowledgeUndos: ["120200000000000101|gate-9"] }]);
-    expect(bridge.toasts.map((toast) => toast.title)).toEqual(["Kuitattu 1 peruutusta"]);
+    await click("Kuittaa uudelleenyritykset");
+    expect(bridge.actionCalls.map((call) => call.params)).toEqual([
+      { dryRun: true },
+      { dryRun: false, confirm: true, acknowledgeUndos: ["120200000000000101|gate-9|2026-10-17T08:00:05.000Z"] },
+    ]);
+    expect(bridge.toasts.map((toast) => toast.title)).toEqual(["Kuitattu 1 uudelleenyritystä"]);
     expect(container.textContent).not.toContain("Aktivoinnin peruutus epäonnistui");
+  });
+
+  it("names what the acknowledgement stops by origin (RK9-570)", () => {
+    expect(ackPrompt([{ origin: "pause" }, { origin: "pause" }])).toMatch(/^Kuittaus lopettaa 2 pysäytyksen uudelleenyrityksen\./);
+    expect(ackPrompt([{}, { origin: "activation" }])).toMatch(/^Kuittaus lopettaa 2 aktivoinnin peruutuksen uudelleenyrityksen\./);
+    expect(ackPrompt([{ origin: "pause" }, {}])).toMatch(/^Kuittaus lopettaa 1 aktivoinnin peruutuksen ja 1 pysäytyksen uudelleenyrityksen\./);
+    expect(ackPrompt([{ origin: "pause" }])).not.toContain("peruutu");
+  });
+
+  it("an acknowledgement that took fewer entries than the preview listed is an error, not a success (RK9-570)", async () => {
+    const pendingUndo = [{ kind: "ad" as const, objectId: "120200000000000301", gateRequestId: "kill_switch:halt-1", since: "2026-10-17T08:00:05.000Z", origin: "pause" as const, attempts: 2 }];
+    bridge.data.set(DATA.overview, ollolaOverview({ pendingUndo }));
+    bridge.actions.set(ACTION.clearHalt, async (params) => {
+      if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: null, pendingUndo: [{ ...pendingUndo[0], key: "120200000000000301|kill_switch:halt-1|2026-10-17T08:00:05.000Z" }] };
+      // A pause failed on the ad after the preview: its key changed, nothing was taken.
+      return { dryRun: false, cleared: false, halt: null, acknowledgedUndos: 0 };
+    });
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    await click("Kuittaa uudelleenyritykset");
+    expect(container.textContent).toContain("Kuittaus lopettaa 1 pysäytyksen uudelleenyrityksen");
+    await type(`Kirjoita ${ACK_UNDO_WORD}`, ACK_UNDO_WORD);
+    await click("Kuittaa uudelleenyritykset");
+    expect(bridge.toasts).toEqual([]);
+    expect(container.textContent).toContain("Kuitattiin 0/1: 1 merkintää muuttui esikatselun jälkeen");
+    expect(container.textContent).toContain("Pysäytys epäonnistui pysäytystilan aikana");
   });
 
   it("names a pause's failed PAUSED write apart from an activation undo, with its attempts (RK9-568)", async () => {
@@ -403,7 +431,7 @@ describe("operator UI (RK9-518)", () => {
     await render(createElement(AdsPage, { context: CONTEXT }));
     expect(container.textContent).toContain("Pysäytys epäonnistui pysäytystilan aikana, voi olla yhä ACTIVE: mainos 120200000000000301 (4 epäonnistunutta yritystä)");
     expect(container.textContent).not.toContain("Aktivoinnin peruutus epäonnistui");
-    expect(buttons("Kuittaa peruutukset")).toHaveLength(1);
+    expect(buttons("Kuittaa uudelleenyritykset")).toHaveLength(1);
   });
 
   it("names a retry that Meta refuses for good, so the board knows only a fix and an acknowledgement end it (RK9-567)", async () => {
