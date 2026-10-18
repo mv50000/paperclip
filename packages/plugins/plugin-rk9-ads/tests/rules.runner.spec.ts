@@ -5,7 +5,7 @@ import { createLedger } from "../src/db.js";
 import type { RuleAdDay } from "../src/features/rules/evaluate.js";
 import { registerRules, RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY } from "../src/features/rules/register.js";
 import { CAP_HALT_RELEASED_ACTIVITY, RULES_JOB_KEY } from "../src/features/rules/runner.js";
-import { readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
+import { clearHalt, readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
 import { memoryRulesStore } from "../src/features/rules/store.js";
 import type { FeatureRuntime } from "../src/features/types.js";
 import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
@@ -248,7 +248,7 @@ describe("rules-evaluate job (A11)", () => {
       [COMPANY_B]: brandConfig({ brandCode: "AUR", meta: { adAccountId: "act_29231592883113369", pageId: "2", accessTokenRef: secretRef(SECRET_B_META) } }),
     };
     const r = setup({ companies });
-    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: Meta status read failed, nothing paused \(fail-open\)/);
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: Meta status read failed \(.*\), only pause_all_cap evaluated \(fail-open\)/);
     expect(r.meta.writes).toHaveLength(0);
     expect(r.store.actions).toEqual([expect.objectContaining({ companyId: COMPANY_B, brandCode: "AUR", objectId: "301", mode: "shadow" })]);
   });
@@ -285,6 +285,17 @@ describe("rules-evaluate job (A11)", () => {
     await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/month-to-date not read .*pause_all_cap skipped/);
     expect(r.meta.writes).toHaveLength(0);
     expect(r.ledgerRuleActions()).toHaveLength(0);
+  });
+
+  it("skips threshold rules when the ad account reports in another time zone than the brand's (RK9-541)", async () => {
+    const meta = new FakeMeta(undefined, { timezone_name: "UTC" });
+    meta.campaigns = accountMeta().campaigns;
+    meta.ads = accountMeta().ads;
+    meta.spend = () => "40.00";
+    const r = setup({ meta, rules: { liveMode: true, list: [CPC_LIVE] } });
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: the ad account reports in another time zone than Europe\/Helsinki, threshold rules skipped/);
+    expect(r.meta.writes).toHaveLength(0);
+    expect(r.store.actions).toHaveLength(0);
   });
 
   it("fails the run when a decision's rule_actions row cannot be written (its cooldown would be lost)", async () => {
@@ -365,40 +376,153 @@ describe("rules-evaluate job (A11)", () => {
       r.store.priorActions = async () => {
         throw new Error("priorActions: more than 5000 rows");
       };
-      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: earlier rule actions not read \(Error: priorActions: more than 5000 rows\), only pause_all_cap ran/);
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: earlier rule actions not read \(Error: priorActions: more than 5000 rows\), only pause_all_cap evaluated, no cap halt in force, no cooldown/);
       // The CPC rule made no decision without its cooldown; the cap rule paused the account.
       expect(r.store.actions).toHaveLength(0);
       expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
     });
 
-    it("a pause_all that leaves an object ACTIVE fails the run and is not counted against the cooldown", async () => {
+    it("a pause_all that hands a failed object to the pause retry is settled; one left ACTIVE without the retry is retried (RK9-541)", async () => {
       const meta = overCap();
       meta.fail = (call) => (call.method !== "GET" && call.path === "303" ? new Response(JSON.stringify({ error: { message: "x", code: 2 } }), { status: 500 }) : null);
       const r = setup({ meta, rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] } });
       await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL pause_all_cap: 1 pause\(s\) failed/);
-      expect(r.ledgerRuleActions()).toEqual([expect.objectContaining({ rule_id: "pause_all_cap", applied: true, error: expect.stringContaining("303") })]);
-      // Such a row (applied, with an error) does not start the cooldown: the store
-      // reads it as not applied (SQL: rules.store-db.spec.ts), so the next run retries.
-      await r.store.insertAction(COMPANY_A, {
+      expect(r.ledgerRuleActions()).toEqual([
+        expect.objectContaining({
+          rule_id: "pause_all_cap",
+          applied: true,
+          error: expect.stringContaining("303"),
+          metrics: expect.objectContaining({ settled: true, retry: expect.objectContaining({ stored: true }) }),
+        }),
+      ]);
+      // pauseAll writes through the ledger; the memory store gets the same row by hand.
+      const row = (settled: boolean, decidedAt: Date) => ({
         brandCode: "OLL",
         ruleId: "pause_all_cap",
         ruleType: "pause_all_cap",
-        objectType: "account",
+        objectType: "account" as const,
         objectId: "29231592883113369",
-        action: "pause_all",
-        mode: "live",
+        action: "pause_all" as const,
+        mode: "live" as const,
         dryRun: false,
         applied: true,
         reason: "cap",
-        metrics: {},
+        metrics: { settled },
         error: "303: x",
-        decidedAt: NOW,
+        decidedAt,
       });
-      expect(await r.store.priorActions(COMPANY_A, ["pause_all_cap"], new Date(0))).toEqual([expect.objectContaining({ ruleId: "pause_all_cap", applied: false })]);
-      r.clock.now = new Date(NOW.getTime() + 3_600_000);
+      await r.store.insertAction(COMPANY_A, row(true, NOW));
+      expect(await r.store.priorActions(COMPANY_A, ["pause_all_cap"], new Date(0))).toEqual([expect.objectContaining({ ruleId: "pause_all_cap", applied: true })]);
+      // The pause retry owns 303 now: the cap rule does not try it every hour.
       meta.fail = () => null;
+      r.clock.now = new Date(NOW.getTime() + 3_600_000);
+      await r.harness.runJob(RULES_JOB_KEY);
+      expect(r.meta.writes.filter((call) => call.path === "303")).toHaveLength(1);
+      // Without the pause retry (not settled) the row does not start the cooldown.
+      r.store.actions.length = 0;
+      await r.store.insertAction(COMPANY_A, row(false, r.clock.now));
+      expect(await r.store.priorActions(COMPANY_A, ["pause_all_cap"], new Date(0))).toEqual([expect.objectContaining({ ruleId: "pause_all_cap", applied: false })]);
+      r.clock.now = new Date(NOW.getTime() + 2 * 3_600_000);
       await r.harness.runJob(RULES_JOB_KEY);
       expect(r.meta.writes.filter((call) => call.path === "303")).toHaveLength(2);
+    });
+
+    it("a cap pause whose Telegram notice failed is settled, so its cooldown holds (RK9-541)", async () => {
+      const r = setup({ meta: overCap(), rules: { liveMode: true, list: [{ type: "pause_all_cap", mode: "live" }] } });
+      r.notifier.fail = new Error("telegram down");
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL pause_all_cap: paused 3 but the Telegram notice failed/);
+      expect(r.ledgerRuleActions()).toEqual([
+        expect.objectContaining({ rule_id: "pause_all_cap", applied: true, error: expect.stringContaining("telegram: "), metrics: expect.objectContaining({ settled: true }) }),
+      ]);
+    });
+
+    it("runs the cap rule when the status read fails: pauseAll lists its own targets (RK9-541)", async () => {
+      const meta = overCap();
+      // The status read's ad listing fails; the pause's own listing works.
+      let adLists = 0;
+      meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/ads") && ++adLists === 1 ? new Error("graph down") : null);
+      const r = setup({ meta, rules: LIVE_RULES });
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/OLL: Meta status read failed \(.*graph down\)+, only pause_all_cap evaluated \(fail-open\)/);
+      expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
+      // The CPC rule made no decision without the ad status.
+      expect(r.store.actions).toHaveLength(0);
+    });
+
+    it("takes the cap rule's cooldown from its settled pause when the earlier rule actions cannot be read (RK9-541)", async () => {
+      const r = setup({ meta: overCap(), rules: LIVE_RULES, days: [] });
+      await r.harness.runJob(RULES_JOB_KEY);
+      expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
+      // The operator restarts the ads; rule_actions cannot be read from now on.
+      for (const object of [...r.meta.campaigns, ...r.meta.ads]) if (object.id !== "302") object.status = "ACTIVE";
+      r.store.priorActions = async () => {
+        throw new Error("db down");
+      };
+      r.clock.now = new Date(NOW.getTime() + 2 * 3_600_000);
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/only pause_all_cap evaluated, cooldown from the settled cap pause of 2026-10-21T09:00:00.000Z/);
+      expect(r.meta.writes).toHaveLength(3);
+      expect(r.notifier.messages).toHaveLength(1);
+      // After the 24 h cooldown the cap rule pauses again.
+      r.clock.now = new Date(NOW.getTime() + 24 * 3_600_000);
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/earlier rule actions not read/);
+      expect(r.meta.writes).toHaveLength(6);
+    });
+
+    it("a cap halt from a pause attempt that paused nothing gives no cooldown (RK9-541)", async () => {
+      const meta = overCap();
+      // The status read and the month read work; the pause's own listing fails.
+      let campaignLists = 0;
+      meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/campaigns") && ++campaignLists === 3 ? new Error("graph down") : null);
+      const r = setup({ meta, rules: LIVE_RULES, days: [] });
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/graph down/);
+      expect(r.meta.writes).toHaveLength(0);
+      expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toMatchObject({ rule: "pause_all_cap" });
+      r.store.priorActions = async () => {
+        throw new Error("db down");
+      };
+      r.clock.now = new Date(NOW.getTime() + 3_600_000);
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/the cap halt in force is not from a settled cap pause, no cooldown/);
+      expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
+    });
+
+    it("with an unread status the cap rule does not override a cleared cap halt (RK9-541)", async () => {
+      const meta = overCap();
+      meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/ads") ? new Error("graph down") : null);
+      const r = setup({ meta, rules: LIVE_RULES });
+      const halt: HaltState = {
+        brandCode: "OLL",
+        rule: "pause_all_cap",
+        id: "cap-1",
+        since: "2026-10-21T07:00:00.000Z",
+        until: "2026-10-31T22:00:00.000Z",
+        reason: "pause_all_cap test",
+        initiator: { source: "job" },
+        cap: { mtdEur: 92, monthlyCapEur: 100 },
+      };
+      await setHalt(r.harness.ctx, COMPANY_A, halt);
+      const preview = await readHalt(r.harness.ctx, COMPANY_A, r.clock.now);
+      await clearHalt(r.harness.ctx, COMPANY_A, preview!.since, r.clock.now);
+      await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/no rule evaluated \(this month's cap halt was cleared; the cap rule waits for a status read\)/);
+      expect(r.meta.writes).toHaveLength(0);
+      expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toBeNull();
+      expect(r.cardCloses).toHaveLength(0);
+    });
+
+    it("a disabled config fails only the first run of each local day; an invalid one fails every run (RK9-541)", async () => {
+      const r = setup({ rules: LIVE_RULES, days: [] });
+      await r.harness.runJob(RULES_JOB_KEY);
+      const valid = r.configs[COMPANY_A]!;
+      const run = (hours: number) => {
+        r.clock.now = new Date(NOW.getTime() + hours * 3_600_000);
+        return r.harness.runJob(RULES_JOB_KEY);
+      };
+      r.configs[COMPANY_A] = { ...valid, monthlyCapEur: null };
+      await expect(run(1)).rejects.toThrow(/OLL: the brand config is disabled; only pause_all_cap ran, on the last valid config/);
+      await expect(run(2)).resolves.toBeUndefined();
+      // The next local day reports it again.
+      await expect(run(24)).rejects.toThrow(/the brand config is disabled/);
+      r.configs[COMPANY_A] = { ...valid, rules: { list: [{ ruleId: "x", type: "nope" }] } };
+      await expect(run(25)).rejects.toThrow(/the brand config is invalid/);
+      await expect(run(26)).rejects.toThrow(/the brand config is invalid/);
     });
 
     it("fails the run when the cap pause's rule_actions row cannot be written", async () => {

@@ -114,6 +114,8 @@ export interface PauseAllResult {
   recheckError?: string;
   /** The failed objects of a live halt pause, stored for the pause retry and alerted (RK9-568). */
   retry?: UndoReport;
+  /** A live pause a rerun has nothing left to fix (also `metrics.settled` on the audit row, RK9-541). */
+  settled?: boolean;
 }
 
 export interface PauseAllDeps {
@@ -509,6 +511,16 @@ export async function pauseAll(
     }
   }
 
+  // A live pause a rerun has nothing left to fix: every target paused or handed
+  // to the pause retry, the halt stored and the cards closed. The rule engine's
+  // cooldown counts such a row although a Telegram failure fills `error`
+  // (rules/store.ts priorActions, RK9-541).
+  const settled =
+    !options.dryRun &&
+    result.count + result.errors.length > 0 &&
+    (result.errors.length === 0 || result.retry?.stored === true) &&
+    stopErrors.length === 0;
+  result.settled = settled;
   const stopRecorded = result.closedCardIds.length > 0 || result.halt !== undefined || stopErrors.length > 0;
   const stopOnly = result.count === 0 && result.errors.length === 0 && options.initiator.source === "job";
   if (result.count > 0 || result.errors.length > 0 || (stopRecorded && (!stopOnly || (await stopOnlyRowWanted(options)))) || options.initiator.source !== "job") {
@@ -536,6 +548,7 @@ export async function pauseAll(
         ...(result.retry ? { retry: { stored: result.retry.stored, telegram: result.retry.telegram } } : {}),
         closedCardIds: result.closedCardIds,
         halt: result.halt !== undefined,
+        settled,
         ...(options.note ? { note: options.note } : {}),
       },
       initiator: options.initiator,

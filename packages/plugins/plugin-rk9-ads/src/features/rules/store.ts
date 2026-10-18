@@ -48,9 +48,12 @@ export interface RulesStore {
   creativeValidity(companyId: string): Promise<Array<{ adId: string; validUntil: string }>>;
   /**
    * The latest decision per (rule, object, mode, applied) since `since`.
-   * `applied` is true only for a row that was applied and recorded no error:
-   * a pause_all that paused some objects and failed on others stays retryable
-   * (RK9-536).
+   * `applied` is true for a row that was applied and recorded no error, or a
+   * pause_all row that pauseAll marked `settled` (every target paused or
+   * handed to the pause retry, halt and card close done; RK9-541). A
+   * pause_all that left an object ACTIVE without the retry stays retryable
+   * (RK9-536); a failed Telegram notice or an object the pause retry owns
+   * does not lift the cooldown.
    */
   priorActions(companyId: string, ruleIds: readonly string[], since: Date): Promise<PriorRuleAction[]>;
   insertAction(companyId: string, row: RuleActionRow): Promise<void>;
@@ -111,10 +114,11 @@ export function createRulesStore(db: PluginDatabaseClient): RulesStore {
     async priorActions(companyId, ruleIds, since) {
       assertCompanyId(companyId);
       if (ruleIds.length === 0) return [];
+      const counted = `((applied AND error IS NULL) OR (action = 'pause_all' AND metrics->>'settled' = 'true'))`;
       const rows = await db.query<Record<string, unknown>>(
-        `SELECT rule_id, object_id, mode, (applied AND error IS NULL) AS applied, max(decided_at) AS decided_at FROM ${ns}.rule_actions ` +
+        `SELECT rule_id, object_id, mode, ${counted} AS applied, max(decided_at) AS decided_at FROM ${ns}.rule_actions ` +
           `WHERE company_id = $1 AND decided_at >= $2::timestamptz AND action IN ('pause', 'pause_all') ` +
-          `GROUP BY rule_id, object_id, mode, (applied AND error IS NULL) LIMIT ${PRIOR_ACTIONS_MAX_ROWS}`,
+          `GROUP BY rule_id, object_id, mode, ${counted} LIMIT ${PRIOR_ACTIONS_MAX_ROWS}`,
         [companyId, since.toISOString()],
       );
       // A cut list could hide a decision and break a cooldown: refuse instead.
@@ -176,7 +180,13 @@ export function memoryRulesStore(seed: { days?: RuleAdDay[]; creatives?: Array<{
     async priorActions(companyId, ruleIds, since) {
       return actions
         .filter((row) => row.companyId === companyId && ruleIds.includes(row.ruleId) && row.decidedAt >= since && (row.action === "pause" || row.action === "pause_all"))
-        .map((row) => ({ ruleId: row.ruleId, objectId: row.objectId, mode: row.mode, applied: row.applied && row.error === null, decidedAt: row.decidedAt.toISOString() }));
+        .map((row) => ({
+          ruleId: row.ruleId,
+          objectId: row.objectId,
+          mode: row.mode,
+          applied: (row.applied && row.error === null) || (row.action === "pause_all" && row.metrics.settled === true),
+          decidedAt: row.decidedAt.toISOString(),
+        }));
     },
     async insertAction(companyId, row) {
       if (store.failInsert) throw new Error("insert failed");

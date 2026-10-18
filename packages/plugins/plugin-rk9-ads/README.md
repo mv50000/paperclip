@@ -501,7 +501,8 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
     summed spend, impressions and link clicks (not for `frequency`). Gates:
     `minImpressions` and `minClicks` (required) and `minSpendEur` (default 0),
     all window totals; equal fires. CPC and CTR are link metrics (G18). Spend
-    with no link click counts as an infinite CPC.
+    with no link click counts as an infinite CPC; no spend is no CPC, so a
+    `cpc lt` floor never fires on an ad that spent nothing (RK9-541).
   - `pause_all_cap`: built in. Pauses the whole ad account (A6's `pauseAll`)
     when month-to-date spend is at 90 % of `monthlyCapEur` or more. MTD is the
     spend guard's (RK9-526) and must be in EUR. A list entry
@@ -521,21 +522,41 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   guard's MTD, `insights_daily`, creative `validUntil` and earlier
   `rule_actions`, then calls the pure `evaluateRules()`. Today's partial day
   never counts, and threshold rules wait until `insights-daily-close` has
-  finalised yesterday; still waiting at 06:00 local time fails the run. Only ACTIVE ads get a decision, account-wide like the
-  kill switch (RK9-523: the ad account belongs to the brand). A failed status read pauses
-  nothing (fail-open) and fails the run; one brand's failure does not stop
-  the others.
+  finalised yesterday; still waiting at 06:00 local time fails the run. The
+  job runs at :00 and the close at :20, so a brand enabled (or the plugin
+  installed) after 06:00 fails its first run once, before the first close
+  (prod 18.10.2026 12:00Z, RK9-541). When the ad account reports in another
+  time zone than `timeZone`, threshold rules do not run: the insights dates
+  and the close marker are account-local days (the spend guard refuses that
+  state too). Only ACTIVE ads get a decision, account-wide like the
+  kill switch (RK9-523: the ad account belongs to the brand). A failed status
+  read fails the run and leaves only the cap rule, which decides on the month
+  position alone (pauseAll lists its own targets, RK9-541). It waits when
+  this month's cap halt was cleared, so an unread status does not override
+  the clear every hour. One brand's failure does not stop the others.
 - **Cap rule isolation (RK9-536):** every other input is read in its own
   `try`: a failed read fails the run and switches off only the rules that
-  need it. Without the earlier `rule_actions` only the cap rule runs. A
+  need it. Without the earlier `rule_actions` only the cap rule runs. Its
+  cooldown then comes from a marker of its latest settled pause, while the
+  halt that pause left is in force on the same ad account (RK9-541). A halt
+  alone proves nothing, because `pauseAll` stores it before it pauses. A
   config that turns invalid, unavailable or disabled (`monthlyCapEur`
   cleared) runs only the cap rule, on the last valid config (ADR 3, A6's
-  `loadPauseConfig`), and fails the run. A brand saved disabled and never
-  enabled is skipped quietly.
+  `loadPauseConfig`), with that config's `rules.liveMode` and ad account: a
+  broken edit is not read, so an edit that moved the ad account or turned the
+  brand live takes effect only once it is valid. An invalid or unavailable
+  config fails every run; a disabled one is the operator's choice and fails
+  only the first run of each local day (RK9-541). Delete the brand config to
+  stop the fallback. A brand saved disabled and never enabled is skipped
+  quietly.
 - **Cooldown** `cooldownHours` (default 24, 1–720): a rule does not decide on
   the same object again inside the window. Shadow counts shadow decisions;
   live counts only applied live pauses without an error, so a failed pause,
-  or a cap pause that left an object ACTIVE, is retried.
+  or a cap pause that left an object ACTIVE, is retried. A cap pause that
+  `pauseAll` marks `settled` counts too (RK9-541): every target paused or
+  handed to the pause retry, the halt stored and the cards closed. A failed
+  Telegram notice then does not cut the cooldown to an hour, and the rules
+  job does not repeat a pause the pause retry already repeats every tick.
 - **Audit:** every decision writes `rule_actions` (shadow: `dry_run=true`) and
   an activity entry with the rule id and the metrics (spend, link clicks,
   impressions, CPC, CTR, days). Shadow hits reach Telegram through the morning
@@ -895,7 +916,8 @@ Not installed in prod by RK9-510.
 A disabled brand that was never enabled is skipped by `scheduled-pause` and
 `rules-evaluate`. A
 brand that was enabled before and is then saved disabled keeps the ADR 3
-fallback: the pause side runs on its last valid config and the run fails.
+fallback: the pause side runs on its last valid config, and `rules-evaluate`
+fails its first run of each local day. Delete the config to remove the brand.
 
 `tests/fixtures/sunspot-brand-config.json` is the same config with a cap, for
 the mocked preflight test.
