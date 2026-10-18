@@ -114,6 +114,8 @@ export interface PauseAllResult {
   recheckError?: string;
   /** The failed objects of a live halt pause, stored for the pause retry and alerted (RK9-568). */
   retry?: UndoReport;
+  /** A live pause a rerun has nothing left to fix (also `metrics.settled` on the audit row, RK9-541). */
+  settled?: boolean;
 }
 
 export interface PauseAllDeps {
@@ -518,6 +520,7 @@ export async function pauseAll(
     result.count + result.errors.length > 0 &&
     (result.errors.length === 0 || result.retry?.stored === true) &&
     stopErrors.length === 0;
+  result.settled = settled;
   const stopRecorded = result.closedCardIds.length > 0 || result.halt !== undefined || stopErrors.length > 0;
   const stopOnly = result.count === 0 && result.errors.length === 0 && options.initiator.source === "job";
   if (result.count > 0 || result.errors.length > 0 || (stopRecorded && (!stopOnly || (await stopOnlyRowWanted(options)))) || options.initiator.source !== "job") {

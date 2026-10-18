@@ -13,9 +13,11 @@
  *    rule_actions the cooldowns need. Each read is isolated (RK9-536): a
  *    failed one fails the run and switches off only the rules that need it,
  *    never the built-in cap rule. Without the earlier rule_actions only the
- *    cap rule runs, and the start of its halt stands in for its cooldown
- *    (RK9-541), so an object the operator restarted is not paused again
- *    every hour.
+ *    cap rule runs, and the marker of its latest settled pause stands in
+ *    for its cooldown while that pause's halt is in force (RK9-541), so an
+ *    object the operator restarted is not paused again every hour.
+ *    Without the status the cap rule still runs, unless this month's cap
+ *    halt was cleared: an unread status must not override that.
  *    Threshold rules wait for insights-daily-close; still waiting at 06:00
  *    local time fails the run, so a broken close is seen. When the ad account
  *    reports in another time zone than the brand's, the insights dates and
@@ -66,7 +68,7 @@ import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
 import type { MetaClientMode, MetaGraphClient } from "../../meta/graph.js";
 import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
-import { clearRuleHalt, HALT_NAMESPACE, haltIdentity, readRuleHalt } from "../spend-guard/halt.js";
+import { clearRuleHalt, HALT_NAMESPACE, haltIdentity, readRuleHalt, storedRuleHalt, type HaltState } from "../spend-guard/halt.js";
 import { pauseAll, PauseListError, stopFailures, type PauseAllDeps } from "../spend-guard/killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "../spend-guard/pause-config.js";
 import { brandClient, brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "../spend-guard/support.js";
@@ -232,7 +234,11 @@ async function readInputs(
     // pauseAll lists its own targets (RK9-541).
     status = { adAccountId: config.meta.adAccountId, ads: [], campaigns: [], unread: true };
     runnable = capOnly(runnable);
-    failures.push(`${brand}: Meta status read failed (${safeError(error)}), only pause_all_cap evaluated (fail-open)`);
+    const cleared = await capHaltCleared(deps, companyId, now);
+    if (cleared) runnable = { ...runnable, list: [] };
+    failures.push(
+      `${brand}: Meta status read failed (${safeError(error)}), ${cleared ? `no rule evaluated (${cleared})` : "only pause_all_cap evaluated"} (fail-open)`,
+    );
   }
   const enabled = runnable.list.filter((rule) => rule.enabled);
 
@@ -314,11 +320,30 @@ async function readInputs(
   return { snapshots: { timeZone: config.timeZone, days, creatives, fatigue, spend, priorActions }, status, rules: runnable };
 }
 
+function capSettledKey(companyId: string) {
+  return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `cap-settled:${companyId}` };
+}
+
 /**
- * The cap rule's cooldown when rule_actions cannot be read: a live cap pause
- * stores its halt before any Meta call, so the halt's start is the latest cap
- * pause (RK9-541). Without a halt in force (none, cleared or expired) the
- * rule has no cooldown, as before; its pause is idempotent.
+ * Remembers a settled live cap pause (RK9-541): the halt it left, the ad
+ * account and the time. The halt alone is no proof, because pauseAll stores
+ * it before it lists or pauses anything. Never throws; without the marker
+ * the cap rule has no cooldown on the fallback path, which only pauses more.
+ */
+async function rememberSettledCap(deps: RulesDeps, companyId: string, config: BrandConfig, halt: HaltState, now: Date): Promise<void> {
+  try {
+    await deps.ctx.state.set(capSettledKey(companyId), { haltId: haltIdentity(halt), adAccountId: config.meta.adAccountId, at: now.toISOString() });
+  } catch (error) {
+    deps.ctx.logger.warn("rk9-ads rules: settled cap pause not remembered", { companyId, error: safeError(error) });
+  }
+}
+
+/**
+ * The cap rule's cooldown when rule_actions cannot be read: the latest
+ * settled cap pause, while the halt it left is still in force (not cleared,
+ * not ended, not replaced by a later attempt) and on the same ad account
+ * (RK9-541). Otherwise the rule has no cooldown, as before; its pause is
+ * idempotent.
  */
 async function capHaltCooldown(
   deps: RulesDeps,
@@ -331,13 +356,38 @@ async function capHaltCooldown(
   if (!cap) return { prior: [], note: "no cooldown" };
   try {
     const halt = await readRuleHalt(deps.ctx, companyId, "pause_all_cap", now);
-    if (!halt || !Number.isFinite(Date.parse(halt.since))) return { prior: [], note: "no cap halt in force, no cooldown" };
+    if (!halt) return { prior: [], note: "no cap halt in force, no cooldown" };
+    const settled = (await deps.ctx.state.get(capSettledKey(companyId))) as { haltId?: unknown; adAccountId?: unknown; at?: unknown } | null;
+    const at = typeof settled?.at === "string" ? Date.parse(settled.at) : Number.NaN;
+    if (!settled || settled.haltId !== haltIdentity(halt) || settled.adAccountId !== config.meta.adAccountId || !Number.isFinite(at)) {
+      return { prior: [], note: "the cap halt in force is not from a settled cap pause, no cooldown" };
+    }
+    const decidedAt = new Date(at).toISOString();
     return {
-      prior: [{ ruleId: cap.ruleId, objectId: config.meta.adAccountId, mode: "live", applied: true, decidedAt: new Date(Date.parse(halt.since)).toISOString() }],
-      note: `cooldown from the cap halt of ${halt.since}`,
+      prior: [{ ruleId: cap.ruleId, objectId: config.meta.adAccountId, mode: "live", applied: true, decidedAt }],
+      note: `cooldown from the settled cap pause of ${decidedAt}`,
     };
   } catch (error) {
     return { prior: [], note: `no cooldown (cap halt not read: ${safeError(error)})` };
+  }
+}
+
+/**
+ * Why the cap rule waits when the status could not be read: this month's
+ * cap halt was cleared, by a board user or by the headroom release. Without
+ * the status that clear must not be overridden every hour (a new halt each
+ * run). Null when the rule may run, also when the halt cannot be read (the
+ * cap rule then runs, as a pause is the safe side).
+ */
+async function capHaltCleared(deps: RulesDeps, companyId: string, now: Date): Promise<string | null> {
+  try {
+    const stored = await storedRuleHalt(deps.ctx, companyId, "pause_all_cap");
+    if (!stored?.cleared) return null;
+    const end = stored.halt.until === undefined ? Number.NaN : Date.parse(stored.halt.until);
+    if (Number.isFinite(end) && end <= now.getTime()) return null;
+    return "this month's cap halt was cleared; the cap rule waits for a status read";
+  } catch {
+    return null;
   }
 }
 
@@ -486,6 +536,7 @@ export async function runRulesForBrand(
             metrics: { ruleId: decision.ruleId, mode: decision.mode, ...decision.metrics },
           },
         );
+        if (!shadow && result.settled && result.halt) await rememberSettledCap(deps, companyId, config, result.halt, now);
         const error = result.errors.length > 0 ? `${result.errors.length} pause(s) failed (last error: ${result.errors.at(-1)!.error})` : null;
         outcome.decisions.push({ ...decision, applied: !shadow && result.count > 0, error });
         if (error) failures.push(`${config.brandCode} ${decision.ruleId}: ${error}`);

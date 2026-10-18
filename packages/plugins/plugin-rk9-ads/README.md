@@ -505,12 +505,15 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   state too). Only ACTIVE ads get a decision, account-wide like the
   kill switch (RK9-523: the ad account belongs to the brand). A failed status
   read fails the run and leaves only the cap rule, which decides on the month
-  position alone (pauseAll lists its own targets, RK9-541); one brand's
-  failure does not stop the others.
+  position alone (pauseAll lists its own targets, RK9-541). It waits when
+  this month's cap halt was cleared, so an unread status does not override
+  the clear every hour. One brand's failure does not stop the others.
 - **Cap rule isolation (RK9-536):** every other input is read in its own
   `try`: a failed read fails the run and switches off only the rules that
-  need it. Without the earlier `rule_actions` only the cap rule runs, and the
-  start of its halt in force stands in for its cooldown (RK9-541). A
+  need it. Without the earlier `rule_actions` only the cap rule runs. Its
+  cooldown then comes from a marker of its latest settled pause, while the
+  halt that pause left is in force on the same ad account (RK9-541). A halt
+  alone proves nothing, because `pauseAll` stores it before it pauses. A
   config that turns invalid, unavailable or disabled (`monthlyCapEur`
   cleared) runs only the cap rule, on the last valid config (ADR 3, A6's
   `loadPauseConfig`), with that config's `rules.liveMode` and ad account: a
