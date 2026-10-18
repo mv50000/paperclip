@@ -14,7 +14,8 @@
  *   them, RK9-557);
  * - whether an approved activation of an ad may still be running;
  * - a newer completed activation of an object or a publication, which ends
- *   the retry of a failed undo (RK9-565);
+ *   the retry of a failed undo (RK9-565), and one still running or with an
+ *   unknown result (RK9-567);
  * - cards past valid_until for the expiry job;
  * - paused_ad_ids of a decided card.
  *
@@ -104,9 +105,16 @@ export interface ActivationGateRepo {
    * An activate_ad card other than `gateRequestId`, approved after `since`,
    * that names the object (as its ad, ad set or campaign, in the binding or
    * in the handler's outcome) or the publication of `gateRequestId`'s card:
-   * one that activated (outcome.result activated), or one whose handler is
-   * still running (approved within `inFlightMinutes`, `inFlight: true`,
-   * listed first). Null when there is none.
+   * one that activated (outcome.result activated), or one with no recorded
+   * end. Of those, one approved within `inFlightMinutes` is still running
+   * (`inFlight: true`); an older one has an unknown result (`unknown: true`):
+   * its worker died, or its outcome was not stored (RK9-567). Running first,
+   * then activated, then unknown. For a campaign (`objectKind`), a card with
+   * no recorded end also matches by its ad set when that ad set is
+   * `gateRequestId`'s or is known (from any card) to be under the campaign:
+   * a swap card's binding names no campaign (RK9-567). An ad or ad set
+   * never matches a sibling's running card, which cannot end its retry. `since` is on the worker's clock; the query moves it
+   * to the database's clock, which `decided_at` uses (RK9-567).
    */
   newerActivation(companyId: string, input: NewerActivationQuery): Promise<NewerActivation | null>;
   /** Pending cards of every company whose valid_until has passed, oldest first. */
@@ -118,6 +126,8 @@ export interface ActivationGateRepo {
 
 export interface NewerActivationQuery {
   objectId: string;
+  /** The object's level. Only a campaign matches a running card by its ad set (RK9-567). */
+  objectKind?: "campaign" | "adset" | "ad";
   gateRequestId: string;
   since: Date;
   inFlightMinutes: number;
@@ -126,6 +136,10 @@ export interface NewerActivationQuery {
 export interface NewerActivation {
   id: string;
   inFlight: boolean;
+  /** No end recorded and approved longer ago than `inFlightMinutes`: it may or may not have activated. */
+  unknown?: boolean;
+  /** Whole minutes since the card was approved, on the database's clock. */
+  ageMinutes: number;
 }
 
 const IDENT_RE = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -157,8 +171,10 @@ export function withActivationColumns(store: GateStore, db: PluginDatabaseClient
   };
 }
 
-export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateRepo {
+export function sqlActivationGateRepo(db: PluginDatabaseClient, options: { now?: () => Date } = {}): ActivationGateRepo {
   const gate = gateTable(db);
+  /** The worker's clock; tests move it to stand in for a skewed one. */
+  const workerNow = options.now ?? (() => new Date());
   return {
     async openForAd(companyId, adId) {
       const rows = await db.query<Record<string, unknown>>(
@@ -194,19 +210,34 @@ export function sqlActivationGateRepo(db: PluginDatabaseClient): ActivationGateR
     },
 
     async newerActivation(companyId, input) {
-      const rows = await db.query<{ id: unknown; in_flight: unknown }>(
-        `SELECT g.id, (g.outcome->>'result' IS DISTINCT FROM 'activated') AS in_flight FROM ${gate} g
-          WHERE g.company_id = $1 AND g.kind = 'activate_ad' AND g.status = 'approved'
-            AND g.decided_at > $3 AND g.id::text <> $2
-            AND (g.outcome->>'result' = 'activated'
-              OR ((g.outcome IS NULL OR g.outcome->>'handler' = 'started') AND g.decided_at > now() - make_interval(mins => $5)))
-            AND (g.ad_id = $4 OR g.adset_id = $4 OR g.payload->'activation'->>'campaignId' = $4
-              OR g.outcome->>'adId' = $4 OR g.outcome->>'adsetId' = $4 OR g.outcome->>'campaignId' = $4
-              OR g.publication_id = (SELECT o.publication_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2))
-          ORDER BY in_flight DESC, g.decided_at DESC LIMIT 1`,
-        [companyId, input.gateRequestId, input.since.toISOString(), input.objectId, Math.max(1, Math.trunc(input.inFlightMinutes))],
+      // $6 is the worker's time now: `since` + (database now - worker now) is the failure on the database's clock.
+      const rows = await db.query<{ id: unknown; state: unknown; age_minutes: unknown }>(
+        `SELECT id, state, age_minutes FROM (
+           SELECT g.id, g.decided_at,
+             CASE WHEN g.outcome->>'result' = 'activated' THEN 'activated'
+                  WHEN g.decided_at > now() - make_interval(mins => $5) THEN 'in_flight'
+                  ELSE 'unknown' END AS state,
+             floor(extract(epoch FROM (now() - g.decided_at)) / 60) AS age_minutes
+           FROM ${gate} g
+           WHERE g.company_id = $1 AND g.kind = 'activate_ad' AND g.status = 'approved'
+             AND g.decided_at > $3::timestamptz + (now() - $6::timestamptz) AND g.id::text <> $2
+             AND (g.outcome->>'result' = 'activated' OR g.outcome IS NULL OR g.outcome->>'handler' = 'started')
+             AND (g.ad_id = $4 OR g.adset_id = $4 OR g.payload->'activation'->>'campaignId' = $4
+               OR g.outcome->>'adId' = $4 OR g.outcome->>'adsetId' = $4 OR g.outcome->>'campaignId' = $4
+               OR g.publication_id = (SELECT o.publication_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2)
+               OR ($7 = 'campaign' AND (g.outcome IS NULL OR g.outcome->>'handler' = 'started') AND g.adset_id IS NOT NULL
+                 AND (g.adset_id = (SELECT o.adset_id FROM ${gate} o WHERE o.company_id = $1 AND o.id::text = $2)
+                   OR g.adset_id IN (SELECT o.adset_id FROM ${gate} o
+                     WHERE o.company_id = $1 AND o.kind = 'activate_ad' AND o.adset_id IS NOT NULL
+                       AND (o.payload->'activation'->>'campaignId' = $4 OR o.outcome->>'campaignId' = $4)))))
+         ) hits
+         ORDER BY CASE state WHEN 'in_flight' THEN 0 WHEN 'activated' THEN 1 ELSE 2 END, decided_at DESC LIMIT 1`,
+        [companyId, input.gateRequestId, input.since.toISOString(), input.objectId, Math.max(1, Math.trunc(input.inFlightMinutes)), workerNow().toISOString(), input.objectKind ?? null],
       );
-      return rows[0] ? { id: String(rows[0].id), inFlight: rows[0].in_flight === true } : null;
+      const row = rows[0];
+      if (!row) return null;
+      const state = String(row.state);
+      return { id: String(row.id), inFlight: state === "in_flight", ...(state === "unknown" ? { unknown: true } : {}), ageMinutes: Number(row.age_minutes) };
     },
 
     async close(companyId, id, outcome) {

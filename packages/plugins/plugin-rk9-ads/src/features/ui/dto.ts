@@ -30,7 +30,12 @@ export interface UiHalt {
   tgUserId: number | null;
 }
 
-/** An activation undo (RK9-565) or a pause's own PAUSED write (RK9-568) that Meta refused; the job retries it. */
+/**
+ * An activation undo (RK9-565) or a pause's own PAUSED write (RK9-568) that
+ * Meta refused. The job retries it until Meta confirms, a newer activation
+ * supersedes it, or a board user acknowledges it (`clear-halt` with
+ * `acknowledgeUndos`); clearing a halt alone does not end it.
+ */
 export interface UiPendingUndo {
   kind: string;
   objectId: string;
@@ -40,6 +45,8 @@ export interface UiPendingUndo {
   origin?: "activation" | "pause";
   /** Failed PAUSED writes so far. */
   attempts?: number;
+  /** Meta refuses the PAUSED write for good (RK9-567): the retry cannot succeed until the operator fixes the cause, so it waits for an acknowledgement. */
+  permanentError?: string;
 }
 
 export type UiSpendCapStatus = "set" | "missing" | "above_cap" | "unknown";
@@ -123,7 +130,7 @@ export interface UiOverview {
   spendError?: string;
   halt: UiHalt | null;
   haltError?: string;
-  /** Clearing the halt acknowledges these: they are no longer retried. */
+  /** Open retries; a board user acknowledges them separately (`acknowledgeUndos`), and only then are they no longer retried. */
   pendingUndo: UiPendingUndo[];
   pendingUndoError?: string;
   publications: UiPublication[];

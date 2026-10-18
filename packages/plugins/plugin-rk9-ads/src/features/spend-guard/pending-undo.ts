@@ -23,14 +23,37 @@
  * pauses the object, which at worst stops an approved ad and never spends.
  * While a newer card's handler still runs (approved, no outcome yet), the
  * tick leaves the entry alone, so it neither pauses what that card is
- * activating nor drops the entry before the card's result is known.
+ * activating nor drops the entry before the card's result is known. A card
+ * still marked running after UNDO_IN_FLIGHT_WARN_MINUTES fails the run (its
+ * worker may have died); after UNDO_IN_FLIGHT_MINUTES its result counts as
+ * unknown and the tick pauses (RK9-567).
  *
- * Alerts use alert_dedupe markers (`undo-failed:<brand>:<gateRequestId>`,
- * `undo-dropped:<brand>:<gateRequestId>`) like the spend alerts (alerts.ts):
- * claimed before the send and given back when the send fails. A failed
- * alert of an entry still open goes out on the next tick; a drop alert is
- * sent once, after the entry is gone, and is not resent. A failed retry
- * writes no audit row (the job run fails instead).
+ * A newer card can be approved between the tick's lookup and its PAUSED
+ * write, and a card whose result is unknown may have activated. So after
+ * every confirmed PAUSED write with no halt in force the tick looks for a
+ * newer card again; a hit means the retry may have paused what that card
+ * set ACTIVE, and one alert per object and card says so (RK9-567). The
+ * entry ends all the same: Meta confirmed the pause.
+ *
+ * A PAUSED write that Meta refuses for good (meta/errors.ts
+ * permanentErrorClass: the token, a permission, the object gone) keeps the
+ * entry and is still retried on every tick, in case the operator fixes the
+ * token, but it fails the run only once and sends one alert; then the entry
+ * waits for a board user's acknowledgement without failing the job every 5
+ * minutes (RK9-567). A transient error makes it a normal failure again.
+ *
+ * Alerts use alert_dedupe markers like the spend alerts (alerts.ts):
+ * claimed before the send and given back when the send fails. The failed
+ * alert of an activation undo has one per gate request
+ * (`undo-failed:<brand>:<gateRequestId>`); the drop, overlap and permanent
+ * alerts have one per object (`undo-dropped:<brand>:<gateRequestId>:<objectId>`,
+ * `undo-overlap:<brand>:<newer card>:<objectId>`,
+ * `undo-permanent:<brand>:<gateRequestId>:<objectId>`), so a second object of
+ * the same card dropped on a later tick is alerted too (RK9-567). A failed
+ * alert of an entry still open goes out on the next tick; a drop or overlap
+ * alert is sent once, after the fact, and is not resent. A failed retry
+ * writes no audit row (the job run fails instead); an audit row that could
+ * not be written fails the run.
  *
  * A pause's own failed PAUSED writes use the same list (RK9-568): when Meta
  * refuses the PAUSED write of an ACTIVE object in a live kill switch,
@@ -48,7 +71,16 @@
  *
  * Stored in plugin_state (no migration, G11), one key per company. The gate
  * handlers and the job run in one worker process, so a per-company lock
- * there serializes every write of the list. The job removes only the
+ * there serializes every write of the list. Verified for RK9-567 against the
+ * host: it forks one worker per plugin per server process
+ * (server/src/services/plugin-worker-manager.ts, workers keyed by plugin id),
+ * jobs and gate callbacks go to that worker over the same RPC handle, and a
+ * restart stops the old worker (shutdown, SIGTERM, SIGKILL) before it starts
+ * the new one. A worker exits when its stdin closes, i.e. when the server
+ * dies, and paperclip.service runs with KillMode=control-group, so a server
+ * restart kills the old workers too. Two servers on one database would each
+ * run a worker and break this lock; Paperclip supports one node per database
+ * (doc/plugins/PLUGIN_SPEC.md). The job removes only the
  * entries it handled (undoEntryKey: object, gate request and the merged
  * failure's time), so a newer failure of the same object that arrived
  * during its Meta calls stays, and only a removed entry gets the
@@ -60,6 +92,7 @@ import type { BrandConfig } from "../../config.js";
 import type { Ledger } from "../../db.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { setObjectStatus } from "../../meta/methods.js";
+import { permanentErrorClass, type PermanentErrorClass } from "../../meta/errors.js";
 import { isDryRun } from "../../meta/types.js";
 import type { NewerActivation, NewerActivationQuery } from "../../gate/gate-requests.js";
 import { HALT_NAMESPACE, readHalt, type HaltRule } from "./halt.js";
@@ -71,6 +104,8 @@ export const PAUSE_FAILED_KIND = "pause_failed";
 export const PAUSE_DROPPED_KIND = "pause_dropped";
 /** A newer card approved this recently whose handler has not finished is still activating (staging-card.ts ACTIVATION_IN_FLIGHT_MINUTES). */
 export const UNDO_IN_FLIGHT_MINUTES = 30;
+/** A newer card marked running for this long fails the run while the retry waits for it: its worker may have died (RK9-567). */
+export const UNDO_IN_FLIGHT_WARN_MINUTES = 5;
 
 export type UndoObjectKind = "campaign" | "adset" | "ad";
 /** "activation": an activation's undo (RK9-565); "pause": a pause's own PAUSED write (RK9-568). */
@@ -102,6 +137,10 @@ export interface PendingUndo {
    * the entry. Absent: `since`.
    */
   failedAt?: string;
+  /** Set while the latest retry failed for good (meta/errors.ts permanentErrorClass, RK9-567). */
+  permanentError?: PermanentErrorClass;
+  /** ISO time of the first retry of the current run of permanent failures. */
+  permanentSince?: string;
 }
 
 export function undoOrigin(entry: Pick<PendingUndo, "origin">): UndoOrigin {
@@ -132,12 +171,20 @@ export function undoEntryKey(entry: Pick<PendingUndo, "objectId" | "gateRequestI
   return `${entry.objectId}|${entry.gateRequestId}${typeof entry.failedAt === "string" ? `|${entry.failedAt}` : ""}`;
 }
 
-export function undoAlertKey(kind: "failed" | "dropped", brandCode: string, gateRequestId: string): string {
-  return `undo-${kind}:${brandCode}:${gateRequestId}`;
+/**
+ * "failed": the first failure; "dropped": a newer activation ended the retry;
+ * "overlap": the retry may have paused a newer activation; "permanent": Meta
+ * refuses the PAUSED write for good (RK9-567).
+ */
+export type UndoAlertKind = "failed" | "dropped" | "overlap" | "permanent";
+
+/** An activation undo's marker: one per gate request for "failed", one per object for the rest (RK9-567). */
+export function undoAlertKey(kind: UndoAlertKind, brandCode: string, gateRequestId: string, objectId?: string): string {
+  return `undo-${kind}:${brandCode}:${gateRequestId}${kind !== "failed" && objectId !== undefined ? `:${objectId}` : ""}`;
 }
 
 /** A pause failure's marker: one per object (RK9-568). */
-export function pauseAlertKey(kind: "failed" | "dropped", brandCode: string, ref: string, objectId: string): string {
+export function pauseAlertKey(kind: UndoAlertKind, brandCode: string, ref: string, objectId: string): string {
   return `pause-${kind}:${brandCode}:${ref}:${objectId}`;
 }
 
@@ -212,17 +259,30 @@ async function addPauseFailures(ctx: StateCtx, companyId: string, entries: reado
   });
 }
 
-/** One more failed attempt on each entry still open (by object and gate request). */
-async function noteRetryFailures(ctx: StateCtx, companyId: string, failed: ReadonlyArray<{ entry: PendingUndo; error: string }>, now: Date): Promise<void> {
+interface RetryFailure {
+  entry: PendingUndo;
+  error: string;
+  permanent: PermanentErrorClass | null;
+}
+
+/** One more failed attempt on each entry still open (by object and gate request), and whether it failed for good. */
+async function noteRetryFailures(ctx: StateCtx, companyId: string, failed: readonly RetryFailure[], now: Date): Promise<void> {
   if (failed.length === 0) return;
   await withLock(companyId, async () => {
-    const errors = new Map(failed.map((item) => [undoEntryKey(item.entry), item.error]));
+    const byKey = new Map(failed.map((item) => [undoEntryKey(item.entry), item]));
     let changed = false;
-    const next = (await readPendingUndos(ctx, companyId)).map((open) => {
-      const error = errors.get(undoEntryKey(open));
-      if (error === undefined) return open;
+    const next = (await readPendingUndos(ctx, companyId)).map((open): PendingUndo => {
+      const item = byKey.get(undoEntryKey(open));
+      if (item === undefined) return open;
       changed = true;
-      return { ...open, attempts: undoAttempts(open) + 1, lastError: error, lastAttemptAt: now.toISOString() };
+      const { permanentError: _class, permanentSince, ...rest } = open;
+      return {
+        ...rest,
+        attempts: undoAttempts(open) + 1,
+        lastError: item.error,
+        lastAttemptAt: now.toISOString(),
+        ...(item.permanent ? { permanentError: item.permanent, permanentSince: permanentSince ?? now.toISOString() } : {}),
+      };
     });
     if (changed) await ctx.state.set(undoKey(companyId), next);
   });
@@ -263,7 +323,44 @@ function objectList(entries: readonly Pick<PendingUndo, "kind" | "objectId">[]):
   return entries.map((entry) => `${KIND_TEXT[entry.kind] ?? entry.kind} ${entry.objectId}`).join(", ");
 }
 
-type AlertEntry = Pick<PendingUndo, "kind" | "objectId"> & Partial<Pick<PendingUndo, "gateRequestId" | "origin" | "haltRule" | "attempts" | "error" | "lastError">>;
+type AlertEntry = Pick<PendingUndo, "kind" | "objectId"> &
+  Partial<Pick<PendingUndo, "gateRequestId" | "origin" | "haltRule" | "attempts" | "error" | "lastError" | "permanentError">>;
+
+const PERMANENT_TEXT: Record<PermanentErrorClass, string> = {
+  token_invalid: "Metan access token on vanhentunut tai peruttu",
+  token_unresolved: "Metan access tokenia ei voitu lukea",
+  permission: "tokenilla ei ole oikeutta kohteeseen (tili tai oikeudet vaihtuneet)",
+  object_missing: "kohdetta ei ole enää Metassa",
+  write_refused: "Meta-asiakas esti kirjoituksen",
+};
+
+/** The newer card an overlap alert names (RK9-567). */
+type OverlapCard = Pick<NewerActivation, "id" | "unknown">;
+
+function errorLine(entry: AlertEntry): string {
+  const error = entry.lastError ?? entry.error;
+  return `• ${KIND_TEXT[entry.kind] ?? entry.kind} ${entry.objectId}: PAUSED epäonnistui ${undoAttempts(entry)} kertaa${error ? `, viimeisin virhe: ${error.slice(0, 200)}` : ""}`;
+}
+
+/** The overlap and permanent alerts (RK9-567), the same for both origins. */
+function retryAlertText(name: string, kind: "overlap" | "permanent", entries: readonly AlertEntry[], newer?: OverlapCard): string[] {
+  if (kind === "overlap") {
+    return [
+      newer?.unknown
+        ? `⚠️ ${name}: uudelleenyritys pysäytti kohteen, vaikka uudempi kortti ${newer.id} hyväksyttiin; kortin tulosta ei tallennettu, joten aktivointi on voinut onnistua`
+        : `⚠️ ${name}: uudelleenyritys pysäytti kohteen, jonka uudempi kortti ${newer?.id ?? "?"} hyväksyttiin sen aikana`,
+      `Nyt PAUSED: ${objectList(entries)}. Kortti voi näyttää "aktivoitu", vaikka kohde on pysäytetty.`,
+      "Jos mainoksen pitää olla käynnissä, lähetä uusi kortti ja hyväksy se. Tarkista tila Metassa.",
+    ];
+  }
+  const reason = entries[0]?.permanentError;
+  return [
+    `⚠️ ${name}: Meta hylkää pysäytyksen pysyvästi${reason ? ` (${PERMANENT_TEXT[reason] ?? reason})` : ""}`,
+    `Voi olla yhä ACTIVE: ${objectList(entries)}`,
+    ...entries.map(errorLine),
+    "Uudelleenyritys jatkuu 5 minuutin välein ilman uusia hälytyksiä, mutta onnistuu vasta korjauksen jälkeen. Pysäytä kohde käsin Metassa tai korjaa token ja oikeudet, ja kuittaa merkintä boardissa.",
+  ];
+}
 
 /** A pause failure's alert (RK9-568): the objects, how often Meta refused and its last error. */
 function pauseAlertText(name: string, kind: "failed" | "dropped", entries: readonly AlertEntry[], stored: boolean): string[] {
@@ -277,18 +374,16 @@ function pauseAlertText(name: string, kind: "failed" | "dropped", entries: reado
   return [
     `⚠️ ${name}: pysäytys epäonnistui pysäytystilan aikana${rule ? ` (${RULE_TEXT[rule] ?? rule})` : ""}`,
     `Voi olla yhä ACTIVE: ${objectList(entries)}`,
-    ...entries.map((entry) => {
-      const error = entry.lastError ?? entry.error;
-      return `• ${KIND_TEXT[entry.kind] ?? entry.kind} ${entry.objectId}: PAUSED epäonnistui ${undoAttempts(entry)} kertaa${error ? `, viimeisin virhe: ${error.slice(0, 200)}` : ""}`;
-    }),
+    ...entries.map(errorLine),
     stored
       ? "Pysäytystä yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa sen, board kuittaa sen tai pysäytystilan päätyttyä uudempi aktivointi hyväksytään. Tarkista tila Metassa."
       : "Uudelleenyritystä ei voitu tallentaa: pysäytä nämä käsin Metassa.",
   ];
 }
 
-export function undoAlertText(config: BrandConfig, kind: "failed" | "dropped", entries: readonly AlertEntry[], stored = true): string {
+export function undoAlertText(config: BrandConfig, kind: UndoAlertKind, entries: readonly AlertEntry[], stored = true, newer?: OverlapCard): string {
   const name = config.displayName || config.brandCode;
+  if (kind === "overlap" || kind === "permanent") return retryAlertText(name, kind, entries, newer).join("\n").slice(0, 3900);
   if (entries[0] && undoOrigin(entries[0]) === "pause") return pauseAlertText(name, kind, entries, stored).join("\n").slice(0, 3900);
   const lines =
     kind === "failed"
@@ -312,27 +407,35 @@ interface AlertDeps {
 }
 
 /**
- * One alert per gate request and kind for an activation undo, one per object
- * for a pause failure (RK9-568); the message lists the objects whose marker
- * this call claimed. A failed send gives the markers back.
+ * The first failure's alert: one per gate request for an activation undo,
+ * one per object for a pause failure (RK9-568). Every other alert: one per
+ * object (RK9-567). `gateRequestId` names the entries' gate request or
+ * pause, or for "overlap" the newer card. The message lists the objects
+ * whose marker this call claimed. A failed send gives the markers back.
  */
 async function sendUndoAlert(
   deps: AlertDeps,
   companyId: string,
   config: BrandConfig,
-  kind: "failed" | "dropped",
+  kind: UndoAlertKind,
   gateRequestId: string,
   entries: readonly AlertEntry[],
   stored = true,
+  newer?: OverlapCard,
 ): Promise<{ telegram: "sent" | "not_configured" | "skipped" | "failed"; error?: string }> {
   // Without Telegram there is no marker, so the alert goes out once Telegram is set up.
   if (!config.telegram) return { telegram: "not_configured" };
   if (entries.length === 0) return { telegram: "skipped" };
   const pause = undoOrigin(entries[0]!) === "pause";
-  const markers: Array<{ key: string; entries: readonly AlertEntry[]; objectId?: string }> = pause
-    ? entries.map((entry) => ({ key: pauseAlertKey(kind, config.brandCode, gateRequestId, entry.objectId), entries: [entry], objectId: entry.objectId }))
+  const perObject = pause || kind !== "failed";
+  const markers: Array<{ key: string; entries: readonly AlertEntry[]; objectId?: string }> = perObject
+    ? entries.map((entry) => ({
+        key: pause ? pauseAlertKey(kind, config.brandCode, gateRequestId, entry.objectId) : undoAlertKey(kind, config.brandCode, gateRequestId, entry.objectId),
+        entries: [entry],
+        objectId: entry.objectId,
+      }))
     : [{ key: undoAlertKey(kind, config.brandCode, gateRequestId), entries }];
-  const markerKind = pause ? (kind === "failed" ? PAUSE_FAILED_KIND : PAUSE_DROPPED_KIND) : kind === "failed" ? UNDO_FAILED_KIND : UNDO_DROPPED_KIND;
+  const markerKind = `${pause ? "pause" : "undo"}_${kind}`;
   const claimed: typeof markers = [];
   const release = async () => {
     for (const marker of claimed) await deps.store.release(companyId, marker.key).catch(() => undefined);
@@ -347,7 +450,7 @@ async function sendUndoAlert(
   }
   if (claimed.length === 0) return { telegram: "skipped" };
   try {
-    return { telegram: await deps.notifier.sendMessage(companyId, config, undoAlertText(config, kind, claimed.flatMap((marker) => marker.entries), stored)) };
+    return { telegram: await deps.notifier.sendMessage(companyId, config, undoAlertText(config, kind, claimed.flatMap((marker) => marker.entries), stored, newer)) };
   } catch (error) {
     await release();
     return { telegram: "failed", error: safeError(error) };
@@ -459,10 +562,14 @@ export interface UndoRetryDeps extends AlertDeps {
   newerActivation?: (companyId: string, input: NewerActivationQuery) => Promise<NewerActivation | null>;
 }
 
-function byRequest(entries: readonly PendingUndo[]): Map<string, PendingUndo[]> {
-  const out = new Map<string, PendingUndo[]>();
-  for (const entry of entries) out.set(entry.gateRequestId, [...(out.get(entry.gateRequestId) ?? []), entry]);
+function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const item of items) out.set(key(item), [...(out.get(key(item)) ?? []), item]);
   return out;
+}
+
+function byRequest<T extends PendingUndo>(entries: readonly T[]): Map<string, T[]> {
+  return groupBy(entries, (entry) => entry.gateRequestId);
 }
 
 /**
@@ -482,11 +589,13 @@ export async function retryPendingUndos(
   const brand = config.brandCode;
   const failures: string[] = [];
   const label = (entry: PendingUndo) => (undoOrigin(entry) === "pause" ? `${entry.haltRule ?? "pause"} pause retry` : "activation undo");
-  const audit = (entry: PendingUndo, applied: boolean, reason: string, error: string | null, message: string, extra: Record<string, unknown> = {}) =>
-    recordAction(deps, {
+  const audit = async (entry: PendingUndo, applied: boolean, reason: string, error: string | null, message: string, extra: Record<string, unknown> = {}) => {
+    const insertError = await recordAction(deps, {
       companyId,
       config,
       ruleId: `${undoOrigin(entry) === "pause" ? "retry" : "undo"}-${entry.gateRequestId}`,
+      // rule_type is a CHECK list (migration 001) without an "unknown" value, and G11 allows no
+      // migration: a halt that could not be read files as kill_switch, and metrics.haltRule is null.
       ruleType: entry.haltRule ?? "kill_switch",
       objectType: entry.kind,
       objectId: entry.objectId,
@@ -497,6 +606,7 @@ export async function retryPendingUndos(
       metrics: {
         gateRequestId: entry.gateRequestId,
         origin: undoOrigin(entry),
+        haltRule: entry.haltRule,
         failedSince: entry.since,
         firstError: entry.error,
         failedAttempts: undoAttempts(entry),
@@ -507,11 +617,14 @@ export async function retryPendingUndos(
       error,
       message,
     });
+    if (insertError) failures.push(`${brand} ${label(entry)}: the audit row of ${entry.kind} ${entry.objectId} was not written (${insertError})`);
+  };
 
   const client = deps.clientFor ? deps.clientFor(companyId, config, "live", initiator) : brandClient(deps, companyId, config, "live", { initiator });
   const done: PendingUndo[] = [];
   const superseded: Array<{ entry: PendingUndo; by: string }> = [];
-  const stillFailing: Array<{ entry: PendingUndo; error: string }> = [];
+  const overlaps: Array<{ entry: PendingUndo; newer: NewerActivation }> = [];
+  const stillFailing: RetryFailure[] = [];
   // A newer activation ends the retry only when no halt is in force; a halt that cannot be read counts as one.
   let haltInForce = true;
   try {
@@ -523,34 +636,77 @@ export async function retryPendingUndos(
     let newer: NewerActivation | null = null;
     // Only an activation approved after the latest failed pause or undo of the object ends it (RK9-568).
     const since = new Date(entry.failedAt ?? entry.since);
-    if (!haltInForce && deps.newerActivation && Number.isFinite(since.getTime())) {
+    const query: NewerActivationQuery = { objectId: entry.objectId, objectKind: entry.kind, gateRequestId: entry.gateRequestId, since, inFlightMinutes: UNDO_IN_FLIGHT_MINUTES };
+    const lookup = !haltInForce && deps.newerActivation !== undefined && Number.isFinite(since.getTime()) ? deps.newerActivation : null;
+    if (lookup) {
       try {
-        newer = await deps.newerActivation(companyId, { objectId: entry.objectId, gateRequestId: entry.gateRequestId, since, inFlightMinutes: UNDO_IN_FLIGHT_MINUTES });
+        newer = await lookup(companyId, query);
       } catch (error) {
         failures.push(`${brand} ${label(entry)}: newer activations of ${entry.kind} ${entry.objectId} not read (${safeError(error)}), pausing anyway`);
       }
     }
     if (newer?.inFlight) {
       // Its result decides: activated ends this retry, failed leaves it for the next tick.
-      deps.ctx.logger.info("rk9-ads pause retry: a newer card is still activating; retry left for the next tick", { companyId, objectId: entry.objectId, gateRequestId: newer.id });
+      if (newer.ageMinutes >= UNDO_IN_FLIGHT_WARN_MINUTES) {
+        // A handler takes seconds: one still marked running this long may have died with its worker (RK9-567).
+        deps.ctx.logger.warn("rk9-ads pause retry: a newer card is marked running for long; its worker may have died", { companyId, objectId: entry.objectId, gateRequestId: newer.id, ageMinutes: newer.ageMinutes });
+        failures.push(
+          `${brand} ${label(entry)}: newer card ${newer.id} of ${entry.kind} ${entry.objectId} was approved ${newer.ageMinutes} min ago and has recorded no end (its worker may have died); the retry waits for it up to ${UNDO_IN_FLIGHT_MINUTES} min, then pauses`,
+        );
+      } else {
+        deps.ctx.logger.info("rk9-ads pause retry: a newer card is still activating; retry left for the next tick", { companyId, objectId: entry.objectId, gateRequestId: newer.id });
+      }
       continue;
     }
-    if (newer) {
+    // A card whose result is unknown may or may not have activated: the doubt pauses (RK9-567).
+    if (newer && !newer.unknown) {
       superseded.push({ entry, by: newer.id });
       continue;
     }
+    let paused = false;
     try {
       const result = await setObjectStatus(client, entry.objectId, "PAUSED");
       if (isDryRun(result) || !result.success) throw new Error(`Meta did not confirm status PAUSED on ${entry.objectId}`);
-      done.push(entry);
-      await audit(entry, true, `${undoOrigin(entry) === "pause" ? "pause" : "activation undo"} retried after a failed pause`, null, `${label(entry)} paused ${entry.kind} ${entry.objectId} on retry`);
+      paused = true;
     } catch (error) {
       const detail = safeError(error);
-      stillFailing.push({ entry, error: detail });
+      const permanent = permanentErrorClass(error);
+      stillFailing.push({ entry, error: detail, permanent });
+      // Without Telegram the run's failure is the only signal: it stays loud.
+      if (permanent && entry.permanentError && config.telegram) {
+        // Alerted and reported already: the entry waits for a board user without failing every run (RK9-567).
+        deps.ctx.logger.info("rk9-ads pause retry: Meta still refuses the PAUSED write for good", { companyId, objectId: entry.objectId, class: permanent });
+        continue;
+      }
       failures.push(
-        `${brand} ${label(entry)}: pausing ${entry.kind} ${entry.objectId} failed again (${undoAttempts(entry) + 1} failed PAUSED writes since ${entry.since}, last error: ${detail}), retrying next tick`,
+        permanent
+          ? `${brand} ${label(entry)}: Meta refuses pausing ${entry.kind} ${entry.objectId} for good (${permanent}: ${detail}); one alert, then it is retried quietly until Meta confirms or a board user acknowledges it`
+          : `${brand} ${label(entry)}: pausing ${entry.kind} ${entry.objectId} failed again (${undoAttempts(entry) + 1} failed PAUSED writes since ${entry.since}, last error: ${detail}), retrying next tick`,
       );
     }
+    if (!paused) continue;
+    done.push(entry);
+    // A newer card approved after the lookup, or one whose result is unknown, may have just been paused (RK9-567).
+    let after: NewerActivation | null = newer;
+    if (lookup) {
+      try {
+        after = (await lookup(companyId, query)) ?? newer;
+      } catch (error) {
+        failures.push(`${brand} ${label(entry)}: newer activations of ${entry.kind} ${entry.objectId} not read again after the pause (${safeError(error)}); check in Meta that no approved ad was stopped`);
+      }
+    }
+    if (after) {
+      overlaps.push({ entry, newer: after });
+      deps.ctx.logger.warn("rk9-ads pause retry: the retry may have paused a newer activation", { companyId, objectId: entry.objectId, gateRequestId: after.id, unknown: after.unknown === true });
+    }
+    await audit(
+      entry,
+      true,
+      `${undoOrigin(entry) === "pause" ? "pause" : "activation undo"} retried after a failed pause`,
+      null,
+      `${label(entry)} paused ${entry.kind} ${entry.objectId} on retry`,
+      after ? { newerActivation: after.id, newerActivationResult: after.unknown ? "unknown" : after.inFlight ? "running" : "activated" } : {},
+    );
   }
   const removed = new Set((await removePendingUndos(deps.ctx, companyId, [...done, ...superseded.map((item) => item.entry)].map(undoEntryKey))).map(undoEntryKey));
   // Only what this tick removed ended: a pause that failed on the object meanwhile changed its key, and its retry goes on.
@@ -563,15 +719,19 @@ export async function retryPendingUndos(
   } catch (error) {
     failures.push(`${brand} pause retry: failed attempts not counted (${safeError(error)})`);
   }
-  for (const [gateRequestId, group] of byRequest(ended.map((item) => item.entry))) {
-    const alert = await sendUndoAlert(deps, companyId, config, "dropped", gateRequestId, group);
-    if (alert.error) failures.push(`${brand} ${label(group[0]!)}: alert failed (${alert.error})`);
+  const alert = async (kind: UndoAlertKind, gateRequestId: string, group: readonly PendingUndo[], newerCard?: OverlapCard) => {
+    const outcome = await sendUndoAlert(deps, companyId, config, kind, gateRequestId, group, true, newerCard);
+    if (outcome.error) failures.push(`${brand} ${label(group[0]!)}: ${kind} alert failed (${outcome.error})`);
+  };
+  for (const [gateRequestId, group] of byRequest(ended.map((item) => item.entry))) await alert("dropped", gateRequestId, group);
+  for (const [, group] of groupBy(overlaps, (item) => `${undoOrigin(item.entry)}|${item.newer.id}`)) {
+    await alert("overlap", group[0]!.newer.id, group.map((item) => item.entry), group[0]!.newer);
   }
   // The first alert may not have gone out: the marker makes this a no-op once it has.
-  const failing = stillFailing.map(({ entry, error }) => ({ ...entry, attempts: undoAttempts(entry) + 1, lastError: error }));
-  for (const [gateRequestId, group] of byRequest(failing)) {
-    const alert = await sendUndoAlert(deps, companyId, config, "failed", gateRequestId, group);
-    if (alert.error) failures.push(`${brand} ${label(group[0]!)}: alert failed (${alert.error})`);
+  const failing = stillFailing.map(({ entry, error, permanent }) => ({ ...entry, attempts: undoAttempts(entry) + 1, lastError: error, permanent }));
+  for (const [gateRequestId, group] of byRequest(failing.filter((entry) => !entry.permanent))) await alert("failed", gateRequestId, group);
+  for (const [gateRequestId, group] of byRequest(failing.filter((entry) => entry.permanent))) {
+    await alert("permanent", gateRequestId, group.map((entry) => ({ ...entry, permanentError: entry.permanent! })));
   }
   return failures;
 }

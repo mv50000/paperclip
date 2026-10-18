@@ -40,23 +40,41 @@ export function memoryActivationRepo(store: MemoryGateStore, now: () => Date): A
     },
     async newerActivation(companyId, input) {
       const original = store.rows.get(input.gateRequestId);
-      const publicationId = original && original.companyId === companyId ? activationOf(original)?.publicationId : undefined;
-      const inFlightSince = now().getTime() - Math.max(1, Math.trunc(input.inFlightMinutes)) * 60_000;
+      const own = original && original.companyId === companyId ? activationOf(original) : null;
+      const publicationId = own?.publicationId;
+      const nowMs = now().getTime();
+      const inFlightSince = nowMs - Math.max(1, Math.trunc(input.inFlightMinutes)) * 60_000;
+      // Ad sets known to be under the object (RK9-567): from any card's binding or outcome.
+      const adsetsOfObject = new Set(
+        [...store.rows.values()]
+          .filter((row) => row.companyId === companyId && row.kind === "activate_ad")
+          .filter((row) => activationOf(row)?.campaignId === input.objectId || row.outcome?.campaignId === input.objectId)
+          .map((row) => activationOf(row)?.adsetId)
+          .filter((id): id is string => typeof id === "string"),
+      );
       const hits = [...store.rows.values()]
         .filter((row) => {
           if (row.companyId !== companyId || row.kind !== "activate_ad" || row.id === input.gateRequestId || row.status !== "approved") return false;
           const decided = row.decidedAt?.getTime() ?? 0;
           if (decided <= input.since.getTime()) return false;
           const running = row.outcome === null || row.outcome.handler === "started";
-          if (row.outcome?.result !== "activated" && !(running && decided > inFlightSince)) return false;
+          if (row.outcome?.result !== "activated" && !running) return false;
           const binding = activationOf(row);
           const outcome = row.outcome ?? {};
           const ids = [binding?.adId, binding?.adsetId, binding?.campaignId, outcome.adId, outcome.adsetId, outcome.campaignId];
-          return ids.includes(input.objectId) || (publicationId !== undefined && binding?.publicationId === publicationId);
+          const byAdset =
+            input.objectKind === "campaign" && running && binding !== null && ((own !== null && binding.adsetId === own.adsetId) || adsetsOfObject.has(binding.adsetId));
+          return ids.includes(input.objectId) || (publicationId !== undefined && binding?.publicationId === publicationId) || byAdset;
         })
-        .map((row) => ({ id: row.id, inFlight: row.outcome?.result !== "activated", decided: row.decidedAt?.getTime() ?? 0 }))
-        .sort((a, b) => Number(b.inFlight) - Number(a.inFlight) || b.decided - a.decided);
-      return hits[0] ? { id: hits[0].id, inFlight: hits[0].inFlight } : null;
+        .map((row) => {
+          const decided = row.decidedAt?.getTime() ?? 0;
+          const state = row.outcome?.result === "activated" ? 1 : decided > inFlightSince ? 0 : 2;
+          return { id: row.id, state, decided };
+        })
+        .sort((a, b) => a.state - b.state || b.decided - a.decided);
+      const hit = hits[0];
+      if (!hit) return null;
+      return { id: hit.id, inFlight: hit.state === 0, ...(hit.state === 2 ? { unknown: true } : {}), ageMinutes: Math.floor((nowMs - hit.decided) / 60_000) };
     },
     async close(companyId, id, outcome) {
       const row = store.rows.get(id);

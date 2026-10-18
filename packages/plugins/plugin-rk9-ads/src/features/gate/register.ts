@@ -71,8 +71,9 @@ async function loadEnabled(ctx: PluginContext, companyId: string): Promise<{ ok:
 export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides = {}): { cards: StagingCards } {
   const { ctx, ledger } = runtime;
   const now = overrides.now ?? (() => new Date());
-  const haltOf = overrides.haltOf ?? ((companyId: string) => readHalt(ctx, companyId, now()));
-  const adHaltOf = overrides.adHaltOf ?? ((companyId: string, adId: string) => readAdHalt(ctx, companyId, adId, now()));
+  // `since`: a halt counts while it has not ended by then (activate_ad passes its own start, RK9-567).
+  const haltOf = overrides.haltOf ?? ((companyId: string, since?: Date) => readHalt(ctx, companyId, since ?? now()));
+  const adHaltOf = overrides.adHaltOf ?? ((companyId: string, adId: string, since?: Date) => readAdHalt(ctx, companyId, adId, since ?? now()));
   const store = overrides.store ?? withActivationColumns(createSqlGateStore(ctx.db), ctx.db);
   const repo = overrides.repo ?? sqlActivationGateRepo(ctx.db);
   const loadConfig = overrides.loadConfig ?? ((companyId: string) => loadEnabled(ctx, companyId));

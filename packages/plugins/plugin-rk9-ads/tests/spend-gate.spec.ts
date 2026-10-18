@@ -715,6 +715,25 @@ describe("pause-ad closes the ad's open activation cards (RK9-562)", () => {
     expect(result.cardsError).toBeUndefined();
   });
 
+  it("tries the ad's halt once more before it pauses without it (RK9-567)", async () => {
+    const r = await rig();
+    registerUi(r.runtime);
+    const set = r.harness.ctx.state.set.bind(r.harness.ctx.state);
+    let refused = 0;
+    r.harness.ctx.state.set = async (key, value) => {
+      if (key.stateKey.includes(":ad:") && refused === 0) {
+        refused += 1;
+        throw new Error("state down");
+      }
+      return set(key, value);
+    };
+    const result = await pauseAd(r);
+    expect(refused).toBe(1);
+    expect(result.haltError).toBeUndefined();
+    expect(result.adHalt).toEqual({ id: expect.any(String), until: expect.any(String) });
+    expect(await readAdHalt(r.harness.ctx, COMPANY_A, AD)).toMatchObject({ id: result.adHalt!.id });
+  });
+
   it("reports cardsError when the activation gate is not running", async () => {
     const r = await rig();
     registerUi(r.runtime);
@@ -771,6 +790,32 @@ describe("pause-ad leaves a short halt for the ad (RK9-566)", () => {
     expect(outcome.result).toBe("failed");
     expect(outcome.detail).toContain("the pause_ad halt was set during the activation");
     expect(outcome.detail).toContain("the ad was paused again");
+    expect(statusWrites(r.meta).filter((call) => call.path.endsWith(AD)).at(-1)!.body.status).toBe("PAUSED");
+  });
+
+  it("an activation that stalls past the end of the ad's halt still sees it and pauses the ad again (RK9-567)", async () => {
+    const r = await rig();
+    const sent = await r.cards.openActivationCard(publication());
+    const original = r.harness.ctx.http.fetch;
+    let fired = false;
+    r.harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
+      const body = init?.body ? new URLSearchParams(String(init.body)) : null;
+      const hit = !fired && init?.method === "POST" && new URL(url).pathname.endsWith(`/${AD}`) && body?.get("status") === "ACTIVE";
+      const response = await original(url, init);
+      if (hit) {
+        fired = true;
+        // A pause-ad halt set during the run that has already ended when the run reads the halt after its writes.
+        await setAdHalt(r.harness.ctx, COMPANY_A, newAdHalt({ brandCode: "OLL", adId: AD, reason: "pysäytys", initiator: { source: "ui" }, now: new Date(Date.now() - 30 * 60_000 + 5) }));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(await readAdHalt(r.harness.ctx, COMPANY_A, AD)).toBeNull();
+      }
+      return response;
+    };
+    await tap(r, sent.messageId, 0);
+    expect(fired).toBe(true);
+    const outcome = r.store.rows.get(sent.id)!.outcome as { result: string; detail: string };
+    expect(outcome.result).toBe("failed");
+    expect(outcome.detail).toContain("the pause_ad halt was set during the activation");
     expect(statusWrites(r.meta).filter((call) => call.path.endsWith(AD)).at(-1)!.body.status).toBe("PAUSED");
   });
 

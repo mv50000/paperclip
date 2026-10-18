@@ -28,7 +28,10 @@
  *    (or when the read fails) it is paused again and the card fails;
  * 7. the halt once more: a pause that started during the writes set
  *    it before its own first pause, so either its listing sees this run's
- *    ACTIVE objects, or this read sees the halt. A halt seen during or after
+ *    ACTIVE objects, or this read sees the halt. Every halt read counts a
+ *    halt that has been in force at any time since the handler started,
+ *    so a run that stalls past a timed halt's end (the 30-minute pause-ad
+ *    halt) still sees it (RK9-567). A halt seen during or after
  *    the writes pauses again everything this run set ACTIVE (an ad that was
  *    ACTIVE already is not this run's, RK9-565). When Meta refuses one of
  *    those PAUSED writes, the object is stored for the scheduled-pause job's
@@ -90,10 +93,14 @@ export interface ActivateAdDeps {
    * may set ACTIVE; the spend guard hook still checks each write.
    */
   activationClient(companyId: string, config: BrandConfig, initiator: Initiator, allowed: ReadonlySet<string>): MetaGraphClient;
-  /** The halt in force (spend-guard/halt.ts). Throws when it cannot be read. */
-  haltOf(companyId: string): Promise<HaltState | null>;
-  /** The ad's pause-ad halt in force (spend-guard/halt.ts readAdHalt). Throws when it cannot be read. */
-  adHaltOf?(companyId: string, adId: string): Promise<AdHaltState | null>;
+  /**
+   * The halt in force (spend-guard/halt.ts), or with `since` one that has
+   * been in force at any time since then: one that ended after `since`
+   * counts. Throws when it cannot be read.
+   */
+  haltOf(companyId: string, since?: Date): Promise<HaltState | null>;
+  /** The ad's pause-ad halt (spend-guard/halt.ts readAdHalt), read like `haltOf`. Throws when it cannot be read. */
+  adHaltOf?(companyId: string, adId: string, since?: Date): Promise<AdHaltState | null>;
   /** The latest published or swapped publication of the ad, or null. */
   publicationOf(companyId: string, adId: string): Promise<AdOwner | null>;
   /**
@@ -251,6 +258,8 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
   }
 
   return async ({ request, tgUserId }) => {
+    // The halt reads look back to here: a halt that ended while this run stalled still stops it (RK9-567).
+    const startedAt = now();
     // No pairing source maps a Telegram user to a company member in the plugin (core owns chat pairing).
     const decidedBy = { tgUserId, memberUserId: null };
     const binding = activationOf(request);
@@ -360,7 +369,9 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     // The company's halts and the ad's own, read right before the first write.
     const haltNow = async (): Promise<HaltState | AdHaltState | null> => {
       try {
-        return (await deps.haltOf(companyId)) ?? (deps.adHaltOf ? await deps.adHaltOf(companyId, binding.adId) : null);
+        // The earlier of the start and now: a worker clock stepped back must not skip a halt that is in force now.
+        const since = new Date(Math.min(startedAt.getTime(), now().getTime()));
+        return (await deps.haltOf(companyId, since)) ?? (deps.adHaltOf ? await deps.adHaltOf(companyId, binding.adId, since) : null);
       } catch (error) {
         throw new HaltedError(`the halt could not be read (${safeError(error)})`, null);
       }

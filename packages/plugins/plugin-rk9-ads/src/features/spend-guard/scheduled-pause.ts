@@ -313,12 +313,16 @@ export async function runDueRechecks(
   return failures;
 }
 
-/** Open activation undos of a company the job skips: without a brand config there is no Meta client to retry them with. */
+/**
+ * Open undos and pause retries of a company the job skips: without a brand
+ * config, a valid one or a last valid one, there is no Meta client to retry
+ * them with.
+ */
 async function orphanedUndos(ctx: ScheduledPauseDeps["ctx"], companyId: string): Promise<string[]> {
   try {
     const open = await readPendingUndos(ctx, companyId);
     if (open.length === 0) return [];
-    return [`company ${companyId}: ${open.length} activation undo(s) open (${open.map((entry) => `${entry.kind} ${entry.objectId}`).join(", ")}) but no brand config to retry them; pause them by hand in Meta`];
+    return [`company ${companyId}: ${open.length} activation undo(s) or pause retry(ies) open (${open.map((entry) => `${entry.kind} ${entry.objectId}`).join(", ")}) but no brand config to retry them; pause them by hand in Meta`];
   } catch (error) {
     return [`company ${companyId}: open activation undos not read (${safeError(error)})`];
   }
@@ -346,7 +350,8 @@ export function createScheduledPauseJob(deps: ScheduledPauseDeps) {
         continue;
       }
       if (!loaded.ok) {
-        failures.push(`company ${companyId}: ${loaded.error}; nothing paused`);
+        // No config to pause with: the retry does not run either, so its open objects are named (RK9-567).
+        failures.push(`company ${companyId}: ${loaded.error}; nothing paused`, ...(await orphanedUndos(ctx, companyId)));
         continue;
       }
       if (loaded.fallback) {

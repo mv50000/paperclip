@@ -697,7 +697,7 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     const r = await rig();
     await lostUndo(r);
     useCompanyConfigs(r.harness, { [COMPANY_A]: {} });
-    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`1 activation undo\\(s\\) open \\(ad ${AD}\\) but no brand config to retry them`));
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`1 activation undo\\(s\\) or pause retry\\(ies\\) open \\(ad ${AD}\\) but no brand config to retry them`));
   });
 
   it("clearing the halt alone keeps the retry; the board's acknowledgement of the previewed entries ends it", async () => {
@@ -860,6 +860,29 @@ describe("clearing the halt is board-only", () => {
     const next = await r.cards.openActivationCard(publication());
     await tap(r, next.messageId);
     expect(r.store.rows.get(next.id)!.outcome).toMatchObject({ result: "activated" });
+  });
+
+  it("reads every halt as of the activation's start, or of now when the clock stepped back (RK9-567)", async () => {
+    const start = Date.now();
+    let steppedBack = false;
+    const seen: Array<{ since: number | undefined }> = [];
+    const r = await rig({
+      gate: {
+        // The handler's own clock: its first reading is its start, every later one a minute earlier (an NTP step).
+        now: () => new Date(steppedBack ? start - 60_000 : start),
+        haltOf: async (_companyId, since) => {
+          seen.push({ since: since?.getTime() });
+          steppedBack = true;
+          return null;
+        },
+      },
+    });
+    const sent = await r.cards.openActivationCard(publication());
+    steppedBack = false;
+    await tap(r, sent.messageId);
+    const reads = seen.slice(-3);
+    expect(reads.length).toBeGreaterThan(1);
+    expect(reads.every((read) => read.since === start - 60_000)).toBe(true);
   });
 
   it("a damaged pause-ad halt record still refuses", async () => {

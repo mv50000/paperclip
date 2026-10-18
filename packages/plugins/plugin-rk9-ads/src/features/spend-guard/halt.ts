@@ -210,10 +210,11 @@ export async function clearHalt(
  * writes before the pause's own PAUSED write. It lasts AD_HALT_MINUTES, as
  * long as an approved activation counts as running
  * (gate/staging-card.ts ACTIVATION_IN_FLIGHT_MINUTES), so a new card of the
- * ad tapped in that time is refused too. An activation that stalls longer
- * than that before its last halt read is not stopped by it; pause-ad still
- * names a running activation (`activationRunning`). A board user clears it early with
- * `clear-halt` and `adId`.
+ * ad tapped in that time is refused too. activate_ad reads it, like the
+ * company's halts, as of its own start (RK9-567): an activation that stalls
+ * past the halt's end still sees it and pauses again what it set ACTIVE.
+ * pause-ad also names a running activation (`activationRunning`). A board
+ * user clears it early with `clear-halt` and `adId`.
  *
  * Stored like the company's halts, one key per ad. A damaged record holds
  * with no end, like theirs.

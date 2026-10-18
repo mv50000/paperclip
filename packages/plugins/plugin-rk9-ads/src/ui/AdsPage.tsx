@@ -182,6 +182,7 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
   const undo = props.pendingUndo ?? [];
   const activationUndo = undo.filter((entry) => entry.origin !== "pause");
   const pauseRetry = undo.filter((entry) => entry.origin === "pause");
+  const permanent = undo.filter((entry) => entry.permanentError);
   if (undo.length === 0 && !props.pendingUndoError) return null;
 
   async function startAck() {
@@ -237,6 +238,13 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
             .join(", ")}
           . Pysäytystä yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa sen, board kuittaa sen tai pysäytystilan päätyttyä uudempi aktivointi
           hyväksytään.
+        </ErrorText>
+      ) : null}
+      {permanent.length > 0 ? (
+        <ErrorText>
+          Meta hylkää pysäytyksen pysyvästi (token, oikeudet tai poistettu kohde):{" "}
+          {permanent.map((entry) => `${UNDO_KIND_LABEL[entry.kind] ?? entry.kind} ${entry.objectId}`).join(", ")}. Uudelleenyritys ei onnistu ennen korjausta. Pysäytä
+          kohde käsin Metassa tai korjaa token, ja kuittaa merkintä.
         </ErrorText>
       ) : null}
       {props.pendingUndoError ? <ErrorText>Keskeneräisiä peruutuksia ei voitu lukea: {props.pendingUndoError}</ErrorText> : null}

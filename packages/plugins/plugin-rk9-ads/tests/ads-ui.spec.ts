@@ -406,6 +406,21 @@ describe("operator UI (RK9-518)", () => {
     expect(buttons("Kuittaa peruutukset")).toHaveLength(1);
   });
 
+  it("names a retry that Meta refuses for good, so the board knows only a fix and an acknowledgement end it (RK9-567)", async () => {
+    bridge.data.set(
+      DATA.overview,
+      ollolaOverview({
+        pendingUndo: [
+          { kind: "ad", objectId: "120200000000000301", gateRequestId: "gate-9", since: "2026-10-17T08:00:05.000Z", attempts: 3, permanentError: "object_missing" },
+          { kind: "campaign", objectId: "120200000000000101", gateRequestId: "gate-9", since: "2026-10-17T08:00:05.000Z", attempts: 2 },
+        ],
+      }),
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    expect(container.textContent).toContain("Meta hylkää pysäytyksen pysyvästi (token, oikeudet tai poistettu kohde): mainos 120200000000000301.");
+    expect(container.textContent).not.toMatch(/pysyvästi[^.]*kampanja 120200000000000101/);
+  });
+
   it("the widget shows MTD against the cap and the pending gate count", async () => {
     bridge.data.set(DATA.widget, { state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 2, halted: false } satisfies UiWidget);
     await render(createElement(AdsWidget, { context: CONTEXT }));

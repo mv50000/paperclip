@@ -339,6 +339,32 @@ the core chat-channels bot is never shared. See
   alert and the Ads page show them. A re-check that finds the object no
   longer ACTIVE still drops silently. The data gate and dry runs store
   nothing.
+- **Retry edge cases** (RK9-567, same list). After each confirmed PAUSED
+  write with no halt in force, the tick looks for a newer card again: one
+  approved during the tick's reads may have just been paused, and one alert
+  per object and card (`undo-overlap:` / `pause-overlap:`) says so; the
+  entry still ends. A newer card with no recorded end past 30 min has an
+  unknown result (its worker died, or its outcome was not stored): it does
+  not end the retry, the tick pauses and sends the same alert. One still
+  marked running after 5 min fails the run while the retry waits. A PAUSED
+  write that Meta refuses for good (token invalid or unresolved, code 10 or
+  200-299, code 100 subcode 33, code 803, a refused write) fails the run once
+  and sends one alert (`undo-permanent:` / `pause-permanent:`); the tick
+  keeps trying the write quietly, and the Ads page marks the entry until a
+  board user acknowledges it. A transient error makes it loud again. Drop
+  alerts have one marker per object. The newer-card lookup moves the
+  failure's time from the worker's clock to the database's, which
+  `decided_at` uses. For a campaign it also counts a running card of the
+  failed card's ad set (a swap card's binding names no campaign); an ad or
+  ad set never waits for a sibling's card. A config that cannot be
+  loaded names the open entries. activate_ad reads every halt as of its own
+  start, so a run that stalls past the 30-minute pause-ad halt still sees
+  it. The callback router tries the handler's final outcome write twice more
+  (250 ms, 1 s) before it logs the failure. The in-memory lock over the
+  list holds because the host runs one worker per plugin per server, stops
+  the old worker before it starts a new one, and a server restart kills its
+  workers (systemd `KillMode=control-group`, worker exits on stdin close);
+  two servers on one database are not supported.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above

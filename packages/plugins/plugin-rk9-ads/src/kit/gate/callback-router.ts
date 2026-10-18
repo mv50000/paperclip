@@ -24,7 +24,11 @@
  * The handler runs at most once. A worker that dies during the handler leaves
  * the card `approved` with outcome `{ handler: "started" }`: the handler may
  * or may not have acted. A reconciler must check the real state (for example
- * the ad's status at Meta) and must not re-run the handler blindly.
+ * the ad's status at Meta) and must not re-run the handler blindly. A store
+ * error on the final outcome leaves the same `started`, so that write is
+ * tried again (`outcomeRetryDelaysMs`) before the router gives up and logs
+ * it (RK9-567): the activation gate reads `started` as a card that may still
+ * be running, and an old one as a card with an unknown result.
  */
 
 import type { PluginLogger } from "@paperclipai/plugin-sdk";
@@ -95,7 +99,12 @@ export interface CallbackRouterOptions {
   cachedKinds?: readonly string[];
   logger: PluginLogger;
   audit?(event: GateAuditEvent): Promise<void>;
+  /** Waits before each repeat of a failed final outcome write; default OUTCOME_RETRY_DELAYS_MS. */
+  outcomeRetryDelaysMs?: readonly number[];
 }
+
+/** Two repeats of a failed final outcome write, after 250 ms and 1 s (RK9-567). */
+export const OUTCOME_RETRY_DELAYS_MS: readonly number[] = [250, 1_000];
 
 export interface CallbackRouter {
   handleUpdate(update: TelegramUpdate): Promise<void>;
@@ -105,6 +114,7 @@ export interface CallbackRouter {
 
 export function createCallbackRouter(options: CallbackRouterOptions): CallbackRouter {
   const { api, store, registry, logger } = options;
+  const outcomeRetryDelays = options.outcomeRetryDelaysMs ?? OUTCOME_RETRY_DELAYS_MS;
   const running = new Set<Promise<void>>();
 
   async function audit(event: GateAuditEvent): Promise<void> {
@@ -188,16 +198,21 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       return;
     }
     // The handler has acted: a later storage error must not show the card as failed.
-    const to = result.status === "denied" || result.status === "failed" ? result.status : "approved";
-    try {
-      await store.settle(request.companyId, request.id, {
-        from: "approved",
-        to,
-        outcome: result.outcome ?? { handler: "done" },
-        error: to === "approved" ? null : (result.error ?? null),
-      });
-    } catch (error) {
-      logger.error("gate: handler succeeded but its outcome was not stored", { gateRequestId: request.id, detail: safe(error) });
+    const to: "approved" | "denied" | "failed" = result.status === "denied" || result.status === "failed" ? result.status : "approved";
+    const final = { from: "approved" as const, to, outcome: result.outcome ?? { handler: "done" }, error: to === "approved" ? null : (result.error ?? null) };
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await store.settle(request.companyId, request.id, final);
+        break;
+      } catch (error) {
+        const delay = outcomeRetryDelays[attempt];
+        if (delay === undefined) {
+          logger.error("gate: handler succeeded but its outcome was not stored", { gateRequestId: request.id, attempts: attempt + 1, detail: safe(error) });
+          break;
+        }
+        logger.warn("gate: handler outcome not stored, trying again", { gateRequestId: request.id, attempt: attempt + 1, detail: safe(error) });
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
     await edit(request, query, result.statusText ?? (to === "approved" ? GATE_TEXT.approved : GATE_TEXT[to]));
   }
