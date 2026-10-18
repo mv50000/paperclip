@@ -15,12 +15,16 @@
  *   re-checks anyway.
  * - It is for the read delay only: a re-check that a tick finds more than
  *   RECHECK_WINDOW_MS past its due time is dropped unrun.
- * - A failed listing keeps it for the next tick within that window.
+ * - A failed listing or halt read keeps it for the next tick within that
+ *   window.
  * - A pause that Meta refuses moves the object to the pause retry
  *   (pending-undo.ts, RK9-568), and the re-check is done: its listing ran.
- *   Only when the retry cannot be stored does the re-check stay, counting
- *   its failed runs and their last error, so a drop at the window's end
- *   says that the ticks ran and failed instead of "no tick ran".
+ *   Only when the retry cannot be stored does the re-check stay.
+ * - Every run that keeps it counts as failed, with its last error: a failed
+ *   listing, halt read or unstored PAUSED write. A drop at the window's end
+ *   then says that the ticks ran and failed instead of "no tick ran", and
+ *   sends one Telegram alert (alert_dedupe marker), because what the late
+ *   listing would show may still be ACTIVE (RK9-570).
  * - It sets no new halt and closes no cards; it notifies only when it paused
  *   something.
  *
@@ -44,9 +48,9 @@ export interface Recheck {
   /** ISO time from which a tick runs it. */
   dueAt: string;
   reason: string;
-  /** Runs whose pauses failed and whose objects could not be stored for the retry (RK9-568). */
+  /** Failed runs: the listing, the halt read, or PAUSED writes not stored for the retry (RK9-568, RK9-570). */
   attempts?: number;
-  /** The last of those runs' errors (safeError). */
+  /** The last of those runs' errors (safeError), with what failed. */
   lastError?: string;
 }
 

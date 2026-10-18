@@ -168,6 +168,17 @@ function HaltBanner(props: {
 }
 
 /**
+ * What the acknowledgement stops, by origin: an activation undo or a pause's
+ * own PAUSED write (RK9-570). Absent origin: an activation undo.
+ */
+export function ackPrompt(entries: ReadonlyArray<{ origin?: string }>): string {
+  const pause = entries.filter((entry) => entry.origin === "pause").length;
+  const activation = entries.length - pause;
+  const what = [activation > 0 ? `${activation} aktivoinnin peruutuksen` : null, pause > 0 ? `${pause} pysäytyksen` : null].filter(Boolean).join(" ja ");
+  return `Kuittaus lopettaa ${what} uudelleenyrityksen. Kohteet voivat jäädä ACTIVE-tilaan kuluttamaan: tarkista ja pysäytä ne Metassa.`;
+}
+
+/**
  * The activation undos (RK9-565) and the pauses' own PAUSED writes during a
  * halt (RK9-568) that Meta refused: the job retries PAUSED every 5 minutes,
  * with or without a halt. A board user can stop the retry of the entries the
@@ -176,7 +187,8 @@ function HaltBanner(props: {
 function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoError?: string; onChanged: () => void }) {
   const clearHalt = usePluginAction(ACTION.clearHalt);
   const toast = usePluginToast();
-  const [keys, setKeys] = useState<string[] | null>(null);
+  const [preview, setPreview] = useState<Array<{ key: string; origin?: string }> | null>(null);
+  const keys = preview?.map((entry) => entry.key) ?? null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const undo = props.pendingUndo ?? [];
@@ -189,14 +201,14 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
     setBusy(true);
     setError(null);
     try {
-      const result = (await clearHalt({ dryRun: true })) as { pendingUndo?: Array<{ key: string }>; pendingUndoError?: string };
+      const result = (await clearHalt({ dryRun: true })) as { pendingUndo?: Array<{ key: string; origin?: string }>; pendingUndoError?: string };
       if (result.pendingUndoError) throw new Error(result.pendingUndoError);
-      const open = (result.pendingUndo ?? []).map((entry) => entry.key);
+      const open = (result.pendingUndo ?? []).map((entry) => ({ key: entry.key, origin: entry.origin }));
       if (open.length === 0) {
         props.onChanged();
         return;
       }
-      setKeys(open);
+      setPreview(open);
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -211,9 +223,17 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
     try {
       // Only the keys from the preview: an undo that failed after it keeps its retry.
       const result = (await clearHalt({ dryRun: false, confirm: true, acknowledgeUndos: keys })) as { acknowledgedUndos?: number };
-      setKeys(null);
-      toast({ title: `Kuitattu ${result.acknowledgedUndos ?? 0} peruutusta`, tone: "success" });
+      const acknowledged = result.acknowledgedUndos ?? 0;
+      setPreview(null);
       props.onChanged();
+      // A failure after the preview gives the entry a new key, so it was not acknowledged: say so (RK9-570).
+      if (acknowledged < keys.length) {
+        setError(
+          `Kuitattiin ${acknowledged}/${keys.length}: ${keys.length - acknowledged} merkintää muuttui esikatselun jälkeen (uusi epäonnistuminen) tai päättyi. Tarkista lista ja kuittaa uudelleen.`,
+        );
+        return;
+      }
+      toast({ title: `Kuitattu ${acknowledged} uudelleenyritystä`, tone: "success" });
     } catch (cause) {
       setError(errorText(cause));
     } finally {
@@ -247,19 +267,19 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
           kohde käsin Metassa tai korjaa token, ja kuittaa merkintä.
         </ErrorText>
       ) : null}
-      {props.pendingUndoError ? <ErrorText>Keskeneräisiä peruutuksia ei voitu lukea: {props.pendingUndoError}</ErrorText> : null}
-      {keys ? (
+      {props.pendingUndoError ? <ErrorText>Keskeneräisiä uudelleenyrityksiä ei voitu lukea: {props.pendingUndoError}</ErrorText> : null}
+      {preview ? (
         <TypedConfirm
           word={ACK_UNDO_WORD}
-          prompt={`Kuittaus lopettaa ${keys.length} peruutuksen uudelleenyrityksen. Kohteet voivat jäädä ACTIVE-tilaan kuluttamaan: tarkista ja pysäytä ne Metassa.`}
-          confirmLabel="Kuittaa peruutukset"
+          prompt={ackPrompt(preview)}
+          confirmLabel="Kuittaa uudelleenyritykset"
           busy={busy}
           onConfirm={confirmAck}
-          onCancel={() => setKeys(null)}
+          onCancel={() => setPreview(null)}
         />
       ) : undo.length > 0 ? (
         <Button variant="destructive" onClick={startAck} disabled={busy}>
-          Kuittaa peruutukset
+          Kuittaa uudelleenyritykset
         </Button>
       ) : null}
       {error ? <ErrorText>{error}</ErrorText> : null}
