@@ -682,13 +682,13 @@ describe("gate transitions", () => {
       store,
       handler: async (input) => {
         seenOutcome = store.rows.get(input.request.id)?.outcome;
-        // The final settle fails: the ad is live, so the card must not say failed.
+        // The final settle fails once: the ad is live, so the card must not say failed.
         const settle = store.settle.bind(store);
         store.settle = async () => {
           store.settle = settle;
           throw new Error("connection reset");
         };
-        return { statusText: "✅ Mainos aktivoitu" };
+        return { statusText: "✅ Mainos aktivoitu", outcome: { handler: "done", result: "activated" } };
       },
     });
     const card = await photoCard(r);
@@ -698,7 +698,47 @@ describe("gate transitions", () => {
     expect(seenOutcome).toEqual({ handler: "started" });
     expect(store.rows.get(card.id)?.status).toBe("approved");
     expect(r.fake.messages.get(card.messageId)?.caption).toMatch(/✅ Mainos aktivoitu$/);
-    expect(r.harness.logs.some((log) => /outcome was not stored/.test(log.message))).toBe(true);
+    // RK9-567 (L2): the write is tried again, so the card does not stay `started` (read later as "result unknown").
+    expect(store.rows.get(card.id)?.outcome).toEqual({ handler: "done", result: "activated" });
+    expect(r.harness.logs.some((log) => /outcome not stored, trying again/.test(log.message))).toBe(true);
+    expect(r.harness.logs.some((log) => /outcome was not stored/.test(log.message))).toBe(false);
+  });
+
+  it("gives up on the final outcome only after its repeats, and logs it (RK9-567)", async () => {
+    const store = createMemoryGateStore();
+    const fake = new FakeTelegram();
+    const api = createBotApi({ token: TOKEN_A, fetch: fake.fetch });
+    const registry = createGateRegistry(GATE_REQUEST_KINDS);
+    const settle = store.settle.bind(store);
+    let finalWrites = 0;
+    registry.register("activate_ad", async () => {
+      store.settle = async () => {
+        finalWrites += 1;
+        throw new Error("connection reset");
+      };
+      return { outcome: { handler: "done", result: "activated" } };
+    });
+    const errors: string[] = [];
+    const logger = { ...silentLogger, error: (message: string) => void errors.push(message) };
+    const brand: GateBrand = { companyId: COMPANY_A, chatId: CHAT_A, allowedUserIds: [String(APPROVER)] };
+    const router = createCallbackRouter({ api, store, registry, brandFor: (id) => (id === COMPANY_A ? brand : null), logger, outcomeRetryDelaysMs: [0, 0] });
+    const card = await createGateCard({
+      store,
+      api,
+      registry,
+      companyId: COMPANY_A,
+      brandCode: "OLL",
+      kind: "activate_ad",
+      chatId: CHAT_A,
+      validUntil: new Date(Date.now() + 60_000),
+      card: { media: "photo", mediaUrl: "https://cdn.example/a.jpg", text: "outcome retry" },
+    });
+    await router.handleUpdate({ ...fake.callbackUpdate({ messageId: card.messageId, data: fake.buttons(card.messageId)[0]!, fromId: APPROVER }), update_id: nextUpdateId++ });
+    await router.idle();
+    store.settle = settle;
+    expect(finalWrites).toBe(3);
+    expect(store.rows.get(card.id)?.outcome).toEqual({ handler: "started" });
+    expect(errors).toContain("gate: handler succeeded but its outcome was not stored");
   });
 
   it("does not run the handler when its start marker cannot be stored", async () => {

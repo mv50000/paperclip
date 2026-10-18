@@ -158,16 +158,16 @@ describeDb("activation gate SQL on real Postgres", () => {
     // Approved, the handler not finished: still activating.
     const newer = await card({ adId: ad });
     expect(await store.decide(companyA, newer.tokenHash, "approved", 4242)).toBe(true);
-    expect(await repo.newerActivation(companyA, query)).toEqual({ id: newer.id, inFlight: true });
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: newer.id, inFlight: true, ageMinutes: 0 });
     // Ended without activating: the retry goes on.
     expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { handler: "done", result: "failed" } })).toBe(true);
     expect(await repo.newerActivation(companyA, query)).toBeNull();
     expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { handler: "done", result: "activated", campaignId: "120200000000000777" } })).toBe(true);
-    expect(await repo.newerActivation(companyA, query)).toEqual({ id: newer.id, inFlight: false });
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: newer.id, inFlight: false, ageMinutes: 0 });
     // Any object of the failed card's publication matches; without the publication, the outcome's campaign (the binding has none) does.
-    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000999" })).toEqual({ id: newer.id, inFlight: false });
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000999" })).toEqual({ id: newer.id, inFlight: false, ageMinutes: 0 });
     await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET publication_id = NULL WHERE id = $1`, [newer.id]);
-    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000777" })).toEqual({ id: newer.id, inFlight: false });
+    expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000777" })).toEqual({ id: newer.id, inFlight: false, ageMinutes: 0 });
     expect(await repo.newerActivation(companyA, { ...query, objectId: "120200000000000999" })).toBeNull();
     // Decided before the failure: not newer.
     await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = $2 WHERE id = $1`, [newer.id, new Date(since.getTime() - 1_000).toISOString()]);
@@ -180,9 +180,54 @@ describeDb("activation gate SQL on real Postgres", () => {
     // A handler that never finished stops counting as running after the window.
     const stuck = await card({ adId: ad });
     expect(await store.decide(companyA, stuck.tokenHash, "approved", 4242)).toBe(true);
-    expect(await repo.newerActivation(companyA, query)).toEqual({ id: stuck.id, inFlight: true });
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: stuck.id, inFlight: true, ageMinutes: 0 });
     await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = now() - interval '31 minutes' WHERE id = $1`, [stuck.id]);
-    expect(await repo.newerActivation(companyA, { ...query, since: new Date(Date.now() - 3_600_000) })).toEqual({ id: newer.id, inFlight: false });
+    expect(await repo.newerActivation(companyA, { ...query, since: new Date(Date.now() - 3_600_000) })).toEqual({ id: newer.id, inFlight: false, ageMinutes: 0 });
+    // RK9-567 (L2, N1): with nothing that activated, the stuck card's result is unknown, and its age is on the database's clock.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET outcome = '{"handler":"done","result":"failed"}'::jsonb WHERE id = $1`, [newer.id]);
+    expect(await repo.newerActivation(companyA, { ...query, since: new Date(Date.now() - 3_600_000) })).toEqual({ id: stuck.id, inFlight: false, unknown: true, ageMinutes: 31 });
+  });
+
+  it("moves `since` from the worker's clock to the database's (RK9-567, L6)", async () => {
+    const ad = "120200000000000314";
+    const failed = await card({ adId: ad });
+    const newer = await card({ adId: ad });
+    expect(await store.decide(companyA, newer.tokenHash, "approved", 4242)).toBe(true);
+    expect(await store.settle(companyA, newer.id, { from: "approved", to: "approved", outcome: { handler: "done", result: "activated" } })).toBe(true);
+    // The newer card was approved 5 minutes ago on the database's clock.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET decided_at = now() - interval '5 minutes' WHERE id = $1`, [newer.id]);
+    // A worker clock 10 minutes behind: the failure 2 minutes ago (after the approval) reads as 12 minutes ago.
+    const behind = 10 * 60_000;
+    const workerNow = () => new Date(Date.now() - behind);
+    const skewed = sqlActivationGateRepo(testDb.client, { now: workerNow });
+    const since = new Date(workerNow().getTime() - 2 * 60_000);
+    const query = { objectId: ad, gateRequestId: failed.id, since, inFlightMinutes: 30 };
+    expect(await skewed.newerActivation(companyA, query)).toBeNull();
+    // A failure 8 minutes ago (before the approval) on the same skewed clock: the card is newer.
+    expect(await skewed.newerActivation(companyA, { ...query, since: new Date(workerNow().getTime() - 8 * 60_000) })).toEqual({ id: newer.id, inFlight: false, ageMinutes: 5 });
+  });
+
+  it("counts a running card of the failed card's ad set, or of an ad set known under the campaign, as in flight (RK9-567, N2)", async () => {
+    const repo = sqlActivationGateRepo(testDb.client);
+    const campaign = "120200000000000888";
+    const failed = await card({ adId: "120200000000000315" });
+    const since = new Date(Date.now() - 60_000);
+    const query = { objectId: campaign, gateRequestId: failed.id, since, inFlightMinutes: 30 };
+    // A swap card of another ad in the same ad set names no campaign in its binding.
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET publication_id = NULL WHERE id = $1`, [failed.id]);
+    const swap = await card({ adId: "120200000000000316" });
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET publication_id = NULL WHERE id = $1`, [swap.id]);
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
+    expect(await store.decide(companyA, swap.tokenHash, "approved", 4242)).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toEqual({ id: swap.id, inFlight: true, ageMinutes: 0 });
+    // Without the failed card's ad set (a pause's own entry names no card), an earlier activation's outcome ties the ad set to the campaign.
+    const pauseQuery = { ...query, gateRequestId: "kill_switch:halt-1" };
+    expect(await repo.newerActivation(companyA, pauseQuery)).toBeNull();
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.gate_requests SET outcome = $2::jsonb WHERE id = $1`, [failed.id, JSON.stringify({ handler: "done", result: "failed", campaignId: campaign })]);
+    expect(await repo.newerActivation(companyA, pauseQuery)).toEqual({ id: swap.id, inFlight: true, ageMinutes: 0 });
+    // Once it ends without activating, the ad-set match no longer holds: only an outcome naming the object does.
+    expect(await store.settle(companyA, swap.id, { from: "approved", to: "approved", outcome: { handler: "done", result: "failed" } })).toBe(true);
+    expect(await repo.newerActivation(companyA, query)).toBeNull();
   });
 
   it("sweeps only cards past valid_until, and the kit's expire moves each one once", async () => {

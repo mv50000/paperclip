@@ -108,6 +108,29 @@ export function operatorErrorClass(error: unknown): OperatorErrorClass | null {
   return error instanceof TokenInvalidError ? TOKEN_INVALID_ERROR_CLASS : null;
 }
 
+/** Graph `error_subcode` with code 100: the object does not exist, or the token cannot load it. */
+export const OBJECT_MISSING_SUBCODE = 33;
+
+/** Why a write can never succeed as it is (RK9-567). */
+export type PermanentErrorClass = "token_invalid" | "token_unresolved" | "permission" | "object_missing" | "write_refused";
+
+/**
+ * A write error that a retry does not fix: the token is invalid or cannot be
+ * resolved, the token lacks a permission on the object (code 10, 200-299:
+ * e.g. the ad account changed), the object is gone (code 100 subcode 33,
+ * code 803), or the client refused the write before sending it. Null for
+ * anything else, a rate limit or a 5xx among them.
+ */
+export function permanentErrorClass(error: unknown): PermanentErrorClass | null {
+  if (error instanceof TokenInvalidError) return "token_invalid";
+  if (error instanceof TokenResolveError) return "token_unresolved";
+  if (error instanceof ReadOnlyViolationError || error instanceof WriteRefusedError) return "write_refused";
+  if (!(error instanceof MetaGraphError) || error instanceof RateLimitError || error.code === null) return null;
+  if (error.code === 10 || (error.code >= 200 && error.code <= 299)) return "permission";
+  if ((error.code === INVALID_PARAM_CODE && error.subcode === OBJECT_MISSING_SUBCODE) || error.code === 803) return "object_missing";
+  return null;
+}
+
 /**
  * Codes 4/17/613/80004: throttled. `retryAfterMs` is Meta's own estimate
  * (`estimated_time_to_regain_access`) when it sent one. `attempts` is how many

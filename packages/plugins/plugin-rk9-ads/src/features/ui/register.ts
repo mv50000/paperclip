@@ -25,7 +25,8 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   spend-guard/halt.ts), so an activation approved just before the pause
  *   pauses the ad again, and closes the ad's open activation cards, so an
  *   old card cannot activate it again (RK9-562); a failed close is
- *   `cardsError`, a halt that was not stored `haltError`.
+ *   `cardsError`, a halt that was not stored after AD_HALT_WRITE_ATTEMPTS
+ *   writes `haltError` (RK9-567).
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
@@ -41,6 +42,8 @@ export const UI_PAUSE_RULE_ID = "ui-pause-ad";
 
 const AD_ID_RE = /^\d{1,30}$/;
 const REASON_MAX = 300;
+/** Writes of the pause-ad halt before the pause goes on without it (RK9-567). */
+export const AD_HALT_WRITE_ATTEMPTS = 2;
 
 export interface UiOverrides {
   store?: OnceStore;
@@ -123,10 +126,18 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     // The halt first: an activation already approved sees it before its next ACTIVE write or after its writes.
     let adHalt: AdHaltState | null = newAdHalt({ brandCode: config.brandCode, adId, reason, initiator, now: deps.now() });
     let haltError: string | undefined;
-    try {
-      await setAdHalt(ctx, companyId, adHalt);
-    } catch (cause) {
-      haltError = safeError(cause);
+    // Without the halt a running activation can still set the ad ACTIVE after the pause: one more try (RK9-567).
+    for (let attempt = 1; attempt <= AD_HALT_WRITE_ATTEMPTS; attempt += 1) {
+      try {
+        await setAdHalt(ctx, companyId, adHalt);
+        haltError = undefined;
+        break;
+      } catch (cause) {
+        haltError = safeError(cause);
+        ctx.logger.warn("rk9-ads ui: the pause-ad halt write failed", { companyId, adId, attempt, detail: haltError });
+      }
+    }
+    if (haltError) {
       adHalt = null;
       ctx.logger.error("rk9-ads ui: the pause-ad halt was not stored", { companyId, adId, detail: haltError });
     }

@@ -249,7 +249,7 @@ describe("the kill switch's own first pause fails (RK9-568, AC 5b and 5c)", () =
 });
 
 describe("after the halt ends, the RK9-565 drop rule holds (RK9-568, AC 5d)", () => {
-  type Newer = { id: string; inFlight: boolean } | null;
+  type Newer = { id: string; inFlight: boolean; unknown?: boolean; ageMinutes?: number } | null;
   async function failedKillSwitch(newer: () => Newer) {
     const queries: NewerActivationQuery[] = [];
     const hook: { lookup: (() => Promise<Newer>) | null } = { lookup: null };
@@ -258,7 +258,8 @@ describe("after the halt ends, the RK9-565 drop rule holds (RK9-568, AC 5d)", ()
       overrides: {
         newerActivation: async (_companyId, query) => {
           queries.push(query);
-          return hook.lookup ? hook.lookup() : newer();
+          const hit = await (hook.lookup ? hook.lookup() : newer());
+          return hit ? { ageMinutes: 0, ...hit } : null;
         },
       },
     });

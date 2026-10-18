@@ -155,6 +155,7 @@ async function readPendingUndoSection(ctx: PluginContext, companyId: string): Pr
       since: entry.since,
       origin: undoOrigin(entry),
       attempts: undoAttempts(entry),
+      ...(entry.permanentError ? { permanentError: entry.permanentError } : {}),
     })),
   };
 }

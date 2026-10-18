@@ -697,7 +697,7 @@ describe("an undo that Meta refuses after a pause won (RK9-565)", () => {
     const r = await rig();
     await lostUndo(r);
     useCompanyConfigs(r.harness, { [COMPANY_A]: {} });
-    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`1 activation undo\\(s\\) open \\(ad ${AD}\\) but no brand config to retry them`));
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(new RegExp(`1 activation undo\\(s\\) or pause retry\\(ies\\) open \\(ad ${AD}\\) but no brand config to retry them`));
   });
 
   it("clearing the halt alone keeps the retry; the board's acknowledgement of the previewed entries ends it", async () => {
