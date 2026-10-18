@@ -15,7 +15,12 @@
  *   re-checks anyway.
  * - It is for the read delay only: a re-check that a tick finds more than
  *   RECHECK_WINDOW_MS past its due time is dropped unrun.
- * - A failed listing or pause keeps it for the next tick within that window.
+ * - A failed listing keeps it for the next tick within that window.
+ * - A pause that Meta refuses moves the object to the pause retry
+ *   (pending-undo.ts, RK9-568), and the re-check is done: its listing ran.
+ *   Only when the retry cannot be stored does the re-check stay, counting
+ *   its failed runs and their last error, so a drop at the window's end
+ *   says that the ticks ran and failed instead of "no tick ran".
  * - It sets no new halt and closes no cards; it notifies only when it paused
  *   something.
  *
@@ -39,6 +44,10 @@ export interface Recheck {
   /** ISO time from which a tick runs it. */
   dueAt: string;
   reason: string;
+  /** Runs whose pauses failed and whose objects could not be stored for the retry (RK9-568). */
+  attempts?: number;
+  /** The last of those runs' errors (safeError). */
+  lastError?: string;
 }
 
 type StateCtx = Pick<PluginContext, "state">;
@@ -49,6 +58,16 @@ function recheckKey(companyId: string, rule: RecheckRule) {
 
 export function isRecheckRule(rule: string): rule is RecheckRule {
   return (RECHECK_RULES as readonly string[]).includes(rule);
+}
+
+/**
+ * One more failed run of this re-check. Writes nothing when a newer pause
+ * replaced it since it was read.
+ */
+export async function noteRecheckFailure(ctx: StateCtx, companyId: string, recheck: Recheck, error: string): Promise<void> {
+  const current = await readRecheck(ctx, companyId, recheck.rule);
+  if (!current || current.dueAt !== recheck.dueAt || current.haltId !== recheck.haltId) return;
+  await ctx.state.set(recheckKey(companyId, recheck.rule), { ...current, attempts: (current.attempts ?? 0) + 1, lastError: error });
 }
 
 /** Stores the re-check of a live pause; a newer pause of the same rule replaces it. */
@@ -68,5 +87,7 @@ export async function readRecheck(ctx: StateCtx, companyId: string, rule: Rechec
     haltId: typeof value.haltId === "string" ? value.haltId : null,
     dueAt: value.dueAt,
     reason: typeof value.reason === "string" ? value.reason : rule,
+    ...(typeof value.attempts === "number" && Number.isFinite(value.attempts) ? { attempts: value.attempts } : {}),
+    ...(typeof value.lastError === "string" ? { lastError: value.lastError } : {}),
   };
 }

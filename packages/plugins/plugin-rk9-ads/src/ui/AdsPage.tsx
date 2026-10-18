@@ -168,9 +168,10 @@ function HaltBanner(props: {
 }
 
 /**
- * The activation undos that Meta refused (RK9-565): the job retries PAUSED
- * every 5 minutes, with or without a halt. A board user can stop the retry
- * of the entries the preview lists, with a typed confirmation.
+ * The activation undos (RK9-565) and the pauses' own PAUSED writes during a
+ * halt (RK9-568) that Meta refused: the job retries PAUSED every 5 minutes,
+ * with or without a halt. A board user can stop the retry of the entries the
+ * preview lists, with a typed confirmation.
  */
 function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoError?: string; onChanged: () => void }) {
   const clearHalt = usePluginAction(ACTION.clearHalt);
@@ -179,6 +180,8 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const undo = props.pendingUndo ?? [];
+  const activationUndo = undo.filter((entry) => entry.origin !== "pause");
+  const pauseRetry = undo.filter((entry) => entry.origin === "pause");
   if (undo.length === 0 && !props.pendingUndoError) return null;
 
   async function startAck() {
@@ -219,11 +222,21 @@ function PendingUndoNotice(props: { pendingUndo?: UiPendingUndo[]; pendingUndoEr
 
   return (
     <div role="status" className="space-y-2 rounded-md border border-destructive p-3">
-      {undo.length > 0 ? (
+      {activationUndo.length > 0 ? (
         <ErrorText>
           Aktivoinnin peruutus epäonnistui, voi olla yhä ACTIVE:{" "}
-          {undo.map((entry) => `${UNDO_KIND_LABEL[entry.kind] ?? entry.kind} ${entry.objectId}`).join(", ")}. Peruutusta yritetään uudelleen 5 minuutin
+          {activationUndo.map((entry) => `${UNDO_KIND_LABEL[entry.kind] ?? entry.kind} ${entry.objectId}`).join(", ")}. Peruutusta yritetään uudelleen 5 minuutin
           välein, kunnes Meta vahvistaa pysäytyksen, uudempi aktivointi hyväksytään tai board kuittaa sen.
+        </ErrorText>
+      ) : null}
+      {pauseRetry.length > 0 ? (
+        <ErrorText>
+          Pysäytys epäonnistui pysäytystilan aikana, voi olla yhä ACTIVE:{" "}
+          {pauseRetry
+            .map((entry) => `${UNDO_KIND_LABEL[entry.kind] ?? entry.kind} ${entry.objectId}${entry.attempts ? ` (${entry.attempts} epäonnistunutta yritystä)` : ""}`)
+            .join(", ")}
+          . Pysäytystä yritetään uudelleen 5 minuutin välein, kunnes Meta vahvistaa sen, board kuittaa sen tai pysäytystilan päätyttyä uudempi aktivointi
+          hyväksytään.
         </ErrorText>
       ) : null}
       {props.pendingUndoError ? <ErrorText>Keskeneräisiä peruutuksia ei voitu lukea: {props.pendingUndoError}</ErrorText> : null}

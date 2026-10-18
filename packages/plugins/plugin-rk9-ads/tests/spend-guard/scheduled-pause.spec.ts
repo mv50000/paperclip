@@ -307,7 +307,7 @@ describe("a scheduled pause's retry tick (RK9-565)", () => {
     let failing = true;
     r.meta.fail = (call) => (failing && call.method === "POST" && call.path === "301" ? new Error("rate limited") : null);
     r.clock.now = new Date("2026-10-21T18:31:00Z");
-    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/1 pause\(s\) failed, retrying next tick/);
+    await expect(r.harness.runJob("scheduled-pause")).rejects.toThrow(/1 pause\(s\) failed \(last error: .*rate limited.*\), moved to the pause retry/);
     const halt = (await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))!;
     expect(halt).toMatchObject({ rule: "scheduled_pause" });
     await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, BOARD);

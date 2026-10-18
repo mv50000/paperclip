@@ -36,6 +36,14 @@
  * RK9-565): about a minute later the scheduled-pause job lists the ACTIVE
  * objects again, in case Meta's listing showed an activation's last write
  * late.
+ *
+ * When Meta refuses the PAUSED write of an ACTIVE object in a live kill
+ * switch, cap pause, scheduled pause or re-check, the object goes to the
+ * pause retry (pending-undo.ts, RK9-568) and one alert names it: the
+ * scheduled-pause job pauses it again every tick until Meta confirms, a
+ * board user acknowledges it, or a newer activation is approved after the
+ * halt ended. A pause that is not repeated (the kill switch) or whose
+ * re-check has a 15-minute window no longer leaves it ACTIVE unnoticed.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -45,10 +53,11 @@ import { randomUUID } from "node:crypto";
 import { localDate, localTime, nextLocalMonthStart, nextLocalTime } from "../../kit/local-time.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
 import { adAccountPath, getObjectStatus, listAds, listCampaignAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
-import type { StatusRow } from "../../meta/types.js";
+import { isDryRun, type StatusRow } from "../../meta/types.js";
 import { CARD_CLOSING_PAUSES, type CardClosingPause, type PauseCardClose } from "../../gate/staging-card.js";
 import { getActivationCards } from "../gate/runtime.js";
-import { haltIdentity, SCHEDULED_HALT_UNTIL, setHalt, type HaltState } from "./halt.js";
+import { HALT_RULES, haltIdentity, SCHEDULED_HALT_UNTIL, setHalt, type HaltRule, type HaltState } from "./halt.js";
+import { reportPauseFailure, type UndoReport } from "./pending-undo.js";
 import { isRecheckRule, RECHECK_DELAY_MS, scheduleRecheck } from "./recheck.js";
 import {
   brandClient,
@@ -56,6 +65,7 @@ import {
   safeError,
   type Initiator,
   type NoticeResult,
+  type OnceStore,
   type SpendGuardNotifier,
 } from "./support.js";
 
@@ -86,7 +96,7 @@ export interface PauseAllResult {
   /** One line per object, campaigns first, for messages and the UI. */
   list: string[];
   /** Objects whose pause failed. The others are paused regardless. */
-  errors: Array<{ id: string; error: string }>;
+  errors: Array<{ id: string; kind: "campaign" | "ad"; error: string }>;
   /** "skipped": dry run, nothing paused or not asked to notify. */
   telegram: NoticeResult | "skipped" | "failed";
   telegramError?: string;
@@ -102,12 +112,16 @@ export interface PauseAllResult {
   haltError?: string;
   /** The re-check of a live kill switch or scheduled pause could not be stored (RK9-565). */
   recheckError?: string;
+  /** The failed objects of a live halt pause, stored for the pause retry and alerted (RK9-568). */
+  retry?: UndoReport;
 }
 
 export interface PauseAllDeps {
   ctx: PluginContext;
   ledger: Ledger;
   notifier: SpendGuardNotifier;
+  /** The alert markers of the pause retry (RK9-568); without it the retry's next tick sends the alert. */
+  store?: OnceStore;
   /** Tests: replaces the brand's Meta client. */
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "dryRun", initiator: Initiator) => MetaGraphClient;
   now?: () => Date;
@@ -130,6 +144,8 @@ export interface PauseAllOptions {
   stopped?: StopActivations;
   /** This run is a re-check (recheck.ts): it stores no re-check of its own. */
   recheck?: boolean;
+  /** A re-check's halt id (it sets none of its own), naming its failed objects in the pause retry. */
+  haltId?: string | null;
   /**
    * Asked before a job run writes an audit row that has only a halt or card
    * failure to report (nothing paused, no pause error). False skips the row,
@@ -157,6 +173,18 @@ export class PauseListError extends Error {
     this.name = cause instanceof Error ? cause.name : "Error";
     this.stopped = stopped;
   }
+}
+
+/** The pause retry's store or alert failure of a pause (RK9-568), as failure lines for a job run. */
+export function retryFailures(prefix: string, result: Pick<PauseAllResult, "errors" | "retry">): string[] {
+  if (result.errors.length === 0) return [];
+  const last = result.errors.at(-1)!.error;
+  return [
+    result.retry?.stored
+      ? `${prefix}: ${result.errors.length} pause(s) failed (last error: ${last}), moved to the pause retry`
+      : `${prefix}: ${result.errors.length} pause(s) failed (last error: ${last})`,
+    ...(result.retry?.error ? [`${prefix}: pause retry: ${result.retry.error}`] : []),
+  ];
 }
 
 /** The halt and card-close failures of a pause, as failure lines for a job run. */
@@ -222,7 +250,13 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
     `Syy: ${options.reason}`.slice(0, 300),
     `${result.pausedCampaigns.length} kampanja(a) ja ${result.pausedAds.length} mainos(ta) → PAUSED:`,
   ];
-  const tail = result.errors.length > 0 ? [`⚠️ ${result.errors.length} pysäytys epäonnistui, katso aktiviteettiloki.`] : [];
+  const tail =
+    result.errors.length > 0
+      ? [
+          `⚠️ ${result.errors.length} pysäytys epäonnistui, katso aktiviteettiloki.` +
+            (result.retry?.stored ? " Niitä yritetään uudelleen 5 minuutin välein." : ""),
+        ]
+      : [];
   // Campaigns first (a restore turns them back on), then ads. Whatever does
   // not fit is counted on its own line, never cut silently; the audit row has
   // every id.
@@ -264,6 +298,10 @@ export function pauseNoticeText(config: BrandConfig, result: PauseAllResult, at:
  */
 function closesCards(rule: PauseRule): rule is CardClosingPause {
   return (CARD_CLOSING_PAUSES as readonly string[]).includes(rule);
+}
+
+function isHaltRule(rule: PauseRule): rule is HaltRule {
+  return (HALT_RULES as readonly string[]).includes(rule);
 }
 
 export type Stopped = Pick<PauseAllResult, "closedCardIds" | "cardsError" | "halt" | "haltError">;
@@ -432,18 +470,35 @@ export async function pauseAll(
   for (const [kind, objects] of [["campaign", targets.campaigns], ["ad", targets.ads]] as const) {
     for (const object of objects) {
       try {
-        await setObjectStatus(client, object.id, "PAUSED");
+        const written = await setObjectStatus(client, object.id, "PAUSED");
+        if (!isDryRun(written) && !written.success) throw new Error(`Meta did not confirm status PAUSED on ${object.id}`);
         const paused = { id: object.id, name: object.name };
         (kind === "ad" ? result.pausedAds : result.pausedCampaigns).push(paused);
         result.list.push(`${kind === "ad" ? "mainos" : "kampanja"} ${label(paused)}`);
       } catch (error) {
-        result.errors.push({ id: object.id, error: safeError(error) });
+        result.errors.push({ id: object.id, kind, error: safeError(error) });
       }
     }
   }
   result.campaignPaused = result.pausedCampaigns.length > 0;
   result.count = result.pausedAds.length + result.pausedCampaigns.length;
   await announce();
+
+  // An object a halt pause could not pause must not stay ACTIVE unnoticed (RK9-568).
+  if (!options.dryRun && isHaltRule(options.rule) && result.errors.length > 0) {
+    const haltId = options.haltId ?? (stopped.halt ? haltIdentity(stopped.halt) : null);
+    result.retry = await reportPauseFailure(
+      deps,
+      companyId,
+      config,
+      {
+        rule: options.rule,
+        ref: `${options.rule}:${haltId ?? `no-halt-${now.toISOString()}`}`,
+        failed: result.errors.map((entry) => ({ kind: entry.kind, objectId: entry.id, error: entry.error })),
+      },
+      now,
+    );
+  }
 
   if (!options.dryRun && options.notify && result.count > 0) {
     try {
@@ -478,6 +533,7 @@ export async function pauseAll(
         campaigns: result.pausedCampaigns,
         failedIds: result.errors.map((entry) => entry.id),
         telegram: result.telegram,
+        ...(result.retry ? { retry: { stored: result.retry.stored, telegram: result.retry.telegram } } : {}),
         closedCardIds: result.closedCardIds,
         halt: result.halt !== undefined,
         ...(options.note ? { note: options.note } : {}),
@@ -486,6 +542,7 @@ export async function pauseAll(
       error: [
         ...result.errors.map((entry) => `${entry.id}: ${entry.error}`),
         ...(result.telegramError ? [`telegram: ${result.telegramError}`] : []),
+        ...(result.retry?.error ? [`pause retry: ${result.retry.error}`] : []),
         ...stopErrors,
       ]
         .join("; ")

@@ -58,7 +58,7 @@ import { checkSpend } from "../spend-guard/guard.js";
 import { clearRuleHalt, HALT_NAMESPACE, haltIdentity, readRuleHalt } from "../spend-guard/halt.js";
 import { pauseAll, PauseListError, stopFailures, type PauseAllDeps } from "../spend-guard/killswitch.js";
 import { loadPauseConfig, pauseReason, type PauseConfig } from "../spend-guard/pause-config.js";
-import { brandClient, brandReadClient, safeError, type Initiator, type SpendGuardNotifier } from "../spend-guard/support.js";
+import { brandClient, brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "../spend-guard/support.js";
 import { evaluateRules, type RuleAdDay, type RuleDecision, type RuleSnapshots, type RuleStatus } from "./evaluate.js";
 import { BUILTIN_PAUSE_ALL_CAP_PCT, BUILTIN_PAUSE_ALL_CAP_RULE_ID, builtinPauseAllCap, type RuleSet, type ThresholdPauseRule } from "./schema.js";
 import type { RulesStore } from "./store.js";
@@ -88,6 +88,8 @@ export interface RulesDeps {
   clientFor?: (companyId: string, config: BrandConfig, mode: MetaClientMode, initiator: Initiator) => MetaGraphClient;
   /** Tests: replaces the running gate's card closer of the cap pause. */
   closeCards?: PauseAllDeps["closeCards"];
+  /** The alert markers of the pause retry of objects the cap pause could not pause (RK9-568). */
+  onceStore?: OnceStore;
 }
 
 export interface AppliedDecision extends RuleDecision {
@@ -414,6 +416,7 @@ export async function runRulesForBrand(
             now: deps.now,
             ...(deps.clientFor ? { clientFor: (id, brandConfig, mode, initiator) => deps.clientFor!(id, brandConfig, mode, initiator) } : {}),
             ...(deps.closeCards ? { closeCards: deps.closeCards } : {}),
+            ...(deps.onceStore ? { store: deps.onceStore } : {}),
           },
           companyId,
           config,
@@ -431,6 +434,7 @@ export async function runRulesForBrand(
         const error = result.errors.length > 0 ? `${result.errors.length} pause(s) failed` : null;
         outcome.decisions.push({ ...decision, applied: !shadow && result.count > 0, error });
         if (error) failures.push(`${config.brandCode} ${decision.ruleId}: ${error}`);
+        if (result.retry?.error) failures.push(`${config.brandCode} ${decision.ruleId}: pause retry: ${result.retry.error}`);
         if (result.auditError) failures.push(`${config.brandCode} ${decision.ruleId}: rule_actions insert failed (${result.auditError})`);
         // The pause stands either way, but open activation cards or a missing halt must not go unnoticed (RK9-561).
         failures.push(...stopFailures(`${config.brandCode} ${decision.ruleId}`, result));

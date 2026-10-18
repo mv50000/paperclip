@@ -30,12 +30,16 @@ export interface UiHalt {
   tgUserId: number | null;
 }
 
-/** An activation undo Meta refused after a halt; retried while a halt is in force (RK9-565). */
+/** An activation undo (RK9-565) or a pause's own PAUSED write (RK9-568) that Meta refused; the job retries it. */
 export interface UiPendingUndo {
   kind: string;
   objectId: string;
   gateRequestId: string;
   since: string;
+  /** "pause": a kill switch, scheduled pause, cap pause or re-check; absent or "activation": an activation's undo. */
+  origin?: "activation" | "pause";
+  /** Failed PAUSED writes so far. */
+  attempts?: number;
 }
 
 export type UiSpendCapStatus = "set" | "missing" | "above_cap" | "unknown";
