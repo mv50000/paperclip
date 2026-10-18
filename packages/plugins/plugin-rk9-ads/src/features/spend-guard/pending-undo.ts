@@ -49,8 +49,10 @@
  * Stored in plugin_state (no migration, G11), one key per company. The gate
  * handlers and the job run in one worker process, so a per-company lock
  * there serializes every write of the list. The job removes only the
- * entries it handled (object and gate request), so a newer failure of the
- * same object that arrived during its Meta calls stays.
+ * entries it handled (undoEntryKey: object, gate request and the merged
+ * failure's time), so a newer failure of the same object that arrived
+ * during its Meta calls stays, and only a removed entry gets the
+ * superseded audit row and alert.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
@@ -120,8 +122,14 @@ function undoKey(companyId: string) {
   return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `pending-undo:${companyId}` };
 }
 
-export function undoEntryKey(entry: Pick<PendingUndo, "objectId" | "gateRequestId">): string {
-  return `${entry.objectId}|${entry.gateRequestId}`;
+/**
+ * An entry's identity for removal and acknowledgement. A merged pause
+ * failure sets `failedAt`, which changes the key: a tick or a board
+ * acknowledgement that read the entry before that failure no longer names
+ * it, so the newer failure stays (RK9-568 verifier).
+ */
+export function undoEntryKey(entry: Pick<PendingUndo, "objectId" | "gateRequestId" | "failedAt">): string {
+  return `${entry.objectId}|${entry.gateRequestId}${typeof entry.failedAt === "string" ? `|${entry.failedAt}` : ""}`;
 }
 
 export function undoAlertKey(kind: "failed" | "dropped", brandCode: string, gateRequestId: string): string {
@@ -220,14 +228,22 @@ async function noteRetryFailures(ctx: StateCtx, companyId: string, failed: Reado
   });
 }
 
-/** Removes these entries. A newer failure of the same object (another gate request) that replaced one stays. */
-async function removePendingUndos(ctx: StateCtx, companyId: string, entries: readonly Pick<PendingUndo, "objectId" | "gateRequestId">[]): Promise<void> {
-  if (entries.length === 0) return;
-  await withLock(companyId, async () => {
-    const ids = new Set(entries.map(undoEntryKey));
-    const rest = (await readPendingUndos(ctx, companyId)).filter((entry) => !ids.has(undoEntryKey(entry)));
+/**
+ * Removes the entries with these keys and returns those it removed. A newer
+ * failure of the same object that replaced one (another gate request) or
+ * was merged into it (a new `failedAt`) has another key and stays.
+ */
+async function removePendingUndos(ctx: StateCtx, companyId: string, keys: readonly string[]): Promise<PendingUndo[]> {
+  if (keys.length === 0) return [];
+  return withLock(companyId, async () => {
+    const ids = new Set(keys);
+    const current = await readPendingUndos(ctx, companyId);
+    const removed = current.filter((entry) => ids.has(undoEntryKey(entry)));
+    if (removed.length === 0) return [];
+    const rest = current.filter((entry) => !ids.has(undoEntryKey(entry)));
     if (rest.length === 0) await ctx.state.delete(undoKey(companyId));
     else await ctx.state.set(undoKey(companyId), rest);
+    return removed;
   });
 }
 
@@ -237,10 +253,7 @@ async function removePendingUndos(ctx: StateCtx, companyId: string, entries: rea
  * An entry added after the preview is not named and stays.
  */
 export async function acknowledgePendingUndos(ctx: StateCtx, companyId: string, keys: readonly string[]): Promise<PendingUndo[]> {
-  const wanted = new Set(keys);
-  const named = (await readPendingUndos(ctx, companyId)).filter((entry) => wanted.has(undoEntryKey(entry)));
-  await removePendingUndos(ctx, companyId, named);
-  return named;
+  return removePendingUndos(ctx, companyId, keys);
 }
 
 const KIND_TEXT: Record<UndoObjectKind, string> = { campaign: "kampanja", adset: "ad set", ad: "mainos" };
@@ -524,7 +537,6 @@ export async function retryPendingUndos(
     }
     if (newer) {
       superseded.push({ entry, by: newer.id });
-      await audit(entry, false, "a newer activation was approved after the failed pause", null, `${label(entry)} of ${entry.kind} ${entry.objectId} ended: superseded by ${newer.id}`, { supersededBy: newer.id });
       continue;
     }
     try {
@@ -540,13 +552,18 @@ export async function retryPendingUndos(
       );
     }
   }
-  await removePendingUndos(deps.ctx, companyId, [...done, ...superseded.map((item) => item.entry)]);
+  const removed = new Set((await removePendingUndos(deps.ctx, companyId, [...done, ...superseded.map((item) => item.entry)].map(undoEntryKey))).map(undoEntryKey));
+  // Only what this tick removed ended: a pause that failed on the object meanwhile changed its key, and its retry goes on.
+  const ended = superseded.filter((item) => removed.has(undoEntryKey(item.entry)));
+  for (const { entry, by } of ended) {
+    await audit(entry, false, "a newer activation was approved after the failed pause", null, `${label(entry)} of ${entry.kind} ${entry.objectId} ended: superseded by ${by}`, { supersededBy: by });
+  }
   try {
     await noteRetryFailures(deps.ctx, companyId, stillFailing, now);
   } catch (error) {
     failures.push(`${brand} pause retry: failed attempts not counted (${safeError(error)})`);
   }
-  for (const [gateRequestId, group] of byRequest(superseded.map((item) => item.entry))) {
+  for (const [gateRequestId, group] of byRequest(ended.map((item) => item.entry))) {
     const alert = await sendUndoAlert(deps, companyId, config, "dropped", gateRequestId, group);
     if (alert.error) failures.push(`${brand} ${label(group[0]!)}: alert failed (${alert.error})`);
   }

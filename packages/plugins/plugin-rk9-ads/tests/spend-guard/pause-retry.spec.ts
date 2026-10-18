@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { createLedger } from "../../src/db.js";
 import { readHalt, type HaltState } from "../../src/features/spend-guard/halt.js";
 import { pauseAll, type PauseAllResult } from "../../src/features/spend-guard/killswitch.js";
-import { readPendingUndos } from "../../src/features/spend-guard/pending-undo.js";
+import { readPendingUndos, reportPauseFailure } from "../../src/features/spend-guard/pending-undo.js";
 import { readRecheck } from "../../src/features/spend-guard/recheck.js";
 import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../../src/features/spend-guard/register.js";
 import type { NewerActivationQuery } from "../../src/gate/gate-requests.js";
@@ -249,21 +249,23 @@ describe("the kill switch's own first pause fails (RK9-568, AC 5b and 5c)", () =
 });
 
 describe("after the halt ends, the RK9-565 drop rule holds (RK9-568, AC 5d)", () => {
-  async function failedKillSwitch(newer: () => { id: string; inFlight: boolean } | null) {
+  type Newer = { id: string; inFlight: boolean } | null;
+  async function failedKillSwitch(newer: () => Newer) {
     const queries: NewerActivationQuery[] = [];
+    const hook: { lookup: (() => Promise<Newer>) | null } = { lookup: null };
     const r = rig({
       meta: activeMeta(),
       overrides: {
         newerActivation: async (_companyId, query) => {
           queries.push(query);
-          return newer();
+          return hook.lookup ? hook.lookup() : newer();
         },
       },
     });
     refuseAdPause(r.meta);
     await killSwitch(r);
     const halt = (await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))!;
-    return { r, halt, queries };
+    return { r, halt, queries, hook };
   }
 
   async function clearHalt(r: Rig, halt: HaltState): Promise<void> {
@@ -296,6 +298,63 @@ describe("after the halt ends, the RK9-565 drop rule holds (RK9-568, AC 5d)", ()
     expect(dropped).toHaveLength(1);
     expect(dropped[0]!.text).toContain(`mainos ${AD}`);
     expect(r.harness.activity.filter((entry) => entry.message.includes(`kill_switch pause retry of ad ${AD} ended: superseded by gate-newer`))).toHaveLength(1);
+  });
+
+  it("a pause that fails on the object while the tick drops the entry keeps it: no drop alert, the retry goes on (verifier High)", async () => {
+    const parsed = parseBrandConfig(brandConfig({ telegram: telegramBlock() }));
+    if (parsed.state !== "enabled") throw new Error("test config invalid");
+    let calls = 0;
+    let ctx: Rig["harness"]["ctx"] | null = null;
+    let notifier: Rig["notifier"] | null = null;
+    let store: Rig["store"] | null = null;
+    // The cap pause fails on the ad after the tick read the list, before it removes the superseded entry.
+    const { r, halt, queries, hook } = await failedKillSwitch(() => null);
+    ctx = r.harness.ctx;
+    notifier = r.notifier;
+    store = r.store;
+    const lookup = async () => {
+      calls += 1;
+      if (calls === 1) {
+        await reportPauseFailure({ ctx: ctx!, notifier: notifier!, store: store! }, COMPANY_A, parsed.config, {
+          rule: "pause_all_cap",
+          ref: "pause_all_cap:halt-2",
+          failed: [{ kind: "ad", objectId: AD, error: "rate limited" }],
+        }, new Date("2026-10-21T10:04:00Z"));
+        return { id: "gate-newer", inFlight: false };
+      }
+      return null;
+    };
+    hook.lookup = lookup;
+    await clearHalt(r, halt);
+    await tick(r, "2026-10-21T10:05:00Z").catch(() => undefined);
+    expect(queries).toHaveLength(1);
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toMatchObject([
+      { objectId: AD, gateRequestId: `kill_switch:${halt.id}`, failedAt: "2026-10-21T10:04:00.000Z", attempts: 2 },
+    ]);
+    expect(r.notifier.messages.some((entry) => entry.text.includes("uudelleenyritys lopetettiin"))).toBe(false);
+    expect(r.harness.activity.some((entry) => entry.message.includes("ended: superseded"))).toBe(false);
+    // The next tick asks again from the merged failure's time and pauses.
+    await failingTick(r, "2026-10-21T10:10:00Z");
+    expect(queries.at(-1)).toMatchObject({ since: new Date("2026-10-21T10:04:00.000Z") });
+  });
+
+  it("an acknowledgement does not take a failure merged after the preview", async () => {
+    const { r, halt } = await failedKillSwitch(() => null);
+    const preview = await r.harness.performAction<{ pendingUndo?: Array<{ key: string }> }>(CLEAR_HALT_ACTION_KEY, {}, BOARD);
+    const parsed = parseBrandConfig(brandConfig({ telegram: telegramBlock() }));
+    if (parsed.state !== "enabled") throw new Error("test config invalid");
+    await reportPauseFailure({ ctx: r.harness.ctx, notifier: r.notifier, store: r.store }, COMPANY_A, parsed.config, {
+      rule: "scheduled_pause",
+      ref: "scheduled_pause:halt-3",
+      failed: [{ kind: "ad", objectId: AD, error: "rate limited" }],
+    }, new Date("2026-10-21T10:02:00Z"));
+    const result = await r.harness.performAction<{ acknowledgedUndos?: number }>(
+      CLEAR_HALT_ACTION_KEY,
+      { dryRun: false, confirm: true, since: halt.since, acknowledgeUndos: [preview.pendingUndo![0]!.key] },
+      BOARD,
+    );
+    expect(result.acknowledgedUndos).toBeUndefined();
+    expect(await readPendingUndos(r.harness.ctx, COMPANY_A)).toMatchObject([{ objectId: AD, attempts: 2, failedAt: "2026-10-21T10:02:00.000Z" }]);
   });
 
   it("the board's acknowledgement of the previewed entry ends it", async () => {

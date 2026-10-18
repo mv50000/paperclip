@@ -431,7 +431,7 @@ export async function runRulesForBrand(
             metrics: { ruleId: decision.ruleId, mode: decision.mode, ...decision.metrics },
           },
         );
-        const error = result.errors.length > 0 ? `${result.errors.length} pause(s) failed` : null;
+        const error = result.errors.length > 0 ? `${result.errors.length} pause(s) failed (last error: ${result.errors.at(-1)!.error})` : null;
         outcome.decisions.push({ ...decision, applied: !shadow && result.count > 0, error });
         if (error) failures.push(`${config.brandCode} ${decision.ruleId}: ${error}`);
         if (result.retry?.error) failures.push(`${config.brandCode} ${decision.ruleId}: pause retry: ${result.retry.error}`);

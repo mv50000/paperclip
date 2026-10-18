@@ -291,9 +291,12 @@ export async function runDueRechecks(
         if (result.errors.length > 0 && !result.retry?.stored) {
           // The objects are not in the retry: the re-check stays and counts the failure.
           failures.push(`${prefix}: retrying next tick`);
-          await noteRecheckFailure(deps.ctx, companyId, recheck, result.errors.at(-1)!.error).catch((error: unknown) =>
-            deps.ctx.logger.warn("rk9-ads pause: re-check failure not counted", { companyId, rule, detail: safeError(error) }),
-          );
+          try {
+            await noteRecheckFailure(deps.ctx, companyId, recheck, result.errors.at(-1)!.error);
+          } catch (error) {
+            // The drop at the window's end cannot tell that this run ran: this line does.
+            failures.push(`${prefix}: this failed run was not counted (${safeError(error)})`);
+          }
           continue;
         }
         // The listing ran; what it could not pause is in the pause retry.
