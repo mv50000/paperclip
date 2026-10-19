@@ -112,3 +112,5 @@ server/src/__tests__/approval-telegram-listener-taint.test.ts
 ui/src/components/RunTaintNotice.test.tsx
 # RK9-488: sähköpostin suppression-poisto vain boardille; lisäys ja poisto kirjoittavat activity_logiin.
 server/src/__tests__/email-suppression-routes.test.ts
+# RK9-486: GitHub-webhookin auto-close sulkee vain yrityksen, joka omistaa PR:n repon.
+server/src/__tests__/github-repo-ownership.test.ts
