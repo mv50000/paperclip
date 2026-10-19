@@ -348,7 +348,14 @@ export async function runDueRechecks(
             await drop();
             continue;
           }
-          // A halt that ran out (a scheduled pause shortly before 06:00) or was replaced goes to the alert below.
+          // A newer pause of the same rule set this halt after the due time (RK9-606): it listed everything again and stores its own re-check.
+          if (halt && Date.parse(halt.since) > due) {
+            deps.ctx.logger.info("rk9-ads pause: halt replaced by a newer pause, re-check dropped without the alert", { companyId, rule, attempts: recheck.attempts });
+            await drop();
+            failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); a newer ${rule} at ${halt.since} lists everything again, dropped without the alert`);
+            continue;
+          }
+          // A halt that ran out (a scheduled pause shortly before 06:00) or was replaced at or before the due time goes to the alert below.
           haltEnded = true;
         }
       }

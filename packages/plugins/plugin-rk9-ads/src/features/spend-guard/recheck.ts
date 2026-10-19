@@ -32,6 +32,13 @@
  *   failed run's count goes to its own key with that id. A newer pause that
  *   stores its re-check at any time during a tick has a new id: neither the
  *   marker nor the count touches it.
+ * - Rollback note (RK9-606): a drop keeps the record, and code from before
+ *   RK9-584 ignores the marker. After a rollback to it, such a record runs
+ *   again: one past its window fails one run with "dropped unrun", one
+ *   within its window whose halt is still in force runs one extra pause
+ *   (harmless). The drop does not also delete the record: plugin state has
+ *   no compare-and-delete, so a delete would lose a newer pause's re-check
+ *   again, which is the race RK9-584 removed.
  *
  * The cap pause needs none: the rules job runs it again every hour while the
  * month stays over the cap. Stored in plugin_state (no migration, G11); the
