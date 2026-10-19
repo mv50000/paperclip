@@ -18,7 +18,7 @@
  *   with the same key resumes and never creates a second creative or ad.
  * - Long work (video processing can take minutes) runs as a background
  *   promise of short Graph calls, each well inside the host's 30 s RPC limit.
- *   The action returns the publication id at once; `publication` data polls it.
+ *   The action returns the publication id at once; the `publication` read action polls it.
  */
 
 import type { PluginContext } from "@paperclipai/plugin-sdk";
