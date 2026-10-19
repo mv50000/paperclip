@@ -300,14 +300,8 @@ export async function runDueRechecks(
       if (!recheck) continue;
       const due = Date.parse(recheck.dueAt);
       if (Number.isFinite(due) && due > now.getTime()) continue;
-      /**
-       * Drops the re-check this tick read. A kill switch or scheduled pause
-       * that stored a newer one during the tick's awaits keeps it (RK9-580).
-       */
-      const drop = async () => {
-        const current = await readRecheck(deps.ctx, companyId, rule);
-        if (current && current.dueAt === recheck.dueAt && current.haltId === recheck.haltId) await dropRecheck(deps.ctx, companyId, rule);
-      };
+      /** Drops the re-check this tick read by its id: one a pause stored during the tick's awaits stays (RK9-580, RK9-584). */
+      const drop = () => dropRecheck(deps.ctx, companyId, recheck);
       /** One more failed run, so the drop at the window's end can say the ticks ran (RK9-568, RK9-570). */
       const noteFailure = async (error: string) => {
         try {
@@ -316,6 +310,15 @@ export async function runDueRechecks(
           // The drop at the window's end cannot tell that this run ran: this line does.
           failures.push(`${prefix}: this failed run was not counted (${safeError(noteError)})`);
         }
+      };
+      /**
+       * Only a board user's clear of this halt skips the alert (RK9-580): one
+       * that ran out, was replaced or cannot be read still alerts, because the
+       * objects may spend.
+       */
+      const boardCleared = async () => {
+        const stored = await storedRuleHalt(deps.ctx, companyId, rule).catch(() => null);
+        return !!stored?.cleared && stored.clearedBy !== "rules_job" && haltIdentity(stored.halt) === recheck.haltId;
       };
       const lastError = (recheck.lastError ?? "unknown").slice(0, 300);
       const expired = !Number.isFinite(due) || now.getTime() - due > RECHECK_WINDOW_MS;
@@ -326,20 +329,11 @@ export async function runDueRechecks(
         failures.push(`${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`);
         continue;
       }
+      // Within the window, the halt ended after failed runs: the drop alerts like the one at the window's end (RK9-584).
+      let haltEnded = false;
       if (recheck.haltId === null) {
         // The halt write failed: the re-check runs anyway.
-      } else if (expired) {
-        // Only a board user's clear of this halt skips the alert (RK9-580): one that ran out,
-        // was replaced or cannot be read still alerts, because the objects may spend.
-        const stored = await storedRuleHalt(deps.ctx, companyId, rule).catch(() => null);
-        if (stored?.cleared && stored.clearedBy !== "rules_job" && haltIdentity(stored.halt) === recheck.haltId) {
-          deps.ctx.logger.info("rk9-ads pause: halt cleared, re-check dropped without the alert", { companyId, rule, attempts: recheck.attempts });
-          await drop();
-          // No alert to pause by hand what the board may want running: the run says the ticks failed.
-          failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); a board user cleared the halt, dropped without the alert`);
-          continue;
-        }
-      } else {
+      } else if (!expired) {
         let halt: Awaited<ReturnType<typeof readRuleHalt>>;
         try {
           halt = await readRuleHalt(deps.ctx, companyId, rule, now);
@@ -349,16 +343,27 @@ export async function runDueRechecks(
           continue;
         }
         if (!halt || haltIdentity(halt) !== recheck.haltId) {
-          deps.ctx.logger.info("rk9-ads pause: halt no longer in force, re-check dropped", { companyId, rule, attempts: recheck.attempts ?? 0 });
-          await drop();
-          // Earlier runs failed: the run says how the re-check ended (RK9-580).
-          if (recheck.attempts) failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); the halt is no longer in force, dropped`);
-          continue;
+          if (!recheck.attempts) {
+            deps.ctx.logger.info("rk9-ads pause: halt no longer in force, re-check dropped", { companyId, rule, attempts: 0 });
+            await drop();
+            continue;
+          }
+          // A halt that ran out (a scheduled pause shortly before 06:00) or was replaced goes to the alert below.
+          haltEnded = true;
         }
       }
-      if (expired) {
+      if ((expired || haltEnded) && recheck.haltId !== null && (await boardCleared())) {
+        deps.ctx.logger.info("rk9-ads pause: halt cleared, re-check dropped without the alert", { companyId, rule, attempts: recheck.attempts });
+        await drop();
+        // No alert to pause by hand what the board may want running: the run says the ticks failed.
+        failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); a board user cleared the halt, dropped without the alert`);
+        continue;
+      }
+      if (expired || haltEnded) {
         // The ticks ran and failed: the objects the late listing would show may still spend (RK9-570).
-        const ran = `${prefix}: ran ${recheck.attempts} time(s) within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt} and failed each time (last error: ${lastError})`;
+        const ran = haltEnded
+          ? `${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); its halt is no longer in force`
+          : `${prefix}: ran ${recheck.attempts} time(s) within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt} and failed each time (last error: ${lastError})`;
         const alertError = await alertDroppedRecheck(deps, companyId, config, recheck);
         if (alertError) {
           // With Telegram down the run's failure is the only signal: it carries what the drop line would.
@@ -366,9 +371,14 @@ export async function runDueRechecks(
             failures.push(`${ran}; check Meta and pause by hand what is still ACTIVE. The alert failed (${alertError}): kept to send it next tick`);
             continue;
           }
-          // The cap (RK9-580): this line is the last one.
           deps.ctx.logger.warn("rk9-ads pause: re-check alert failed until its cap, dropped", { companyId, rule, dueAt: recheck.dueAt, attempts: recheck.attempts });
           await drop();
+          if (!Number.isFinite(due)) {
+            // A damaged due time has no cap to count from (RK9-584): this line is the only one.
+            failures.push(`${ran}; check Meta and pause by hand what is still ACTIVE. The alert failed (${alertError}) and the due time cannot be read: dropped unsent`);
+            continue;
+          }
+          // The cap (RK9-580): this line is the last one.
           failures.push(`${ran}; check Meta and pause by hand what is still ACTIVE. The alert failed for ${RECHECK_ALERT_KEEP_MS / 3_600_000} h (${alertError}): dropped unsent`);
           continue;
         }

@@ -27,12 +27,18 @@
  *   listing would show may still be ACTIVE (RK9-570).
  * - It sets no new halt and closes no cards; it notifies only when it paused
  *   something.
+ * - Plugin state has no compare-and-delete (RK9-584). So a drop stores a
+ *   marker with the dropped re-check's id instead of deleting it, and a
+ *   failed run's count goes to its own key with that id. A newer pause that
+ *   stores its re-check at any time during a tick has a new id: neither the
+ *   marker nor the count touches it.
  *
  * The cap pause needs none: the rules job runs it again every hour while the
  * month stays over the cap. Stored in plugin_state (no migration, G11); the
  * tick is runDueRechecks in scheduled-pause.ts.
  */
 
+import { randomUUID } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
 import { HALT_NAMESPACE } from "./halt.js";
 
@@ -43,6 +49,8 @@ export type RecheckRule = (typeof RECHECK_RULES)[number];
 
 export interface Recheck {
   rule: RecheckRule;
+  /** Names this re-check for its drop and its count (RK9-584). Re-checks stored before have none; `dueAt` and `haltId` stand in. */
+  id?: string;
   /** The halt the pause left; null when its write failed. */
   haltId: string | null;
   /** ISO time from which a tick runs it. */
@@ -60,38 +68,65 @@ function recheckKey(companyId: string, rule: RecheckRule) {
   return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `recheck:${companyId}:${rule}` };
 }
 
+/** The id of the last dropped re-check (RK9-584). */
+function droppedKey(companyId: string, rule: RecheckRule) {
+  return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `recheck-done:${companyId}:${rule}` };
+}
+
+/** The failed runs of the re-check named by `id` (RK9-584). */
+function attemptsKey(companyId: string, rule: RecheckRule) {
+  return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey: `recheck-attempts:${companyId}:${rule}` };
+}
+
+export function recheckIdentity(recheck: Pick<Recheck, "id" | "dueAt" | "haltId">): string {
+  return recheck.id ?? `${recheck.dueAt}|${recheck.haltId ?? ""}`;
+}
+
 export function isRecheckRule(rule: string): rule is RecheckRule {
   return (RECHECK_RULES as readonly string[]).includes(rule);
 }
 
 /**
- * One more failed run of this re-check. Writes nothing when a newer pause
- * replaced it since it was read.
+ * One more failed run of this re-check. It writes only the count's key, with
+ * the re-check's id, so a newer pause's re-check stored since the read keeps
+ * its own count. The scheduled-pause job is the only writer.
  */
 export async function noteRecheckFailure(ctx: StateCtx, companyId: string, recheck: Recheck, error: string): Promise<void> {
-  const current = await readRecheck(ctx, companyId, recheck.rule);
-  if (!current || current.dueAt !== recheck.dueAt || current.haltId !== recheck.haltId) return;
-  await ctx.state.set(recheckKey(companyId, recheck.rule), { ...current, attempts: (current.attempts ?? 0) + 1, lastError: error });
+  await ctx.state.set(attemptsKey(companyId, recheck.rule), { id: recheckIdentity(recheck), attempts: (recheck.attempts ?? 0) + 1, lastError: error });
 }
 
-/** Stores the re-check of a live pause; a newer pause of the same rule replaces it. */
+/** Stores the re-check of a live pause with a new id; a newer pause of the same rule replaces it. */
 export async function scheduleRecheck(ctx: StateCtx, companyId: string, recheck: Recheck): Promise<void> {
-  await ctx.state.set(recheckKey(companyId, recheck.rule), recheck);
+  await ctx.state.set(recheckKey(companyId, recheck.rule), { ...recheck, id: recheck.id ?? randomUUID() });
 }
 
-export async function dropRecheck(ctx: StateCtx, companyId: string, rule: RecheckRule): Promise<void> {
-  await ctx.state.delete(recheckKey(companyId, rule));
+/** Drops the re-check named by its id: a newer one stored meanwhile stays (RK9-584). */
+export async function dropRecheck(ctx: StateCtx, companyId: string, recheck: Recheck): Promise<void> {
+  await ctx.state.set(droppedKey(companyId, recheck.rule), recheckIdentity(recheck));
 }
 
+/** The rule's re-check, or null when none is stored or it was dropped. Its count comes from the count's key when that names it. */
 export async function readRecheck(ctx: StateCtx, companyId: string, rule: RecheckRule): Promise<Recheck | null> {
-  const value = (await ctx.state.get(recheckKey(companyId, rule))) as Partial<Recheck> | null;
+  const [value, dropped, counted] = (await Promise.all([
+    ctx.state.get(recheckKey(companyId, rule)),
+    ctx.state.get(droppedKey(companyId, rule)),
+    ctx.state.get(attemptsKey(companyId, rule)),
+  ])) as [Partial<Recheck> | null, unknown, { id?: unknown; attempts?: unknown; lastError?: unknown } | null];
   if (!value || typeof value !== "object" || typeof value.dueAt !== "string") return null;
-  return {
+  const recheck: Recheck = {
     rule,
+    ...(typeof value.id === "string" ? { id: value.id } : {}),
     haltId: typeof value.haltId === "string" ? value.haltId : null,
     dueAt: value.dueAt,
     reason: typeof value.reason === "string" ? value.reason : rule,
-    ...(typeof value.attempts === "number" && Number.isFinite(value.attempts) ? { attempts: value.attempts } : {}),
-    ...(typeof value.lastError === "string" ? { lastError: value.lastError } : {}),
+  };
+  const id = recheckIdentity(recheck);
+  if (dropped === id) return null;
+  // A re-check stored before RK9-584 carries its count inline.
+  const count = counted && typeof counted === "object" && counted.id === id ? counted : value;
+  return {
+    ...recheck,
+    ...(typeof count.attempts === "number" && Number.isFinite(count.attempts) ? { attempts: count.attempts } : {}),
+    ...(typeof count.lastError === "string" ? { lastError: count.lastError } : {}),
   };
 }
