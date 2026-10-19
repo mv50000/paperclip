@@ -381,7 +381,7 @@ the core chat-channels bot is never shared. See
   its window it sends one Telegram alert (`recheck-dropped:<brand>:<rule>:<due
   time>`); a failed send keeps the re-check for the next tick, at most
   24 h past its window (RK9-580). Only a board user's clear of its halt
-  skips the alert; a halt that ran out still alerts. A drop removes only
+  skips the alert; a halt that ran out still alerts. A drop ends only
   the re-check the tick read, not a newer one. A halt that ends within the
   window after failed runs (a scheduled pause shortly before 06:00, or a
   replaced halt) alerts at once, like the drop at the window's end

@@ -290,7 +290,12 @@ describe("a halt that ends within the window after failed runs (RK9-584 item 1)"
 describe("a pause that stores a re-check during the tick keeps it (RK9-584 item 2)", () => {
   const newer = { rule: "kill_switch" as const, haltId: "newer-halt", dueAt: "2026-10-21T10:06:00.000Z", reason: "hätä 2" };
 
-  /** Stores the newer re-check right before the first write to `stateKey`. */
+  /**
+   * Stores the newer re-check right before the first write to `stateKey`.
+   * These tests check the new invariant (the drop and the count write only
+   * their own keys with the re-check's id). They do not replay master's
+   * read-then-delete race, whose window had no write to hook.
+   */
   function storeNewerBefore(r: Rig, stateKey: string): void {
     const state = r.harness.ctx.state;
     const set = state.set.bind(state);
