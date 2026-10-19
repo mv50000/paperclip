@@ -389,7 +389,21 @@ the core chat-channels bot is never shared. See
   (`recheck-done:`) and a failed run's count goes to its own key
   (`recheck-attempts:`), so a pause that stores a new re-check during the
   tick keeps it. A damaged due time whose alert failed is dropped with a
-  line that says so.
+  line that says so. A halt replaced within the window by a newer pause of
+  the same rule after the re-check's due time (a kill switch fired during
+  the tick) keeps the re-check for one tick, uncounted and without the
+  alert: the newer pause stores its own re-check, which replaces it. When
+  it stored none (its config or re-check store failed), the next tick
+  alerts. At the window's end a replaced halt still alerts (RK9-606).
+  Rollback note: a drop keeps the record, and code from before RK9-584
+  ignores the `recheck-done:` marker and the `recheck-attempts:` count.
+  After a rollback to it, a dropped re-check runs again: one past its
+  window fails one run with "dropped unrun", one within its window whose
+  halt is still in force runs one extra pause (harmless). A re-check stored
+  before RK9-584 carries its count inline: with failed runs it can fail
+  again and send the drop alert once more. The drop does not delete the
+  record, because a delete would again lose a newer pause's re-check
+  (RK9-606).
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
