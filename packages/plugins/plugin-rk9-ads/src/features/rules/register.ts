@@ -10,8 +10,9 @@ import { createRulesStore } from "./store.js";
  * Rule engine (A11, RK9-515): pause rules, shadow mode first.
  *
  * - job `rules-evaluate` (hourly): runner.ts
- * - data `rules`: the brand's effective rules, liveMode and the rule actions
- *   of the last 24 h, for the operator UI (A12 owns the editor, G13)
+ * - read action `rules`: the brand's effective rules, liveMode and the rule
+ *   actions of the last 24 h, for the operator UI (A12 owns the editor, G13).
+ *   An action, so the company comes from `context.companyId` (RK9-583).
  * - action `rules.dryRun`: what the rules would decide now. Reads only: no
  *   rule_actions row, no Meta write, no Telegram.
  * - action `rules.prepareSave`: checks the rule editor's pause rules and
@@ -21,7 +22,7 @@ import { createRulesStore } from "./store.js";
  *   the saved ones as `stale` (RK9-581). Writes nothing.
  */
 
-export const RULES_DATA_KEY = "rules";
+export const RULES_ACTION_KEY = "rules";
 export const RULES_DRY_RUN_ACTION_KEY = "rules.dryRun";
 export const RULES_PREPARE_SAVE_ACTION_KEY = "rules.prepareSave";
 
@@ -39,10 +40,9 @@ export function registerRules(runtime: FeatureRuntime, overrides: Partial<RulesD
 
   ctx.jobs.register(RULES_JOB_KEY, createRulesJob(deps));
 
-  ctx.data.register(RULES_DATA_KEY, async (params) => {
-    // The host sets companyId to the company it authorized for this call.
-    const companyId = typeof params.companyId === "string" ? params.companyId : null;
-    if (!companyId) return { state: "error", error: "company context is required" };
+  ctx.actions.register(RULES_ACTION_KEY, async (_params, context) => {
+    const companyId = context.companyId;
+    if (!companyId) throw new Error("company context is required");
     const result = await loadCompanyConfig(ctx, companyId);
     if (result.state !== "enabled") return { state: result.state };
     let recentActions: unknown[] = [];

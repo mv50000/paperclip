@@ -3,7 +3,7 @@ import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import { createLedger } from "../src/db.js";
 import type { RuleAdDay } from "../src/features/rules/evaluate.js";
-import { registerRules, RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY } from "../src/features/rules/register.js";
+import { registerRules, RULES_ACTION_KEY, RULES_DRY_RUN_ACTION_KEY } from "../src/features/rules/register.js";
 import { CAP_HALT_RELEASED_ACTIVITY, RULES_JOB_KEY } from "../src/features/rules/runner.js";
 import { clearHalt, readHalt, setHalt, type HaltState } from "../src/features/spend-guard/halt.js";
 import { memoryRulesStore } from "../src/features/rules/store.js";
@@ -660,7 +660,7 @@ describe("rules-evaluate job (A11)", () => {
 
 });
 
-describe("rules data and dry-run action (for the A12 UI)", () => {
+describe("rules view and dry-run actions (for the A12 UI)", () => {
   const UI = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "user-1" } };
 
   it("the dry run returns live decisions without writing anything", async () => {
@@ -677,14 +677,14 @@ describe("rules data and dry-run action (for the A12 UI)", () => {
 
   it("serves the effective rules", async () => {
     const r = setup();
-    const data = await r.harness.getData<{ state: string; liveMode: boolean; rules: Array<{ ruleId: string; mode: string }> }>(RULES_DATA_KEY, { companyId: COMPANY_A });
+    const data = await r.harness.performAction<{ state: string; liveMode: boolean; rules: Array<{ ruleId: string; mode: string }> }>(RULES_ACTION_KEY, {}, UI);
     expect(data.state).toBe("enabled");
     expect(data.liveMode).toBe(false);
     expect(data.rules.map((rule) => [rule.ruleId, rule.mode])).toEqual([
       ["cpc-ceiling", "shadow"],
       ["pause_all_cap", "shadow"],
     ]);
-    expect(await r.harness.getData(RULES_DATA_KEY, {})).toEqual({ state: "error", error: "company context is required" });
+    await expect(r.harness.performAction(RULES_ACTION_KEY, {}, { actor: UI.actor })).rejects.toThrow("company context is required");
   });
 });
 

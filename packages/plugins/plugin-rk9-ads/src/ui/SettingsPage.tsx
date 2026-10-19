@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { DataTable, KeyValueList, Spinner, StatusBadge, useHostNavigation, usePluginAction, usePluginData, usePluginToast } from "@paperclipai/plugin-sdk/ui";
+import { useEffect, useRef, useState } from "react";
+import { DataTable, KeyValueList, Spinner, StatusBadge, useHostNavigation, usePluginAction, usePluginToast } from "@paperclipai/plugin-sdk/ui";
 import type { PluginCompanySettingsPageProps } from "@paperclipai/plugin-sdk/ui";
 import type { PreflightResult } from "../brand/preflight.js";
 import type { ProvisionResult } from "../brand/provision.js";
@@ -7,7 +7,8 @@ import type { UiSettings } from "../features/ui/dto.js";
 import { Button, EmptyState, ErrorText, Muted, Section, TypedConfirm } from "./components.js";
 import { errorText, fmtDateTime, fmtEur } from "./format.js";
 import { readConfigVersion, saveRulesBlock } from "./host-config.js";
-import { ACTION, DATA, HOST_CONFIG_PATH } from "./keys.js";
+import { ACTION, HOST_CONFIG_PATH, VIEW } from "./keys.js";
+import { useViewData } from "./view-data.js";
 import {
   BUILTIN_CAP_RULE_ID,
   EDITOR_AGGREGATES,
@@ -39,6 +40,21 @@ interface RulesData {
   state: string;
   liveMode?: boolean;
   rules?: Array<Record<string, unknown>>;
+}
+
+const STALE_TEXT = "Tallennetut säännöt muuttuivat sivun latauksen jälkeen, eikä luonnosta tallennettu.";
+/** The config states other than enabled, as the reload after a stale save reports them (RK9-583). */
+const RULES_STATE_TEXT: Record<string, string> = {
+  absent: "brändin asetukset on poistettu",
+  invalid: "brändin asetukset ovat virheelliset",
+  disabled: "brändi on pois päältä",
+  unavailable: "brändin asetuksia ei voitu lukea",
+};
+
+/** What the reload after a stale save found: the rules again, or the state that hides the editor. */
+export function staleReloadText(state: string): string {
+  if (state === "enabled") return `${STALE_TEXT} Säännöt ladattiin uudelleen: tee muutokset ja tallenna uudelleen.`;
+  return `${STALE_TEXT} Sääntöjä ei voi nyt muokata: ${RULES_STATE_TEXT[state] ?? `asetusten tila on ${state}`}. Korjaa asetukset, niin säännöt näkyvät taas.`;
 }
 
 interface PreparedRules {
@@ -125,7 +141,7 @@ function ConfigSummary(props: { settings: UiSettings }) {
 }
 
 function PreflightSection(props: { companyId: string | null }) {
-  const status = usePluginData<PreflightStatus>(DATA.preflight, { companyId: props.companyId });
+  const status = useViewData<PreflightStatus>(VIEW.preflight, props.companyId);
   const verify = usePluginAction(ACTION.verifyConnection);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -313,7 +329,7 @@ function RuleRow(props: { rule: EditorRule; onChange: (rule: EditorRule) => void
 }
 
 function RuleEditor(props: { companyId: string | null }) {
-  const rules = usePluginData<RulesData>(DATA.rules, { companyId: props.companyId });
+  const rules = useViewData<RulesData>(VIEW.rules, props.companyId);
   const prepare = usePluginAction(ACTION.rulesPrepareSave);
   const dryRun = usePluginAction(ACTION.rulesDryRun);
   const toast = usePluginToast();
@@ -327,9 +343,32 @@ function RuleEditor(props: { companyId: string | null }) {
   const [version, setVersion] = useState<{ updatedAt: string | null } | null>(null);
   /** The rules block the draft started from; the worker refuses the save when the saved rules differ from it (RK9-581). */
   const [loaded, setLoaded] = useState<{ liveMode: boolean; list: Array<Record<string, unknown>> } | null>(null);
+  /** Set by a refused stale save: the reload then says what it found (RK9-583). */
+  const staleReload = useRef(false);
+  // A stale save of another company says nothing about this one.
+  useEffect(() => {
+    staleReload.current = false;
+  }, [props.companyId]);
 
   useEffect(() => {
-    if (!rules.data || rules.data.state !== "enabled") return;
+    if (rules.error) staleReload.current = false;
+    if (!rules.data) return;
+    const reportStale = () => {
+      if (!staleReload.current) return;
+      staleReload.current = false;
+      setErrors([staleReloadText(rules.data!.state)]);
+    };
+    if (rules.data.state !== "enabled") {
+      // A config that went invalid or disabled has no rules to edit: the old draft leaves the page (RK9-583).
+      setDraft(null);
+      setLoaded(null);
+      setPending(null);
+      // Only a stale save's report is shown here: an older save error belongs to the dropped draft.
+      if (staleReload.current) reportStale();
+      else setErrors([]);
+      return;
+    }
+    reportStale();
     // propose_scale stays off and is not edited here; the worker keeps the saved entries (G9).
     setDraft((rules.data.rules ?? []).filter((rule) => rule.type !== "propose_scale").map(toEditor));
     setLiveMode(rules.data.liveMode === true);
@@ -346,7 +385,7 @@ function RuleEditor(props: { companyId: string | null }) {
     return () => {
       current = false;
     };
-  }, [rules.data, props.companyId]);
+  }, [rules.data, rules.error, props.companyId]);
 
   // A confirmation covers the draft it listed; an edit after it asks again.
   useEffect(() => setPending(null), [draft, liveMode]);
@@ -356,6 +395,13 @@ function RuleEditor(props: { companyId: string | null }) {
     return (
       <Section title="Säännöt">
         {rules.loading ? <Spinner label="Ladataan sääntöjä" /> : <Muted>Säännöt ovat käytössä vain, kun brändi on päällä.</Muted>}
+        {errors.length > 0 ? (
+          <div role="alert" className="space-y-1">
+            {errors.map((error) => (
+              <ErrorText key={error}>{error}</ErrorText>
+            ))}
+          </div>
+        ) : null}
       </Section>
     );
   }
@@ -368,10 +414,14 @@ function RuleEditor(props: { companyId: string | null }) {
     rules.refresh();
   }
 
-  /** A draft older than the saved rules is not saved: the editor reloads them (RK9-581). */
+  /**
+   * A draft older than the saved rules is not saved: the editor reloads them (RK9-581). The message names what the
+   * reload found, because a config that also went invalid or disabled shows no rules to edit (RK9-583).
+   */
   function reloadStale() {
     setPending(null);
-    setErrors(["Tallennetut säännöt muuttuivat sivun latauksen jälkeen, eikä luonnosta tallennettu. Säännöt ladataan uudelleen: tee muutokset ja tallenna uudelleen."]);
+    setErrors([`${STALE_TEXT} Tallennettuja sääntöjä luetaan uudelleen.`]);
+    staleReload.current = true;
     rules.refresh();
   }
 
@@ -551,7 +601,7 @@ function RuleEditor(props: { companyId: string | null }) {
 
 export function SettingsPage(props: PluginCompanySettingsPageProps) {
   const companyId = props.context.companyId;
-  const settings = usePluginData<UiSettings>(DATA.settings, { companyId });
+  const settings = useViewData<UiSettings>(VIEW.settings, companyId);
 
   if (settings.loading && !settings.data) return <Spinner label="Ladataan asetuksia" />;
   if (settings.error) return <ErrorText>Asetuksia ei voitu ladata: {settings.error.message}</ErrorText>;

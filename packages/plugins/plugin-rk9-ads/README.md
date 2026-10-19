@@ -764,15 +764,15 @@ anything ACTIVE.
   link to the host config form, the preflight checks with a re-run, the
   provision dry run, and the rule editor (pause rules only).
 - **Dashboard widget**: MTD against the cap, pending cards, and the halt.
-- **Data** `ads-overview`, `ads-widget`, `ads-settings`: allowlist DTOs
+- **Views** `ads-overview`, `ads-widget`, `ads-settings` (and `rules`,
+  `preflight-status`): read-only actions that return allowlist DTOs
   (`dto.ts`). They never carry raw config, secret refs or tokens; every value
-  goes through `sanitize()`. The company comes from the host-merged
-  `params.companyId`. The SDK gives a data handler no other context, so a
-  bridge call without a company (instance admin only) keeps the caller's
-  value; the worker cannot tell it apart without a core change (RK9-563).
-  Moving the views to actions (`context.companyId`) would close this without
-  a core change but needs a new data hook for the three pages; it is left
-  for a follow-up (RK9-581).
+  goes through `sanitize()`. They are actions, not data handlers, so the
+  company comes from the host's `context.companyId` (RK9-583). A data
+  handler gets only params, and a bridge call without a company (instance
+  admin only) kept the caller's own `params.companyId`. The pages load them
+  with `ui/view-data.ts`, which has the shape of `usePluginData` (data,
+  loading, error, refresh).
 - **Action** `pause-ad` `{ adId, dryRun?, confirm?, idempotencyKey? }`: pauses
   one ad of the brand's ad account. `dryRun` defaults to true. A real pause
   needs `confirm: true`, a board user and `idempotencyKey` (8-100 of
@@ -782,7 +782,9 @@ anything ACTIVE.
   pause Meta confirmed (RK9-581), so any other repeat (the ad still runs,
   or a first call died before its halt and card close) pauses again, and a
   failed pause leaves no marker. Markers older than 24 h are deleted when a
-  new one is written. It writes a `rule_actions` row
+  new one is written. A repeat that arrives while the same user's call with
+  the same key still runs joins that call and returns its result with
+  `duplicate: true` (RK9-583), so two quick clicks write one audit row. It writes a `rule_actions` row
   (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
   activity entry. Before the Meta write it stores a 30-minute halt for the
   ad (`adHalt`, RK9-566), then closes the ad's open activation cards
@@ -815,7 +817,11 @@ anything ACTIVE.
   RK9-563). `LIVE` covers only the listed live changes (`confirmedLive`): one
   that appears after it refuses the save (RK9-581). The page sends the rules
   its draft loaded (`loaded`); when the saved rules differ from them, the
-  save is refused as `stale` and the page reloads the rules (RK9-581). The browser's save checks both again against the config read
+  save is refused as `stale` and the page reloads the rules (RK9-581).
+  Saved rules that no longer parse are compared as saved, so broken rules
+  saved elsewhere refuse the old draft too. When the reload finds the
+  brand invalid or disabled, the page says so and drops the draft instead
+  of promising rules to edit (RK9-583). The browser's save checks both again against the config read
   right before the POST. That read must also show the `updatedAt` the editor
   loaded: a config saved since, on the host's form or in another tab,
   refuses the save, and the page does not save before that version was read
@@ -883,7 +889,7 @@ secret ids.
 |---|---|---|
 | `verify-connection` | action | "Tarkista yhteys": the live preflight, cached in plugin state |
 | `provision` | action | `{ dryRun?, confirm?, dailyBudgetCents?, campaignId?, adSetId? }`; dry run unless `dryRun: false, confirm: true`; a real run is board-only (an agent gets the dry run only) |
-| `preflight-status` | data | The cached preflight and `fresh`; no Meta call |
+| `preflight-status` | action (read) | The cached preflight and `fresh`; no Meta call |
 
 The buttons belong to the operator UI (A12, G13). Until then an operator calls
 the actions through the host's plugin action API.

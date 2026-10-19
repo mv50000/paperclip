@@ -22,7 +22,9 @@
  * When the saved rules no longer equal it, the save is refused as `stale`
  * (RK9-581): a rule saved elsewhere after the page loaded is not overwritten
  * by the old draft, even when the change does not weaken anything. Saved
- * rules that do not parse skip this check, so the draft can still fix them.
+ * rules that do not parse are compared as saved (RK9-583): the editor
+ * loads only parsed rules, so broken rules saved elsewhere after the load
+ * refuse the old draft too.
  *
  * A config without `rules.list` runs the shipped default rules. A save that
  * keeps exactly those defaults leaves `list` out, so the defaults are not
@@ -111,9 +113,10 @@ export function prepareRules(
   });
   if (errors.length > 0) return { ok: false, errors };
   if (input.loaded !== undefined) {
-    // Saved rules that do not parse cannot be shown to reload; the draft may fix them, as before (rules/register.ts).
+    // Broken saved rules are compared as written: a draft loaded from parsed rules does not overwrite them unseen (RK9-583).
     const current = parseRules(rawConfig.rules);
-    if (current.errors.length === 0 && canonical(input.loaded) !== canonical(current.rules)) {
+    const savedNow = current.errors.length === 0 ? current.rules : (rawConfig.rules ?? null);
+    if (canonical(input.loaded) !== canonical(savedNow)) {
       return { ok: false, errors: ["The saved rules changed after this page loaded; the page reloads them, then edit and save again"], stale: true };
     }
   }

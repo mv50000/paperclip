@@ -12,22 +12,22 @@ import esbuild from "esbuild";
 import type { Company } from "@paperclipai/plugin-sdk";
 import { createPluginBundlerPresets } from "@paperclipai/plugin-sdk/bundlers";
 import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/testing";
-import { PREFLIGHT_STATUS_DATA_KEY, PROVISION_ACTION_KEY, VERIFY_CONNECTION_ACTION_KEY } from "../src/features/brand/register.js";
+import { PREFLIGHT_STATUS_ACTION_KEY, PROVISION_ACTION_KEY, VERIFY_CONNECTION_ACTION_KEY } from "../src/features/brand/register.js";
 import { RESEND_GATE_CARD_ACTION_KEY } from "../src/features/gate/register.js";
 import { RULE_AGGREGATES, RULE_METRICS, RULE_MODES, RULE_OPERATORS } from "../src/features/rules/schema.js";
 import { EDITABLE_RULE_TYPES } from "../src/features/rules/editor.js";
-import { RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY, RULES_PREPARE_SAVE_ACTION_KEY } from "../src/features/rules/register.js";
+import { RULES_ACTION_KEY, RULES_DRY_RUN_ACTION_KEY, RULES_PREPARE_SAVE_ACTION_KEY } from "../src/features/rules/register.js";
 import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../src/features/spend-guard/register.js";
 import type { UiOverview, UiSettings, UiWidget } from "../src/features/ui/dto.js";
-import { OVERVIEW_DATA_KEY, PAUSE_AD_ACTION_KEY, PAUSE_MARKER_HOURS, SETTINGS_DATA_KEY, UI_PAUSE_RULE_ID, WIDGET_DATA_KEY } from "../src/features/ui/register.js";
+import { OVERVIEW_ACTION_KEY, PAUSE_AD_ACTION_KEY, PAUSE_MARKER_HOURS, SETTINGS_ACTION_KEY, UI_PAUSE_RULE_ID, WIDGET_ACTION_KEY } from "../src/features/ui/register.js";
 import { PUBLICATION_DATA_KEY } from "../src/features/publish/register.js";
-import { sanitize } from "../src/features/ui/sanitize.js";
+import { BOT_TOKEN_RE, sanitize } from "../src/features/ui/sanitize.js";
 import { spendView } from "../src/features/ui/views.js";
 import { addDays } from "../src/insights/mtd.js";
 import { localDate } from "../src/kit/local-time.js";
 import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
 import manifest, { PLUGIN_ID } from "../src/manifest.js";
-import { ACTION, DATA, PLUGIN_KEY } from "../src/ui/keys.js";
+import { ACTION, PLUGIN_KEY, VIEW } from "../src/ui/keys.js";
 import { EDITOR_AGGREGATES, EDITOR_METRICS, EDITOR_MODES, EDITOR_OPERATORS, EDITOR_RULE_TYPES, LIVE_MODE_ON_TEXT } from "../src/ui/rule-fields.js";
 import plugin from "../src/worker.js";
 import { brandConfig, COMPANY_A, COMPANY_B, COMPANY_UNCONFIGURED, PACKAGE_ROOT, SECRET_A_BOT, SECRET_A_META, SECRET_B_META, secretRef } from "./fixtures.js";
@@ -105,6 +105,7 @@ interface Rig {
   harness: TestHarness;
   meta: FakeMeta;
   actionKeys: string[];
+  actionHandlers: Map<string, Parameters<TestHarness["ctx"]["actions"]["register"]>[1]>;
   dataKeys: string[];
   queries: Array<{ sql: string; params: unknown[] }>;
   executes: Array<{ sql: string; params: unknown[] }>;
@@ -187,9 +188,11 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
 
   const actionKeys: string[] = [];
   const dataKeys: string[] = [];
+  const actionHandlers = new Map<string, Parameters<typeof harness.ctx.actions.register>[1]>();
   const registerAction = harness.ctx.actions.register.bind(harness.ctx.actions);
   harness.ctx.actions.register = (key, handler) => {
     actionKeys.push(key);
+    actionHandlers.set(key, handler);
     registerAction(key, handler);
   };
   const registerData = harness.ctx.data.register.bind(harness.ctx.data);
@@ -202,6 +205,7 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
     harness,
     meta,
     actionKeys,
+    actionHandlers,
     dataKeys,
     queries,
     executes,
@@ -223,12 +227,12 @@ describe("operator UI handlers (RK9-518)", () => {
 
   it("pins every UI key to the worker's own constant", () => {
     expect(PLUGIN_KEY).toBe(PLUGIN_ID);
-    expect(DATA).toEqual({
-      overview: OVERVIEW_DATA_KEY,
-      widget: WIDGET_DATA_KEY,
-      settings: SETTINGS_DATA_KEY,
-      preflight: PREFLIGHT_STATUS_DATA_KEY,
-      rules: RULES_DATA_KEY,
+    expect(VIEW).toEqual({
+      overview: OVERVIEW_ACTION_KEY,
+      widget: WIDGET_ACTION_KEY,
+      settings: SETTINGS_ACTION_KEY,
+      preflight: PREFLIGHT_STATUS_ACTION_KEY,
+      rules: RULES_ACTION_KEY,
     });
     expect(ACTION).toEqual({
       pauseAd: PAUSE_AD_ACTION_KEY,
@@ -242,7 +246,9 @@ describe("operator UI handlers (RK9-518)", () => {
       rulesPrepareSave: RULES_PREPARE_SAVE_ACTION_KEY,
     });
     for (const key of Object.values(ACTION)) expect(r.actionKeys).toContain(key);
-    for (const key of Object.values(DATA)) expect(r.dataKeys).toContain(key);
+    // The views are actions: the company comes from the host context (RK9-583).
+    for (const key of Object.values(VIEW)) expect(r.actionKeys).toContain(key);
+    for (const key of Object.values(VIEW)) expect(r.dataKeys).not.toContain(key);
     expect([...EDITOR_RULE_TYPES].sort()).toEqual([...EDITABLE_RULE_TYPES].sort());
     expect(EDITOR_METRICS).toEqual(RULE_METRICS);
     expect(EDITOR_OPERATORS).toEqual(RULE_OPERATORS);
@@ -259,7 +265,7 @@ describe("operator UI handlers (RK9-518)", () => {
 
   it("ads-overview serves the company's page: spend, publications, gates, rule log and 14 days", async () => {
     r = await rig({ poisoned: true });
-    const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    const overview = await r.harness.performAction<UiOverview>(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     expect(overview.state).toBe("enabled");
     expect(overview.brand).toEqual({ brandCode: "OLL", displayName: "Ololla", timeZone: "Europe/Helsinki", monthlyCapEur: 100 });
     // spend_cap 100 € with nothing spent: Meta still allows 100 €, but only 87.66 € of the month is left (RK9-563).
@@ -291,13 +297,13 @@ describe("operator UI handlers (RK9-518)", () => {
   it("a lifetime spend_cap above the monthly cap is fine when its headroom fits what is left (RK9-563)", async () => {
     // 5000 € lifetime cap, 4950 € spent over the account's life: Meta allows 50 €, 87.66 € of the month is left.
     r.meta.account = { ...r.meta.account, spend_cap: "500000", amount_spent: "495000" };
-    const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    const overview = await r.harness.performAction<UiOverview>(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     expect(overview.spend).toMatchObject({ spendCapEur: 5000, headroomEur: 50, remainingEur: 87.66, spendCapStatus: "set", risks: [] });
   });
 
   it("pending cards: the database keeps only live ones, soonest-expiring first, so expired rows cannot fill the limit (RK9-563)", async () => {
     r.queries.length = 0;
-    await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    await r.harness.performAction<UiOverview>(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     const gates = r.queries.filter((query) => /FROM \S+\.gate_requests WHERE/.test(query.sql));
     expect(gates).toHaveLength(1);
     expect(gates[0]!.sql).toMatch(/WHERE company_id = \$1 AND status = \$2 AND valid_until > now\(\) ORDER BY valid_until ASC LIMIT 50$/);
@@ -331,15 +337,34 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(out.error).toBe("POST https://api.telegram.org/bot[REDACTED]/sendMessage failed");
   });
 
-  it("every UI data handler requires a company and serves only that company", async () => {
-    for (const key of [OVERVIEW_DATA_KEY, WIDGET_DATA_KEY, SETTINGS_DATA_KEY]) {
-      expect(await r.harness.getData(key, {})).toEqual({ state: "error", error: "company context is required" });
-      const other = await r.harness.getData<{ state: string }>(key, { companyId: COMPANY_UNCONFIGURED });
+  it("sanitize stays linear on a long digit run and masks exactly what the pattern without the lookbehind masked (RK9-583)", () => {
+    const digits = "1".repeat(20_000);
+    const started = performance.now();
+    expect(sanitize({ error: `${digits} end` }).error).toBe(`${digits} end`);
+    expect(performance.now() - started).toBeLessThan(250);
+    // The token's id is the whole digit run before its ":", so no digit of it stays.
+    expect(sanitize({ error: `x${digits}${BOT_TOKEN}` }).error).toBe("x[REDACTED]");
+    expect(sanitize({ error: `${digits} ${BOT_TOKEN}` }).error).toBe(`${digits} [REDACTED]`);
+    // Random text over the token alphabet: the new pattern masks the same spans as the old one.
+    const old = /\d{6,}:[A-Za-z0-9_-]{30,}/g;
+    const alphabet = "0123456789012345678901234567890123456789:aZ_-/n ";
+    let seed = 583;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    for (let sample = 0; sample < 2000; sample += 1) {
+      const text = Array.from({ length: 20 + Math.floor(next() * 200) }, () => alphabet[Math.floor(next() * alphabet.length)]).join("");
+      expect(text.replace(BOT_TOKEN_RE, "[REDACTED]"), text).toBe(text.replace(old, "[REDACTED]"));
+    }
+  });
+
+  it("every UI view requires a company and serves only that company", async () => {
+    for (const key of [OVERVIEW_ACTION_KEY, WIDGET_ACTION_KEY, SETTINGS_ACTION_KEY]) {
+      await expect(r.harness.performAction(key, {}, { actor: UI.actor })).rejects.toThrow("company context is required");
+      const other = await r.harness.performAction<{ state: string }>(key, {}, { ...UI, companyId: COMPANY_UNCONFIGURED });
       expect(other.state).toBe("absent");
       expect(JSON.stringify(other)).not.toMatch(/OLL|Ololla|301|act_/);
     }
     r.queries.length = 0;
-    const b = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_B });
+    const b = await r.harness.performAction<UiOverview>(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_B });
     expect(b.brand?.brandCode).toBe("SUN");
     expect(b.publications.map((row) => row.id)).toEqual([PUB_B]);
     expect(JSON.stringify(b)).not.toContain(PUB_A);
@@ -349,14 +374,25 @@ describe("operator UI handlers (RK9-518)", () => {
     for (const query of r.queries) expect(query.params[0]).toBe(COMPANY_B);
     // An unconfigured company reads nothing from the ledger.
     r.queries.length = 0;
-    await r.harness.getData(OVERVIEW_DATA_KEY, { companyId: COMPANY_UNCONFIGURED });
+    await r.harness.performAction(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_UNCONFIGURED });
     expect(r.queries).toEqual([]);
   });
 
+  it("the views take the company from the host context, never from params (RK9-583)", async () => {
+    const actor = { type: "user" as const, userId: "instance-admin-1", agentId: null, runId: null, companyId: null };
+    for (const key of Object.values(VIEW)) {
+      // A bridge call without a company (instance admin only) keeps the caller's own params.companyId: the view refuses it.
+      await expect(r.actionHandlers.get(key)!({ companyId: COMPANY_A }, { companyId: null, actor })).rejects.toThrow("company context is required");
+    }
+    const b = (await r.actionHandlers.get(OVERVIEW_ACTION_KEY)!({ companyId: COMPANY_A }, { companyId: COMPANY_B, actor: { ...actor, companyId: COMPANY_B } })) as UiOverview;
+    expect(b.brand?.brandCode).toBe("SUN");
+    expect(JSON.stringify(b)).not.toContain(PUB_A);
+  });
+
   it("ads-widget and ads-settings are allowlisted views", async () => {
-    const widget = await r.harness.getData<UiWidget>(WIDGET_DATA_KEY, { companyId: COMPANY_A });
+    const widget = await r.harness.performAction<UiWidget>(WIDGET_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     expect(widget).toEqual({ state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 1, halted: false });
-    const settings = await r.harness.getData<UiSettings>(SETTINGS_DATA_KEY, { companyId: COMPANY_A });
+    const settings = await r.harness.performAction<UiSettings>(SETTINGS_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     expect(settings.meta).toMatchObject({ adAccountId: "29231592883113369", accessTokenConfigured: true });
     expect(settings.telegram).toMatchObject({ configured: true, chatId: "-1001", approverCount: 1 });
     const text = JSON.stringify(settings);
@@ -389,7 +425,7 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(r.harness.activity).toEqual(
       expect.arrayContaining([expect.objectContaining({ companyId: COMPANY_A, message: expect.stringContaining("ui paused ad 301") })]),
     );
-    const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    const overview = await r.harness.performAction<UiOverview>(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     expect(overview.publications[0]).toMatchObject({ metaAdId: "301", adStatus: "PAUSED" });
   });
 
@@ -407,6 +443,33 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(r.meta.writes).toHaveLength(1);
     expect(r.ruleActionInserts()).toHaveLength(1);
     expect(r.harness.activity).toHaveLength(activity);
+  });
+
+  it("pause-ad: a repeat while the same confirmation still runs joins it instead of a second pause (RK9-583)", async () => {
+    const key = randomUUID();
+    const live = { adId: "301", dryRun: false, confirm: true, idempotencyKey: key };
+    const [first, second, agent] = await Promise.allSettled([
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, live, UI),
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, live, UI),
+      // Not the same caller: an agent with the same key does not join and is refused as before.
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, live, { companyId: COMPANY_A, actor: { type: "agent", agentId: "agent-1" } }),
+    ]);
+    expect(first).toMatchObject({ status: "fulfilled", value: { paused: true, status: "PAUSED", previousStatus: "ACTIVE" } });
+    expect((first as PromiseFulfilledResult<Record<string, unknown>>).value).not.toHaveProperty("duplicate");
+    expect(second).toMatchObject({ status: "fulfilled", value: { paused: true, status: "PAUSED", duplicate: true } });
+    expect(agent).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/board-only/) }) });
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
+    expect(r.ruleActionInserts()).toHaveLength(1);
+    // A call without confirm does not join a running one with the same key: it is refused as before.
+    const [, unconfirmed] = await Promise.allSettled([
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, live, UI),
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, idempotencyKey: key }, UI),
+    ]);
+    expect(unconfirmed).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/confirm: true/) }) });
+    // The join ends with the call: a later repeat goes by the marker.
+    const later = await r.harness.performAction(PAUSE_AD_ACTION_KEY, live, UI);
+    expect(later).toMatchObject({ duplicate: true });
+    expect(r.meta.writes).toHaveLength(1);
   });
 
   it("pause-ad: a repeat whose key is taken but whose ad still runs pauses again (verifier H1, RK9-563)", async () => {
@@ -518,7 +581,7 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(r.ruleActionInserts()).toEqual([expect.objectContaining({ rule_id: "kill_switch", action: "pause_all", source: "ui", applied: true })]);
     expect(r.harness.activity.some((entry) => entry.message.includes("kill_switch paused 3"))).toBe(true);
     // The page shows the standing halt with when, who and why.
-    const overview = await r.harness.getData<UiOverview>(OVERVIEW_DATA_KEY, { companyId: COMPANY_A });
+    const overview = await r.harness.performAction<UiOverview>(OVERVIEW_ACTION_KEY, {}, { ...UI, companyId: COMPANY_A });
     expect(overview.halt).toMatchObject({ source: "ui", userId: "board-user-1" });
   });
 
@@ -576,15 +639,19 @@ describe("operator UI handlers (RK9-518)", () => {
       [RESEND_GATE_CARD_ACTION_KEY]: { gateRequestId: GATE_A },
       [RULES_PREPARE_SAVE_ACTION_KEY]: { list: [] },
     };
+    const views = Object.values(VIEW) as string[];
     for (const key of r.actionKeys) {
-      try {
-        outputs.push(`${key}: ${JSON.stringify(await r.harness.performAction(key, params[key] ?? {}, UI))}`);
-      } catch (error) {
-        outputs.push(`${key} threw: ${(error as Error).message}`);
+      // A view runs for both companies, like the data handlers.
+      for (const companyId of views.includes(key) ? [COMPANY_A, COMPANY_B] : [COMPANY_A]) {
+        try {
+          outputs.push(`${key}: ${JSON.stringify(await r.harness.performAction(key, params[key] ?? {}, { ...UI, companyId }))}`);
+        } catch (error) {
+          outputs.push(`${key} threw: ${(error as Error).message}`);
+        }
       }
     }
     expect(r.meta.writes).toEqual([]);
-    expect(outputs.length).toBe(r.dataKeys.length * 2 + r.actionKeys.length);
+    expect(outputs.length).toBe(r.dataKeys.length * 2 + r.actionKeys.length + views.length);
     for (const output of outputs) assertNoSecrets(output.slice(0, 40), output);
   });
 

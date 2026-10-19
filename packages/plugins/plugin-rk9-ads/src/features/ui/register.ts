@@ -1,3 +1,4 @@
+import type { PluginPerformActionContext } from "@paperclipai/plugin-sdk";
 import type { BrandConfig } from "../../config.js";
 import type { PauseCardClose } from "../../gate/staging-card.js";
 import { getAdOwner, getObjectStatus, setObjectStatus } from "../../meta/methods.js";
@@ -8,7 +9,7 @@ import { brandClient, brandReadClient, recordAction, safeError, sqlOnceStore, ty
 import { getActivationCards } from "../gate/runtime.js";
 import type { FeatureRuntime } from "../types.js";
 import type { UiPauseAdResult } from "./dto.js";
-import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type ViewDeps } from "./views.js";
+import { buildOverview, buildSettings, buildWidget, sanitize, type ViewDeps } from "./views.js";
 
 /**
  * Worker side of the operator UI (A12, RK9-518). The UI also calls actions
@@ -16,8 +17,12 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  * verify-connection, provision, rules.dryRun, rules.prepareSave, digest.dryRun);
  * this feature adds only:
  *
- * - data `ads-overview`, `ads-widget`, `ads-settings`: allowlisted DTOs
- *   (./dto.ts), never the raw config, a secret_ref or a resolved secret;
+ * - read actions `ads-overview`, `ads-widget`, `ads-settings`: allowlisted
+ *   DTOs (./dto.ts), never the raw config, a secret_ref or a resolved secret.
+ *   They are actions, not data handlers, so the company comes from
+ *   `context.companyId`: a data handler gets only params, and a bridge call
+ *   without a company keeps the caller's own `params.companyId` (RK9-583).
+ *   They write nothing; the UI loads them with ui/view-data.ts;
  * - action `pause-ad`: pauses one ad of the brand's ad account. Dry run by
  *   default; a real pause needs `confirm: true` and a board user (an agent may
  *   only preview it). It writes rule_actions and the activity log. Before the
@@ -35,16 +40,21 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   the first call may still run, have died before its halt and card close,
  *   or have failed, and a second audit row beats an ad that keeps spending.
  *   Markers older than PAUSE_MARKER_HOURS are deleted when a new one is
- *   written, so the table does not grow by one row per pause.
+ *   written, so the table does not grow by one row per pause. A repeat that
+ *   arrives while the same user's call with the same key still runs joins
+ *   that call and returns its result with `duplicate: true` (RK9-583): the
+ *   marker does not exist yet, and a second run would only add a second
+ *   audit row. The join lives in the worker's memory, so a call that died
+ *   with its worker leaves nothing to join.
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
  * the host's invocation context, never from params.
  */
 
-export const OVERVIEW_DATA_KEY = "ads-overview";
-export const WIDGET_DATA_KEY = "ads-widget";
-export const SETTINGS_DATA_KEY = "ads-settings";
+export const OVERVIEW_ACTION_KEY = "ads-overview";
+export const WIDGET_ACTION_KEY = "ads-widget";
+export const SETTINGS_ACTION_KEY = "ads-settings";
 export const PAUSE_AD_ACTION_KEY = "pause-ad";
 /** rule_actions.rule_id of a pause from the UI; its rule_type is kill_switch (the operator's manual stop). */
 export const UI_PAUSE_RULE_ID = "ui-pause-ad";
@@ -91,26 +101,20 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     );
   };
 
-  // The host sets companyId to the company it authorized for this call.
-  ctx.data.register(OVERVIEW_DATA_KEY, async (params) => {
-    const companyId = companyOf(params);
-    if (!companyId) return { state: "error", error: "company context is required" };
-    return buildOverview(deps, companyId);
-  });
+  /** A read action: the company comes from the host context, never from params. */
+  const companyFrom = (context: { companyId: string | null }): string => {
+    if (!context.companyId) throw new Error("company context is required");
+    return context.companyId;
+  };
 
-  ctx.data.register(WIDGET_DATA_KEY, async (params) => {
-    const companyId = companyOf(params);
-    if (!companyId) return { state: "error", error: "company context is required" };
-    return buildWidget(deps, companyId);
-  });
+  ctx.actions.register(OVERVIEW_ACTION_KEY, async (_params, context) => buildOverview(deps, companyFrom(context)));
+  ctx.actions.register(WIDGET_ACTION_KEY, async (_params, context) => buildWidget(deps, companyFrom(context)));
+  ctx.actions.register(SETTINGS_ACTION_KEY, async (_params, context) => buildSettings(ctx, companyFrom(context)));
 
-  ctx.data.register(SETTINGS_DATA_KEY, async (params) => {
-    const companyId = companyOf(params);
-    if (!companyId) return { state: "error", error: "company context is required" };
-    return buildSettings(ctx, companyId);
-  });
+  /** Live pauses running now, by company, user, ad and confirmation key (RK9-583). */
+  const runningPauses = new Map<string, Promise<UiPauseAdResult>>();
 
-  ctx.actions.register(PAUSE_AD_ACTION_KEY, async (params, context): Promise<UiPauseAdResult> => {
+  const pauseAd = async (params: Record<string, unknown>, context: PluginPerformActionContext): Promise<UiPauseAdResult> => {
     const companyId = context.companyId;
     if (!companyId) throw new Error("company context is required");
     const adId = typeof params.adId === "string" ? params.adId.trim() : "";
@@ -280,6 +284,30 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       ...(haltError ? { haltError } : {}),
       ...(auditError ? { auditError } : {}),
     });
+  };
+
+  ctx.actions.register(PAUSE_AD_ACTION_KEY, async (params, context): Promise<UiPauseAdResult> => {
+    const adId = typeof params.adId === "string" ? params.adId.trim() : "";
+    // Only a confirmed live pause of a board user joins; anything else runs, and pauseAd refuses what it must.
+    const joinKey =
+      params.dryRun === false &&
+      params.confirm === true &&
+      context.companyId &&
+      context.actor.type === "user" &&
+      context.actor.userId &&
+      typeof params.idempotencyKey === "string"
+        ? JSON.stringify([context.companyId, context.actor.userId, adId, params.idempotencyKey])
+        : null;
+    if (!joinKey) return pauseAd(params, context);
+    const running = runningPauses.get(joinKey);
+    if (running) return { ...(await running), duplicate: true };
+    const run = pauseAd(params, context);
+    runningPauses.set(joinKey, run);
+    try {
+      return await run;
+    } finally {
+      runningPauses.delete(joinKey);
+    }
   });
 }
 

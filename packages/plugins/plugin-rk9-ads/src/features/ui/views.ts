@@ -1,6 +1,7 @@
 /**
  * Read models of the operator UI (A12, RK9-518). Every builder takes the
- * company from the host-authorized `companyId` and copies named fields into
+ * company from the action's host context (`context.companyId`, RK9-583) and
+ * copies named fields into
  * the DTOs of ./dto.ts. A section that cannot be read reports its own error;
  * the rest of the page still renders.
  */
@@ -49,20 +50,6 @@ export interface ViewDeps {
 }
 
 export { sanitize };
-
-/**
- * `companyId` from the host-merged params; never another source.
- *
- * The SDK's getData puts the host-authorized company over `params.companyId`
- * (worker-rpc-host handleGetData) and gives a data handler no other context.
- * Only a bridge call without a company keeps the caller's own value, and the
- * host lets only an instance admin make one (assertPluginBridgeScope). The
- * worker cannot tell the two apart without a core change (RK9-563, G1), so
- * that admin can read any company's views, as on the host's own forms.
- */
-export function companyOf(params: Record<string, unknown>): string | null {
-  return typeof params.companyId === "string" && params.companyId !== "" ? params.companyId : null;
-}
 
 type Section<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -239,7 +226,7 @@ function publicationRow(row: LedgerRow): Omit<UiPublication, "adStatus" | "adEff
   };
 }
 
-/** Data key `ads-overview`. */
+/** Action key `ads-overview`. */
 export async function buildOverview(deps: ViewDeps, companyId: string): Promise<UiOverview> {
   const { ctx, ledger, store, now } = deps;
   const result = await loadCompanyConfig(ctx, companyId);
@@ -325,7 +312,7 @@ export async function buildOverview(deps: ViewDeps, companyId: string): Promise<
   return sanitize(out);
 }
 
-/** Data key `ads-widget`. */
+/** Action key `ads-widget`. */
 export async function buildWidget(deps: ViewDeps, companyId: string): Promise<UiWidget> {
   const { ctx, store, now } = deps;
   const result = await loadCompanyConfig(ctx, companyId);
@@ -358,7 +345,7 @@ export async function buildWidget(deps: ViewDeps, companyId: string): Promise<Ui
   return sanitize(out);
 }
 
-/** Data key `ads-settings`: named fields only; a secret shows as "configured". */
+/** Action key `ads-settings`: named fields only; a secret shows as "configured". */
 export async function buildSettings(ctx: PluginContext, companyId: string): Promise<UiSettings> {
   const result = await loadCompanyConfig(ctx, companyId);
   const empty: UiSettings = {

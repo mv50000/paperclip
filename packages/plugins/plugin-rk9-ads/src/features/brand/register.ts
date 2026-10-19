@@ -26,8 +26,9 @@ import type { FeatureRuntime } from "../types.js";
  * - action `provision`: the PAUSED campaign + ad set. Dry run by default; a
  *   real run needs `confirm: true`, a board user (an agent may only preview
  *   it, RK9-538) and a launch-ready preflight.
- * - data `preflight-status`: the cached preflight and whether it is fresh. No
- *   Meta call.
+ * - read action `preflight-status`: the cached preflight and whether it is
+ *   fresh. No Meta call. An action, so the company comes from
+ *   `context.companyId` (RK9-583).
  *
  * The operator UI (A12) owns the buttons (G13). Every handler takes the
  * company from the host's invocation context, never from params.
@@ -35,7 +36,7 @@ import type { FeatureRuntime } from "../types.js";
 
 export const VERIFY_CONNECTION_ACTION_KEY = "verify-connection";
 export const PROVISION_ACTION_KEY = "provision";
-export const PREFLIGHT_STATUS_DATA_KEY = "preflight-status";
+export const PREFLIGHT_STATUS_ACTION_KEY = "preflight-status";
 
 export interface BrandOverrides {
   store?: OnceStore;
@@ -161,10 +162,9 @@ export function registerBrand(runtime: FeatureRuntime, overrides: BrandOverrides
     }
   });
 
-  ctx.data.register(PREFLIGHT_STATUS_DATA_KEY, async (params) => {
-    // The host sets companyId to the company it authorized for this call.
-    const companyId = typeof params.companyId === "string" ? params.companyId : null;
-    if (!companyId) return { state: "error", error: "company context is required" };
+  ctx.actions.register(PREFLIGHT_STATUS_ACTION_KEY, async (_params, context) => {
+    const companyId = context.companyId;
+    if (!companyId) throw new Error("company context is required");
     const loaded = await loadDraft(ctx, companyId);
     if (!loaded.ok) return { state: "unconfigured", error: loaded.error };
     const cached = await readCachedPreflight(ctx, companyId);
