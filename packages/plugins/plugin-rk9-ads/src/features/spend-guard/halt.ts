@@ -93,7 +93,8 @@ function clearedKey(companyId: string, rule: HaltRule) {
 
 /**
  * The clear marker's halt id and clearer. A bare string is a marker from
- * before RK9-582, with no clearer. Anything else is damaged and clears nothing.
+ * before RK9-582, with no clearer; so is an object whose `by` is not a known
+ * clearer. A value without a string id is damaged and clears nothing.
  */
 function readMarker(value: unknown): { id: string; by?: HaltClearer } | null {
   if (typeof value === "string") return { id: value };

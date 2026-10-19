@@ -579,6 +579,9 @@ describe("rules-evaluate job (A11)", () => {
         await setHalt(r.harness.ctx, COMPANY_A, clearedHalt);
         await r.harness.ctx.state.set(clearedKey, { by: "board" });
         expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toMatchObject({ id: "cap-1" });
+        // The halt is in force, so the cap rule runs and pauses.
+        await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/Meta status read failed \(.*graph down\)+, only pause_all_cap evaluated/);
+        expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
       });
 
       it("a cleared halt without the cap figure waits, as only a board user clears one", async () => {
