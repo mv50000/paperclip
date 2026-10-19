@@ -460,6 +460,12 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(agent).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/board-only/) }) });
     expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
     expect(r.ruleActionInserts()).toHaveLength(1);
+    // A call without confirm does not join a running one with the same key: it is refused as before.
+    const [, unconfirmed] = await Promise.allSettled([
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, live, UI),
+      r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, idempotencyKey: key }, UI),
+    ]);
+    expect(unconfirmed).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: expect.stringMatching(/confirm: true/) }) });
     // The join ends with the call: a later repeat goes by the marker.
     const later = await r.harness.performAction(PAUSE_AD_ACTION_KEY, live, UI);
     expect(later).toMatchObject({ duplicate: true });

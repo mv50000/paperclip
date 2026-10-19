@@ -509,6 +509,23 @@ describe("operator UI (RK9-518)", () => {
     expect(container.textContent).toContain("Ladataan mainontaa");
   });
 
+  it("a view load that meets a worker restart is tried again before the error shows, like usePluginData (RK9-583)", async () => {
+    let calls = 0;
+    bridge.actions.set(VIEW.widget, async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error("worker restarting"), { code: "WORKER_UNAVAILABLE" });
+      return { state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 2, halted: false } satisfies UiWidget;
+    });
+    await render(createElement(AdsWidget, { context: CONTEXT }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flush();
+    });
+    expect(calls).toBe(2);
+    expect(container.querySelector('[data-metric="Kulutus OLL"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("worker restarting");
+  });
+
   it("the settings page lists preflight checks and re-runs them in place", async () => {
     bridge.data.set(VIEW.settings, {
       state: "enabled",

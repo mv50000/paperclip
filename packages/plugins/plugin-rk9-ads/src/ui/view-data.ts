@@ -19,6 +19,15 @@ export interface ViewData<T> {
   refresh(): void;
 }
 
+/** Like usePluginData: a worker restart or a timeout is tried again, twice, before the error shows. */
+const RETRY_CODES = ["WORKER_UNAVAILABLE", "TIMEOUT"];
+const MAX_RETRIES = 2;
+
+function retryable(cause: unknown): boolean {
+  const code = cause && typeof cause === "object" && "code" in cause ? (cause as { code: unknown }).code : null;
+  return typeof code === "string" && RETRY_CODES.includes(code);
+}
+
 interface Loaded<T> {
   /** The key and company the state belongs to: data of another company is never shown. */
   scope: string;
@@ -42,17 +51,30 @@ export function useViewData<T>(key: string, companyId: string | null | undefined
       return;
     }
     let current = true;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     setState((prev) => (prev.scope === scope ? { ...prev, loading: true } : { scope, data: null, loading: true, error: null }));
-    loadRef.current({}).then(
-      (data) => {
-        if (current) setState({ scope, data: data as T, loading: false, error: null });
-      },
-      (cause: unknown) => {
-        if (current) setState({ scope, data: null, loading: false, error: new Error(errorText(cause)) });
-      },
-    );
+    const request = (attempt: number) => {
+      loadRef.current({}).then(
+        (data) => {
+          if (current) setState({ scope, data: data as T, loading: false, error: null });
+        },
+        (cause: unknown) => {
+          if (!current) return;
+          if (retryable(cause) && attempt < MAX_RETRIES) {
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (current) request(attempt + 1);
+            }, 150 * (attempt + 1));
+            return;
+          }
+          setState({ scope, data: null, loading: false, error: new Error(errorText(cause)) });
+        },
+      );
+    };
+    request(0);
     return () => {
       current = false;
+      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [scope, companyId, tick]);
 

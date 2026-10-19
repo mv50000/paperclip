@@ -345,6 +345,10 @@ function RuleEditor(props: { companyId: string | null }) {
   const [loaded, setLoaded] = useState<{ liveMode: boolean; list: Array<Record<string, unknown>> } | null>(null);
   /** Set by a refused stale save: the reload then says what it found (RK9-583). */
   const staleReload = useRef(false);
+  // A stale save of another company says nothing about this one.
+  useEffect(() => {
+    staleReload.current = false;
+  }, [props.companyId]);
 
   useEffect(() => {
     if (rules.error) staleReload.current = false;
@@ -359,7 +363,9 @@ function RuleEditor(props: { companyId: string | null }) {
       setDraft(null);
       setLoaded(null);
       setPending(null);
-      reportStale();
+      // Only a stale save's report is shown here: an older save error belongs to the dropped draft.
+      if (staleReload.current) reportStale();
+      else setErrors([]);
       return;
     }
     reportStale();

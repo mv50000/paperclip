@@ -288,9 +288,14 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
 
   ctx.actions.register(PAUSE_AD_ACTION_KEY, async (params, context): Promise<UiPauseAdResult> => {
     const adId = typeof params.adId === "string" ? params.adId.trim() : "";
-    // Only a live pause of a board user joins; anything else runs, and pauseAd refuses what it must.
+    // Only a confirmed live pause of a board user joins; anything else runs, and pauseAd refuses what it must.
     const joinKey =
-      params.dryRun === false && context.companyId && context.actor.type === "user" && context.actor.userId && typeof params.idempotencyKey === "string"
+      params.dryRun === false &&
+      params.confirm === true &&
+      context.companyId &&
+      context.actor.type === "user" &&
+      context.actor.userId &&
+      typeof params.idempotencyKey === "string"
         ? JSON.stringify([context.companyId, context.actor.userId, adId, params.idempotencyKey])
         : null;
     if (!joinKey) return pauseAd(params, context);
