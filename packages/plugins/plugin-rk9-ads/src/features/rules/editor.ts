@@ -13,8 +13,15 @@
  * A block that weakens the spend protection against the config saved now
  * (ui/rule-fields.ts weakeningChanges), turns live mode on, or makes a rule
  * live while live mode is on (liveChanges, RK9-563), is refused until the
- * call names those changes in `confirmedWeakening` and sets `confirmLive`
+ * call names those changes in `confirmedWeakening` and `confirmedLive`
  * (RK9-566): the refusal's `confirm` lists them for the UI's typed words.
+ * LIVE confirms only the live changes it listed: one that appears after the
+ * confirmation needs the word again (RK9-581).
+ *
+ * `loaded` is the rules block the editor's draft started from (data `rules`).
+ * When the saved rules no longer equal it, the save is refused as `stale`
+ * (RK9-581): a rule saved elsewhere after the page loaded is not overwritten
+ * by the old draft, even when the change does not weaken anything.
  *
  * A config without `rules.list` runs the shipped default rules. A save that
  * keeps exactly those defaults leaves `list` out, so the defaults are not
@@ -35,7 +42,7 @@ export const MAX_EDITED_RULES = 50;
 export type PreparedRules =
   /** `rules.list` is left out when the save keeps the default rules of a config that has no list. */
   | { ok: true; rules: { liveMode: boolean; list?: Array<Record<string, unknown>> }; effective: RuleSet }
-  | { ok: false; errors: string[]; confirm?: RulesConfirmation };
+  | { ok: false; errors: string[]; confirm?: RulesConfirmation; stale?: true };
 
 /** What a weakening or live-mode save must confirm (RK9-566). */
 export interface RulesConfirmation {
@@ -78,7 +85,7 @@ function keptEntries(rawConfig: Record<string, unknown>): Array<Record<string, u
 
 export function prepareRules(
   rawConfig: Record<string, unknown>,
-  input: { liveMode?: unknown; list?: unknown; confirmedWeakening?: unknown; confirmLive?: unknown },
+  input: { liveMode?: unknown; list?: unknown; confirmedWeakening?: unknown; confirmedLive?: unknown; loaded?: unknown },
 ): PreparedRules {
   const errors: string[] = [];
   if (input.liveMode !== undefined && typeof input.liveMode !== "boolean") errors.push("rules.liveMode: must be a boolean");
@@ -102,21 +109,26 @@ export function prepareRules(
     edited.push({ ...entry });
   });
   if (errors.length > 0) return { ok: false, errors };
+  if (input.loaded !== undefined && canonical(input.loaded) !== canonical(parseRules(rawConfig.rules).rules)) {
+    return { ok: false, errors: ["The saved rules changed after this page loaded; the page reloads them, then edit and save again"], stale: true };
+  }
   const block = { liveMode: input.liveMode === true, list: [...edited, ...keptEntries(rawConfig)] };
   const parsed = parseRules(block);
   if (parsed.errors.length > 0) return { ok: false, errors: parsed.errors };
   const saved = savedRulesBlock(rawConfig);
   const live = liveChanges(saved, block);
   const confirm: RulesConfirmation = { weakening: weakeningChanges(saved, block), liveOn: live.length > 0, live };
-  const confirmed = Array.isArray(input.confirmedWeakening) ? input.confirmedWeakening.filter((entry): entry is string => typeof entry === "string") : [];
+  const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+  const confirmed = strings(input.confirmedWeakening);
   const unconfirmed = confirm.weakening.filter((change) => !confirmed.includes(change));
-  const liveUnconfirmed = confirm.liveOn && input.confirmLive !== true;
-  if (unconfirmed.length > 0 || liveUnconfirmed) {
+  const confirmedLive = strings(input.confirmedLive);
+  const liveUnconfirmed = live.filter((change) => !confirmedLive.includes(change));
+  if (unconfirmed.length > 0 || liveUnconfirmed.length > 0) {
     return {
       ok: false,
       errors: [
         ...(unconfirmed.length > 0 ? [`The save weakens the spend protection and needs confirmation: ${unconfirmed.join(" ")}`] : []),
-        ...(liveUnconfirmed ? [`The save starts pausing ads in Meta and needs confirmation: ${live.join(" ")}`] : []),
+        ...(liveUnconfirmed.length > 0 ? [`The save starts pausing ads in Meta and needs confirmation: ${liveUnconfirmed.join(" ")}`] : []),
       ],
       confirm,
     };

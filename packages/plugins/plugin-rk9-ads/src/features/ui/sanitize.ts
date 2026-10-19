@@ -9,10 +9,12 @@ import { REDACTED, redactValue } from "../../meta/redact.js";
 
 /**
  * Telegram bot token shape (`<bot id>:<secret>`); redactText covers Meta
- * tokens. No word boundary: in a Bot API URL the id follows `/bot` directly
- * (`/bot123456:SECRET/sendMessage`, RK9-563).
+ * tokens. The id starts after a character that cannot be part of a token,
+ * or right after `bot`: in a Bot API URL the id follows `/bot` directly
+ * (`/bot123456:SECRET/sendMessage`, RK9-563). So the digits inside a longer
+ * id or hash are not taken for one (RK9-581).
  */
-export const BOT_TOKEN_RE = /\d{6,}:[A-Za-z0-9_-]{30,}/g;
+export const BOT_TOKEN_RE = /(?:(?<=bot)|(?<![A-Za-z0-9_-]))\d{6,}:[A-Za-z0-9_-]{30,}/g;
 
 /** Token shapes are redacted even in free text (errors, Meta details). */
 export function sanitize<T>(dto: T): T {

@@ -117,12 +117,17 @@ export function haltView(halt: HaltState): UiHalt {
 
 export function spendView(snapshot: Awaited<ReturnType<typeof spendSnapshot>>): UiSpend {
   // Meta's spend_cap is lifetime: what it still allows (headroom) is compared with what is left of the month (RK9-563).
+  // The headroom is in the account's currency and the remainder in EUR: like the digest, only an EUR account is compared (RK9-581).
   const spendCapStatus =
     snapshot.mtdEur === null && snapshot.spendCapEur === null
       ? "unknown"
       : snapshot.spendCapEur === null
         ? "missing"
-        : snapshot.headroomEur !== null && snapshot.remainingEur !== null && snapshot.headroomEur > 0 && snapshot.headroomEur > snapshot.remainingEur
+        : snapshot.currency === "EUR" &&
+            snapshot.headroomEur !== null &&
+            snapshot.remainingEur !== null &&
+            snapshot.headroomEur > 0 &&
+            snapshot.headroomEur > snapshot.remainingEur
           ? "headroom_above_remaining"
           : "set";
   return {
