@@ -13,6 +13,9 @@
  * defaults and the cross-field rules that JSON Schema cannot express.
  */
 
+// The manifest bundles BRAND_CONFIG_JSON_SCHEMA: its rule constants come from
+// the zod-free constants.ts, and esbuild.config.mjs keeps schema.ts (zod) out
+// of the manifest (RK9-579).
 import {
   DEFAULT_RULE_COOLDOWN_HOURS,
   MAX_RULE_COOLDOWN_HOURS,
@@ -20,7 +23,6 @@ import {
   MAX_RULE_MIN_COUNT,
   MAX_RULE_MIN_SPEND_EUR,
   MAX_SCALE_INCREASE_PCT,
-  parseRules,
   RULE_AGGREGATES,
   RULE_METRICS,
   RULE_MODES,
@@ -28,8 +30,8 @@ import {
   RULE_ITEM_JSON_CONDITIONS,
   RULE_TYPES,
   type RuleOperator,
-  type RuleSet,
-} from "./features/rules/schema.js";
+} from "./features/rules/constants.js";
+import { parseRules, type RuleSet } from "./features/rules/schema.js";
 import { DEFAULT_TIME_ZONE, isValidHhMm } from "./kit/local-time.js";
 
 // ---------------------------------------------------------------------------
@@ -70,13 +72,12 @@ export {
   RULE_MODES,
   RULE_OPERATORS,
   RULE_TYPES,
-  type RuleConfig,
   type RuleMetric,
   type RuleMode,
   type RuleOperator,
-  type RuleSet,
   type RuleType,
-} from "./features/rules/schema.js";
+} from "./features/rules/constants.js";
+export type { RuleConfig, RuleSet } from "./features/rules/schema.js";
 
 export interface BrandConfig {
   /** Upper-case brand code used in names and logs, e.g. "OLL". */

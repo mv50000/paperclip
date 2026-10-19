@@ -508,7 +508,10 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
 `src/features/rules/`: pause-only rules per brand, shadow mode first.
 
 - **Config** `rules: { liveMode, list }`, validated by a zod discriminated
-  union in `schema.ts` (config.ts calls `parseRules()`). Rule types:
+  union in `schema.ts` (config.ts calls `parseRules()`). The constants and
+  the JSON Schema conditions are in the zod-free `constants.ts`, and
+  `esbuild.config.mjs` keeps `schema.ts` out of the manifest bundle, so
+  `dist/manifest.js` carries no zod (RK9-579: 566 KB to 17 KB). Rule types:
   - `threshold_pause`: `metric` (`cpc`, `ctr`, `cpm`, `frequency`, `spend`)
     `operator` `threshold` over the `days` completed Helsinki days that end
     yesterday. `aggregate: "each_day"` (default) needs every day to break the
@@ -522,7 +525,12 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
     when month-to-date spend is at 90 % of `monthlyCapEur` or more. MTD is the
     spend guard's (RK9-526) and must be in EUR. A list entry
     `{ type: "pause_all_cap", mode }` only sets its mode and cooldown (at most
-    24 h); it cannot be disabled or removed.
+    24 h); it cannot be disabled or removed. The list takes one such entry.
+    The rule editor refuses a second one, but the host's Ajv check on save
+    does not (JSON Schema draft-07 cannot count matching items): a config
+    saved past the editor with two entries is invalid, and the brand runs
+    only the cap rule on its last valid config, failing every run, until
+    the duplicate is removed (RK9-579).
   - `pause_valid_until`: pauses an ad whose creative `validUntil` has passed.
   - `pause_fatigued`: opt-in; pauses an ad that A10 calls `fatigued`.
   - `propose_scale`: schema only, must stay `enabled: false` (G9).
@@ -544,11 +552,18 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   time zone than `timeZone`, threshold rules do not run: the insights dates
   and the close marker are account-local days (the spend guard refuses that
   state too). Only ACTIVE ads get a decision, account-wide like the
-  kill switch (RK9-523: the ad account belongs to the brand). A failed status
+  kill switch (RK9-523: the ad account belongs to the brand), not limited
+  to `meta.campaignId`. So every brand needs an ad account of its own: on
+  a shared one, its per-ad rules would pause the other brand's ads too.
+  Checked 19.10.2026 (RK9-579): Ololla and Sunspot have separate ad
+  accounts. A failed status
   read fails the run and leaves only the cap rule, which decides on the month
   position alone (pauseAll lists its own targets, RK9-541). It waits when
-  this month's cap halt was cleared, so an unread status does not override
-  the clear every hour. One brand's failure does not stop the others.
+  this month's cap halt was cleared at the cap it paused at, so an unread
+  status does not override the clear every hour. After a clear under a
+  raised `monthlyCapEur` (as after the headroom release) it runs, so spend
+  at 90 % of the new cap still pauses. A halt without `until` ends with the
+  local month of its `since` (RK9-579). One brand's failure does not stop the others.
 - **Cap rule isolation (RK9-536):** every other input is read in its own
   `try`: a failed read fails the run and switches off only the rules that
   need it. Without the earlier `rule_actions` only the cap rule runs. Its

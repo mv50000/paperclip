@@ -1,11 +1,12 @@
 import esbuild from "esbuild";
 import { createPluginBundlerPresets } from "@paperclipai/plugin-sdk/bundlers";
+import { manifestWithoutZod } from "./scripts/manifest-without-zod.mjs";
 
 const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
 const watch = process.argv.includes("--watch");
 
 const workerCtx = await esbuild.context(presets.esbuild.worker);
-const manifestCtx = await esbuild.context(presets.esbuild.manifest);
+const manifestCtx = await esbuild.context({ ...presets.esbuild.manifest, plugins: [manifestWithoutZod] });
 const uiCtx = await esbuild.context(presets.esbuild.ui);
 
 if (watch) {
