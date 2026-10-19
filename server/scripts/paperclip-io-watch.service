@@ -1,0 +1,46 @@
+# nvme0n1 IO-pressure watcher with Slack alerts to #all-rk9 (RK9-151, RK9-158).
+# Script: server/scripts/io-watch.sh. Notes: docs/implementation-notes/io-watch.md.
+# The live unit used to carry DATABASE_URL (with the password) inline in a
+# world-readable file. It now comes from a root-only EnvironmentFile.
+# Install (create the env file BEFORE the first start; the command reads the
+# value from the old unit and never prints it):
+#   sudo bash -c 'umask 077; v=$(sed -n "s/^Environment=DATABASE_URL=//p" /etc/systemd/system/paperclip-io-watch.service); [ -n "$v" ] && printf "DATABASE_URL=%s\n" "$v" >/etc/paperclip/io-watch.env && chown root:root /etc/paperclip/io-watch.env && chmod 600 /etc/paperclip/io-watch.env'
+#   sudo cp server/scripts/paperclip-io-watch.service /etc/systemd/system/
+#   sudo cp server/scripts/paperclip-io-watch.logrotate /etc/logrotate.d/paperclip-io-watch
+#   sudo systemctl daemon-reload && sudo systemctl restart paperclip-io-watch
+[Unit]
+Description=Paperclip — nvme0n1 IO-pressure watcher (Slack alerts to #all-rk9)
+After=network.target paperclip.service
+Wants=paperclip.service
+
+[Service]
+Type=simple
+User=paperclip
+Group=paperclip
+WorkingDirectory=/opt/paperclip/server
+Environment=HOME=/var/lib/paperclip
+Environment=PAPERCLIP_HOME=/var/lib/paperclip/.paperclip
+EnvironmentFile=/etc/paperclip/io-watch.env
+Environment=PAPERCLIP_SECRETS_MASTER_KEY_FILE=/var/lib/paperclip/.paperclip/instances/default/secrets/master.key
+Environment=PATH=/var/lib/paperclip/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+# IO-pressure thresholds, calibrated 2026-06-17: trigger on disk LATENCY only.
+# Reference points: the 2026-05-23 disk-full incident drove w_await to 5690ms;
+# the peak await in normal operation was 147ms. The earlier `util>85% OR
+# await>5ms` single-sample trigger fired ~1235 flap-pairs on 5-7ms write blips
+# at util 2-17%. So 200ms sits above every benign blip and ~28x below the
+# incident. WARN_CONSEC=4 samples (~60s at the 15s sample) must stay above it
+# before an alert; OK_CONSEC=3 samples (~45s) must stay below it before
+# recovery (hysteresis). util/aqu are context in the message, never triggers.
+# Rationale in the io-watch.sh header.
+Environment=IO_WATCH_WARN_AWAIT=200
+Environment=IO_WATCH_WARN_CONSEC=4
+Environment=IO_WATCH_OK_CONSEC=3
+# Log volume (RK9-158): healthy samples are not logged; one heartbeat line per
+# hour. Pressure and recovery samples keep full detail.
+Environment=IO_WATCH_HEARTBEAT=3600
+ExecStart=/opt/paperclip/server/scripts/io-watch.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

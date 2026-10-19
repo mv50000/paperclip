@@ -11,8 +11,22 @@ versionhallintaa 11.9.2026 asti.
 | `server/scripts/io-watch.sh` | `paperclip-io-watch.service` (ExecStart ajaa tiedoston suoraan, User=paperclip) | Tila `100755` on pakollinen. Ilman sitä restart kaatuu 203/EXEC-virheeseen. |
 | `server/scripts/io-watch-alert.ts` | `io-watch.sh` jokaisella hälytyksellä: `pnpm tsx scripts/io-watch-alert.ts` | Ei kuulu server-tsconfigin includeen. Importtaa `server/src/services/slack/client.ts`:n ja `@paperclipai/db`:n. |
 
-Unit-tiedosto ei ole repossa. Unit asettaa kynnysarvot ja tietokantaympäristön.
+Unit (`server/scripts/paperclip-io-watch.service`) ja logrotate-sääntö
+(`server/scripts/paperclip-io-watch.logrotate`) ovat repossa (RK9-158). Unit asettaa
+kynnysarvot. `DATABASE_URL` tulee tiedostosta `/etc/paperclip/io-watch.env` (root, 0600),
+ei enää unitista, joka oli luettavissa kaikille. Asennuskomennot ovat unit-tiedoston
+otsikossa. Repon kopio ei päivity hostille itsestään: `sudo cp` ja `daemon-reload` tehdään käsin.
 Lokit: `/var/lib/paperclip/io-watch.log` ja `/var/lib/paperclip/io-watch.log.slack`.
+
+## Lokin kasvu
+
+Aiemmin skripti kirjoitti rivin joka 15. sekunti, ja loki kasvoi 57 MB:iin. Nyt skripti
+kirjoittaa vain liputetut näytteet (paine, WARN, toipuminen), Slack-tapahtumat ja yhden
+`[heartbeat]`-rivin tunnissa (`IO_WATCH_HEARTBEAT`, oletus 3600 s). Terve näyte ei kirjoita mitään.
+Hälytys ei lue lokia, joten hälytys toimii kuten ennen. Vika "ei iostat-dataa" kirjataan kerran
+jakson alussa. Logrotate kiertää molemmat lokit viikoittain tai 20 MB:n ylittyessä ja säilyttää
+4 kierrosta. Skripti avaa lokin polulla jokaista kirjoitusta varten, joten `copytruncate` ja restart eivät ole tarpeen.
+Testi: `server/scripts/io-watch.test.mjs`.
 
 ## Kohderepo ja kanoninen kopio
 
