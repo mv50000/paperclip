@@ -401,6 +401,8 @@ describe("a halt replaced by a newer pause after the due time (RK9-606 item 1)",
     await failingTick(r, "2026-10-21T10:05:00Z");
     await tickDuringKillSwitch(r, halt);
     expect(recheckAlerts(r)).toEqual([]);
+    // Kept, uncounted, until the newer one replaces it.
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toMatchObject({ haltId: halt.id, attempts: 1 });
     // The kill switch goes on to store its re-check.
     await scheduleRecheck(r.harness.ctx, COMPANY_A, { rule: "kill_switch", haltId: "newer-halt", dueAt: "2026-10-21T10:10:59.000Z", reason: "hätä 2" });
     await failingTick(r, "2026-10-21T10:15:00Z");
