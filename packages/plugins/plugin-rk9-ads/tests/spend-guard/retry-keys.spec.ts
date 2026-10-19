@@ -265,14 +265,15 @@ describe("a re-check whose every run fails within its window (RK9-568 verifier L
     await killSwitch(r);
     reactivate(r.meta);
     const state = r.harness.ctx.state;
-    const del = state.delete.bind(state);
+    const set = state.set.bind(state);
     let refuse = true;
-    state.delete = async (input) => {
-      if (refuse && input.stateKey === `recheck:${COMPANY_A}:kill_switch`) {
+    // The drop is the marker write (RK9-584).
+    state.set = async (input, value) => {
+      if (refuse && input.stateKey === `recheck-done:${COMPANY_A}:kill_switch`) {
         refuse = false;
         throw new Error("state down");
       }
-      return del(input);
+      return set(input, value);
     };
     expect(await failingTick(r, "2026-10-21T10:05:00Z")).toMatch(/OLL kill_switch re-check: Error: state down/);
     const kept = await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch");

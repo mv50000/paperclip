@@ -10,6 +10,17 @@
  * - A re-check whose alert keeps failing is kept for RECHECK_ALERT_KEEP_MS
  *   past its window, then dropped.
  *
+ * RK9-584 (RK9-580 verifier Lows):
+ *
+ * - A halt that ends within the window after failed runs (a scheduled pause
+ *   shortly before 06:00, or a replaced halt) alerts like the drop at the
+ *   window's end; a board user's clear still does not.
+ * - A drop or a failed run's count leaves a re-check that a pause stored
+ *   during the tick alone.
+ * - A damaged due time whose alert failed is dropped with a line that says
+ *   so, not "failed for 24 h".
+ * - A replaced halt at the window's end alerts.
+ *
  * Meta is a routing fake and Telegram a recording notifier: no real Meta or
  * Telegram call is made.
  */
@@ -21,7 +32,7 @@ import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../../src/features/
 import { RECHECK_ALERT_KEEP_MS } from "../../src/features/spend-guard/scheduled-pause.js";
 import { brandConfig, COMPANY_A } from "../fixtures.js";
 import { FakeMeta } from "./fake-meta.js";
-import { rig, type Rig } from "./rig.js";
+import { rig, telegramBlock, type Rig } from "./rig.js";
 
 const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-1" } };
 
@@ -117,7 +128,7 @@ describe("a halt cleared before the drop tick (RK9-580 item 1)", () => {
     failListing(r.meta);
     await failingTick(r, "2026-10-21T10:05:00Z");
     await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, BOARD);
-    expect(await failingTick(r, "2026-10-21T10:10:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time .*; the halt is no longer in force, dropped/);
+    expect(await failingTick(r, "2026-10-21T10:10:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time .*; a board user cleared the halt, dropped without the alert/);
     expect(recheckAlerts(r)).toEqual([]);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
   });
@@ -225,6 +236,131 @@ describe("a re-check whose alert keeps failing is kept for a day (RK9-580 item 4
     const r = rig({ meta: activeMeta(), config: brandConfig({}) });
     await failedRecheck(r, "listing failed: graph down");
     expect(await failingTick(r, "2026-10-21T10:20:00Z")).toContain("dropped; check Meta and pause by hand");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+});
+
+describe("a halt that ends within the window after failed runs (RK9-584 item 1)", () => {
+  it("a scheduled pause at 05:45 whose halt runs out at 06:00 alerts at once", async () => {
+    // 05:45 EEST is 02:45Z; the halt ends at 06:00 local, 03:00Z.
+    const config = brandConfig({ telegram: telegramBlock(), schedule: { scheduledPause: { enabled: true, at: "05:45" } } });
+    const r = rig({ meta: activeMeta(), config });
+    r.clock.now = new Date("2026-10-21T02:45:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "scheduled_pause")).toMatchObject({ dueAt: "2026-10-21T02:46:00.000Z" });
+    expect((await readHalt(r.harness.ctx, COMPANY_A, r.clock.now))?.until).toBe("2026-10-21T03:00:00.000Z");
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T02:50:00Z");
+    await failingTick(r, "2026-10-21T02:55:00Z");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "scheduled_pause")).toMatchObject({ attempts: 2 });
+
+    const message = await failingTick(r, "2026-10-21T03:00:00Z");
+    expect(message).toMatch(/scheduled_pause re-check: ran 2 time\(s\) and failed each time \(last error: listing failed: .*graph down.*\); its halt is no longer in force, dropped; check Meta and pause by hand/);
+    expect(recheckAlerts(r)).toHaveLength(1);
+    expect(recheckAlerts(r)[0]!.text).toContain("ajastetun pysäytyksen uudelleentarkistus epäonnistui 2 kertaa");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "scheduled_pause")).toBeNull();
+  });
+
+  it("a halt replaced within the window alerts too", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await setHalt(r.harness.ctx, COMPANY_A, { ...halt, id: "newer-halt", since: "2026-10-21T10:07:00.000Z" });
+    expect(await failingTick(r, "2026-10-21T10:10:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time .*; its halt is no longer in force, dropped; check Meta/);
+    expect(recheckAlerts(r)).toHaveLength(1);
+  });
+
+  it("with no failed run the re-check still drops silently", async () => {
+    const config = brandConfig({ telegram: telegramBlock(), schedule: { scheduledPause: { enabled: true, at: "05:59" } } });
+    const r = rig({ meta: activeMeta(), config });
+    r.clock.now = new Date("2026-10-21T02:59:00Z");
+    await r.harness.runJob("scheduled-pause");
+    reactivate(r.meta);
+    r.clock.now = new Date("2026-10-21T03:00:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(recheckAlerts(r)).toEqual([]);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "scheduled_pause")).toBeNull();
+    expect(r.meta.ads[0]!.status).toBe("ACTIVE");
+  });
+});
+
+describe("a pause that stores a re-check during the tick keeps it (RK9-584 item 2)", () => {
+  const newer = { rule: "kill_switch" as const, haltId: "newer-halt", dueAt: "2026-10-21T10:06:00.000Z", reason: "hätä 2" };
+
+  /** Stores the newer re-check right before the first write to `stateKey`. */
+  function storeNewerBefore(r: Rig, stateKey: string): void {
+    const state = r.harness.ctx.state;
+    const set = state.set.bind(state);
+    let pending = true;
+    state.set = async (input, value) => {
+      if (pending && input.stateKey === stateKey) {
+        pending = false;
+        await scheduleRecheck(r.harness.ctx, COMPANY_A, newer);
+      }
+      return set(input, value);
+    };
+  }
+
+  it("between the tick's read and its drop", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    reactivate(r.meta);
+    storeNewerBefore(r, `recheck-done:${COMPANY_A}:kill_switch`);
+    r.clock.now = new Date("2026-10-21T10:05:00Z");
+    await r.harness.runJob("scheduled-pause");
+    expect(r.meta.ads[0]!.status).toBe("PAUSED");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toMatchObject({ haltId: "newer-halt", dueAt: newer.dueAt });
+  });
+
+  it("between the tick's read and its failed run's count, which the newer one does not inherit", async () => {
+    const r = rig({ meta: activeMeta() });
+    await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    storeNewerBefore(r, `recheck-attempts:${COMPANY_A}:kill_switch`);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    const kept = await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch");
+    expect(kept).toMatchObject({ haltId: "newer-halt", dueAt: newer.dueAt });
+    expect(kept?.attempts).toBeUndefined();
+  });
+
+  it("a re-check stored before RK9-584 (no id, its count inline) still counts and drops", async () => {
+    const r = rig({ meta: activeMeta() });
+    const key = { scopeKind: "instance" as const, namespace: "spend-guard", stateKey: `recheck:${COMPANY_A}:kill_switch` };
+    await r.harness.ctx.state.set(key, { rule: "kill_switch", haltId: null, dueAt: "2026-10-21T10:01:00.000Z", reason: "hätä", attempts: 1, lastError: "listing failed: old" });
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toMatchObject({ attempts: 2, lastError: expect.stringContaining("graph down") });
+    expect(await failingTick(r, "2026-10-21T10:20:00Z")).toMatch(/ran 2 time\(s\) within 15 min .*, dropped; check Meta/);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+});
+
+describe("a damaged due time whose alert failed (RK9-584 item 3)", () => {
+  it("is dropped with a line that names the due time, not the 24 h cap", async () => {
+    const r = rig({ meta: activeMeta() });
+    await scheduleRecheck(r.harness.ctx, COMPANY_A, { rule: "kill_switch", haltId: null, dueAt: "not-a-time", reason: "hätä", attempts: 2, lastError: "listing failed: graph down" });
+    r.notifier.fail = new Error("Telegram 502");
+    const message = await failingTick(r, "2026-10-21T10:20:00Z");
+    expect(message).toMatch(/kill_switch re-check: ran 2 time\(s\) .*The alert failed \(.*Telegram 502.*\) and the due time cannot be read: dropped unsent/);
+    expect(message).not.toContain("failed for 24 h");
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+});
+
+describe("a replaced halt at the window's end (RK9-584 item 4)", () => {
+  it("still alerts", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await setHalt(r.harness.ctx, COMPANY_A, { ...halt, id: "newer-halt", since: "2026-10-21T10:07:00.000Z" });
+    expect(await failingTick(r, "2026-10-21T10:20:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) within 15 min .* and failed each time .*, dropped; check Meta and pause by hand/);
+    expect(recheckAlerts(r)).toHaveLength(1);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
   });
 });

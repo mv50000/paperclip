@@ -382,7 +382,14 @@ the core chat-channels bot is never shared. See
   time>`); a failed send keeps the re-check for the next tick, at most
   24 h past its window (RK9-580). Only a board user's clear of its halt
   skips the alert; a halt that ran out still alerts. A drop removes only
-  the re-check the tick read, not a newer one.
+  the re-check the tick read, not a newer one. A halt that ends within the
+  window after failed runs (a scheduled pause shortly before 06:00, or a
+  replaced halt) alerts at once, like the drop at the window's end
+  (RK9-584). A re-check has an id: a drop stores a marker with it
+  (`recheck-done:`) and a failed run's count goes to its own key
+  (`recheck-attempts:`), so a pause that stores a new re-check during the
+  tick keeps it. A damaged due time whose alert failed is dropped with a
+  line that says so.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
