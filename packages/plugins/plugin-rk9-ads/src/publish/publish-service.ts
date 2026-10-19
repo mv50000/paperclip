@@ -80,7 +80,8 @@ export type PublishErrorCode =
   | "ad_not_owned"
   | "ad_not_paused"
   | "idempotency_key_conflict"
-  | "publication_not_found";
+  | "publication_not_found"
+  | "board_only";
 
 export class PublishError extends Error {
   readonly code: PublishErrorCode;
