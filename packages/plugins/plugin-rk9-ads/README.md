@@ -686,7 +686,7 @@ No token or secret goes into it.
 | Key | Kind | What it does |
 |---|---|---|
 | `publish` | action | `{ creativeId \| manifest, text?, placement?, sizeBytes?, durationSec?, idempotencyKey?, dryRun?, confirm?, waitMs? }`. Dry run (the full planned payloads, no Meta call) unless `dryRun: false, confirm: true`. A real run needs `creativeId` and a launch-ready preflight |
-| `swap-creative` | action | The same plus `adId`: a new creative on a PAUSED ad that this company published; the ad stays PAUSED |
+| `swap-creative` | action | The same plus `adId`: a new creative on a PAUSED ad that this company published; the ad stays PAUSED. A real swap is board-only (an agent gets the dry run only, RK9-540) |
 | `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication. The stored error goes through `sanitize()` again when it is read (RK9-563) |
 
 ## Activation gate (RK9-517)

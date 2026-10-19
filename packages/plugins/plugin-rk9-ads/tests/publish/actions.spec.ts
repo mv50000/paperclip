@@ -9,7 +9,7 @@ import type { Company } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { memoryBindingStore } from "../../src/brand/provision.js";
 import { createLedger } from "../../src/db.js";
-import { PUBLICATION_DATA_KEY, PUBLISH_ACTION_KEY, registerPublish } from "../../src/features/publish/register.js";
+import { PUBLICATION_DATA_KEY, PUBLISH_ACTION_KEY, registerPublish, SWAP_CREATIVE_ACTION_KEY } from "../../src/features/publish/register.js";
 import { memoryOnceStore } from "../../src/features/spend-guard/support.js";
 import type { FeatureRuntime } from "../../src/features/types.js";
 import { useCompanyConfigs, useCompanySecrets } from "../../src/kit/testing/harness.js";
@@ -22,6 +22,7 @@ import { ADSET, CAMPAIGN, COMPANY, CREATIVE_IMAGE, CREATIVE_VIDEO, imageCreative
 
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const UI = { companyId: COMPANY, actor: { type: "user" as const, userId: "user-1" } };
+const AGENT = { companyId: COMPANY, actor: { type: "agent" as const, agentId: "agent-1", runId: "run-1" } };
 const ACT = "act_29231592883113369";
 
 function setup() {
@@ -67,6 +68,18 @@ describe("publish actions", () => {
     await expect(harness.performAction(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE, dryRun: false }, UI)).rejects.toThrow(/confirm: true/);
     await expect(harness.performAction(PUBLISH_ACTION_KEY, { creativeId: "nope" }, UI)).rejects.toThrow(/invalid_request: creativeId/);
     await expect(harness.performAction(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE, status: "ACTIVE" }, UI)).rejects.toThrow(/invalid_request/);
+  });
+
+  it("an agent may publish a new PAUSED ad, but a real creative swap is board-only (RK9-540)", async () => {
+    const { harness, routes, service } = setup();
+    const outcome = await harness.performAction<PublishOutcome>(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE, dryRun: false, confirm: true }, AGENT);
+    await service.settled();
+    expect(outcome.started).toBe(true);
+    const calls = routes.calls.length;
+    await expect(
+      harness.performAction(SWAP_CREATIVE_ACTION_KEY, { creativeId: CREATIVE_IMAGE, adId: "5001", dryRun: false, confirm: true }, AGENT),
+    ).rejects.toThrow(/board_only: a real creative swap is board-only/);
+    expect(routes.calls.length).toBe(calls);
   });
 
   it("takes the company from the host context: another company sees neither the config nor the creative", async () => {

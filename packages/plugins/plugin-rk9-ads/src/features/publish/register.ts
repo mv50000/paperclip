@@ -32,7 +32,9 @@ import type { FeatureRuntime } from "../types.js";
  *   result or failure shows in the action result; a longer run returns
  *   `pending` with the publication id to poll.
  * - action `swap-creative`: the same for a new creative on an existing ad
- *   (`adId`); the ad's status is never touched.
+ *   (`adId`); the ad's status is never touched. A real swap is board-only
+ *   (RK9-540): the ad's open activation cards close and a new one opens, so an
+ *   agent's key only previews it. A new PAUSED ad stays open to an agent.
  * - data `publication`: one publication by id, for polling. Its stored error
  *   text goes through the UI's `sanitize` again when it is read (RK9-563).
  *
@@ -148,6 +150,9 @@ export function registerPublish(runtime: FeatureRuntime, overrides: PublishOverr
       const request = parsePublishRequest(rest);
       if (request.dryRun !== false) return await service.plan(companyId, request, mode);
       if (request.confirm !== true) throw new PublishError("invalid_request", "a real publish needs confirm: true; preview it with a dry run first");
+      if (mode === "swap" && context.actor.type !== "user") {
+        throw new PublishError("board_only", "a real creative swap is board-only; an agent can run it with a dry run only");
+      }
       const outcome =
         mode === "publish"
           ? await service.publish(companyId, request, initiatorOf(context))
