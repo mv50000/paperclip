@@ -328,7 +328,8 @@ function RuleRow(props: { rule: EditorRule; onChange: (rule: EditorRule) => void
   );
 }
 
-function RuleEditor(props: { companyId: string | null }) {
+/** Exported for the tests: the page unmounts it while another company's settings load. */
+export function RuleEditor(props: { companyId: string | null }) {
   const rules = useViewData<RulesData>(VIEW.rules, props.companyId);
   const prepare = usePluginAction(ACTION.rulesPrepareSave);
   const dryRun = usePluginAction(ACTION.rulesDryRun);
@@ -345,9 +346,10 @@ function RuleEditor(props: { companyId: string | null }) {
   const [loaded, setLoaded] = useState<{ liveMode: boolean; list: Array<Record<string, unknown>> } | null>(null);
   /** Set by a refused stale save: the reload then says what it found (RK9-583). */
   const staleReload = useRef(false);
-  // A stale save of another company says nothing about this one.
+  // A stale save or save error of another company says nothing about this one (RK9-603).
   useEffect(() => {
     staleReload.current = false;
+    setErrors([]);
   }, [props.companyId]);
 
   useEffect(() => {

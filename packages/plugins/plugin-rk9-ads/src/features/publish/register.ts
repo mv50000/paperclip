@@ -22,7 +22,7 @@ import { brandClient, brandReadClient, sqlOnceStore, type Initiator, type OnceSt
 import type { FeatureRuntime } from "../types.js";
 
 /**
- * Publishing (A8, RK9-514). Actions and data need no manifest entry, so the
+ * Publishing (A8, RK9-514). Actions need no manifest entry, so the
  * capability set and the manifest stay as installed (G11).
  *
  * - action `publish`: a dry run by default (the full planned payloads, no
@@ -35,15 +35,17 @@ import type { FeatureRuntime } from "../types.js";
  *   (`adId`); the ad's status is never touched. A real swap is board-only
  *   (RK9-540): the ad's open activation cards close and a new one opens, so an
  *   agent's key only previews it. A new PAUSED ad stays open to an agent.
- * - data `publication`: one publication by id, for polling. Its stored error
- *   text goes through the UI's `sanitize` again when it is read (RK9-563).
+ * - read action `publication`: one publication by id, for polling. Its stored
+ *   error text goes through the UI's `sanitize` again when it is read
+ *   (RK9-563). An action, so the company comes from `context.companyId`, not
+ *   from the caller's params (RK9-603).
  *
  * Every handler takes the company from the host's invocation context.
  */
 
 export const PUBLISH_ACTION_KEY = "publish";
 export const SWAP_CREATIVE_ACTION_KEY = "swap-creative";
-export const PUBLICATION_DATA_KEY = "publication";
+export const PUBLICATION_ACTION_KEY = "publication";
 export const DEFAULT_ACTION_WAIT_MS = 10_000;
 export const MAX_ACTION_WAIT_MS = 20_000;
 
@@ -169,12 +171,11 @@ export function registerPublish(runtime: FeatureRuntime, overrides: PublishOverr
   ctx.actions.register(PUBLISH_ACTION_KEY, handle("publish"));
   ctx.actions.register(SWAP_CREATIVE_ACTION_KEY, handle("swap"));
 
-  ctx.data.register(PUBLICATION_DATA_KEY, async (params) => {
-    // The host sets companyId to the company it authorized for this call.
-    const companyId = typeof params.companyId === "string" ? params.companyId : null;
-    if (!companyId) return { state: "error", error: "company context is required" };
+  ctx.actions.register(PUBLICATION_ACTION_KEY, async (params, context) => {
+    const companyId = context.companyId;
+    if (!companyId) throw new Error("company context is required");
     const id = typeof params.publicationId === "string" ? params.publicationId : null;
-    if (!id) return { state: "error", error: "publicationId is required" };
+    if (!id) throw new Error("publicationId is required");
     const publication = await service.get(companyId, id);
     return publication ? { state: "ok", publication: sanitize(publication) } : { state: "not_found" };
   });

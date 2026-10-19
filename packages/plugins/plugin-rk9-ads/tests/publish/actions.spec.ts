@@ -9,7 +9,7 @@ import type { Company } from "@paperclipai/plugin-sdk";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import { memoryBindingStore } from "../../src/brand/provision.js";
 import { createLedger } from "../../src/db.js";
-import { PUBLICATION_DATA_KEY, PUBLISH_ACTION_KEY, registerPublish, SWAP_CREATIVE_ACTION_KEY } from "../../src/features/publish/register.js";
+import { PUBLICATION_ACTION_KEY, PUBLISH_ACTION_KEY, registerPublish, SWAP_CREATIVE_ACTION_KEY } from "../../src/features/publish/register.js";
 import { memoryOnceStore } from "../../src/features/spend-guard/support.js";
 import type { FeatureRuntime } from "../../src/features/types.js";
 import { useCompanyConfigs, useCompanySecrets } from "../../src/kit/testing/harness.js";
@@ -95,9 +95,13 @@ describe("publish actions", () => {
     expect(outcome.publication.error).toMatch(/^Meta refused the request: the ad account has not accepted Meta's policy terms \(code 100, subcode 2859024\)\. Fix: /);
     expect(outcome.publication.error).not.toContain("\n");
     expect(JSON.stringify(outcome)).not.toContain(META_TOKEN);
-    const data = await harness.getData<{ state: string; publication: { error: string } }>(PUBLICATION_DATA_KEY, { companyId: COMPANY, publicationId: outcome.publication.id });
+    const data = await harness.performAction<{ state: string; publication: { error: string } }>(PUBLICATION_ACTION_KEY, { publicationId: outcome.publication.id }, UI);
     expect(data).toMatchObject({ state: "ok", publication: { error: outcome.publication.error } });
-    expect(await harness.getData(PUBLICATION_DATA_KEY, { companyId: OTHER, publicationId: outcome.publication.id })).toEqual({ state: "not_found" });
+    expect(await harness.performAction(PUBLICATION_ACTION_KEY, { publicationId: outcome.publication.id }, { ...UI, companyId: OTHER })).toEqual({ state: "not_found" });
+    // The company comes from the host context: a params companyId does not reach another company's row (RK9-603).
+    expect(await harness.performAction(PUBLICATION_ACTION_KEY, { companyId: COMPANY, publicationId: outcome.publication.id }, { ...UI, companyId: OTHER })).toEqual({ state: "not_found" });
+    await expect(harness.performAction(PUBLICATION_ACTION_KEY, { publicationId: outcome.publication.id }, { actor: UI.actor })).rejects.toThrow("company context is required");
+    await expect(harness.performAction(PUBLICATION_ACTION_KEY, {}, UI)).rejects.toThrow("publicationId is required");
     await service.settled();
   });
 
@@ -114,7 +118,7 @@ describe("publish actions", () => {
     const outcome = await harness.performAction<PublishOutcome>(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_VIDEO, dryRun: false, confirm: true, waitMs: 0 }, UI);
     expect(outcome).toMatchObject({ started: true, publication: { status: "pending" } });
     const [data, plan] = await Promise.all([
-      harness.getData<{ publication: { status: string } }>(PUBLICATION_DATA_KEY, { companyId: COMPANY, publicationId: outcome.publication.id }),
+      harness.performAction<{ publication: { status: string } }>(PUBLICATION_ACTION_KEY, { publicationId: outcome.publication.id }, AGENT),
       harness.performAction<PublishPlan>(PUBLISH_ACTION_KEY, { creativeId: CREATIVE_IMAGE }, UI),
     ]);
     expect(data.publication.status).toBe("pending");
@@ -124,7 +128,7 @@ describe("publish actions", () => {
 
     release();
     await service.settled();
-    const done = await harness.getData<{ publication: { status: string; metaAdId: string } }>(PUBLICATION_DATA_KEY, { companyId: COMPANY, publicationId: outcome.publication.id });
+    const done = await harness.performAction<{ publication: { status: string; metaAdId: string } }>(PUBLICATION_ACTION_KEY, { publicationId: outcome.publication.id }, UI);
     expect(done.publication).toMatchObject({ status: "published", metaAdId: "5001" });
   });
 });

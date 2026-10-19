@@ -633,7 +633,7 @@ describe("MTD alerts", () => {
   });
 });
 
-describe("getData spend-guard and the pacing tool", () => {
+describe("the spend-guard read action and the pacing tool", () => {
   it("returns the figures and alerted thresholds, never a token", async () => {
     const meta = new FakeMeta();
     meta.spend = () => "81.00";
@@ -641,7 +641,7 @@ describe("getData spend-guard and the pacing tool", () => {
     meta.adsets = [{ id: "200", status: "ACTIVE", daily_budget: "100" }];
     const r = rig({ meta });
     await r.harness.runJob("scheduled-pause");
-    const data = await r.harness.getData<Record<string, unknown>>("spend-guard", { companyId: COMPANY_A });
+    const data = await r.harness.performAction<Record<string, unknown>>("spend-guard", {}, { companyId: COMPANY_A });
     expect(data).toMatchObject({
       state: "enabled",
       brandCode: "OLL",
@@ -656,7 +656,8 @@ describe("getData spend-guard and the pacing tool", () => {
       allow: true,
     });
     expect(JSON.stringify(data)).not.toMatch(/EAA|token|secret/i);
-    expect(await r.harness.getData("spend-guard", {})).toMatchObject({ state: "error" });
+    // A read action: the company comes from the host context only, never from params (RK9-603).
+    await expect(r.harness.performAction("spend-guard", {}, {})).rejects.toThrow("company context is required");
 
     const pacing = await r.harness.executeTool<{ content: string }>("rk9ads_get_pacing", {}, { companyId: COMPANY_A });
     expect(pacing.content).toMatch(/spent 81 EUR of 100 EUR \(81 %\)/);

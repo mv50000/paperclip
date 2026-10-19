@@ -7,7 +7,7 @@
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UiOverview, UiPublication, UiSettings, UiWidget } from "../src/features/ui/dto.js";
 import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
 import { ACK_UNDO_WORD, ackPrompt, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
@@ -16,7 +16,7 @@ import { ACTION, VIEW } from "../src/ui/keys.js";
 import { EDITOR_DEFAULT_RULES, fromEditor, LIVE_MODE_ON_TEXT, liveChanges, savedRulesBlock, toEditor, weakeningChanges } from "../src/ui/rule-fields.js";
 import { prepareRules } from "../src/features/rules/editor.js";
 import { DEFAULT_RULES, parseRules } from "../src/features/rules/schema.js";
-import { LIVE_WORD, WEAKEN_WORD } from "../src/ui/SettingsPage.js";
+import { LIVE_WORD, RuleEditor, WEAKEN_WORD } from "../src/ui/SettingsPage.js";
 
 const COMPANY_ID = "11111111-1111-4111-8111-111111111111";
 const CONTEXT = { companyId: COMPANY_ID, companyPrefix: "OLL", projectId: null, entityId: null, entityType: null, userId: "board-user-1" };
@@ -328,6 +328,24 @@ describe("operator UI (RK9-518)", () => {
     expect(bridge.toasts.map((toast) => toast.title)).toEqual(["Pysäytys oli jo lähetetty: mainoksen OLL kesä 1 tila nyt PAUSED"]);
   });
 
+  it("a repeat that joined the running pause still warns of its unsaved audit row (RK9-603)", async () => {
+    bridge.data.set(VIEW.overview, ollolaOverview());
+    bridge.actions.set(ACTION.pauseAd, async (params) =>
+      params.dryRun !== false
+        ? { dryRun: true, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "ACTIVE", paused: false }
+        : { dryRun: false, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "PAUSED", paused: true, duplicate: true, auditError: "rule_actions insert failed" },
+    );
+    await render(createElement(AdsPage, { context: CONTEXT }));
+    await click("Pysäytä");
+    await click("Tarkista ja jatka");
+    await type(`Kirjoita ${PAUSE_WORD}`, PAUSE_WORD);
+    await click("Pysäytä mainos");
+    expect(bridge.toasts).toEqual([
+      { title: "Pysäytys oli jo lähetetty: mainoksen OLL kesä 1 tila nyt PAUSED", tone: "success" },
+      { title: "Kirjanpitoriviä ei tallennettu", body: "rule_actions insert failed", tone: "warn" },
+    ]);
+  });
+
   it("the kill switch previews, needs the typed word, and shows halt and card failures as errors", async () => {
     bridge.data.set(VIEW.overview, ollolaOverview());
     const base = { rule: "kill_switch", scope: "account", campaignPaused: true, list: [], errors: [], telegram: "sent", closedCardIds: [] };
@@ -524,6 +542,67 @@ describe("operator UI (RK9-518)", () => {
     expect(calls).toBe(2);
     expect(container.querySelector('[data-metric="Kulutus OLL"]')).not.toBeNull();
     expect(container.textContent).not.toContain("worker restarting");
+  });
+
+  it("a view load that keeps meeting a worker restart shows the error after two retries (RK9-603)", async () => {
+    let calls = 0;
+    bridge.actions.set(VIEW.widget, async () => {
+      calls += 1;
+      throw Object.assign(new Error("worker restarting"), { code: "WORKER_UNAVAILABLE" });
+    });
+    await render(createElement(AdsWidget, { context: CONTEXT }));
+    expect(container.textContent).not.toContain("worker restarting");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await flush();
+    });
+    expect(calls).toBe(3);
+    expect(container.textContent).toContain("Mainonta: worker restarting");
+  });
+
+  it("a view load error with a code that is not retried shows at once, with no second load (RK9-603)", async () => {
+    let calls = 0;
+    bridge.actions.set(VIEW.widget, async () => {
+      calls += 1;
+      throw Object.assign(new Error("forbidden"), { code: "FORBIDDEN" });
+    });
+    await render(createElement(AdsWidget, { context: CONTEXT }));
+    expect(container.textContent).toContain("Mainonta: forbidden");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flush();
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("an unmount clears the pending retry timer, and no load follows (RK9-603)", async () => {
+    let calls = 0;
+    bridge.actions.set(VIEW.widget, async () => {
+      calls += 1;
+      throw Object.assign(new Error("worker restarting"), { code: "WORKER_UNAVAILABLE" });
+    });
+    const retryTimers: unknown[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number) => {
+      const id = realSetTimeout(handler, ms);
+      if (ms === 150) retryTimers.push(id);
+      return id;
+    }) as typeof setTimeout);
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      await render(createElement(AdsWidget, { context: CONTEXT }));
+      expect(retryTimers).toHaveLength(1);
+      await render(createElement("div"));
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(retryTimers[0]);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await flush();
+    });
+    expect(calls).toBe(1);
   });
 
   it("the settings page lists preflight checks and re-runs them in place", async () => {
@@ -755,6 +834,35 @@ describe("operator UI (RK9-518)", () => {
       expect(container.textContent).not.toContain("ladattiin uudelleen");
       expect(container.querySelector('input[aria-label="Kynnys"]')).toBeNull();
       expect(buttons("Tallenna säännöt")).toHaveLength(0);
+    });
+
+    it("a save error does not follow to another company whose brand is off (RK9-603)", async () => {
+      bridge.actions.set(ACTION.rulesPrepareSave, async () => ({ ok: false, errors: ["Kynnys ei kelpaa"] }));
+      await render(createElement(RuleEditor, { companyId: COMPANY_ID }));
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(container.textContent).toContain("Kynnys ei kelpaa");
+      bridge.data.set(VIEW.rules, { state: "disabled" });
+      await render(createElement(RuleEditor, { companyId: "22222222-2222-4222-8222-222222222222" }));
+      expect(container.textContent).toContain("Säännöt ovat käytössä vain, kun brändi on päällä.");
+      expect(container.textContent).not.toContain("Kynnys ei kelpaa");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    });
+
+    it("a stale save's reload in one company is not reported in another (RK9-603)", async () => {
+      savedConfig.rules.liveMode = false;
+      await render(createElement(RuleEditor, { companyId: COMPANY_ID }));
+      await type("Kynnys", "0.6");
+      // The reload of the stale company does not arrive before the host switches company.
+      bridge.actions.set(VIEW.rules, () => new Promise(() => undefined));
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(container.textContent).toContain("Tallennettuja sääntöjä luetaan uudelleen.");
+      bridge.actions.delete(VIEW.rules);
+      await render(createElement(RuleEditor, { companyId: "22222222-2222-4222-8222-222222222222" }));
+      expect(container.querySelector('input[aria-label="Kynnys"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Tallennetut säännöt muuttuivat");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
     });
 
     it("a rule saved elsewhere between the rules data and the version read is not lost to the old draft (RK9-581)", async () => {

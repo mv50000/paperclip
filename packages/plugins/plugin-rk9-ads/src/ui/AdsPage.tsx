@@ -521,11 +521,11 @@ function PauseAdPanel(props: { publication: UiPublication; onCancel: () => void;
       const result = (await pauseAd({ adId, dryRun: false, confirm: true, idempotencyKey })) as UiPauseAdResult;
       if (result.duplicate) {
         toast({ title: `Pysäytys oli jo lähetetty: mainoksen ${result.name ?? adId} tila nyt ${result.status}`, tone: "success" });
-        props.onPaused(result);
-        return;
+      } else {
+        const closed = result.closedCardIds?.length ?? 0;
+        toast({ title: `Mainos ${result.name ?? adId} pysäytetty${closed > 0 ? `, ${closed} aktivointikorttia suljettu` : ""}`, tone: "success" });
       }
-      const closed = result.closedCardIds?.length ?? 0;
-      toast({ title: `Mainos ${result.name ?? adId} pysäytetty${closed > 0 ? `, ${closed} aktivointikorttia suljettu` : ""}`, tone: "success" });
+      // A repeat that joined the running call carries that call's warnings: the first response may have been lost (RK9-603).
       if (result.auditError) toast({ title: "Kirjanpitoriviä ei tallennettu", body: result.auditError, tone: "warn" });
       props.onPaused(result);
     } catch (cause) {

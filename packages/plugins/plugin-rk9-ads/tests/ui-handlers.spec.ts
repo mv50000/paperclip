@@ -17,10 +17,10 @@ import { RESEND_GATE_CARD_ACTION_KEY } from "../src/features/gate/register.js";
 import { RULE_AGGREGATES, RULE_METRICS, RULE_MODES, RULE_OPERATORS } from "../src/features/rules/schema.js";
 import { EDITABLE_RULE_TYPES } from "../src/features/rules/editor.js";
 import { RULES_ACTION_KEY, RULES_DRY_RUN_ACTION_KEY, RULES_PREPARE_SAVE_ACTION_KEY } from "../src/features/rules/register.js";
-import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../src/features/spend-guard/register.js";
+import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY, SPEND_GUARD_ACTION_KEY } from "../src/features/spend-guard/register.js";
 import type { UiOverview, UiSettings, UiWidget } from "../src/features/ui/dto.js";
 import { OVERVIEW_ACTION_KEY, PAUSE_AD_ACTION_KEY, PAUSE_MARKER_HOURS, SETTINGS_ACTION_KEY, UI_PAUSE_RULE_ID, WIDGET_ACTION_KEY } from "../src/features/ui/register.js";
-import { PUBLICATION_DATA_KEY } from "../src/features/publish/register.js";
+import { PUBLICATION_ACTION_KEY } from "../src/features/publish/register.js";
 import { BOT_TOKEN_RE, sanitize } from "../src/features/ui/sanitize.js";
 import { spendView } from "../src/features/ui/views.js";
 import { addDays } from "../src/insights/mtd.js";
@@ -249,6 +249,9 @@ describe("operator UI handlers (RK9-518)", () => {
     // The views are actions: the company comes from the host context (RK9-583).
     for (const key of Object.values(VIEW)) expect(r.actionKeys).toContain(key);
     for (const key of Object.values(VIEW)) expect(r.dataKeys).not.toContain(key);
+    // No data handler is left: one gets only params, so a bridge call without a company kept the caller's own (RK9-603).
+    expect(r.dataKeys).toEqual([]);
+    expect(r.actionKeys).toEqual(expect.arrayContaining([SPEND_GUARD_ACTION_KEY, PUBLICATION_ACTION_KEY]));
     expect([...EDITOR_RULE_TYPES].sort()).toEqual([...EDITABLE_RULE_TYPES].sort());
     expect(EDITOR_METRICS).toEqual(RULE_METRICS);
     expect(EDITOR_OPERATORS).toEqual(RULE_OPERATORS);
@@ -310,9 +313,9 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(gates[0]!.params).toEqual([COMPANY_A, "pending"]);
   });
 
-  it("the publication data key redacts a stored error again when it is read (RK9-563)", async () => {
+  it("the publication read action redacts a stored error again when it is read (RK9-563)", async () => {
     r = await rig({ poisoned: true });
-    const read = await r.harness.getData<{ state: string; publication: { error: string | null } }>(PUBLICATION_DATA_KEY, { companyId: COMPANY_A, publicationId: PUB_A });
+    const read = await r.harness.performAction<{ state: string; publication: { error: string | null } }>(PUBLICATION_ACTION_KEY, { publicationId: PUB_A }, UI);
     expect(read.state).toBe("ok");
     expect(read.publication.error).toBe("Graph 400 for token [REDACTED] via bot [REDACTED]");
     assertNoSecrets("publication", JSON.stringify(read));
@@ -638,10 +641,11 @@ describe("operator UI handlers (RK9-518)", () => {
       [PAUSE_AD_ACTION_KEY]: { adId: "301" },
       [RESEND_GATE_CARD_ACTION_KEY]: { gateRequestId: GATE_A },
       [RULES_PREPARE_SAVE_ACTION_KEY]: { list: [] },
+      [PUBLICATION_ACTION_KEY]: { publicationId: PUB_A },
     };
-    const views = Object.values(VIEW) as string[];
+    // The read actions (the views, spend-guard and publication) run for both companies.
+    const views = [...(Object.values(VIEW) as string[]), SPEND_GUARD_ACTION_KEY, PUBLICATION_ACTION_KEY];
     for (const key of r.actionKeys) {
-      // A view runs for both companies, like the data handlers.
       for (const companyId of views.includes(key) ? [COMPANY_A, COMPANY_B] : [COMPANY_A]) {
         try {
           outputs.push(`${key}: ${JSON.stringify(await r.harness.performAction(key, params[key] ?? {}, { ...UI, companyId }))}`);

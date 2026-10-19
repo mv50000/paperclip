@@ -410,9 +410,11 @@ the core chat-channels bot is never shared. See
   pointer to an array counts its items. An unreadable feed pauses nothing
   (fail-open), but it fails the run so the broken feed is seen. A Telegram
   failure after a pause fails the run, and the pauses stay.
-- **Data** `spend-guard` (`getData`) and the tool `rk9ads_get_pacing` return
+- **Read action** `spend-guard` and the tool `rk9ads_get_pacing` return
   the guard figures, the alerted thresholds and `halt` (the halt in force or
-  null; `haltError` when it cannot be read). They never return a token.
+  null; `haltError` when it cannot be read). They never return a token. It is
+  an action, not a data handler, so the company comes from the host's
+  `context.companyId` and never from params (RK9-603).
 - Every pause, refusal and alert writes a `rule_actions` row and an activity
   entry. Refusals and alerts use `rule_type = pause_all_cap` with
   `action = none` (rule ids `spend-guard`, `spend-alert-80`,
@@ -684,7 +686,7 @@ and the re-run reuses it and adopts the ad. If Meta refuses the delete,
 **Async.** The action records the row, starts the run as a background
 promise of short Graph calls (each well inside the host's 30 s RPC limit),
 and waits at most `waitMs` (default 10 s, at most 20 s). A longer run
-returns `pending`; poll the `publication` data key. A worker restart cuts a
+returns `pending`; poll the `publication` read action. A worker restart cuts a
 run off; publish again with the same input to resume it.
 
 Every Meta write writes an activity entry: `entityType: "rk9_ads_publication"`,
@@ -695,7 +697,7 @@ No token or secret goes into it.
 |---|---|---|
 | `publish` | action | `{ creativeId \| manifest, text?, placement?, sizeBytes?, durationSec?, idempotencyKey?, dryRun?, confirm?, waitMs? }`. Dry run (the full planned payloads, no Meta call) unless `dryRun: false, confirm: true`. A real run needs `creativeId` and a launch-ready preflight |
 | `swap-creative` | action | The same plus `adId`: a new creative on a PAUSED ad that this company published; the ad stays PAUSED. A real swap is board-only (an agent gets the dry run only, RK9-540) |
-| `publication` | data | `{ publicationId }`: status, Meta ids, error and cleanup of one publication. The stored error goes through `sanitize()` again when it is read (RK9-563) |
+| `publication` | action (read) | `{ publicationId }`: status, Meta ids, error and cleanup of one publication. The stored error goes through `sanitize()` again when it is read (RK9-563). The company comes from `context.companyId`, not from params (RK9-603) |
 
 ## Activation gate (RK9-517)
 
@@ -780,7 +782,8 @@ anything ACTIVE.
   handler gets only params, and a bridge call without a company (instance
   admin only) kept the caller's own `params.companyId`. The pages load them
   with `ui/view-data.ts`, which has the shape of `usePluginData` (data,
-  loading, error, refresh).
+  loading, error, refresh). The plugin registers no data handler at all:
+  `spend-guard` and `publication` are read actions too (RK9-603).
 - **Action** `pause-ad` `{ adId, dryRun?, confirm?, idempotencyKey? }`: pauses
   one ad of the brand's ad account. `dryRun` defaults to true. A real pause
   needs `confirm: true`, a board user and `idempotencyKey` (8-100 of
@@ -792,7 +795,8 @@ anything ACTIVE.
   failed pause leaves no marker. Markers older than 24 h are deleted when a
   new one is written. A repeat that arrives while the same user's call with
   the same key still runs joins that call and returns its result with
-  `duplicate: true` (RK9-583), so two quick clicks write one audit row. It writes a `rule_actions` row
+  `duplicate: true` (RK9-583), so two quick clicks write one audit row. The
+  page shows the joined result's `auditError` warning too (RK9-603). It writes a `rule_actions` row
   (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
   activity entry. Before the Meta write it stores a 30-minute halt for the
   ad (`adHalt`, RK9-566), then closes the ad's open activation cards
