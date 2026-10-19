@@ -555,12 +555,14 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   kill switch (RK9-523: the ad account belongs to the brand), not limited
   to `meta.campaignId`. So every brand needs an ad account of its own: on
   a shared one, its per-ad rules would pause the other brand's ads too.
-  Checked 19.10.2026 (RK9-579): Ololla and Sunspot have separate ad
-  accounts. A failed status
+  Checked 19.10.2026 against the operator's notes (RK9-579): Ololla and
+  Sunspot have separate ad accounts; compare `meta.adAccountId` in the
+  company configs before a new brand goes live. A failed status
   read fails the run and leaves only the cap rule, which decides on the month
   position alone (pauseAll lists its own targets, RK9-541). It waits when
-  this month's cap halt was cleared at the cap it paused at, so an unread
-  status does not override the clear every hour. After a clear under a
+  this month's cap halt was cleared and `monthlyCapEur` is not above the cap
+  it paused at (or the halt has no cap figure), so an unread status does not
+  override the clear every hour. After a clear under a
   raised `monthlyCapEur` (as after the headroom release) it runs, so spend
   at 90 % of the new cap still pauses. A halt without `until` ends with the
   local month of its `since` (RK9-579). One brand's failure does not stop the others.
