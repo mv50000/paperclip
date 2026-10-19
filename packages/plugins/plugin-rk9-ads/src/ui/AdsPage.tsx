@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { DataTable, KeyValueList, Spinner, usePluginAction, usePluginData, usePluginToast } from "@paperclipai/plugin-sdk/ui";
+import { DataTable, KeyValueList, Spinner, usePluginAction, usePluginToast } from "@paperclipai/plugin-sdk/ui";
 import type { PluginPageProps } from "@paperclipai/plugin-sdk/ui";
 import type { UiGateCard, UiHalt, UiOverview, UiPauseAdResult, UiPendingUndo, UiPublication, UiSpend } from "../features/ui/dto.js";
 import type { HaltState } from "../features/spend-guard/halt.js";
 import type { PauseAllResult } from "../features/spend-guard/killswitch.js";
 import { AdStatusBadge, Button, CapGauge, EmptyState, ErrorText, FatigueBadge, Muted, Section, TypedConfirm } from "./components.js";
 import { errorText, fmtDateTime, fmtEur, fmtNumber, fmtPct } from "./format.js";
-import { ACTION, DATA } from "./keys.js";
+import { ACTION, VIEW } from "./keys.js";
+import { useViewData } from "./view-data.js";
 
 /** The word the operator types before a pause or the kill switch. */
 export const PAUSE_WORD = "PYSÄYTÄ";
@@ -641,7 +642,7 @@ function DigestPreview() {
 
 export function AdsPage(props: PluginPageProps) {
   const companyId = props.context.companyId;
-  const overview = usePluginData<UiOverview>(DATA.overview, { companyId });
+  const overview = useViewData<UiOverview>(VIEW.overview, companyId);
   const [pausing, setPausing] = useState<UiPublication | null>(null);
   // A pause's warnings and halt stay on the page after the panel closes, per ad: a later pause of another ad keeps them (RK9-562, RK9-566).
   const [pausedAds, setPausedAds] = useState<PausedAdNote[]>([]);

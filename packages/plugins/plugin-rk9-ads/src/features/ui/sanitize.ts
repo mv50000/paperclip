@@ -14,8 +14,13 @@ import { REDACTED, redactValue } from "../../meta/redact.js";
  * text, where a newline before a token is the letter pair `\n`. A boundary
  * let such tokens through (RK9-581 verifier), so a non-secret string of the
  * same shape is masked too: a masked string costs less than a leaked token.
+ *
+ * `(?<!\d)` starts a match only where a digit run starts (RK9-583). Without
+ * it a long digit run with no `:` was retried from every digit: 10 000
+ * digits took about 1.5 s. It lets no token through: a run that ends in a
+ * token's `:` matches from its first digit, as before.
  */
-export const BOT_TOKEN_RE = /\d{6,}:[A-Za-z0-9_-]{30,}/g;
+export const BOT_TOKEN_RE = /(?<!\d)\d{6,}:[A-Za-z0-9_-]{30,}/g;
 
 /** Token shapes are redacted even in free text (errors, Meta details). */
 export function sanitize<T>(dto: T): T {

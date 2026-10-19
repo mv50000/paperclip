@@ -12,7 +12,7 @@ import type { UiOverview, UiPublication, UiSettings, UiWidget } from "../src/fea
 import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
 import { ACK_UNDO_WORD, ackPrompt, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
 import { readConfigVersion, saveRulesBlock } from "../src/ui/host-config.js";
-import { ACTION, DATA } from "../src/ui/keys.js";
+import { ACTION, VIEW } from "../src/ui/keys.js";
 import { EDITOR_DEFAULT_RULES, fromEditor, LIVE_MODE_ON_TEXT, liveChanges, savedRulesBlock, toEditor, weakeningChanges } from "../src/ui/rule-fields.js";
 import { prepareRules } from "../src/features/rules/editor.js";
 import { DEFAULT_RULES, parseRules } from "../src/features/rules/schema.js";
@@ -26,48 +26,46 @@ const CONTEXT = { companyId: COMPANY_ID, companyPrefix: "OLL", projectId: null, 
 type Handler = (params: Record<string, unknown>) => Promise<unknown>;
 
 interface Bridge {
+  /** What each read view (an action, RK9-583) returns. */
   data: Map<string, unknown>;
   actions: Map<string, Handler>;
   actionCalls: Array<{ key: string; params: Record<string, unknown> }>;
+  /** Loads of a view after its first one. */
   refreshes: string[];
+  loads: Map<string, number>;
   toasts: Array<{ title: string; tone?: string }>;
-  notify(): void;
 }
 
 function installBridge(): Bridge {
-  const listeners = new Set<() => void>();
   const bridge: Bridge = {
     data: new Map(),
     actions: new Map(),
     actionCalls: [],
     refreshes: [],
+    loads: new Map(),
     toasts: [],
-    notify: () => listeners.forEach((listener) => listener()),
   };
   const cell = (value: unknown) => (value === null || value === undefined ? "" : (value as React.ReactNode));
   (globalThis as { __paperclipPluginBridge__?: unknown }).__paperclipPluginBridge__ = {
     react: React,
     sdkUi: {
       usePluginData(key: string) {
-        const [, setTick] = React.useState(0);
-        React.useEffect(() => {
-          const listener = () => setTick((tick) => tick + 1);
-          listeners.add(listener);
-          return () => {
-            listeners.delete(listener);
-          };
-        }, []);
-        return {
-          data: bridge.data.get(key) ?? null,
-          loading: false,
-          error: null,
-          refresh: () => {
-            bridge.refreshes.push(key);
-            bridge.notify();
-          },
-        };
+        // The views are actions: a data handler would take the caller's own companyId (RK9-583).
+        throw new Error(`usePluginData(${key}): load views with useViewData`);
       },
       usePluginAction(key: string) {
+        if ((Object.values(VIEW) as string[]).includes(key)) {
+          // A view loads through an action: a fresh copy each time, as from the worker.
+          return async () => {
+            const count = bridge.loads.get(key) ?? 0;
+            if (count > 0) bridge.refreshes.push(key);
+            bridge.loads.set(key, count + 1);
+            const handler = bridge.actions.get(key);
+            if (handler) return handler({});
+            const value = bridge.data.get(key);
+            return value === undefined ? null : JSON.parse(JSON.stringify(value));
+          };
+        }
         return async (params: Record<string, unknown> = {}) => {
           bridge.actionCalls.push({ key, params });
           const handler = bridge.actions.get(key);
@@ -226,9 +224,9 @@ afterEach(async () => {
 
 describe("operator UI (RK9-518)", () => {
   it("shows an empty state with the settings link when the company has no config", async () => {
-    bridge.data.set(DATA.overview, { ...ollolaOverview(), state: "absent", brand: null, spend: null, publications: [], pendingGates: [], ruleLog: [], spend14d: [], error: "RK9 Ads is not configured for this company" });
-    bridge.data.set(DATA.widget, { state: "absent", brandCode: null, mtdEur: null, monthlyCapEur: null, pctUsed: null, pendingGates: null, halted: false } satisfies UiWidget);
-    bridge.data.set(DATA.settings, { state: "absent", errors: [], brand: null, meta: null, telegram: null, landing: null, schedule: null, digest: null, fatigue: null } satisfies UiSettings);
+    bridge.data.set(VIEW.overview, { ...ollolaOverview(), state: "absent", brand: null, spend: null, publications: [], pendingGates: [], ruleLog: [], spend14d: [], error: "RK9 Ads is not configured for this company" });
+    bridge.data.set(VIEW.widget, { state: "absent", brandCode: null, mtdEur: null, monthlyCapEur: null, pctUsed: null, pendingGates: null, halted: false } satisfies UiWidget);
+    bridge.data.set(VIEW.settings, { state: "absent", errors: [], brand: null, meta: null, telegram: null, landing: null, schedule: null, digest: null, fatigue: null } satisfies UiSettings);
 
     await render(createElement(AdsPage, { context: CONTEXT }));
     expect(container.textContent).toContain("RK9 Ads ei ole käytössä");
@@ -243,14 +241,14 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("shows an empty publications state for a configured brand with nothing published", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview({ publications: [], pendingGates: [], ruleLog: [], spend14d: [] }));
+    bridge.data.set(VIEW.overview, ollolaOverview({ publications: [], pendingGates: [], ruleLog: [], spend14d: [] }));
     await render(createElement(AdsPage, { context: CONTEXT }));
     expect(container.textContent).toContain("Ei vielä julkaisuja.");
     expect(container.textContent).toContain("Ei odottavia kortteja.");
   });
 
   it("renders the Ololla page: header gauge, publications, gate card, rule log, 14 days", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.data.set(VIEW.overview, ollolaOverview());
     await render(createElement(AdsPage, { context: CONTEXT }));
     const text = container.textContent ?? "";
     expect(text).toContain("Mainonta: Ololla");
@@ -271,10 +269,10 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("pauses an ad after a typed confirmation and shows PAUSED without a reload", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.data.set(VIEW.overview, ollolaOverview());
     bridge.actions.set(ACTION.pauseAd, async (params) => {
       if (params.dryRun !== false) return { dryRun: true, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "ACTIVE", paused: false };
-      bridge.data.set(DATA.overview, ollolaOverview({ publications: [publication({ adStatus: "PAUSED", adEffectiveStatus: "PAUSED" })] }));
+      bridge.data.set(VIEW.overview, ollolaOverview({ publications: [publication({ adStatus: "PAUSED", adEffectiveStatus: "PAUSED" })] }));
       return { dryRun: false, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "PAUSED", paused: true };
     });
     await render(createElement(AdsPage, { context: CONTEXT }));
@@ -289,24 +287,25 @@ describe("operator UI (RK9-518)", () => {
     await click("Pysäytä mainos");
 
     expect(bridge.actionCalls[1]).toEqual({ key: ACTION.pauseAd, params: { adId: "301", dryRun: false, confirm: true, idempotencyKey: expect.stringMatching(/^[A-Za-z0-9_-]{8,100}$/) } });
-    expect(bridge.refreshes).toContain(DATA.overview);
+    expect(bridge.refreshes).toContain(VIEW.overview);
     expect(container.querySelector('[data-badge="PAUSED"]')).not.toBeNull();
     expect(buttons("Pysäytä")).toEqual([]);
     expect(bridge.toasts.map((toast) => toast.title)).toContain("Mainos OLL kesä 1 pysäytetty");
   });
 
   it("shows the standing spend risks as warnings, with Meta's headroom against what is left of the month (RK9-563)", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.data.set(VIEW.overview, ollolaOverview());
     await render(createElement(AdsPage, { context: CONTEXT }));
     expect(container.querySelector('ul[aria-label="Kulutusriskit"]')).toBeNull();
     const spend = ollolaOverview().spend!;
     bridge.data.set(
-      DATA.overview,
+      VIEW.overview,
       ollolaOverview({
         spend: { ...spend, headroomEur: 100, spendCapStatus: "headroom_above_remaining", projectedMonthEndEur: 140, risks: ["spend_cap_headroom_exceeds_remaining", "projection_exceeds_cap"] },
       }),
     );
-    await render(createElement(AdsPage, { context: CONTEXT }));
+    // A new mount loads the view again.
+    await render(createElement(AdsPage, { key: "reloaded", context: CONTEXT }));
     const risks = Array.from(container.querySelectorAll('ul[aria-label="Kulutusriskit"] li')).map((node) => node.textContent ?? "");
     expect(risks).toHaveLength(2);
     expect(risks[0]).toMatch(/^Metan spend_cap sallii vielä 100,00\s€, mutta kuukausikatosta on jäljellä 87,66\s€: Meta ei pysäytä ajoissa\.$/);
@@ -315,7 +314,7 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("a repeated pause names the ad's status now instead of a second pause (RK9-563)", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.data.set(VIEW.overview, ollolaOverview());
     bridge.actions.set(ACTION.pauseAd, async (params) =>
       params.dryRun !== false
         ? { dryRun: true, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "ACTIVE", paused: false }
@@ -330,7 +329,7 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("the kill switch previews, needs the typed word, and shows halt and card failures as errors", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.data.set(VIEW.overview, ollolaOverview());
     const base = { rule: "kill_switch", scope: "account", campaignPaused: true, list: [], errors: [], telegram: "sent", closedCardIds: [] };
     bridge.actions.set(ACTION.pauseAll, async (params) =>
       params.dryRun !== false
@@ -349,7 +348,7 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("keeps the kill switch on a broken config, runs it on the fallback config, and the widget warns", async () => {
-    bridge.data.set(DATA.overview, { ...ollolaOverview(), state: "invalid", error: "rules.list[0]: bad threshold" });
+    bridge.data.set(VIEW.overview, { ...ollolaOverview(), state: "invalid", error: "rules.list[0]: bad threshold" });
     const base = { rule: "kill_switch", scope: "account", campaignPaused: true, list: [], telegram: "sent", closedCardIds: [], fallbackConfig: "invalid" };
     bridge.actions.set(ACTION.pauseAll, async (params) =>
       params.dryRun !== false
@@ -365,7 +364,7 @@ describe("operator UI (RK9-518)", () => {
     await click("Pysäytä kaikki");
     expect(bridge.actionCalls.map((call) => call.params)).toEqual([{ dryRun: true }, { dryRun: false, confirm: true }]);
 
-    bridge.data.set(DATA.widget, { state: "invalid", error: "rules.list[0]: bad threshold", brandCode: null, mtdEur: null, monthlyCapEur: null, pctUsed: null, pendingGates: null, halted: true } satisfies UiWidget);
+    bridge.data.set(VIEW.widget, { state: "invalid", error: "rules.list[0]: bad threshold", brandCode: null, mtdEur: null, monthlyCapEur: null, pctUsed: null, pendingGates: null, halted: true } satisfies UiWidget);
     await render(createElement(AdsWidget, { context: CONTEXT }));
     expect(container.textContent).toContain("mainokset voivat olla yhä käynnissä");
     expect(container.textContent).toContain("Pysäytystila päällä");
@@ -374,10 +373,10 @@ describe("operator UI (RK9-518)", () => {
 
   it("shows the standing halt and clears it with the preview's since", async () => {
     const halt = { rule: "kill_switch", since: "2026-10-17T08:00:00.000Z", until: null, reason: "Pysäytä kaikki (UI)", source: "ui", userId: "board-user-1", agentId: null, tgUserId: null };
-    bridge.data.set(DATA.overview, ollolaOverview({ halt }));
+    bridge.data.set(VIEW.overview, ollolaOverview({ halt }));
     bridge.actions.set(ACTION.clearHalt, async (params) => {
       if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: { brandCode: "OLL", rule: "kill_switch", since: halt.since, reason: halt.reason, initiator: { source: "ui" } } };
-      bridge.data.set(DATA.overview, ollolaOverview());
+      bridge.data.set(VIEW.overview, ollolaOverview());
       return { dryRun: false, cleared: true };
     });
     await render(createElement(AdsPage, { context: CONTEXT }));
@@ -393,10 +392,10 @@ describe("operator UI (RK9-518)", () => {
 
   it("says so when the halt ended before the clear (RK9-565)", async () => {
     const halt = { rule: "kill_switch", since: "2026-10-17T08:00:00.000Z", until: null, reason: "Pysäytä kaikki (UI)", source: "ui", userId: "board-user-1", agentId: null, tgUserId: null };
-    bridge.data.set(DATA.overview, ollolaOverview({ halt }));
+    bridge.data.set(VIEW.overview, ollolaOverview({ halt }));
     bridge.actions.set(ACTION.clearHalt, async (params) => {
       if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: { brandCode: "OLL", rule: "kill_switch", since: halt.since, reason: halt.reason, initiator: { source: "ui" } } };
-      bridge.data.set(DATA.overview, ollolaOverview());
+      bridge.data.set(VIEW.overview, ollolaOverview());
       return { dryRun: false, cleared: false, halt: null };
     });
     await render(createElement(AdsPage, { context: CONTEXT }));
@@ -408,10 +407,10 @@ describe("operator UI (RK9-518)", () => {
 
   it("shows the open activation undos without a halt and acknowledges only the previewed ones (RK9-565)", async () => {
     const pendingUndo = [{ kind: "campaign", objectId: "120200000000000101", gateRequestId: "gate-9", since: "2026-10-17T08:00:05.000Z" }];
-    bridge.data.set(DATA.overview, ollolaOverview({ pendingUndo }));
+    bridge.data.set(VIEW.overview, ollolaOverview({ pendingUndo }));
     bridge.actions.set(ACTION.clearHalt, async (params) => {
       if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: null, pendingUndo: [{ ...pendingUndo[0], key: "120200000000000101|gate-9|2026-10-17T08:00:05.000Z" }] };
-      bridge.data.set(DATA.overview, ollolaOverview());
+      bridge.data.set(VIEW.overview, ollolaOverview());
       return { dryRun: false, cleared: false, halt: null, acknowledgedUndos: 1 };
     });
     await render(createElement(AdsPage, { context: CONTEXT }));
@@ -439,7 +438,7 @@ describe("operator UI (RK9-518)", () => {
 
   it("an acknowledgement that took fewer entries than the preview listed is an error, not a success (RK9-570)", async () => {
     const pendingUndo = [{ kind: "ad" as const, objectId: "120200000000000301", gateRequestId: "kill_switch:halt-1", since: "2026-10-17T08:00:05.000Z", origin: "pause" as const, attempts: 2 }];
-    bridge.data.set(DATA.overview, ollolaOverview({ pendingUndo }));
+    bridge.data.set(VIEW.overview, ollolaOverview({ pendingUndo }));
     bridge.actions.set(ACTION.clearHalt, async (params) => {
       if (params.dryRun !== false) return { dryRun: true, cleared: false, halt: null, pendingUndo: [{ ...pendingUndo[0], key: "120200000000000301|kill_switch:halt-1|2026-10-17T08:00:05.000Z" }] };
       // A pause failed on the ad after the preview: its key changed, nothing was taken.
@@ -457,7 +456,7 @@ describe("operator UI (RK9-518)", () => {
 
   it("names a pause's failed PAUSED write apart from an activation undo, with its attempts (RK9-568)", async () => {
     bridge.data.set(
-      DATA.overview,
+      VIEW.overview,
       ollolaOverview({
         pendingUndo: [
           { kind: "ad", objectId: "120200000000000301", gateRequestId: "kill_switch:halt-1", since: "2026-10-17T08:00:05.000Z", origin: "pause", attempts: 4 },
@@ -472,7 +471,7 @@ describe("operator UI (RK9-518)", () => {
 
   it("names a retry that Meta refuses for good, so the board knows only a fix and an acknowledgement end it (RK9-567)", async () => {
     bridge.data.set(
-      DATA.overview,
+      VIEW.overview,
       ollolaOverview({
         pendingUndo: [
           { kind: "ad", objectId: "120200000000000301", gateRequestId: "gate-9", since: "2026-10-17T08:00:05.000Z", attempts: 3, permanentError: "object_missing" },
@@ -486,14 +485,32 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("the widget shows MTD against the cap and the pending gate count", async () => {
-    bridge.data.set(DATA.widget, { state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 2, halted: false } satisfies UiWidget);
+    bridge.data.set(VIEW.widget, { state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 2, halted: false } satisfies UiWidget);
     await render(createElement(AdsWidget, { context: CONTEXT }));
     expect(container.querySelector('[data-metric="Kulutus OLL"]')?.textContent).toMatch(/12,34\s€ \/ 100,00\s€ \(12,3 %\)/);
     expect(container.querySelector('[data-metric="Odottavat kortit"]')?.textContent).toBe("Odottavat kortit: 2");
   });
 
+  it("views load through actions: a failed load shows its error, and another company's data is not shown while it loads (RK9-583)", async () => {
+    bridge.actions.set(VIEW.widget, async () => {
+      throw new Error("company context is required");
+    });
+    await render(createElement(AdsWidget, { context: CONTEXT }));
+    expect(container.textContent).toContain("Mainonta: company context is required");
+
+    bridge.actions.delete(VIEW.widget);
+    bridge.data.set(VIEW.widget, { state: "enabled", brandCode: "OLL", mtdEur: 12.34, monthlyCapEur: 100, pctUsed: 12.3, pendingGates: 2, halted: false } satisfies UiWidget);
+    await render(createElement(AdsWidget, { key: "a", context: CONTEXT }));
+    expect(container.querySelector('[data-metric="Kulutus OLL"]')).not.toBeNull();
+    // The host switches company; its view has not arrived yet.
+    bridge.actions.set(VIEW.widget, () => new Promise(() => undefined));
+    await render(createElement(AdsWidget, { key: "a", context: { ...CONTEXT, companyId: "22222222-2222-4222-8222-222222222222", companyPrefix: "SUN" } }));
+    expect(container.querySelector('[data-metric="Kulutus OLL"]')).toBeNull();
+    expect(container.textContent).toContain("Ladataan mainontaa");
+  });
+
   it("the settings page lists preflight checks and re-runs them in place", async () => {
-    bridge.data.set(DATA.settings, {
+    bridge.data.set(VIEW.settings, {
       state: "enabled",
       errors: [],
       brand: { brandCode: "OLL", displayName: "Ololla", timeZone: "Europe/Helsinki", monthlyCapEur: 100 },
@@ -505,22 +522,22 @@ describe("operator UI (RK9-518)", () => {
       fatigue: { enabled: true, issuesEnabled: false },
     } satisfies UiSettings);
     const check = (name: string, status: string) => ({ check: name, status, required: true, reason: status === "pass" ? "ok" : "spend_cap_missing", detail: `${name} ${status}` });
-    bridge.data.set(DATA.preflight, { state: "enabled", fresh: true, result: { launchReady: false, checkedAt: "2026-10-17T06:00:00.000Z", checks: [check("token_scopes", "pass"), check("spend_cap", "fail")] } });
-    bridge.data.set(DATA.rules, { state: "enabled", liveMode: false, rules: [{ ruleId: "pause_all_cap", type: "pause_all_cap", enabled: true, mode: "shadow", cooldownHours: 24 }] });
+    bridge.data.set(VIEW.preflight, { state: "enabled", fresh: true, result: { launchReady: false, checkedAt: "2026-10-17T06:00:00.000Z", checks: [check("token_scopes", "pass"), check("spend_cap", "fail")] } });
+    bridge.data.set(VIEW.rules, { state: "enabled", liveMode: false, rules: [{ ruleId: "pause_all_cap", type: "pause_all_cap", enabled: true, mode: "shadow", cooldownHours: 24 }] });
     bridge.actions.set(ACTION.verifyConnection, async () => {
-      bridge.data.set(DATA.preflight, { state: "enabled", fresh: true, result: { launchReady: true, checkedAt: "2026-10-17T07:00:00.000Z", checks: [check("token_scopes", "pass"), check("spend_cap", "pass")] } });
+      bridge.data.set(VIEW.preflight, { state: "enabled", fresh: true, result: { launchReady: true, checkedAt: "2026-10-17T07:00:00.000Z", checks: [check("token_scopes", "pass"), check("spend_cap", "pass")] } });
       return {};
     });
     await render(createElement(SettingsPage, { context: CONTEXT }));
     expect(container.textContent).toContain("spend_cap fail");
     expect(container.textContent).toContain("asetettu (secret)");
     await click("Aja preflight uudelleen");
-    expect(bridge.refreshes).toContain(DATA.preflight);
+    expect(bridge.refreshes).toContain(VIEW.preflight);
     expect(container.textContent).toContain("spend_cap pass");
     expect(container.textContent).toContain("Julkaisuvalmis.");
   });
   it("shows a pause-ad card close failure as an error after the panel closes (RK9-562)", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview());
+    bridge.data.set(VIEW.overview, ollolaOverview());
     bridge.actions.set(ACTION.pauseAd, async (params) =>
       params.dryRun !== false
         ? { dryRun: true, adId: "301", name: "OLL kesä 1", previousStatus: "ACTIVE", status: "ACTIVE", paused: false }
@@ -536,7 +553,7 @@ describe("operator UI (RK9-518)", () => {
   });
 
   it("a clean pause of another ad keeps the first ad's warning; the ad's halt shows and a board user lifts it (RK9-566)", async () => {
-    bridge.data.set(DATA.overview, ollolaOverview({ publications: [publication(), publication({ id: "aaaaaaaa-1111-4111-8111-000000000002", adName: "OLL kesä 2", metaAdId: "302" })] }));
+    bridge.data.set(VIEW.overview, ollolaOverview({ publications: [publication(), publication({ id: "aaaaaaaa-1111-4111-8111-000000000002", adName: "OLL kesä 2", metaAdId: "302" })] }));
     const halt = { id: "halt-302", until: "2026-10-17T10:30:00.000Z" };
     const clears: Array<Record<string, unknown>> = [];
     bridge.actions.set(ACTION.pauseAd, async (params) => {
@@ -582,9 +599,9 @@ describe("operator UI (RK9-518)", () => {
       posts = [];
       prepares = [];
       savedConfig = { brandCode: "OLL", rules: { liveMode: true, list: [CPC, { type: "pause_all_cap", mode: "live" }] } };
-      bridge.data.set(DATA.settings, { state: "disabled", errors: [], brand: null, meta: null, telegram: null, landing: null, schedule: null, digest: null, fatigue: null } satisfies UiSettings);
-      bridge.data.set(DATA.preflight, { state: "disabled", fresh: false, result: null });
-      bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: [CPC, CAP] });
+      bridge.data.set(VIEW.settings, { state: "disabled", errors: [], brand: null, meta: null, telegram: null, landing: null, schedule: null, digest: null, fatigue: null } satisfies UiSettings);
+      bridge.data.set(VIEW.preflight, { state: "disabled", fresh: false, result: null });
+      bridge.data.set(VIEW.rules, { state: "enabled", liveMode: true, rules: [CPC, CAP] });
       // The worker's own check (features/rules/editor.ts) against the config saved now.
       bridge.actions.set(ACTION.rulesPrepareSave, async (params) => {
         prepares.push(params);
@@ -641,7 +658,7 @@ describe("operator UI (RK9-518)", () => {
     });
 
     it("shadow -> live still needs LIVE; no POST without it", async () => {
-      bridge.data.set(DATA.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
+      bridge.data.set(VIEW.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
       savedConfig.rules.liveMode = false;
       await render(createElement(SettingsPage, { context: CONTEXT }));
       const [liveToggle] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
@@ -672,7 +689,7 @@ describe("operator UI (RK9-518)", () => {
     });
 
     it("a weakening save that also turns live mode on asks HEIKENNÄ and then LIVE (RK9-566)", async () => {
-      bridge.data.set(DATA.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
+      bridge.data.set(VIEW.rules, { state: "enabled", liveMode: false, rules: [CPC, CAP] });
       savedConfig.rules.liveMode = false;
       await render(createElement(SettingsPage, { context: CONTEXT }));
       const [liveToggle] = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
@@ -702,7 +719,25 @@ describe("operator UI (RK9-518)", () => {
       expect(posts).toEqual([]);
       expect(buttons("Tallenna live-tilassa")).toHaveLength(0);
       expect(container.textContent).toContain("Tallennetut säännöt muuttuivat sivun latauksen jälkeen");
-      expect(bridge.refreshes).toContain(DATA.rules);
+      expect(bridge.refreshes).toContain(VIEW.rules);
+    });
+
+    it.each([
+      ["invalid", "brändin asetukset ovat virheelliset"],
+      ["disabled", "brändi on pois päältä"],
+    ])("a stale save whose reload finds the config %s names that state and drops the old draft (RK9-583)", async (state, text) => {
+      savedConfig.rules.liveMode = false;
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await type("Kynnys", "0.6");
+      // Another config change made the brand invalid or disabled along with the rules.
+      bridge.data.set(VIEW.rules, { state });
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(bridge.refreshes).toContain(VIEW.rules);
+      expect(container.textContent).toContain(`Tallennetut säännöt muuttuivat sivun latauksen jälkeen, eikä luonnosta tallennettu. Sääntöjä ei voi nyt muokata: ${text}.`);
+      expect(container.textContent).not.toContain("ladattiin uudelleen");
+      expect(container.querySelector('input[aria-label="Kynnys"]')).toBeNull();
+      expect(buttons("Tallenna säännöt")).toHaveLength(0);
     });
 
     it("a rule saved elsewhere between the rules data and the version read is not lost to the old draft (RK9-581)", async () => {
@@ -711,17 +746,15 @@ describe("operator UI (RK9-518)", () => {
       savedConfig.rules.list = [CPC, added, { type: "pause_all_cap", mode: "live" }];
       await render(createElement(SettingsPage, { context: CONTEXT }));
       await type("Kynnys", "0.6");
+      // The worker serves the new rules from now on.
+      bridge.data.set(VIEW.rules, { state: "enabled", liveMode: true, rules: parseRules(savedConfig.rules).rules.list });
       await click("Tallenna säännöt");
       expect(posts).toEqual([]);
       expect(prepares.at(-1)).toMatchObject({ loaded: { liveMode: true, list: [CPC, CAP] } });
       expect(container.textContent).toContain("Tallennetut säännöt muuttuivat sivun latauksen jälkeen");
-      expect(bridge.refreshes).toContain(DATA.rules);
+      expect(container.textContent).toContain("Säännöt ladattiin uudelleen");
+      expect(bridge.refreshes).toContain(VIEW.rules);
       // The reloaded rules hold the new one: the next save keeps it.
-      bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: parseRules(savedConfig.rules).rules.list });
-      await act(async () => {
-        bridge.notify();
-        await flush();
-      });
       await click("Tallenna säännöt");
       expect(posts).toHaveLength(1);
       expect((posts[0]!.configJson as { rules: { list: Array<{ ruleId?: string }> } }).rules.list.map((rule) => rule.ruleId)).toContain("ctr-floor");
@@ -737,10 +770,12 @@ describe("operator UI (RK9-518)", () => {
       const changed = { brandCode: "OLL", rules: { liveMode: true, list: [{ ...CPC, threshold: 0.7 }, CAP] } };
       expect(prepareRules(changed, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
       expect(prepareRules({ ...raw, rules: { ...raw.rules, liveMode: false } }, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
-      // Saved rules that no longer parse cannot be reloaded into the editor: the draft may fix them (RK9-581 verifier).
+      // Broken rules saved elsewhere after the load are not overwritten by the old draft either (RK9-583).
       const broken = { brandCode: "OLL", rules: { liveMode: true, list: [CPC, CAP, { ruleId: "bad", type: "threshold_pause", metric: "nope" }] } };
       expect(parseRules(broken.rules).errors.length).toBeGreaterThan(0);
-      const fix = prepareRules(broken, { ...draft, loaded });
+      expect(prepareRules(broken, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
+      // Rules saved exactly as the draft loaded them are not stale even when they no longer parse: the draft may fix them.
+      const fix = prepareRules(broken, { ...draft, loaded: broken.rules });
       expect(fix).not.toHaveProperty("stale");
       // Dropping the broken rule is still a removal to confirm, like any other.
       expect(fix).toMatchObject({ ok: false, confirm: { weakening: ["Kynnyspysäytys bad: poistetaan."] } });
@@ -749,7 +784,7 @@ describe("operator UI (RK9-518)", () => {
     it("a rule switched to live while live mode is on needs LIVE; no POST without it (RK9-563)", async () => {
       const shadow = { ...CPC, mode: "shadow" };
       savedConfig.rules.list = [shadow, CAP];
-      bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: [shadow, CAP] });
+      bridge.data.set(VIEW.rules, { state: "enabled", liveMode: true, rules: [shadow, CAP] });
       await render(createElement(SettingsPage, { context: CONTEXT }));
       const mode = container.querySelectorAll<HTMLSelectElement>('select[aria-label="Tila"]')[0]!;
       await act(async () => {

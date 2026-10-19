@@ -123,7 +123,7 @@ export interface UiSpendDay {
   cpcEur: number | null;
 }
 
-/** Data key `ads-overview`: the AdsPage. Each section reports its own read error. */
+/** Action key `ads-overview`: the AdsPage. Each section reports its own read error. */
 export interface UiOverview {
   state: UiConfigState;
   error?: string;
@@ -149,7 +149,7 @@ export interface UiOverview {
   insightsError?: string;
 }
 
-/** Data key `ads-widget`: the dashboard widget. */
+/** Action key `ads-widget`: the dashboard widget. */
 export interface UiWidget {
   state: UiConfigState;
   error?: string;
@@ -163,7 +163,7 @@ export interface UiWidget {
   halted: boolean;
 }
 
-/** Data key `ads-settings`: the redacted config view. Secrets show only as "configured". */
+/** Action key `ads-settings`: the redacted config view. Secrets show only as "configured". */
 export interface UiSettings {
   state: UiConfigState;
   error?: string;

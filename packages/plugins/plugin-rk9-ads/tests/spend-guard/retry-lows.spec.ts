@@ -21,7 +21,7 @@ import { describe, expect, it } from "vitest";
 import { parseBrandConfig, type BrandConfig } from "../../src/config.js";
 import { createLedger } from "../../src/db.js";
 import type { UiOverview } from "../../src/features/ui/dto.js";
-import { OVERVIEW_DATA_KEY, registerUi } from "../../src/features/ui/register.js";
+import { OVERVIEW_ACTION_KEY, registerUi } from "../../src/features/ui/register.js";
 import { addPendingUndos, readPendingUndos, reportUndoFailure, type PendingUndo } from "../../src/features/spend-guard/pending-undo.js";
 import type { NewerActivation, NewerActivationQuery } from "../../src/gate/gate-requests.js";
 import { brandConfig, COMPANY_A } from "../fixtures.js";
@@ -202,7 +202,7 @@ describe("a PAUSED write that Meta refuses for good (L5)", () => {
     expect(await tick(r, "2026-10-21T10:05:00Z")).toMatch(/for good \(object_missing/);
     expect(alerts(r, "kohdetta ei ole enää Metassa")).toHaveLength(1);
     registerUi({ ctx: r.harness.ctx, ledger: createLedger(r.harness.ctx.db), handleWebhook() {}, handleApiRoute() {}, onConfigChanged() {}, onShutdown() {} });
-    const overview = (await r.harness.getData(OVERVIEW_DATA_KEY, { companyId: COMPANY_A })) as UiOverview;
+    const overview = (await r.harness.performAction(OVERVIEW_ACTION_KEY, {}, { companyId: COMPANY_A, actor: { type: "user", userId: "board-user-1" } })) as UiOverview;
     expect(overview.pendingUndo).toMatchObject([{ objectId: AD, permanentError: "object_missing", attempts: 2 }]);
   });
 });

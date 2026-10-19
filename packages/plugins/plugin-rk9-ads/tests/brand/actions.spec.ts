@@ -4,7 +4,7 @@ import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import type { PreflightResult } from "../../src/brand/preflight.js";
 import { memoryBindingStore, type ProvisionResult } from "../../src/brand/provision.js";
 import { createLedger } from "../../src/db.js";
-import { PREFLIGHT_STATUS_DATA_KEY, PROVISION_ACTION_KEY, registerBrand, VERIFY_CONNECTION_ACTION_KEY } from "../../src/features/brand/register.js";
+import { PREFLIGHT_STATUS_ACTION_KEY, PROVISION_ACTION_KEY, registerBrand, VERIFY_CONNECTION_ACTION_KEY } from "../../src/features/brand/register.js";
 import { memoryOnceStore } from "../../src/features/spend-guard/support.js";
 import type { FeatureRuntime } from "../../src/features/types.js";
 import { recordedOutput, useCompanyConfigs, useCompanySecrets } from "../../src/kit/testing/harness.js";
@@ -60,10 +60,10 @@ describe("brand actions", () => {
 
   it("preflight-status serves the cached result and freshness without calling Meta", async () => {
     const { harness, routes } = setup();
-    expect(await harness.getData(PREFLIGHT_STATUS_DATA_KEY, { companyId: COMPANY })).toMatchObject({ state: "enabled", fresh: false, result: null });
+    expect(await harness.performAction(PREFLIGHT_STATUS_ACTION_KEY, {}, UI)).toMatchObject({ state: "enabled", fresh: false, result: null });
     await harness.performAction(VERIFY_CONNECTION_ACTION_KEY, {}, UI);
     const calls = routes.calls.length;
-    const status = await harness.getData<{ fresh: boolean; result: PreflightResult }>(PREFLIGHT_STATUS_DATA_KEY, { companyId: COMPANY });
+    const status = await harness.performAction<{ fresh: boolean; result: PreflightResult }>(PREFLIGHT_STATUS_ACTION_KEY, {}, UI);
     expect(status.fresh).toBe(true);
     expect(status.result.launchReady).toBe(true);
     expect(routes.calls.length).toBe(calls);

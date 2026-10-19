@@ -1,5 +1,5 @@
 /**
- * Data and action keys the UI calls. Plain strings: the UI bundle must not
+ * View and action keys the UI calls. Plain strings: the UI bundle must not
  * import worker modules. tests/ui-handlers.spec.ts pins each one to the
  * worker's own constant.
  */
@@ -7,7 +7,8 @@
 /** Manifest PLUGIN_ID; the host config route takes the plugin key. */
 export const PLUGIN_KEY = "rk9-ads";
 
-export const DATA = {
+/** Read views: actions loaded with useViewData (view-data.ts), so the worker gets the host's company (RK9-583). */
+export const VIEW = {
   overview: "ads-overview",
   widget: "ads-widget",
   settings: "ads-settings",

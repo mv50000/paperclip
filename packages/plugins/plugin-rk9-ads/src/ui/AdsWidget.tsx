@@ -1,13 +1,14 @@
-import { MetricCard, Spinner, useHostNavigation, usePluginData } from "@paperclipai/plugin-sdk/ui";
+import { MetricCard, Spinner, useHostNavigation } from "@paperclipai/plugin-sdk/ui";
 import type { PluginWidgetProps } from "@paperclipai/plugin-sdk/ui";
 import type { UiWidget } from "../features/ui/dto.js";
 import { EmptyState, ErrorText } from "./components.js";
 import { fmtEur, fmtPct } from "./format.js";
-import { DATA } from "./keys.js";
+import { VIEW } from "./keys.js";
+import { useViewData } from "./view-data.js";
 
 /** Dashboard widget: MTD against the monthly cap and the pending activation cards. */
 export function AdsWidget(props: PluginWidgetProps) {
-  const widget = usePluginData<UiWidget>(DATA.widget, { companyId: props.context.companyId });
+  const widget = useViewData<UiWidget>(VIEW.widget, props.context.companyId);
   const navigation = useHostNavigation();
 
   if (widget.loading && !widget.data) return <Spinner label="Ladataan mainontaa" />;

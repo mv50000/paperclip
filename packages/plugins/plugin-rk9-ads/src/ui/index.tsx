@@ -1,7 +1,7 @@
 /**
  * Operator UI (A12, RK9-518), the only writer of src/ui/** (G13). Every
- * manifest UI slot resolves to an export here. Data and actions go through
- * the host bridge (usePluginData / usePluginAction); there is no activate,
+ * manifest UI slot resolves to an export here. Views and actions go through
+ * the host bridge (usePluginAction, views via view-data.ts); there is no activate,
  * resume or unpause control: an ad goes ACTIVE only through the Telegram gate (G1).
  */
 import { useHostNavigation } from "@paperclipai/plugin-sdk/ui";
