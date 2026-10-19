@@ -737,6 +737,13 @@ describe("operator UI (RK9-518)", () => {
       const changed = { brandCode: "OLL", rules: { liveMode: true, list: [{ ...CPC, threshold: 0.7 }, CAP] } };
       expect(prepareRules(changed, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
       expect(prepareRules({ ...raw, rules: { ...raw.rules, liveMode: false } }, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
+      // Saved rules that no longer parse cannot be reloaded into the editor: the draft may fix them (RK9-581 verifier).
+      const broken = { brandCode: "OLL", rules: { liveMode: true, list: [CPC, CAP, { ruleId: "bad", type: "threshold_pause", metric: "nope" }] } };
+      expect(parseRules(broken.rules).errors.length).toBeGreaterThan(0);
+      const fix = prepareRules(broken, { ...draft, loaded });
+      expect(fix).not.toHaveProperty("stale");
+      // Dropping the broken rule is still a removal to confirm, like any other.
+      expect(fix).toMatchObject({ ok: false, confirm: { weakening: ["Kynnyspysäytys bad: poistetaan."] } });
     });
 
     it("a rule switched to live while live mode is on needs LIVE; no POST without it (RK9-563)", async () => {

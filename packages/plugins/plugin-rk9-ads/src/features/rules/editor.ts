@@ -21,7 +21,8 @@
  * `loaded` is the rules block the editor's draft started from (data `rules`).
  * When the saved rules no longer equal it, the save is refused as `stale`
  * (RK9-581): a rule saved elsewhere after the page loaded is not overwritten
- * by the old draft, even when the change does not weaken anything.
+ * by the old draft, even when the change does not weaken anything. Saved
+ * rules that do not parse skip this check, so the draft can still fix them.
  *
  * A config without `rules.list` runs the shipped default rules. A save that
  * keeps exactly those defaults leaves `list` out, so the defaults are not
@@ -109,8 +110,12 @@ export function prepareRules(
     edited.push({ ...entry });
   });
   if (errors.length > 0) return { ok: false, errors };
-  if (input.loaded !== undefined && canonical(input.loaded) !== canonical(parseRules(rawConfig.rules).rules)) {
-    return { ok: false, errors: ["The saved rules changed after this page loaded; the page reloads them, then edit and save again"], stale: true };
+  if (input.loaded !== undefined) {
+    // Saved rules that do not parse cannot be shown to reload; the draft may fix them, as before (rules/register.ts).
+    const current = parseRules(rawConfig.rules);
+    if (current.errors.length === 0 && canonical(input.loaded) !== canonical(current.rules)) {
+      return { ok: false, errors: ["The saved rules changed after this page loaded; the page reloads them, then edit and save again"], stale: true };
+    }
   }
   const block = { liveMode: input.liveMode === true, list: [...edited, ...keptEntries(rawConfig)] };
   const parsed = parseRules(block);

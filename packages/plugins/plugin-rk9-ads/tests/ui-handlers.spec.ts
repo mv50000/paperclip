@@ -319,13 +319,11 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(spendView({ ...snapshot, currency: null }).spendCapStatus).toBe("set");
   });
 
-  it("sanitize does not take the digits inside a longer id for a bot token, and still redacts one after a space or a quote (RK9-581)", () => {
-    const hash = `a1234567:${"b".repeat(40)}`;
-    expect(sanitize({ note: `ref ${hash}` }).note).toBe(`ref ${hash}`);
-    expect(sanitize({ note: `id_1234567:${"c".repeat(40)}` }).note).toBe(`id_1234567:${"c".repeat(40)}`);
-    expect(sanitize({ error: `bot token ${BOT_TOKEN} refused` }).error).toBe("bot token [REDACTED] refused");
-    expect(sanitize({ error: `"${BOT_TOKEN}"` }).error).toBe('"[REDACTED]"');
-    expect(sanitize({ error: BOT_TOKEN }).error).toBe("[REDACTED]");
+  it("sanitize redacts a bot token after an escaped newline or tab, any prefix, or at the start (RK9-581 verifier)", () => {
+    for (const before of ["line1\n", "a\tb ", "\r", "Bot", "BOT", "TOKEN_", "bot_", "tok-", "\u001b[0m", "x=", '"', ""]) {
+      const out = sanitize({ error: `${before}${BOT_TOKEN} refused` });
+      expect(out.error, JSON.stringify(before)).toBe(`${before}[REDACTED] refused`);
+    }
   });
 
   it("sanitize redacts a bot token inside a Bot API URL, where no word boundary precedes it (RK9-563)", () => {
@@ -464,6 +462,23 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(markers[0]!.params).toEqual(expect.arrayContaining([COMPANY_A, "ui_pause_ad", expect.stringMatching(/^pause-ad-done:301:/)]));
     const prunes = r.executes.filter((call) => /DELETE FROM \S+\.alert_dedupe .*created_at < now\(\)/.test(call.sql));
     expect(prunes).toEqual([{ sql: expect.stringContaining("company_id = $1 AND kind = $2"), params: [COMPANY_A, "ui_pause_ad", PAUSE_MARKER_HOURS] }]);
+  });
+
+  it("pause-ad: a pause whose halt was not stored writes no marker, so the retry stores the halt and reports again (RK9-581 verifier)", async () => {
+    const key = randomUUID();
+    const set = r.harness.ctx.state.set.bind(r.harness.ctx.state);
+    r.harness.ctx.state.set = async (...args: Parameters<typeof set>) => {
+      throw new Error("state down");
+    };
+    const first = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(first).toMatchObject({ paused: true, haltError: expect.stringContaining("state down") });
+    expect(r.executes.filter((call) => /INSERT INTO \S+\.alert_dedupe/.test(call.sql))).toEqual([]);
+    r.harness.ctx.state.set = set;
+    // The response was lost; the same confirmation again on the now-PAUSED ad.
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(retry).toMatchObject({ paused: true, previousStatus: "PAUSED", adHalt: expect.objectContaining({ id: expect.any(String) }) });
+    expect(retry).not.toHaveProperty("haltError");
   });
 
   it("pause-ad: a marker or prune failure does not fail a confirmed pause (RK9-581)", async () => {
