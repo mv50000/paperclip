@@ -79,6 +79,23 @@ describe("a halt cleared before the drop tick (RK9-580 item 1)", () => {
     expect(message).not.toContain("pause by hand");
     expect(recheckAlerts(r)).toEqual([]);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+    // The clear marker names the board as the clearer (RK9-582).
+    expect(await r.harness.ctx.state.get({ scopeKind: "instance", namespace: "spend-guard", stateKey: `halt-cleared:${COMPANY_A}` })).toEqual({
+      id: halt.id,
+      by: "board",
+    });
+  });
+
+  it("a clear marker that names the rules job still alerts (RK9-582)", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await r.harness.ctx.state.set({ scopeKind: "instance", namespace: "spend-guard", stateKey: `halt-cleared:${COMPANY_A}` }, { id: halt.id, by: "rules_job" });
+    expect(await readHalt(r.harness.ctx, COMPANY_A, new Date("2026-10-21T10:20:00Z"))).toBeNull();
+    expect(await failingTick(r, "2026-10-21T10:20:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) within 15 min .* and failed each time .*, dropped; check Meta and pause by hand/);
+    expect(recheckAlerts(r)).toHaveLength(1);
   });
 
   it("a halt that ran out before the drop tick (the scheduled pause's 06:00) still alerts", async () => {

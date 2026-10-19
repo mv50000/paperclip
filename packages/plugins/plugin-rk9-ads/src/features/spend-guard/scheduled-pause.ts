@@ -332,7 +332,7 @@ export async function runDueRechecks(
         // Only a board user's clear of this halt skips the alert (RK9-580): one that ran out,
         // was replaced or cannot be read still alerts, because the objects may spend.
         const stored = await storedRuleHalt(deps.ctx, companyId, rule).catch(() => null);
-        if (stored?.cleared && haltIdentity(stored.halt) === recheck.haltId) {
+        if (stored?.cleared && stored.clearedBy !== "rules_job" && haltIdentity(stored.halt) === recheck.haltId) {
           deps.ctx.logger.info("rk9-ads pause: halt cleared, re-check dropped without the alert", { companyId, rule, attempts: recheck.attempts });
           await drop();
           // No alert to pause by hand what the board may want running: the run says the ticks failed.

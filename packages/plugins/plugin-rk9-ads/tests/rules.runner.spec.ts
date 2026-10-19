@@ -518,6 +518,7 @@ describe("rules-evaluate job (A11)", () => {
         initiator: { source: "job" },
         cap: { mtdEur: 92, monthlyCapEur: 100 },
       };
+      const clearedKey = { scopeKind: "instance" as const, namespace: "spend-guard", stateKey: `halt-cleared:${COMPANY_A}:pause_all_cap` };
       /** The status read's first ad listing fails; the pause's own listing works. */
       function unreadStatus(): FakeMeta {
         const meta = overCap();
@@ -541,10 +542,46 @@ describe("rules-evaluate job (A11)", () => {
         expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toMatchObject({ rule: "pause_all_cap", cap: { mtdEur: 95, monthlyCapEur: 100 } });
       });
 
-      it("a clear at a cap that was lowered since still makes the cap rule wait", async () => {
+      it("a board clear at a cap that was lowered since does not make the cap rule wait (RK9-582)", async () => {
+        // Cleared at a 120 EUR cap; the cap is now 100 EUR and the month at 95.
         const r = await clearedRig({ ...clearedHalt, cap: { mtdEur: 92, monthlyCapEur: 120 } });
+        await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/Meta status read failed \(.*graph down\)+, only pause_all_cap evaluated \(fail-open\)/);
+        expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
+      });
+
+      it("a board clear at the cap it paused at makes the cap rule wait, and the marker names the board (RK9-582)", async () => {
+        const r = await clearedRig(clearedHalt);
+        expect(await r.harness.ctx.state.get(clearedKey)).toEqual({ id: "cap-1", by: "board" });
         await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/no rule evaluated \(this month's cap halt was cleared; the cap rule waits for a status read\)/);
         expect(r.meta.writes).toHaveLength(0);
+      });
+
+      it("a clear marker from before RK9-582 (no clearer) waits at the cap it paused at", async () => {
+        const r = setup({ meta: unreadStatus(), rules: LIVE_RULES });
+        await setHalt(r.harness.ctx, COMPANY_A, clearedHalt);
+        await r.harness.ctx.state.set(clearedKey, "cap-1");
+        expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toBeNull();
+        await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/no rule evaluated \(this month's cap halt was cleared/);
+        expect(r.meta.writes).toHaveLength(0);
+      });
+
+      it("a clear by the rules job does not make the cap rule wait, also at the cap it paused at (RK9-582)", async () => {
+        const r = setup({ meta: unreadStatus(), rules: LIVE_RULES });
+        await setHalt(r.harness.ctx, COMPANY_A, clearedHalt);
+        await r.harness.ctx.state.set(clearedKey, { id: "cap-1", by: "rules_job" });
+        expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toBeNull();
+        await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/Meta status read failed \(.*graph down\)+, only pause_all_cap evaluated \(fail-open\)/);
+        expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
+      });
+
+      it("a damaged clear marker clears nothing", async () => {
+        const r = setup({ meta: unreadStatus(), rules: LIVE_RULES });
+        await setHalt(r.harness.ctx, COMPANY_A, clearedHalt);
+        await r.harness.ctx.state.set(clearedKey, { by: "board" });
+        expect(await readHalt(r.harness.ctx, COMPANY_A, r.clock.now)).toMatchObject({ id: "cap-1" });
+        // The halt is in force, so the cap rule runs and pauses.
+        await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/Meta status read failed \(.*graph down\)+, only pause_all_cap evaluated/);
+        expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
       });
 
       it("a cleared halt without the cap figure waits, as only a board user clears one", async () => {
@@ -571,7 +608,7 @@ describe("rules-evaluate job (A11)", () => {
         const halt = { ...clearedHalt, since: "not a time", until: undefined };
         await setHalt(r.harness.ctx, COMPANY_A, halt);
         // clearHalt looks a halt up by since; the marker is what it would store.
-        await r.harness.ctx.state.set({ scopeKind: "instance", namespace: "spend-guard", stateKey: `halt-cleared:${COMPANY_A}:pause_all_cap` }, "cap-1");
+        await r.harness.ctx.state.set(clearedKey, "cap-1");
         await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/only pause_all_cap evaluated \(fail-open\)/);
         expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual(capPauses);
       });
@@ -745,6 +782,29 @@ describe("the cap pause's halt ends when the month is back under the cap (RK9-56
     expect(await halt(r)).toMatchObject({ rule: "pause_all_cap", cap: { mtdEur: 95, monthlyCapEur: 100 } });
   });
 
+  it("after the release and a cap lowered back to the one it paused at, the cap rule pauses when the status is unread (RK9-582)", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, capHalt);
+    await at(r, 0);
+    await at(r, 60);
+    expect(await halt(r)).toBeNull();
+    expect(await r.harness.ctx.state.get({ scopeKind: "instance", namespace: "spend-guard", stateKey: `halt-cleared:${COMPANY_A}:pause_all_cap` })).toEqual({
+      id: "cap-halt-1",
+      by: "rules_job",
+    });
+    // The operator lowers the cap back to 36 EUR; the month is at 40 and the status read fails.
+    r.configs[COMPANY_A] = { ...r.configs[COMPANY_A]!, monthlyCapEur: 36 };
+    let adLists = 0;
+    r.meta.fail = (call) => (call.method === "GET" && call.path.endsWith("/ads") && ++adLists === 1 ? new Error("graph down") : null);
+    r.clock.now = new Date(NOW.getTime() + 120 * 60_000);
+    await expect(r.harness.runJob(RULES_JOB_KEY)).rejects.toThrow(/Meta status read failed \(.*graph down\)+, only pause_all_cap evaluated \(fail-open\)/);
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([
+      ["100", "PAUSED"],
+      ["301", "PAUSED"],
+      ["303", "PAUSED"],
+    ]);
+  });
+
   it("a run that cannot read the month starts the count again", async () => {
     const r = setup({ rules: CAP_LIVE });
     await setHalt(r.harness.ctx, COMPANY_A, capHalt);
@@ -783,6 +843,15 @@ describe("the cap pause's halt ends when the month is back under the cap (RK9-56
     await at(r, 0);
     await at(r, 60);
     expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+  });
+
+  it("a damaged cap with a valid MTD waits for the board (RK9-582)", async () => {
+    const r = setup({ rules: CAP_LIVE });
+    await setHalt(r.harness.ctx, COMPANY_A, { ...capHalt, cap: { mtdEur: 33, monthlyCapEur: "36" } } as unknown as HaltState);
+    await at(r, 0);
+    await at(r, 60);
+    expect(await halt(r)).toMatchObject({ id: "cap-halt-1" });
+    expect(r.harness.activity.find((entry) => entry.message === CAP_HALT_RELEASED_ACTIVITY)).toBeUndefined();
   });
 
   it("a cap halt without the figures waits for the board", async () => {

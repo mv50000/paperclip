@@ -563,12 +563,13 @@ ingest, read-only, and compares spend, impressions, link clicks and CPC.
   company configs before a new brand goes live. A failed status
   read fails the run and leaves only the cap rule, which decides on the month
   position alone (pauseAll lists its own targets, RK9-541). It waits when
-  this month's cap halt was cleared and `monthlyCapEur` is not above the cap
+  a board user cleared this month's cap halt and `monthlyCapEur` is the cap
   it paused at (or the halt has no cap figure), so an unread status does not
-  override the clear every hour. After a clear under a
-  raised `monthlyCapEur` (as after the headroom release) it runs, so spend
-  at 90 % of the new cap still pauses. A halt without `until` ends with the
-  local month of its `since` (RK9-579). One brand's failure does not stop the others.
+  override the clear every hour. After the headroom release, or under a
+  `monthlyCapEur` raised or lowered since the clear, it runs, so spend at
+  90 % of the cap still pauses (RK9-582: the clear marker names who
+  cleared the halt; a marker from before it waits at the same cap). A halt
+  without `until` ends with the local month of its `since` (RK9-579). One brand's failure does not stop the others.
 - **Cap rule isolation (RK9-536):** every other input is read in its own
   `try`: a failed read fails the run and switches off only the rules that
   need it. Without the earlier `rule_actions` only the cap rule runs. Its

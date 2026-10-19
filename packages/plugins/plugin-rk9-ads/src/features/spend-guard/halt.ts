@@ -24,6 +24,10 @@
  * and the clear writes a new id, which the marker does not match, so the
  * newer halt stays.
  *
+ * The marker also names who cleared the halt (RK9-582): `board` for
+ * `clear-halt`, `rules_job` for the cap pause's headroom release. A marker
+ * stored before RK9-582 is the bare id and names no clearer.
+ *
  * Stored in plugin_state (no migration, G11), instance scope keyed by
  * company and rule, like the alert-check marker: one company runs one brand.
  * Each rule has its own key, so a timed halt never overwrites the kill
@@ -73,6 +77,9 @@ export interface HaltState {
 
 type StateCtx = Pick<PluginContext, "state">;
 
+/** Who cleared a halt: a board user (`clear-halt`) or the rules job's headroom release. */
+export type HaltClearer = "board" | "rules_job";
+
 function haltKey(companyId: string, rule: HaltRule) {
   // The kill switch keeps the key it had before RK9-561, so a halt stored then still holds.
   const stateKey = rule === "scheduled_pause" || rule === "pause_all_cap" ? `halt:${companyId}:${rule}` : `halt:${companyId}`;
@@ -82,6 +89,19 @@ function haltKey(companyId: string, rule: HaltRule) {
 function clearedKey(companyId: string, rule: HaltRule) {
   const stateKey = rule === "scheduled_pause" || rule === "pause_all_cap" ? `halt-cleared:${companyId}:${rule}` : `halt-cleared:${companyId}`;
   return { scopeKind: "instance" as const, namespace: HALT_NAMESPACE, stateKey };
+}
+
+/**
+ * The clear marker's halt id and clearer. A bare string is a marker from
+ * before RK9-582, with no clearer; so is an object whose `by` is not a known
+ * clearer. A value without a string id is damaged and clears nothing.
+ */
+function readMarker(value: unknown): { id: string; by?: HaltClearer } | null {
+  if (typeof value === "string") return { id: value };
+  if (value === null || typeof value !== "object") return null;
+  const marker = value as { id?: unknown; by?: unknown };
+  if (typeof marker.id !== "string") return null;
+  return marker.by === "board" || marker.by === "rules_job" ? { id: marker.id, by: marker.by } : { id: marker.id };
 }
 
 function isHalt(value: unknown): value is HaltState {
@@ -128,7 +148,7 @@ export async function readRuleHalt(ctx: StateCtx, companyId: string, rule: HaltR
   const halt: HaltState = isHalt(value)
     ? { ...value, rule }
     : { brandCode: "?", rule, id: damagedId(value), since: "?", reason: "unreadable halt record", initiator: { source: "job" } };
-  if (typeof cleared === "string" && cleared === identity(halt)) return null;
+  if (readMarker(cleared)?.id === identity(halt)) return null;
   if (halt.until !== undefined) {
     const end = Date.parse(halt.until);
     if (Number.isFinite(end) && end <= now.getTime()) return null;
@@ -155,20 +175,31 @@ export async function readHalt(ctx: StateCtx, companyId: string, now: Date = new
 
 /**
  * The rule's stored halt as written, also when it was cleared or has ended,
- * and whether a board user cleared it. Null for no record or a damaged one.
+ * and whether it was cleared, by a board user or by the rules job's headroom
+ * release. `clearedBy` is set only when the marker names the clearer: a
+ * marker from before RK9-582 does not. Null for no record or a damaged one.
  */
-export async function storedRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule): Promise<{ halt: HaltState; cleared: boolean } | null> {
+export async function storedRuleHalt(
+  ctx: StateCtx,
+  companyId: string,
+  rule: HaltRule,
+): Promise<{ halt: HaltState; cleared: boolean; clearedBy?: HaltClearer } | null> {
   const [value, cleared] = await Promise.all([ctx.state.get(haltKey(companyId, rule)), ctx.state.get(clearedKey(companyId, rule))]);
   if (!isHalt(value)) return null;
   const halt = { ...value, rule };
-  return { halt, cleared: typeof cleared === "string" && cleared === identity(halt) };
+  const marker = readMarker(cleared);
+  if (marker?.id !== identity(halt)) return { halt, cleared: false };
+  return marker.by ? { halt, cleared: true, clearedBy: marker.by } : { halt, cleared: true };
 }
 
-/** Clears the rule's halt when it is the one named by `id` (or `since` for a halt without one). False when it is not in force. */
-export async function clearRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule, id: string, now: Date = new Date()): Promise<boolean> {
+/**
+ * Clears the rule's halt when it is the one named by `id` (or `since` for a
+ * halt without one), and records who cleared it. False when it is not in force.
+ */
+export async function clearRuleHalt(ctx: StateCtx, companyId: string, rule: HaltRule, id: string, by: HaltClearer, now: Date = new Date()): Promise<boolean> {
   const halt = await readRuleHalt(ctx, companyId, rule, now);
   if (!halt || identity(halt) !== id) return false;
-  await ctx.state.set(clearedKey(companyId, rule), id);
+  await ctx.state.set(clearedKey(companyId, rule), { id, by });
   return true;
 }
 
@@ -181,8 +212,8 @@ export async function setHalt(ctx: StateCtx, companyId: string, halt: HaltState)
 }
 
 /**
- * Clears the halt in force whose `since` is the given one (from the
- * preview). `cleared` is null when no such halt is in force; `current` is the
+ * A board user's clear of the halt in force whose `since` is the given one
+ * (from the preview). `cleared` is null when no such halt is in force; `current` is the
  * halt still in force afterwards, if any. Throws when the state cannot be
  * read or written.
  */
@@ -195,7 +226,7 @@ export async function clearHalt(
   for (const rule of HALT_RULES) {
     const halt = await readRuleHalt(ctx, companyId, rule, now);
     if (!halt || halt.since !== since) continue;
-    await ctx.state.set(clearedKey(companyId, rule), identity(halt));
+    await ctx.state.set(clearedKey(companyId, rule), { id: identity(halt), by: "board" satisfies HaltClearer });
     return { cleared: halt, current: await readHalt(ctx, companyId, now) };
   }
   return { cleared: null, current: await readHalt(ctx, companyId, now) };
