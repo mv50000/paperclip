@@ -379,7 +379,10 @@ the core chat-channels bot is never shared. See
   note. A re-check counts a failed listing or halt read as a failed run
   too, and when a re-check whose runs all failed is dropped at the end of
   its window it sends one Telegram alert (`recheck-dropped:<brand>:<rule>:<due
-  time>`); a failed send keeps the re-check for the next tick.
+  time>`); a failed send keeps the re-check for the next tick, at most
+  24 h past its window (RK9-580). Only a board user's clear of its halt
+  skips the alert; a halt that ran out still alerts. A drop removes only
+  the re-check the tick read, not a newer one.
 - **Job** `scheduled-pause` (every 5 min UTC). It sends the 80 % and 100 % MTD
   alerts (once per brand, local month and threshold) and the risk alerts
   (once per brand, local day and risk): no `spend_cap`, Meta's headroom above
