@@ -28,8 +28,8 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   `cardsError`, a halt that was not stored after AD_HALT_WRITE_ATTEMPTS
  *   writes `haltError` (RK9-567). A live pause carries `idempotencyKey`
  *   (one per confirmation in the UI). The key's marker is written only after
- *   a pause that Meta confirmed, with the halt stored, the cards closed and
- *   no activation running (RK9-581): a repeat with the same key, on an
+ *   a pause that Meta confirmed, with the halt stored, the cards closed, the
+ *   audit row written and no activation running (RK9-581): a repeat with the same key, on an
  *   ad that is already PAUSED, then writes nothing and returns
  *   `duplicate: true` (RK9-563). Any other repeat runs the whole pause again:
  *   the first call may still run, have died before its halt and card close,
@@ -251,9 +251,9 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}${haltError ? `; the pause-ad halt was not stored: ${haltError}` : ""}${activationRunning ? "; an approved activation of the ad may still be running and set it ACTIVE: check the ad's status" : ""}`;
       throw new Error(`The pause of ad ${adId} failed: ${error}. ${cards}`);
     }
-    // Only a pause with its halt stored and its cards closed ends the repeat: otherwise a retry writes the halt and closes the cards again,
-    // and shows their warnings again instead of a bare duplicate (RK9-581 verifier).
-    if (adHalt !== null && !cardsError && !activationRunning) {
+    // Only a pause with its halt stored, its cards closed and its audit row written ends the repeat: otherwise a retry
+    // does that work again and shows its warnings again instead of a bare duplicate (RK9-581 verifier).
+    if (adHalt !== null && !cardsError && !activationRunning && !auditError) {
       try {
         await deps.store.claim(companyId, onceKey, PAUSE_MARKER_KIND, { adId });
       } catch (cause) {

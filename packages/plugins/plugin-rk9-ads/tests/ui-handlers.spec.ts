@@ -481,6 +481,23 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(retry).not.toHaveProperty("haltError");
   });
 
+  it("pause-ad: a pause whose audit row was not written writes no marker, so the retry writes it (RK9-581 verifier)", async () => {
+    const key = randomUUID();
+    const execute = r.harness.ctx.db.execute.bind(r.harness.ctx.db);
+    r.harness.ctx.db.execute = async (sql: string, params?: unknown[]) => {
+      if (/INSERT INTO \S+\.rule_actions/.test(sql)) throw new Error("ledger down");
+      return execute(sql, params);
+    };
+    const first = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(first).toMatchObject({ paused: true, auditError: expect.any(String) });
+    expect(r.executes.filter((call) => /INSERT INTO \S+\.alert_dedupe/.test(call.sql))).toEqual([]);
+    r.harness.ctx.db.execute = execute;
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(retry).not.toHaveProperty("auditError");
+    expect(r.ruleActionInserts()).toHaveLength(1);
+  });
+
   it("pause-ad: a marker or prune failure does not fail a confirmed pause (RK9-581)", async () => {
     const execute = r.harness.ctx.db.execute.bind(r.harness.ctx.db);
     r.harness.ctx.db.execute = async (sql: string, params?: unknown[]) => {
