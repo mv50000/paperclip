@@ -27,8 +27,10 @@ import {
  * Spend guard, kill switch and scheduled pause (A6, RK9-511).
  *
  * - job `scheduled-pause`: alerts, scheduled pause, data gate (scheduled-pause.ts)
- * - data `spend-guard`: MTD, cap, spend_cap, projection, % used, alerted thresholds,
- *   and `halt`: the halt in force or null (`haltError` when it cannot be read)
+ * - read action `spend-guard`: MTD, cap, spend_cap, projection, % used, alerted
+ *   thresholds, and `halt`: the halt in force or null (`haltError` when it
+ *   cannot be read). An action, so the company comes from `context.companyId`
+ *   (RK9-603).
  * - action `pause-all`: the UI's "Pysäytä kaikki" (dry-run preview, then confirm)
  * - action `clear-halt`: lifts the halt in force (RK9-557, RK9-561). Dry run
  *   by default; a real clear needs `confirm: true`, a board user (an agent
@@ -49,7 +51,7 @@ import {
  * - gate kind `pause_all`: one tap on the card's button pauses everything
  */
 
-export const SPEND_GUARD_DATA_KEY = "spend-guard";
+export const SPEND_GUARD_ACTION_KEY = "spend-guard";
 export const PAUSE_ALL_ACTION_KEY = "pause-all";
 export const CLEAR_HALT_ACTION_KEY = "clear-halt";
 export const HALT_CLEARED_ACTIVITY = "rk9-ads spend guard: halt cleared";
@@ -181,10 +183,9 @@ export function registerSpendGuard(runtime: FeatureRuntime, overrides: SpendGuar
 
   ctx.jobs.register(SCHEDULED_PAUSE_JOB_KEY, createScheduledPauseJob(deps));
 
-  ctx.data.register(SPEND_GUARD_DATA_KEY, async (params) => {
-    // The host sets companyId to the company it authorized for this call.
-    const companyId = typeof params.companyId === "string" ? params.companyId : null;
-    if (!companyId) return { state: "error", error: "company context is required" };
+  ctx.actions.register(SPEND_GUARD_ACTION_KEY, async (_params, context) => {
+    const companyId = context.companyId;
+    if (!companyId) throw new Error("company context is required");
     const halt = await haltView(ctx, companyId, now());
     const loaded = await loadEnabled(ctx, companyId);
     if (!loaded.ok) return { state: loaded.state, error: loaded.error, ...halt };

@@ -17,7 +17,7 @@ import { createLedger } from "../src/db.js";
 import { registerGate, type GateOverrides } from "../src/features/gate/register.js";
 import { HALT_NAMESPACE, newAdHalt, readAdHalt, readHalt, setAdHalt, setHalt, type AdHaltState, type HaltState } from "../src/features/spend-guard/halt.js";
 import { pauseAll, type PauseAllResult, type PauseRule } from "../src/features/spend-guard/killswitch.js";
-import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_DATA_KEY, UNDO_ACKNOWLEDGED_ACTIVITY } from "../src/features/spend-guard/register.js";
+import { CLEAR_HALT_ACTION_KEY, HALT_CLEARED_ACTIVITY, PAUSE_ALL_ACTION_KEY, registerSpendGuard, SPEND_GUARD_ACTION_KEY, UNDO_ACKNOWLEDGED_ACTIVITY } from "../src/features/spend-guard/register.js";
 import { addPendingUndos, readPendingUndos, reportUndoFailure, type PendingUndo } from "../src/features/spend-guard/pending-undo.js";
 import { memoryOnceStore } from "../src/features/spend-guard/support.js";
 import { TelegramController } from "../src/features/telegram/controller.js";
@@ -802,7 +802,7 @@ describe("clearing the halt is board-only", () => {
     const r = await rig();
     await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD);
 
-    const data = await r.harness.getData<{ halt: HaltState | null }>(SPEND_GUARD_DATA_KEY, { companyId: COMPANY_A });
+    const data = await r.harness.performAction<{ halt: HaltState | null }>(SPEND_GUARD_ACTION_KEY, {}, AGENT);
     expect(data.halt).toMatchObject({ brandCode: "OLL", reason: "hätä" });
 
     await expect(r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true }, AGENT)).rejects.toThrow(/board-only/);
@@ -823,7 +823,7 @@ describe("clearing the halt is board-only", () => {
     expect(r.harness.activity.find((entry) => entry.message === HALT_CLEARED_ACTIVITY)).toMatchObject({
       metadata: { clearedBy: { userId: "board-1" }, reason: "tarkistettu" },
     });
-    expect((await r.harness.getData<{ halt: HaltState | null }>(SPEND_GUARD_DATA_KEY, { companyId: COMPANY_A })).halt).toBeNull();
+    expect((await r.harness.performAction<{ halt: HaltState | null }>(SPEND_GUARD_ACTION_KEY, {}, BOARD)).halt).toBeNull();
 
     const next = await r.cards.openActivationCard(publication());
     await tap(r, next.messageId);
@@ -947,7 +947,10 @@ describe("clearing the halt is board-only", () => {
     await r.harness.performAction(PAUSE_ALL_ACTION_KEY, { dryRun: false, confirm: true, reason: "hätä" }, BOARD);
     const halt = (await haltOf(r))!;
     const boardB = { companyId: COMPANY_B, actor: { type: "user" as const, userId: "board-b" } };
-    expect((await r.harness.getData<{ halt: HaltState | null }>(SPEND_GUARD_DATA_KEY, { companyId: COMPANY_B })).halt).toBeNull();
+    expect((await r.harness.performAction<{ halt: HaltState | null }>(SPEND_GUARD_ACTION_KEY, {}, boardB)).halt).toBeNull();
+    // The company comes from the host context, not from params (RK9-603).
+    expect((await r.harness.performAction<{ halt: HaltState | null }>(SPEND_GUARD_ACTION_KEY, { companyId: COMPANY_A }, boardB)).halt).toBeNull();
+    await expect(r.harness.performAction(SPEND_GUARD_ACTION_KEY, {}, { actor: boardB.actor })).rejects.toThrow("company context is required");
     expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, {}, boardB)).toMatchObject({ dryRun: true, halt: null });
     expect(await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, boardB)).toEqual({
       dryRun: false,
