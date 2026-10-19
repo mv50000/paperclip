@@ -17,7 +17,9 @@
  *    for its cooldown while that pause's halt is in force (RK9-541), so an
  *    object the operator restarted is not paused again every hour.
  *    Without the status the cap rule still runs, unless this month's cap
- *    halt was cleared: an unread status must not override that.
+ *    halt was cleared at the cap it paused at: an unread status must not
+ *    override that. After a clear under a raised cap (the headroom release)
+ *    it runs, so spend at 90 % of the new cap still pauses (RK9-579).
  *    Threshold rules wait for insights-daily-close; still waiting at 06:00
  *    local time fails the run, so a broken close is seen. When the ad account
  *    reports in another time zone than the brand's, the insights dates and
@@ -64,7 +66,7 @@ import type { Ledger } from "../../db.js";
 import { evaluateFatigue, type AdFatigue } from "../../insights/fatigue-issues.js";
 import { addDays } from "../../insights/mtd.js";
 import { createInsightsStore } from "../../insights/store.js";
-import { isLocalTimeAtOrAfter, localDate } from "../../kit/local-time.js";
+import { isLocalTimeAtOrAfter, localDate, nextLocalMonthStart } from "../../kit/local-time.js";
 import type { MetaClientMode, MetaGraphClient } from "../../meta/graph.js";
 import { listAds, listCampaigns, setObjectStatus } from "../../meta/methods.js";
 import { checkSpend } from "../spend-guard/guard.js";
@@ -234,7 +236,7 @@ async function readInputs(
     // pauseAll lists its own targets (RK9-541).
     status = { adAccountId: config.meta.adAccountId, ads: [], campaigns: [], unread: true };
     runnable = capOnly(runnable);
-    const cleared = await capHaltCleared(deps, companyId, now);
+    const cleared = await capHaltCleared(deps, companyId, config, now);
     if (cleared) runnable = { ...runnable, list: [] };
     failures.push(
       `${brand}: Meta status read failed (${safeError(error)}), ${cleared ? `no rule evaluated (${cleared})` : "only pause_all_cap evaluated"} (fail-open)`,
@@ -374,17 +376,31 @@ async function capHaltCooldown(
 
 /**
  * Why the cap rule waits when the status could not be read: this month's
- * cap halt was cleared, by a board user or by the headroom release. Without
- * the status that clear must not be overridden every hour (a new halt each
- * run). Null when the rule may run, also when the halt cannot be read (the
- * cap rule then runs, as a pause is the safe side).
+ * cap halt was cleared at the cap it paused at. Without the status that clear
+ * must not be overridden every hour (a new halt each run). Null when the rule
+ * may run, also when the halt cannot be read (the cap rule then runs, as a
+ * pause is the safe side).
+ *
+ * A clear while `monthlyCapEur` is above the cap the halt stored (as after
+ * the headroom release, RK9-579) does not make the rule wait: the
+ * clear said nothing about the new cap, so spend at 90 % of it pauses as it
+ * would with a status read. A halt without the cap figure (stored before
+ * RK9-565) waits, as only a board user can clear it. A halt without `until`
+ * (a hand edit or a legacy record) ends with the local month of its `since`,
+ * like every cap halt; one without a readable `since` does not make the rule
+ * wait.
  */
-async function capHaltCleared(deps: RulesDeps, companyId: string, now: Date): Promise<string | null> {
+async function capHaltCleared(deps: RulesDeps, companyId: string, config: BrandConfig, now: Date): Promise<string | null> {
   try {
     const stored = await storedRuleHalt(deps.ctx, companyId, "pause_all_cap");
     if (!stored?.cleared) return null;
-    const end = stored.halt.until === undefined ? Number.NaN : Date.parse(stored.halt.until);
-    if (Number.isFinite(end) && end <= now.getTime()) return null;
+    const { halt } = stored;
+    const until = halt.until === undefined ? Number.NaN : Date.parse(halt.until);
+    const since = Date.parse(halt.since);
+    const end = Number.isFinite(until) ? until : Number.isFinite(since) ? nextLocalMonthStart(new Date(since), config.timeZone).getTime() : Number.NaN;
+    if (!(end > now.getTime())) return null;
+    const pausedAt = halt.cap?.monthlyCapEur;
+    if (typeof pausedAt === "number" && Number.isFinite(pausedAt) && config.monthlyCapEur > pausedAt) return null;
     return "this month's cap halt was cleared; the cap rule waits for a status read";
   } catch {
     return null;

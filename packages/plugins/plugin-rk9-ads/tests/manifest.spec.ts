@@ -153,3 +153,24 @@ describe("manifest", () => {
     expect(manifest.tools?.map((tool) => tool.name).filter((name) => /activ|resume|unpause|scale/.test(name))).toEqual([]);
   });
 });
+
+describe("the manifest bundle (RK9-579)", () => {
+  it("carries no zod, and its manifest equals the source's", async () => {
+    const esbuild = await import("esbuild");
+    const { createPluginBundlerPresets } = await import("@paperclipai/plugin-sdk/bundlers");
+    // A runtime path: the build script is plain JS without types.
+    const pluginPath = new URL("../scripts/manifest-without-zod.mjs", import.meta.url).href;
+    const { manifestWithoutZod } = (await import(pluginPath)) as { manifestWithoutZod: import("esbuild").Plugin };
+    const presets = createPluginBundlerPresets({ uiEntry: "src/ui/index.tsx" });
+    const root = new URL("..", import.meta.url).pathname;
+    const result = await esbuild.build({ ...presets.esbuild.manifest, absWorkingDir: root, plugins: [manifestWithoutZod], write: false, metafile: true, sourcemap: false });
+    // esbuild parses zod (config.ts imports schema.ts) but must put none of it in the bundle.
+    const [output] = Object.entries(result.metafile.outputs).filter(([path]) => path.endsWith("manifest.js"));
+    const bundledInputs = Object.entries(output![1].inputs).filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path);
+    expect(bundledInputs).toContain("src/config.ts");
+    expect(bundledInputs.filter((input) => input.includes("node_modules/zod") || input.endsWith("features/rules/schema.ts"))).toEqual([]);
+    const code = result.outputFiles.find((file) => file.path.endsWith("manifest.js"))!.text;
+    const bundled = (await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`)) as { default: PaperclipPluginManifestV1 };
+    expect(JSON.parse(JSON.stringify(bundled.default))).toEqual(JSON.parse(JSON.stringify(manifest)));
+  });
+});

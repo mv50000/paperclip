@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../src/config.js";
+import { prepareRules } from "../src/features/rules/editor.js";
 import { DEFAULT_RULES, parseRules } from "../src/features/rules/schema.js";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
@@ -156,6 +157,18 @@ describe("rule schema (A11)", () => {
     const config = brandConfig({ rules: { list: [JSON.parse(JSON.stringify(rule))] } });
     expect(parseBrandConfig(config).state).toBe("invalid");
     expect(validator.validateInstanceConfig(config, manifest.instanceConfigSchema).valid).toBe(false);
+  });
+
+  it("a second pause_all_cap entry: the editor refuses it, the host's save check cannot (README, RK9-579)", async () => {
+    const validator = await importRepoModule<{
+      validateInstanceConfig(config: Record<string, unknown>, schema: unknown): { valid: boolean };
+    }>("server/src/services/plugin-config-validator.ts");
+    const list = [{ type: "pause_all_cap" }, { type: "pause_all_cap", mode: "live" }];
+    expect(prepareRules(brandConfig(), { list })).toEqual({ ok: false, errors: ["rules.list[1] (pause_all_cap).ruleId: duplicate rule id pause_all_cap"] });
+    const config = brandConfig({ rules: { list } });
+    // JSON Schema draft-07 cannot count matching items: the host saves it, and the brand turns invalid.
+    expect(validator.validateInstanceConfig(config, manifest.instanceConfigSchema).valid).toBe(true);
+    expect(parseBrandConfig(config).state).toBe("invalid");
   });
 
   it("keeps the built-in cap rule's cooldown at 24 h or less, so it cannot sleep through a month", async () => {
