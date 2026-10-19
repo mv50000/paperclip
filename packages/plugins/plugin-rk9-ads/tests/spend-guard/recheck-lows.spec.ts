@@ -1,8 +1,9 @@
 /**
  * RK9-580: the Lows of the re-check's drop alert (RK9-570 verifier).
  *
- * - A halt that ended before the drop tick sends no alert to pause by hand
- *   what the board may want running; an unread halt still alerts.
+ * - A board user's clear of the halt before the drop tick sends no alert to
+ *   pause by hand what the board may want running. A halt that ran out or
+ *   cannot be read still alerts.
  * - The drop removes only the re-check the tick read, not a newer one a kill
  *   switch stored during the tick.
  * - The failure lines cap the stored last error at 300 characters.
@@ -14,7 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { readHalt, type HaltState } from "../../src/features/spend-guard/halt.js";
+import { readHalt, setHalt, type HaltState } from "../../src/features/spend-guard/halt.js";
 import { readRecheck, RECHECK_WINDOW_MS, scheduleRecheck } from "../../src/features/spend-guard/recheck.js";
 import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../../src/features/spend-guard/register.js";
 import { RECHECK_ALERT_KEEP_MS } from "../../src/features/spend-guard/scheduled-pause.js";
@@ -63,7 +64,7 @@ async function failingTick(r: Rig, iso: string): Promise<string> {
 
 const recheckAlerts = (r: Rig) => r.notifier.messages.filter((message) => message.text.includes("uudelleentarkistus epäonnistui"));
 
-describe("a halt that ended before the drop tick (RK9-580 item 1)", () => {
+describe("a halt cleared before the drop tick (RK9-580 item 1)", () => {
   it("a board user's clear after the failed ticks drops the re-check without the alert, and the run says why", async () => {
     const r = rig({ meta: activeMeta() });
     const halt = await killSwitch(r);
@@ -74,8 +75,32 @@ describe("a halt that ended before the drop tick (RK9-580 item 1)", () => {
 
     await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, BOARD);
     const message = await failingTick(r, "2026-10-21T10:20:00Z");
-    expect(message).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time \(last error: listing failed: .*graph down.*\); the halt ended before the drop, dropped without the alert/);
+    expect(message).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time \(last error: listing failed: .*graph down.*\); a board user cleared the halt, dropped without the alert/);
     expect(message).not.toContain("pause by hand");
+    expect(recheckAlerts(r)).toEqual([]);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+
+  it("a halt that ran out before the drop tick (the scheduled pause's 06:00) still alerts", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await setHalt(r.harness.ctx, COMPANY_A, { ...halt, until: "2026-10-21T10:10:00.000Z" });
+    expect(await failingTick(r, "2026-10-21T10:20:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) within 15 min .*, dropped; check Meta and pause by hand/);
+    expect(recheckAlerts(r)).toHaveLength(1);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
+  });
+
+  it("a clear within the window after a failed run drops it and says so", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await r.harness.performAction(CLEAR_HALT_ACTION_KEY, { dryRun: false, confirm: true, since: halt.since }, BOARD);
+    expect(await failingTick(r, "2026-10-21T10:10:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time .*; the halt is no longer in force, dropped/);
     expect(recheckAlerts(r)).toEqual([]);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
   });

@@ -326,25 +326,33 @@ export async function runDueRechecks(
         failures.push(`${prefix}: no tick ran within ${RECHECK_WINDOW_MS / 60_000} min of ${recheck.dueAt}, dropped unrun`);
         continue;
       }
-      if (recheck.haltId !== null) {
-        // Read before the drop alert too: a board user who cleared the halt allowed activations again (RK9-580).
-        let halt: Awaited<ReturnType<typeof readRuleHalt>> | "unread";
+      if (recheck.haltId === null) {
+        // The halt write failed: the re-check runs anyway.
+      } else if (expired) {
+        // Only a board user's clear of this halt skips the alert (RK9-580): one that ran out,
+        // was replaced or cannot be read still alerts, because the objects may spend.
+        const stored = await storedRuleHalt(deps.ctx, companyId, rule).catch(() => null);
+        if (stored?.cleared && haltIdentity(stored.halt) === recheck.haltId) {
+          deps.ctx.logger.info("rk9-ads pause: halt cleared, re-check dropped without the alert", { companyId, rule, attempts: recheck.attempts });
+          await drop();
+          // No alert to pause by hand what the board may want running: the run says the ticks failed.
+          failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); a board user cleared the halt, dropped without the alert`);
+          continue;
+        }
+      } else {
+        let halt: Awaited<ReturnType<typeof readRuleHalt>>;
         try {
           halt = await readRuleHalt(deps.ctx, companyId, rule, now);
         } catch (error) {
-          if (!expired) {
-            failures.push(`${prefix}: halt not read (${safeError(error)}), retrying next tick`);
-            await noteFailure(`halt not read: ${safeError(error)}`);
-            continue;
-          }
-          // At the window's end an unread halt still alerts: the objects may spend.
-          halt = "unread";
+          failures.push(`${prefix}: halt not read (${safeError(error)}), retrying next tick`);
+          await noteFailure(`halt not read: ${safeError(error)}`);
+          continue;
         }
-        if (halt !== "unread" && (!halt || haltIdentity(halt) !== recheck.haltId)) {
+        if (!halt || haltIdentity(halt) !== recheck.haltId) {
           deps.ctx.logger.info("rk9-ads pause: halt no longer in force, re-check dropped", { companyId, rule, attempts: recheck.attempts ?? 0 });
           await drop();
-          // No alert to pause by hand what the board may want running: the run says the ticks failed and the halt ended.
-          if (expired) failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); the halt ended before the drop, dropped without the alert`);
+          // Earlier runs failed: the run says how the re-check ended (RK9-580).
+          if (recheck.attempts) failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); the halt is no longer in force, dropped`);
           continue;
         }
       }
