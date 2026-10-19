@@ -51,7 +51,7 @@ import { haltIdentity, readRuleHalt, storedRuleHalt } from "./halt.js";
 import { haltUntil, pauseAll, PauseListError, retryFailures, stopFailures, type PauseAllDeps, type PauseAllResult, type StopActivations } from "./killswitch.js";
 import { loadPauseConfig } from "./pause-config.js";
 import { readPendingUndos, retryPendingUndos, type UndoRetryDeps } from "./pending-undo.js";
-import { dropRecheck, noteRecheckFailure, readRecheck, RECHECK_RULES, RECHECK_WINDOW_MS, type Recheck, type RecheckRule } from "./recheck.js";
+import { dropRecheck, noteRecheckFailure, readRecheck, RECHECK_DELAY_MS, RECHECK_RULES, RECHECK_WINDOW_MS, type Recheck, type RecheckRule } from "./recheck.js";
 import { brandReadClient, safeError, type Initiator, type OnceStore, type SpendGuardNotifier } from "./support.js";
 
 export const SCHEDULED_PAUSE_JOB_KEY = "scheduled-pause";
@@ -348,14 +348,20 @@ export async function runDueRechecks(
             await drop();
             continue;
           }
-          // A newer pause of the same rule set this halt after the due time (RK9-606): it listed everything again and stores its own re-check.
-          if (halt && Date.parse(halt.since) > due) {
-            deps.ctx.logger.info("rk9-ads pause: halt replaced by a newer pause, re-check dropped without the alert", { companyId, rule, attempts: recheck.attempts });
-            await drop();
-            failures.push(`${prefix}: ran ${recheck.attempts} time(s) and failed each time (last error: ${lastError}); a newer ${rule} at ${halt.since} lists everything again, dropped without the alert`);
+          /**
+           * A newer pause of the same rule set this halt after the due time
+           * within the last RECHECK_DELAY_MS (RK9-606): a kill switch fired
+           * during the tick stores its own re-check right after its halt, and
+           * that one replaces this one. So it is kept, uncounted, without the
+           * alert. A pause that stored none (its config or re-check store
+           * failed) leaves this one for the next tick, which alerts.
+           */
+          const since = halt ? Date.parse(halt.since) : Number.NaN;
+          if (since > due && now.getTime() - since <= RECHECK_DELAY_MS) {
+            deps.ctx.logger.info("rk9-ads pause: halt replaced by a newer pause just now, re-check kept for its own", { companyId, rule, attempts: recheck.attempts, haltSince: halt!.since });
             continue;
           }
-          // A halt that ran out (a scheduled pause shortly before 06:00) or was replaced at or before the due time goes to the alert below.
+          // A halt that ran out (a scheduled pause shortly before 06:00) or was replaced, and no newer re-check took this one's place, goes to the alert below.
           haltEnded = true;
         }
       }

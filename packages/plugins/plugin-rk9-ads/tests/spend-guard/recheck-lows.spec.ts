@@ -22,8 +22,9 @@
  * - A replaced halt at the window's end alerts.
  *
  * RK9-606 (RK9-584 verifier Low): a halt replaced within the window by a
- * newer pause of the same rule after the re-check's due time drops it
- * without the alert: the newer pause lists everything again.
+ * newer pause of the same rule after the re-check's due time keeps the
+ * re-check for one tick without the alert, so the newer pause's own
+ * re-check takes its place. When none does, the next tick alerts.
  *
  * Meta is a routing fake and Telegram a recording notifier: no real Meta or
  * Telegram call is made.
@@ -266,13 +267,13 @@ describe("a halt that ends within the window after failed runs (RK9-584 item 1)"
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "scheduled_pause")).toBeNull();
   });
 
-  it("a halt replaced at or before the due time alerts too", async () => {
+  it("a halt replaced within the window alerts too", async () => {
     const r = rig({ meta: activeMeta() });
     const halt = await killSwitch(r);
     reactivate(r.meta);
     failListing(r.meta);
     await failingTick(r, "2026-10-21T10:05:00Z");
-    await setHalt(r.harness.ctx, COMPANY_A, { ...halt, id: "newer-halt", since: "2026-10-21T10:01:00.000Z" });
+    await setHalt(r.harness.ctx, COMPANY_A, { ...halt, id: "newer-halt", since: "2026-10-21T10:07:00.000Z" });
     expect(await failingTick(r, "2026-10-21T10:10:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time .*; its halt is no longer in force, dropped; check Meta/);
     expect(recheckAlerts(r)).toHaveLength(1);
   });
@@ -375,13 +376,8 @@ describe("a replaced halt at the window's end (RK9-584 item 4)", () => {
 });
 
 describe("a halt replaced by a newer pause after the due time (RK9-606 item 1)", () => {
-  it("a kill switch fired during the tick, before its re-check is stored, drops the old one without the alert", async () => {
-    const r = rig({ meta: activeMeta() });
-    const halt = await killSwitch(r);
-    reactivate(r.meta);
-    failListing(r.meta);
-    await failingTick(r, "2026-10-21T10:05:00Z");
-    // The new kill switch's halt write, which the tick reads before the kill switch stores its re-check.
+  /** A kill switch's halt write during the tick, which the tick reads before that kill switch stores its re-check. */
+  async function tickDuringKillSwitch(r: Rig, halt: HaltState): Promise<void> {
     const state = r.harness.ctx.state;
     const get = state.get.bind(state);
     let pending = true;
@@ -392,10 +388,36 @@ describe("a halt replaced by a newer pause after the due time (RK9-606 item 1)",
       }
       return get(input);
     };
-    const message = await failingTick(r, "2026-10-21T10:10:00Z");
-    expect(message).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time \(last error: listing failed: .*graph down.*\); a newer kill_switch at 2026-10-21T10:09:59.000Z lists everything again, dropped without the alert/);
-    expect(message).not.toContain("pause by hand");
+    r.clock.now = new Date("2026-10-21T10:10:00Z");
+    await r.harness.runJob("scheduled-pause").catch(() => undefined);
+    state.get = get;
+  }
+
+  it("the old re-check sends no alert and the newer kill switch's re-check takes its place", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await tickDuringKillSwitch(r, halt);
     expect(recheckAlerts(r)).toEqual([]);
+    // The kill switch goes on to store its re-check.
+    await scheduleRecheck(r.harness.ctx, COMPANY_A, { rule: "kill_switch", haltId: "newer-halt", dueAt: "2026-10-21T10:10:59.000Z", reason: "hätä 2" });
+    await failingTick(r, "2026-10-21T10:15:00Z");
+    expect(recheckAlerts(r)).toEqual([]);
+    expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toMatchObject({ haltId: "newer-halt", attempts: 1 });
+  });
+
+  it("a newer halt whose pause stored no re-check (its config failed) alerts on the next tick", async () => {
+    const r = rig({ meta: activeMeta() });
+    const halt = await killSwitch(r);
+    reactivate(r.meta);
+    failListing(r.meta);
+    await failingTick(r, "2026-10-21T10:05:00Z");
+    await tickDuringKillSwitch(r, halt);
+    expect(recheckAlerts(r)).toEqual([]);
+    expect(await failingTick(r, "2026-10-21T10:15:00Z")).toMatch(/kill_switch re-check: ran 1 time\(s\) and failed each time .*; its halt is no longer in force, dropped; check Meta and pause by hand/);
+    expect(recheckAlerts(r)).toHaveLength(1);
     expect(await readRecheck(r.harness.ctx, COMPANY_A, "kill_switch")).toBeNull();
   });
 });
