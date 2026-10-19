@@ -48,6 +48,8 @@ interface PreparedRules {
   rules?: { liveMode: boolean; list?: Array<Record<string, unknown>> };
   /** What the save must confirm, against the config saved now (RK9-566); `live` lists what starts pausing ads (RK9-563). */
   confirm?: { weakening: string[]; liveOn: boolean; live?: string[] };
+  /** The saved rules are no longer the ones this draft loaded (RK9-581). */
+  stale?: boolean;
 }
 
 /**
@@ -323,12 +325,15 @@ function RuleEditor(props: { companyId: string | null }) {
   const [dry, setDry] = useState<DryRunResult | null>(null);
   /** `updatedAt` of the saved config this draft started from; the save refuses a newer one (RK9-563). Null until it was read. */
   const [version, setVersion] = useState<{ updatedAt: string | null } | null>(null);
+  /** The rules block the draft started from; the worker refuses the save when the saved rules differ from it (RK9-581). */
+  const [loaded, setLoaded] = useState<{ liveMode: boolean; list: Array<Record<string, unknown>> } | null>(null);
 
   useEffect(() => {
     if (!rules.data || rules.data.state !== "enabled") return;
     // propose_scale stays off and is not edited here; the worker keeps the saved entries (G9).
     setDraft((rules.data.rules ?? []).filter((rule) => rule.type !== "propose_scale").map(toEditor));
     setLiveMode(rules.data.liveMode === true);
+    setLoaded({ liveMode: rules.data.liveMode === true, list: rules.data.rules ?? [] });
     if (!props.companyId) return;
     let current = true;
     setVersion(null);
@@ -354,12 +359,19 @@ function RuleEditor(props: { companyId: string | null }) {
       </Section>
     );
   }
-  async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[], confirmedLive: boolean) {
+  async function write(prepared: NonNullable<PreparedRules["rules"]>, confirmedWeakening: string[], confirmedLive: string[]) {
     // Without the loaded version a newer config could be overwritten: no save (RK9-563).
     if (!version) throw new Error("Tallennetun configin versiota ei ole luettu. Lataa sivu uudelleen ja tallenna sitten.");
     setVersion({ updatedAt: await saveRulesBlock(props.companyId!, prepared, fetch, confirmedWeakening, confirmedLive, version.updatedAt) });
     setPending(null);
     toast({ title: "Säännöt tallennettu", tone: "success" });
+    rules.refresh();
+  }
+
+  /** A draft older than the saved rules is not saved: the editor reloads them (RK9-581). */
+  function reloadStale() {
+    setPending(null);
+    setErrors(["Tallennetut säännöt muuttuivat sivun latauksen jälkeen, eikä luonnosta tallennettu. Säännöt ladataan uudelleen: tee muutokset ja tallenna uudelleen."]);
     rules.refresh();
   }
 
@@ -374,9 +386,13 @@ function RuleEditor(props: { companyId: string | null }) {
     setErrors([]);
     try {
       const list = draft!.map(fromEditor);
-      const prepared = (await prepare({ liveMode, list })) as PreparedRules;
+      const prepared = (await prepare({ liveMode, list, loaded })) as PreparedRules;
       if (prepared.ok && prepared.rules) {
-        await write(prepared.rules, [], false);
+        await write(prepared.rules, [], []);
+        return;
+      }
+      if (prepared.stale) {
+        reloadStale();
         return;
       }
       if (prepared.confirm && (prepared.confirm.weakening.length > 0 || prepared.confirm.liveOn)) {
@@ -401,9 +417,13 @@ function RuleEditor(props: { companyId: string | null }) {
     setBusy(true);
     setErrors([]);
     try {
-      const prepared = (await prepare({ liveMode: pending.liveMode, list: pending.list, confirmedWeakening: pending.weakening, confirmLive: pending.liveOn })) as PreparedRules;
+      const prepared = (await prepare({ liveMode: pending.liveMode, list: pending.list, confirmedWeakening: pending.weakening, confirmedLive: pending.live, loaded })) as PreparedRules;
       if (prepared.ok && prepared.rules) {
-        await write(prepared.rules, pending.weakening, pending.liveOn);
+        await write(prepared.rules, pending.weakening, pending.live);
+        return;
+      }
+      if (prepared.stale) {
+        reloadStale();
         return;
       }
       if (prepared.confirm && (prepared.confirm.weakening.length > 0 || prepared.confirm.liveOn)) {

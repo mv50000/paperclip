@@ -27,12 +27,15 @@ import { buildOverview, buildSettings, buildWidget, companyOf, sanitize, type Vi
  *   old card cannot activate it again (RK9-562); a failed close is
  *   `cardsError`, a halt that was not stored after AD_HALT_WRITE_ATTEMPTS
  *   writes `haltError` (RK9-567). A live pause carries `idempotencyKey`
- *   (one per confirmation in the UI): a repeat with the same key, on an ad
- *   that is already PAUSED, writes nothing and returns `duplicate: true`
- *   (RK9-563). On an ad that is not PAUSED the repeat pauses again: the
- *   first call may still run, have died, or have failed after the browser
- *   gave up on it, and a second audit row beats an ad that keeps spending.
- *   A failed pause gives the key back.
+ *   (one per confirmation in the UI). The key's marker is written only after
+ *   a pause that Meta confirmed, with the halt stored, the cards closed, the
+ *   audit row written and no activation running (RK9-581): a repeat with the same key, on an
+ *   ad that is already PAUSED, then writes nothing and returns
+ *   `duplicate: true` (RK9-563). Any other repeat runs the whole pause again:
+ *   the first call may still run, have died before its halt and card close,
+ *   or have failed, and a second audit row beats an ad that keeps spending.
+ *   Markers older than PAUSE_MARKER_HOURS are deleted when a new one is
+ *   written, so the table does not grow by one row per pause.
  *
  * There is no activate, resume or unpause action (G1): an ad goes ACTIVE only
  * through the Telegram activation gate. Every handler takes the company from
@@ -51,6 +54,10 @@ const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9_-]{8,100}$/;
 const REASON_MAX = 300;
 /** Writes of the pause-ad halt before the pause goes on without it (RK9-567). */
 export const AD_HALT_WRITE_ATTEMPTS = 2;
+/** alert_dedupe kind of the pause-ad markers. */
+export const PAUSE_MARKER_KIND = "ui_pause_ad";
+/** How long a pause-ad marker answers a repeat of its confirmation; older markers are deleted (RK9-581). */
+export const PAUSE_MARKER_HOURS = 24;
 
 export interface UiOverrides {
   store?: OnceStore;
@@ -59,6 +66,8 @@ export interface UiOverrides {
   clientFor?: (companyId: string, config: BrandConfig, mode: "live" | "readOnly", initiator: Initiator | null) => MetaGraphClient;
   /** Tests: replaces the running gate's card closer. */
   closeAdCards?: (companyId: string, adId: string, input: { reason: string; halted?: boolean }) => Promise<PauseCardClose>;
+  /** Tests: replaces the delete of old pause-ad markers. */
+  prunePauseMarkers?: (companyId: string) => Promise<void>;
 }
 
 function reasonText(value: unknown, fallback: string): string {
@@ -72,6 +81,15 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
     overrides.clientFor?.(companyId, config, "readOnly", null) ?? brandReadClient(ctx, companyId, config);
   const writeClient = (companyId: string, config: BrandConfig, initiator: Initiator) =>
     overrides.clientFor?.(companyId, config, "live", initiator) ?? brandClient({ ctx, ledger }, companyId, config, "live", { initiator });
+
+  /** Deletes the company's pause-ad markers older than PAUSE_MARKER_HOURS, this one's and the RK9-563 claims (`pause-ad:`) alike. */
+  const prunePauseMarkers = async (companyId: string): Promise<void> => {
+    if (overrides.prunePauseMarkers) return overrides.prunePauseMarkers(companyId);
+    await ctx.db.execute(
+      `DELETE FROM ${ledger.namespace}.alert_dedupe WHERE company_id = $1 AND kind = $2 AND created_at < now() - make_interval(hours => $3::int)`,
+      [companyId, PAUSE_MARKER_KIND, PAUSE_MARKER_HOURS],
+    );
+  };
 
   // The host sets companyId to the company it authorized for this call.
   ctx.data.register(OVERVIEW_DATA_KEY, async (params) => {
@@ -127,18 +145,18 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       return sanitize({ dryRun: true, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: false });
     }
 
-    // A repeat of the same confirmation (a double click, a retry after a lost response) writes no second row.
-    const onceKey = `pause-ad:${adId}:${idempotencyKey}`;
-    let claimed = false;
-    try {
-      claimed = await deps.store.claim(companyId, onceKey, "ui_pause_ad", { adId });
-      // Only a pause that took effect ends the repeat; an ad still running is paused again.
-      if (!claimed && before.status === "PAUSED") {
-        return sanitize({ dryRun: false, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: true, duplicate: true });
+    // A repeat of a confirmation that already paused the ad (a retry after a lost response) writes no second row.
+    // The marker exists only after a confirmed pause, so a first call that died before its halt and card close is run again (RK9-581).
+    const onceKey = `pause-ad-done:${adId}:${idempotencyKey}`;
+    if (before.status === "PAUSED") {
+      try {
+        if ((await deps.store.claimed(companyId, [onceKey])).length > 0) {
+          return sanitize({ dryRun: false, adId, name: before.name || null, previousStatus: before.status, status: before.status, paused: true, duplicate: true });
+        }
+      } catch (cause) {
+        // A pause stops spend: it goes on without the duplicate check rather than not at all.
+        ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker could not be read", { companyId, adId, detail: safeError(cause) });
       }
-    } catch (cause) {
-      // A pause stops spend: it goes on without the duplicate check rather than not at all.
-      ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker could not be claimed", { companyId, adId, detail: safeError(cause) });
     }
 
     const initiator: Initiator = {
@@ -230,15 +248,23 @@ export function registerUi(runtime: FeatureRuntime, overrides: UiOverrides = {})
       ctx.logger.warn("rk9-ads ui: closed activation cards not edited", { companyId, adId, detail: safeError(cause) });
     }
     if (!paused) {
-      if (claimed) {
-        try {
-          await deps.store.release(companyId, onceKey);
-        } catch (cause) {
-          ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker was not released", { companyId, adId, detail: safeError(cause) });
-        }
-      }
       const cards = `${closedCardIds.length} activation card(s) of the ad closed${cardsError ? `; card warning: ${cardsError}` : ""}${haltError ? `; the pause-ad halt was not stored: ${haltError}` : ""}${activationRunning ? "; an approved activation of the ad may still be running and set it ACTIVE: check the ad's status" : ""}`;
       throw new Error(`The pause of ad ${adId} failed: ${error}. ${cards}`);
+    }
+    // Only a pause with its halt stored, its cards closed and its audit row written ends the repeat: otherwise a retry
+    // does that work again and shows its warnings again instead of a bare duplicate (RK9-581 verifier).
+    if (adHalt !== null && !cardsError && !activationRunning && !auditError) {
+      try {
+        await deps.store.claim(companyId, onceKey, PAUSE_MARKER_KIND, { adId });
+      } catch (cause) {
+        // The pause stands; without the marker a repeat only pauses again.
+        ctx.logger.warn("rk9-ads ui: the pause-ad idempotency marker was not written", { companyId, adId, detail: safeError(cause) });
+      }
+      try {
+        await prunePauseMarkers(companyId);
+      } catch (cause) {
+        ctx.logger.warn("rk9-ads ui: old pause-ad idempotency markers were not deleted", { companyId, detail: safeError(cause) });
+      }
     }
     return sanitize({
       dryRun: false,

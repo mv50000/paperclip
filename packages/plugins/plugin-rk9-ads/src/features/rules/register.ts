@@ -17,7 +17,8 @@ import { createRulesStore } from "./store.js";
  * - action `rules.prepareSave`: checks the rule editor's pause rules and
  *   returns the `rules` block the UI saves through the host config route
  *   (editor.ts). A weakening save or live mode on is refused with the
- *   changes to confirm (RK9-566). Writes nothing.
+ *   changes to confirm (RK9-566), a draft whose loaded rules are no longer
+ *   the saved ones as `stale` (RK9-581). Writes nothing.
  */
 
 export const RULES_DATA_KEY = "rules";
@@ -72,7 +73,7 @@ export function registerRules(runtime: FeatureRuntime, overrides: Partial<RulesD
     // A broken config can still take a rules fix; without a saved config there is nothing to put rules into.
     if (result.state === "absent" || result.state === "unavailable") return { ok: false, errors: [`Brand config is ${result.state}`] };
     const raw = await ctx.config.get(companyId);
-    return prepareRules(raw, { liveMode: params.liveMode, list: params.list, confirmedWeakening: params.confirmedWeakening, confirmLive: params.confirmLive });
+    return prepareRules(raw, { liveMode: params.liveMode, list: params.list, confirmedWeakening: params.confirmedWeakening, confirmedLive: params.confirmedLive, loaded: params.loaded });
   });
 
   return deps;

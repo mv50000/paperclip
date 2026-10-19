@@ -19,15 +19,16 @@ import { EDITABLE_RULE_TYPES } from "../src/features/rules/editor.js";
 import { RULES_DATA_KEY, RULES_DRY_RUN_ACTION_KEY, RULES_PREPARE_SAVE_ACTION_KEY } from "../src/features/rules/register.js";
 import { CLEAR_HALT_ACTION_KEY, PAUSE_ALL_ACTION_KEY } from "../src/features/spend-guard/register.js";
 import type { UiOverview, UiSettings, UiWidget } from "../src/features/ui/dto.js";
-import { OVERVIEW_DATA_KEY, PAUSE_AD_ACTION_KEY, SETTINGS_DATA_KEY, UI_PAUSE_RULE_ID, WIDGET_DATA_KEY } from "../src/features/ui/register.js";
+import { OVERVIEW_DATA_KEY, PAUSE_AD_ACTION_KEY, PAUSE_MARKER_HOURS, SETTINGS_DATA_KEY, UI_PAUSE_RULE_ID, WIDGET_DATA_KEY } from "../src/features/ui/register.js";
 import { PUBLICATION_DATA_KEY } from "../src/features/publish/register.js";
 import { sanitize } from "../src/features/ui/sanitize.js";
+import { spendView } from "../src/features/ui/views.js";
 import { addDays } from "../src/insights/mtd.js";
 import { localDate } from "../src/kit/local-time.js";
 import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
 import manifest, { PLUGIN_ID } from "../src/manifest.js";
 import { ACTION, DATA, PLUGIN_KEY } from "../src/ui/keys.js";
-import { EDITOR_AGGREGATES, EDITOR_METRICS, EDITOR_MODES, EDITOR_OPERATORS, EDITOR_RULE_TYPES } from "../src/ui/rule-fields.js";
+import { EDITOR_AGGREGATES, EDITOR_METRICS, EDITOR_MODES, EDITOR_OPERATORS, EDITOR_RULE_TYPES, LIVE_MODE_ON_TEXT } from "../src/ui/rule-fields.js";
 import plugin from "../src/worker.js";
 import { brandConfig, COMPANY_A, COMPANY_B, COMPANY_UNCONFIGURED, PACKAGE_ROOT, SECRET_A_BOT, SECRET_A_META, SECRET_B_META, secretRef } from "./fixtures.js";
 import { FakeMeta } from "./spend-guard/fake-meta.js";
@@ -106,6 +107,7 @@ interface Rig {
   actionKeys: string[];
   dataKeys: string[];
   queries: Array<{ sql: string; params: unknown[] }>;
+  executes: Array<{ sql: string; params: unknown[] }>;
   ruleActionInserts(): Array<Record<string, unknown>>;
 }
 
@@ -149,8 +151,13 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
 
   const data = rowsByCompany(options.poisoned === true);
   const queries: Rig["queries"] = [];
+  // The harness's execute reports rowCount 0; the pause-ad idempotency marker (alert_dedupe) needs a real ON CONFLICT answer (RK9-563).
+  const dedupe = new Set<string>();
   harness.ctx.db.query = async <T,>(sql: string, params?: unknown[]): Promise<T[]> => {
     queries.push({ sql, params: params ?? [] });
+    if (/SELECT count\(\*\)::int AS n FROM \S+\.alert_dedupe WHERE/.test(sql)) {
+      return [{ n: dedupe.has(`${String(params?.[0])}|${String(params?.[1])}`) ? 1 : 0 }] as T[];
+    }
     const rows = data[String(params?.[0])];
     if (!rows) return [];
     if (/FROM \S+\.publications WHERE/.test(sql)) return rows.publications as T[];
@@ -160,10 +167,10 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
     return [];
   };
 
-  // The harness's execute reports rowCount 0; the pause-ad idempotency marker (alert_dedupe) needs a real ON CONFLICT answer (RK9-563).
-  const dedupe = new Set<string>();
+  const executes: Rig["executes"] = [];
   const execute = harness.ctx.db.execute.bind(harness.ctx.db);
   harness.ctx.db.execute = async (sql: string, params?: unknown[]) => {
+    executes.push({ sql, params: params ?? [] });
     const result = await execute(sql, params);
     if (/INSERT INTO \S+\.alert_dedupe .* ON CONFLICT DO NOTHING/s.test(sql)) {
       const key = `${String(params?.[0])}|${String(params?.[2])}`;
@@ -171,7 +178,7 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
       dedupe.add(key);
       return { rowCount: 1 };
     }
-    if (/DELETE FROM \S+\.alert_dedupe WHERE/.test(sql)) {
+    if (/DELETE FROM \S+\.alert_dedupe WHERE company_id = \$1 AND dedupe_key = \$2/.test(sql)) {
       dedupe.delete(`${String(params?.[0])}|${String(params?.[1])}`);
       return { rowCount: 1 };
     }
@@ -197,6 +204,7 @@ async function rig(options: { poisoned?: boolean } = {}): Promise<Rig> {
     actionKeys,
     dataKeys,
     queries,
+    executes,
     ruleActionInserts: () =>
       harness.dbExecutes
         .filter((entry) => /INSERT INTO \S+\.rule_actions/.test(entry.sql))
@@ -304,6 +312,20 @@ describe("operator UI handlers (RK9-518)", () => {
     assertNoSecrets("publication", JSON.stringify(read));
   });
 
+  it("spendView compares the spend_cap headroom with the monthly remainder on an EUR account only, like the digest (RK9-581)", () => {
+    const snapshot = { month: "2026-10", mtdEur: 12.34, monthlyCapEur: 100, spendCapEur: 100, headroomEur: 100, remainingEur: 87.66, currency: "EUR", risks: [] } as unknown as Parameters<typeof spendView>[0];
+    expect(spendView(snapshot).spendCapStatus).toBe("headroom_above_remaining");
+    expect(spendView({ ...snapshot, currency: "SEK" }).spendCapStatus).toBe("set");
+    expect(spendView({ ...snapshot, currency: null }).spendCapStatus).toBe("set");
+  });
+
+  it("sanitize redacts a bot token after an escaped newline or tab, any prefix, or at the start (RK9-581 verifier)", () => {
+    for (const before of ["line1\n", "a\tb ", "\r", "Bot", "BOT", "TOKEN_", "bot_", "tok-", "\u001b[0m", "x=", '"', ""]) {
+      const out = sanitize({ error: `${before}${BOT_TOKEN} refused` });
+      expect(out.error, JSON.stringify(before)).toBe(`${before}[REDACTED] refused`);
+    }
+  });
+
   it("sanitize redacts a bot token inside a Bot API URL, where no word boundary precedes it (RK9-563)", () => {
     const out = sanitize({ error: `POST https://api.telegram.org/bot${BOT_TOKEN}/sendMessage failed` });
     expect(out.error).toBe("POST https://api.telegram.org/bot[REDACTED]/sendMessage failed");
@@ -389,10 +411,10 @@ describe("operator UI handlers (RK9-518)", () => {
 
   it("pause-ad: a repeat whose key is taken but whose ad still runs pauses again (verifier H1, RK9-563)", async () => {
     const key = randomUUID();
-    // A first call that is still running, or that died before it gave the key back.
+    // A marker without a confirmed pause behind it: the ad still runs, so the repeat pauses.
     await r.harness.ctx.db.execute(
       "INSERT INTO plugin_ns.alert_dedupe (company_id, id, dedupe_key, kind, metadata) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-      [COMPANY_A, randomUUID(), `pause-ad:301:${key}`, "ui_pause_ad", "{}"],
+      [COMPANY_A, randomUUID(), `pause-ad-done:301:${key}`, "ui_pause_ad", "{}"],
     );
     const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
     expect(retry).toMatchObject({ paused: true, status: "PAUSED", previousStatus: "ACTIVE" });
@@ -401,15 +423,90 @@ describe("operator UI handlers (RK9-518)", () => {
     expect(r.ruleActionInserts()).toHaveLength(1);
   });
 
-  it("pause-ad: a failed pause gives its key back, so the same confirmation can retry (RK9-563)", async () => {
+  it("pause-ad: a repeat after a first call that died before its halt, on an ad that was already PAUSED, runs the pause again (RK9-581)", async () => {
+    r.meta.ads[0]!.status = "PAUSED";
+    const key = randomUUID();
+    // The RK9-563 claim of a first call that died right after it: no halt, no closed cards, no confirmed pause.
+    await r.harness.ctx.db.execute(
+      "INSERT INTO plugin_ns.alert_dedupe (company_id, id, dedupe_key, kind, metadata) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+      [COMPANY_A, randomUUID(), `pause-ad:301:${key}`, "ui_pause_ad", "{}"],
+    );
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).toMatchObject({ paused: true, status: "PAUSED", previousStatus: "PAUSED", adHalt: expect.objectContaining({ id: expect.any(String) }) });
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(r.meta.writes.map((call) => [call.path, call.body.status])).toEqual([["301", "PAUSED"]]);
+    expect(r.ruleActionInserts()).toHaveLength(1);
+    // Now the confirmed pause has its marker: the same confirmation again writes nothing.
+    const again = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(again).toMatchObject({ paused: true, duplicate: true });
+    expect(r.meta.writes).toHaveLength(1);
+    expect(r.ruleActionInserts()).toHaveLength(1);
+  });
+
+  it("pause-ad: a failed pause writes no marker, so the same confirmation can retry (RK9-563, RK9-581)", async () => {
     const key = randomUUID();
     r.meta.fail = (call) => (call.method !== "GET" ? new Response(JSON.stringify({ error: { message: "Invalid parameter", code: 100 } }), { status: 400 }) : null);
     await expect(r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI)).rejects.toThrow(/The pause of ad 301 failed/);
+    expect(r.executes.filter((call) => /INSERT INTO \S+\.alert_dedupe/.test(call.sql))).toEqual([]);
     r.meta.fail = () => null;
     const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
     expect(retry).toMatchObject({ paused: true, status: "PAUSED" });
     expect(retry).not.toHaveProperty("duplicate");
     expect(r.ruleActionInserts().map((row) => row.applied)).toEqual([false, true]);
+  });
+
+  it("pause-ad: a confirmed pause writes its marker and deletes the company's pause-ad markers older than a day (RK9-581)", async () => {
+    await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: randomUUID() }, UI);
+    const markers = r.executes.filter((call) => /INSERT INTO \S+\.alert_dedupe/.test(call.sql));
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.params).toEqual(expect.arrayContaining([COMPANY_A, "ui_pause_ad", expect.stringMatching(/^pause-ad-done:301:/)]));
+    const prunes = r.executes.filter((call) => /DELETE FROM \S+\.alert_dedupe .*created_at < now\(\)/.test(call.sql));
+    expect(prunes).toEqual([{ sql: expect.stringContaining("company_id = $1 AND kind = $2"), params: [COMPANY_A, "ui_pause_ad", PAUSE_MARKER_HOURS] }]);
+  });
+
+  it("pause-ad: a pause whose halt was not stored writes no marker, so the retry stores the halt and reports again (RK9-581 verifier)", async () => {
+    const key = randomUUID();
+    const set = r.harness.ctx.state.set.bind(r.harness.ctx.state);
+    r.harness.ctx.state.set = async (...args: Parameters<typeof set>) => {
+      throw new Error("state down");
+    };
+    const first = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(first).toMatchObject({ paused: true, haltError: expect.stringContaining("state down") });
+    expect(r.executes.filter((call) => /INSERT INTO \S+\.alert_dedupe/.test(call.sql))).toEqual([]);
+    r.harness.ctx.state.set = set;
+    // The response was lost; the same confirmation again on the now-PAUSED ad.
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(retry).toMatchObject({ paused: true, previousStatus: "PAUSED", adHalt: expect.objectContaining({ id: expect.any(String) }) });
+    expect(retry).not.toHaveProperty("haltError");
+  });
+
+  it("pause-ad: a pause whose audit row was not written writes no marker, so the retry writes it (RK9-581 verifier)", async () => {
+    const key = randomUUID();
+    const execute = r.harness.ctx.db.execute.bind(r.harness.ctx.db);
+    r.harness.ctx.db.execute = async (sql: string, params?: unknown[]) => {
+      if (/INSERT INTO \S+\.rule_actions/.test(sql)) throw new Error("ledger down");
+      return execute(sql, params);
+    };
+    const first = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(first).toMatchObject({ paused: true, auditError: expect.any(String) });
+    expect(r.executes.filter((call) => /INSERT INTO \S+\.alert_dedupe/.test(call.sql))).toEqual([]);
+    r.harness.ctx.db.execute = execute;
+    const retry = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: key }, UI);
+    expect(retry).not.toHaveProperty("duplicate");
+    expect(retry).not.toHaveProperty("auditError");
+    expect(r.ruleActionInserts()).toHaveLength(1);
+  });
+
+  it("pause-ad: a marker or prune failure does not fail a confirmed pause (RK9-581)", async () => {
+    const execute = r.harness.ctx.db.execute.bind(r.harness.ctx.db);
+    r.harness.ctx.db.execute = async (sql: string, params?: unknown[]) => {
+      if (/alert_dedupe/.test(sql)) throw new Error("db down");
+      return execute(sql, params);
+    };
+    const result = await r.harness.performAction(PAUSE_AD_ACTION_KEY, { adId: "301", dryRun: false, confirm: true, idempotencyKey: randomUUID() }, UI);
+    expect(result).toMatchObject({ paused: true, status: "PAUSED" });
+    expect(r.meta.writes).toHaveLength(1);
   });
 
   it("the kill switch (pause-all) needs confirm and pauses every active object with ledger and activity", async () => {
@@ -428,10 +525,10 @@ describe("operator UI handlers (RK9-518)", () => {
   it("rules.prepareSave returns the pause-rules block to save and refuses propose_scale", async () => {
     const valid = await r.harness.performAction<{ ok: boolean; rules: { liveMode: boolean; list: unknown[] } }>(
       RULES_PREPARE_SAVE_ACTION_KEY,
-      { liveMode: true, confirmLive: true, confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: poistetaan."], list: [{ ruleId: "cpc-max", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.8, days: 3, minImpressions: 0, minClicks: 0 }, { type: "pause_all_cap", mode: "live" }] },
+      { liveMode: true, confirmedLive: [LIVE_MODE_ON_TEXT], confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: poistetaan."], list: [{ ruleId: "cpc-max", type: "threshold_pause", metric: "cpc", operator: "gt", threshold: 0.8, days: 3, minImpressions: 0, minClicks: 0 }, { type: "pause_all_cap", mode: "live" }] },
       UI,
     );
-    expect(valid.ok).toBe(true);
+    expect(valid).toMatchObject({ ok: true });
     expect(valid.rules.liveMode).toBe(true);
     expect(valid.rules.list).toHaveLength(2);
     // Unconfirmed, the worker refuses and names what to confirm against the config saved now (RK9-566).
@@ -441,6 +538,9 @@ describe("operator UI handlers (RK9-518)", () => {
       UI,
     );
     expect(unconfirmed).toMatchObject({ ok: false, confirm: { liveOn: true } });
+    // A draft loaded from other rules than the saved ones is stale (RK9-581).
+    const stale = await r.harness.performAction(RULES_PREPARE_SAVE_ACTION_KEY, { liveMode: false, list: [{ type: "pause_all_cap", mode: "shadow" }], loaded: { liveMode: true, list: [] } }, UI);
+    expect(stale).toMatchObject({ ok: false, stale: true });
     const scale = await r.harness.performAction<{ ok: boolean; errors: string[] }>(
       RULES_PREPARE_SAVE_ACTION_KEY,
       { list: [{ ruleId: "grow", type: "propose_scale", enabled: true, threshold: 0.2, minImpressions: 0, minClicks: 0 }] },

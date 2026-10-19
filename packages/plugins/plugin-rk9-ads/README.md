@@ -753,7 +753,8 @@ anything ACTIVE.
   rule log of 7 days, 14 days of spend, and a digest preview. Meta's
   `spend_cap` is lifetime: the status compares its headroom
   (`spend_cap - amount_spent`, `headroomEur`) with what is left of the month
-  (`remainingEur`), not the cap itself with `monthlyCapEur` (RK9-563). The
+  (`remainingEur`), not the cap itself with `monthlyCapEur` (RK9-563), and
+  only on an EUR account, like the digest (RK9-581). The
   pending cards are read with `valid_until > now()` in SQL, soonest-expiring
   first, at most 50.
 - **Settings** (company settings, `ads`): a redacted config summary with a
@@ -766,13 +767,19 @@ anything ACTIVE.
   `params.companyId`. The SDK gives a data handler no other context, so a
   bridge call without a company (instance admin only) keeps the caller's
   value; the worker cannot tell it apart without a core change (RK9-563).
+  Moving the views to actions (`context.companyId`) would close this without
+  a core change but needs a new data hook for the three pages; it is left
+  for a follow-up (RK9-581).
 - **Action** `pause-ad` `{ adId, dryRun?, confirm?, idempotencyKey? }`: pauses
   one ad of the brand's ad account. `dryRun` defaults to true. A real pause
   needs `confirm: true`, a board user and `idempotencyKey` (8-100 of
   `A-Za-z0-9_-`, the page sends one per confirmation, RK9-563). A repeat with
   the same key on an ad that is already PAUSED writes nothing and returns
-  `duplicate: true`; on an ad that still runs it pauses again. A failed
-  pause gives the key back. It writes a `rule_actions` row
+  `duplicate: true`. The key's `alert_dedupe` marker is written only after a
+  pause Meta confirmed (RK9-581), so any other repeat (the ad still runs,
+  or a first call died before its halt and card close) pauses again, and a
+  failed pause leaves no marker. Markers older than 24 h are deleted when a
+  new one is written. It writes a `rule_actions` row
   (`rule_type: kill_switch`, `object_type: ad`, `source: ui`) and an
   activity entry. Before the Meta write it stores a 30-minute halt for the
   ad (`adHalt`, RK9-566), then closes the ad's open activation cards
@@ -802,7 +809,10 @@ anything ACTIVE.
   save, naming the changes (`confirm`); the page then asks `HEIKENNÄ`, and
   `LIVE` too when the save also turns live mode on, or, with live mode on,
   makes a rule live (from shadow, switched on, or new; `confirm.live`,
-  RK9-563). The browser's save checks both again against the config read
+  RK9-563). `LIVE` covers only the listed live changes (`confirmedLive`): one
+  that appears after it refuses the save (RK9-581). The page sends the rules
+  its draft loaded (`loaded`); when the saved rules differ from them, the
+  save is refused as `stale` and the page reloads the rules (RK9-581). The browser's save checks both again against the config read
   right before the POST. That read must also show the `updatedAt` the editor
   loaded: a config saved since, on the host's form or in another tab,
   refuses the save, and the page does not save before that version was read

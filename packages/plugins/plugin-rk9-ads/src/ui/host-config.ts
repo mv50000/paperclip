@@ -15,10 +15,15 @@
  * off after this page loaded is not overridden without the word LIVE.
  *
  * A rule that becomes live while live mode is on needs LIVE too (RK9-563).
+ * LIVE covers only the live changes the operator saw: one that appears after
+ * the confirmation refuses the save (RK9-581).
  *
  * Version check (RK9-563): the editor reads the saved config's `updatedAt`
  * when it loads (`readConfigVersion`) and passes it here; it does not save
- * until that read succeeded. The GET right
+ * until that read succeeded. That read comes after the rules data, so a
+ * rules save in between would pair an old draft with a new version: the
+ * worker's `rules.prepareSave` therefore compares the draft's loaded rules
+ * with the saved ones first and refuses a stale draft (RK9-581). The GET right
  * before the POST must show the same `updatedAt`; a config saved since, on
  * the host's form or in another tab, refuses the save instead of being
  * overwritten. The host route has no compare-and-swap, so a save between
@@ -72,8 +77,8 @@ export async function saveRulesBlock(
   fetcher: typeof fetch = fetch,
   /** The weakening changes the operator confirmed with the typed word (rule-fields.ts weakeningChanges). */
   confirmedWeakening: readonly string[] = [],
-  /** The operator typed LIVE for this save. */
-  confirmedLive = false,
+  /** The live changes the operator confirmed with LIVE (rule-fields.ts liveChanges). */
+  confirmedLive: readonly string[] = [],
   /** `updatedAt` of the config the editor loaded (readConfigVersion); null skips the version check. */
   expectedUpdatedAt: string | null = null,
 ): Promise<string | null> {
@@ -86,7 +91,7 @@ export async function saveRulesBlock(
   // A block without `list` keeps the default rules (features/rules/editor.ts).
   const next = savedRulesBlock({ rules });
   const unconfirmed = weakeningChanges(savedNow, next).filter((change) => !confirmedWeakening.includes(change));
-  if (!confirmedLive) unconfirmed.push(...liveChanges(savedNow, next));
+  unconfirmed.push(...liveChanges(savedNow, next).filter((change) => !confirmedLive.includes(change)));
   if (unconfirmed.length > 0) {
     throw new Error(`The saved rules changed after this page loaded; reload and confirm again. Unconfirmed: ${unconfirmed.join(" ")}`.slice(0, 600));
   }

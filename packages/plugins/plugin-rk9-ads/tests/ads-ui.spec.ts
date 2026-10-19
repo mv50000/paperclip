@@ -13,7 +13,7 @@ import { AdsPage, AdsWidget, SettingsPage } from "../src/ui/index.js";
 import { ACK_UNDO_WORD, ackPrompt, CLEAR_HALT_WORD, PAUSE_WORD } from "../src/ui/AdsPage.js";
 import { readConfigVersion, saveRulesBlock } from "../src/ui/host-config.js";
 import { ACTION, DATA } from "../src/ui/keys.js";
-import { EDITOR_DEFAULT_RULES, fromEditor, liveChanges, savedRulesBlock, toEditor, weakeningChanges } from "../src/ui/rule-fields.js";
+import { EDITOR_DEFAULT_RULES, fromEditor, LIVE_MODE_ON_TEXT, liveChanges, savedRulesBlock, toEditor, weakeningChanges } from "../src/ui/rule-fields.js";
 import { prepareRules } from "../src/features/rules/editor.js";
 import { DEFAULT_RULES, parseRules } from "../src/features/rules/schema.js";
 import { LIVE_WORD, WEAKEN_WORD } from "../src/ui/SettingsPage.js";
@@ -667,7 +667,7 @@ describe("operator UI (RK9-518)", () => {
       expect(posts).toEqual([]);
       await type(`Kirjoita ${WEAKEN_WORD}`, WEAKEN_WORD);
       await click("Tallenna heikennetyt säännöt");
-      expect(prepares.at(-1)).toMatchObject({ confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 9999."], confirmLive: false });
+      expect(prepares.at(-1)).toMatchObject({ confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 9999."], confirmedLive: [], loaded: { liveMode: true, list: [CPC, CAP] } });
       expect(posts).toHaveLength(1);
     });
 
@@ -693,17 +693,57 @@ describe("operator UI (RK9-518)", () => {
       expect((posts[0]!.configJson as { rules: { liveMode: boolean } }).rules.liveMode).toBe(true);
     });
 
-    it("live mode turned off elsewhere after the page loaded: a save with live on asks LIVE again", async () => {
+    it("live mode turned off elsewhere after the page loaded: the old draft is not saved and the rules reload (RK9-581)", async () => {
       // The page loaded with live mode on; another session turned it off since.
       savedConfig.rules.liveMode = false;
       await render(createElement(SettingsPage, { context: CONTEXT }));
       await type("Kynnys", "0.6");
       await click("Tallenna säännöt");
       expect(posts).toEqual([]);
-      expect(buttons("Tallenna live-tilassa")).toHaveLength(1);
-      await type(`Kirjoita ${LIVE_WORD}`, LIVE_WORD);
-      await click("Tallenna live-tilassa");
+      expect(buttons("Tallenna live-tilassa")).toHaveLength(0);
+      expect(container.textContent).toContain("Tallennetut säännöt muuttuivat sivun latauksen jälkeen");
+      expect(bridge.refreshes).toContain(DATA.rules);
+    });
+
+    it("a rule saved elsewhere between the rules data and the version read is not lost to the old draft (RK9-581)", async () => {
+      // The host's form adds a shadow rule (not a weakening) after the editor read the rules; the version read sees the new config.
+      const added = { ...CPC, ruleId: "ctr-floor", mode: "shadow", metric: "ctr", operator: "lt", threshold: 0.5 };
+      savedConfig.rules.list = [CPC, added, { type: "pause_all_cap", mode: "live" }];
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(prepares.at(-1)).toMatchObject({ loaded: { liveMode: true, list: [CPC, CAP] } });
+      expect(container.textContent).toContain("Tallennetut säännöt muuttuivat sivun latauksen jälkeen");
+      expect(bridge.refreshes).toContain(DATA.rules);
+      // The reloaded rules hold the new one: the next save keeps it.
+      bridge.data.set(DATA.rules, { state: "enabled", liveMode: true, rules: parseRules(savedConfig.rules).rules.list });
+      await act(async () => {
+        bridge.notify();
+        await flush();
+      });
+      await click("Tallenna säännöt");
       expect(posts).toHaveLength(1);
+      expect((posts[0]!.configJson as { rules: { list: Array<{ ruleId?: string }> } }).rules.list.map((rule) => rule.ruleId)).toContain("ctr-floor");
+    });
+
+    it("the worker refuses a draft whose loaded rules are no longer the saved ones (RK9-581)", () => {
+      const raw = { brandCode: "OLL", rules: { liveMode: true, list: [CPC, CAP] } };
+      const loaded = parseRules(raw.rules).rules;
+      const draft = { liveMode: true, list: [{ ...CPC, threshold: 0.6 }, CAP] };
+      expect(prepareRules(raw, { ...draft, loaded })).toMatchObject({ ok: true });
+      // Key order and a JSON round trip do not matter.
+      expect(prepareRules(raw, { ...draft, loaded: JSON.parse(JSON.stringify({ list: loaded.list, liveMode: loaded.liveMode })) })).toMatchObject({ ok: true });
+      const changed = { brandCode: "OLL", rules: { liveMode: true, list: [{ ...CPC, threshold: 0.7 }, CAP] } };
+      expect(prepareRules(changed, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
+      expect(prepareRules({ ...raw, rules: { ...raw.rules, liveMode: false } }, { ...draft, loaded })).toMatchObject({ ok: false, stale: true });
+      // Saved rules that no longer parse cannot be reloaded into the editor: the draft may fix them (RK9-581 verifier).
+      const broken = { brandCode: "OLL", rules: { liveMode: true, list: [CPC, CAP, { ruleId: "bad", type: "threshold_pause", metric: "nope" }] } };
+      expect(parseRules(broken.rules).errors.length).toBeGreaterThan(0);
+      const fix = prepareRules(broken, { ...draft, loaded });
+      expect(fix).not.toHaveProperty("stale");
+      // Dropping the broken rule is still a removal to confirm, like any other.
+      expect(fix).toMatchObject({ ok: false, confirm: { weakening: ["Kynnyspysäytys bad: poistetaan."] } });
     });
 
     it("a rule switched to live while live mode is on needs LIVE; no POST without it (RK9-563)", async () => {
@@ -722,7 +762,7 @@ describe("operator UI (RK9-518)", () => {
       expect(posts).toEqual([]);
       await type(`Kirjoita ${LIVE_WORD}`, LIVE_WORD);
       await click("Tallenna live-tilassa");
-      expect(prepares.at(-1)).toMatchObject({ confirmLive: true });
+      expect(prepares.at(-1)).toMatchObject({ confirmedLive: ["Kynnyspysäytys cpc-ceiling: varjotilasta live-tilaan."] });
       expect(posts).toHaveLength(1);
     });
 
@@ -769,12 +809,59 @@ describe("operator UI (RK9-518)", () => {
       }) as typeof fetch;
       const loaded = await readConfigVersion(COMPANY_ID, fetcher);
       expect(loaded).toBe("2026-10-18T08:00:00.000Z");
-      await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], false, "2026-10-18T07:00:00.000Z")).rejects.toThrow(/saved elsewhere/);
+      await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], [], "2026-10-18T07:00:00.000Z")).rejects.toThrow(/saved elsewhere/);
       expect(posts).toEqual([]);
-      await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], false, loaded)).resolves.toBe("2026-10-18T10:00:00.000Z");
+      await expect(saveRulesBlock(COMPANY_ID, savedConfig.rules, fetcher, [], [], loaded)).resolves.toBe("2026-10-18T10:00:00.000Z");
       expect(posts).toHaveLength(1);
       const failing = (async () => new Response("nope", { status: 500 })) as typeof fetch;
       await expect(readConfigVersion(COMPANY_ID, failing)).rejects.toThrow(/could not be read/);
+    });
+
+    it("no save when the version read failed, even though the GET at save time succeeds (RK9-581)", async () => {
+      let gets = 0;
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push({});
+          return new Response("{}", { status: 200 });
+        }
+        gets += 1;
+        // The load-time version read fails; every later GET would succeed.
+        if (gets === 1) return new Response("down", { status: 503 });
+        return new Response(JSON.stringify({ configJson: savedConfig, updatedAt: "2026-10-18T08:00:00.000Z" }), { status: 200 });
+      }) as typeof fetch;
+      await render(createElement(SettingsPage, { context: CONTEXT }));
+      expect(gets).toBe(1);
+      await type("Kynnys", "0.6");
+      await click("Tallenna säännöt");
+      expect(posts).toEqual([]);
+      expect(container.textContent).toContain("Tallennetun configin versiota ei ole luettu");
+    });
+
+    it("LIVE covers only the live changes it listed: one that appears before the POST refuses the save (RK9-581)", async () => {
+      const shadow = { ...CPC, mode: "shadow" };
+      const other = { ...CPC, ruleId: "cpm-ceiling", metric: "cpm" };
+      let saved = { brandCode: "OLL", rules: { liveMode: true, list: [shadow, { ...other, mode: "shadow" }] } };
+      const fetcher = (async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts.push({});
+          return new Response("{}", { status: 200 });
+        }
+        return new Response(JSON.stringify({ configJson: saved }), { status: 200 });
+      }) as typeof fetch;
+      const next = { liveMode: true, list: [CPC, other] };
+      const confirmed = ["Kynnyspysäytys cpc-ceiling: varjotilasta live-tilaan."];
+      // The operator saw two changes but confirmed one: refused.
+      await expect(saveRulesBlock(COMPANY_ID, next, fetcher, [], confirmed)).rejects.toThrow(/cpm-ceiling: varjotilasta live-tilaan/);
+      // The second rule was live already when the operator confirmed; another session turned it to shadow before the POST.
+      saved = { brandCode: "OLL", rules: { liveMode: true, list: [shadow, other] } };
+      await expect(saveRulesBlock(COMPANY_ID, next, fetcher, [], confirmed)).resolves.toBeNull();
+      saved = { brandCode: "OLL", rules: { liveMode: true, list: [shadow, { ...other, mode: "shadow" }] } };
+      await expect(saveRulesBlock(COMPANY_ID, next, fetcher, [], confirmed)).rejects.toThrow(/Unconfirmed: Kynnyspysäytys cpm-ceiling/);
+      expect(posts).toHaveLength(1);
+      // The worker does the same.
+      const raw = { brandCode: "OLL", rules: { liveMode: true, list: [shadow, { ...other, mode: "shadow" }] } };
+      expect(prepareRules(raw, { ...next, confirmedLive: confirmed })).toMatchObject({ ok: false, errors: [expect.stringMatching(/cpm-ceiling/)] });
+      expect(prepareRules(raw, { ...next, confirmedLive: [...confirmed, "Kynnyspysäytys cpm-ceiling: varjotilasta live-tilaan."] })).toMatchObject({ ok: true });
     });
 
     it("no save while the loaded config version is unknown (RK9-563)", async () => {
@@ -836,7 +923,7 @@ describe("operator UI (RK9-518)", () => {
       }) as typeof fetch;
       await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [])).rejects.toThrow(/Live-tila päälle/);
       expect(posts).toEqual([]);
-      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [], true)).resolves.toBeNull();
+      await expect(saveRulesBlock(COMPANY_ID, { liveMode: true, list: [CPC] }, fetcher, [], [LIVE_MODE_ON_TEXT])).resolves.toBeNull();
       expect(posts).toHaveLength(1);
     });
 
@@ -903,7 +990,7 @@ describe("operator UI (RK9-518)", () => {
         expect(prepareRules(raw, { ...weakened, confirmedWeakening: ["Kynnyspysäytys cpc-ceiling: kynnys 0.8 → 1000."] })).toMatchObject({ ok: true });
         const off = { brandCode: "OLL", rules: { ...live, liveMode: false } };
         expect(prepareRules(off, live)).toMatchObject({ ok: false, confirm: { weakening: [], liveOn: true } });
-        expect(prepareRules(off, { ...live, confirmLive: true })).toMatchObject({ ok: true });
+        expect(prepareRules(off, { ...live, confirmedLive: [LIVE_MODE_ON_TEXT] })).toMatchObject({ ok: true });
       });
     });
 
