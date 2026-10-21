@@ -3,6 +3,7 @@ import {
   buildDraftUserMessage,
   demoUrlForSegment,
   estimateCostUsd,
+  isEndOfLifePhp,
   parseDraftResponse,
   parseProviders,
   RK9_NO_LINK_LINE,
@@ -97,6 +98,38 @@ describe("outreach AI drafting — pure logic (RK9-196)", () => {
     expect(buildDraftUserMessage({ company: "rk9", orgName: "Acme Oy", observation: null })).toContain(
       "viestityyppi A (EI SIVUA)",
     );
+  });
+
+  it("rk9: asks for type C when the site reports an end-of-life PHP branch", () => {
+    const msg = buildDraftUserMessage({
+      company: "rk9",
+      orgName: "Acme Oy",
+      observation: null,
+      websiteUrl: "https://www.acme.fi/",
+      phpVersion: "7.4.33",
+    });
+    expect(msg).toContain(
+      "Verkkosivu löytyi: https://www.acme.fi/. Sivuston palvelin kertoo käyttävänsä PHP-versiota 7.4.33, jonka tietoturvatuki on päättynyt. → Kirjoita viestityyppi C (VANHA PHP).",
+    );
+    expect(msg).not.toContain("viestityyppi B");
+    expect(msg).toContain(RK9_NO_LINK_LINE);
+  });
+
+  it("rk9: a supported or unknown PHP version stays type B, and no website stays type A", () => {
+    for (const phpVersion of ["8.2.35", "8.5.12", null, undefined, "unknown"]) {
+      const msg = buildDraftUserMessage({ company: "rk9", orgName: "A", observation: null, websiteUrl: "https://a.fi", phpVersion });
+      expect(msg).toContain("viestityyppi B (SIVU ON)");
+      expect(msg).not.toContain("PHP");
+    }
+    expect(
+      buildDraftUserMessage({ company: "rk9", orgName: "A", observation: null, websiteUrl: null, phpVersion: "5.6.40" }),
+    ).toContain("viestityyppi A (EI SIVUA)");
+  });
+
+  it("isEndOfLifePhp: branches below 8.2 are end-of-life", () => {
+    for (const v of ["5.2.13", "5.6.40", "7.3.33", "7.4.33", "8.0.30", "8.1.34", "PHP/8.1.34"]) expect(isEndOfLifePhp(v)).toBe(true);
+    for (const v of ["8.2.35", "8.3.36", "8.4.27", "8.5.12", "9.0.0"]) expect(isEndOfLifePhp(v)).toBe(false);
+    for (const v of [null, undefined, "", "PHP"]) expect(isEndOfLifePhp(v)).toBe(false);
   });
 
   it("saatavilla user message is unchanged by the rk9 branch", () => {
