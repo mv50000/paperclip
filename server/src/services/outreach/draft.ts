@@ -68,6 +68,27 @@ export interface DraftProspectFacts {
   company?: OutreachTemplateCompany;
   /** RK9-349 (rk9 only): the prospect's website if one is known — decides message type A/B. */
   websiteUrl?: string | null;
+  /**
+   * rk9 only: the PHP version the site's own `X-Powered-By` header reported
+   * (`enrichment.php.version`). An end-of-life branch turns type B into type C.
+   */
+  phpVersion?: string | null;
+}
+
+/**
+ * Oldest PHP branch with security support (php.net/supported-versions):
+ * 8.1 ended 31.12.2025, 8.2 ends 31.12.2026 — raise this then. The PHP2Shell
+ * fix (CVE-2026-109618/109619, 21.10.2026) shipped only for 8.2–8.5.
+ */
+const OLDEST_SUPPORTED_PHP: readonly [number, number] = [8, 2];
+
+/** True when `version` ("7.4.33", "PHP/8.1.34") names a branch without security support. */
+export function isEndOfLifePhp(version: string | null | undefined): boolean {
+  const match = version?.match(/(\d+)\.(\d+)/);
+  if (!match) return false;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  const [oldestMajor, oldestMinor] = OLDEST_SUPPORTED_PHP;
+  return major < oldestMajor || (major === oldestMajor && minor < oldestMinor);
 }
 
 /** Human-readable names for the provider slugs the PRH scan emits (`skills/prh-prospector`). */
@@ -154,12 +175,15 @@ export function buildDraftUserMessage(facts: DraftProspectFacts): string {
 
 /**
  * RK9-349: the rk9 template sells a website, not booking — so no provider
- * line; the branch is "is there a website at all" (docs/outreach/templates/rk9.md, A/B).
+ * line; the branch is "is there a website at all" (docs/outreach/templates/rk9.md, A/B),
+ * and a site that reports an end-of-life PHP branch gets type C.
  */
 function buildRk9UserMessage(facts: DraftProspectFacts, observationLine: string): string {
-  const websiteLine = facts.websiteUrl
-    ? `Verkkosivu löytyi: ${facts.websiteUrl}. → Kirjoita viestityyppi B (SIVU ON).`
-    : "Verkkosivua ei löytynyt. → Kirjoita viestityyppi A (EI SIVUA).";
+  const websiteLine = !facts.websiteUrl
+    ? "Verkkosivua ei löytynyt. → Kirjoita viestityyppi A (EI SIVUA)."
+    : isEndOfLifePhp(facts.phpVersion)
+      ? `Verkkosivu löytyi: ${facts.websiteUrl}. Sivuston palvelin kertoo käyttävänsä PHP-versiota ${facts.phpVersion}, jonka tietoturvatuki on päättynyt. → Kirjoita viestityyppi C (VANHA PHP).`
+      : `Verkkosivu löytyi: ${facts.websiteUrl}. → Kirjoita viestityyppi B (SIVU ON).`;
   return [
     `Yrityksen nimi: ${facts.orgName}`,
     websiteLine,
@@ -309,7 +333,7 @@ export async function draftMessageForProspect(
   }
 
   const enrichment = prospect.enrichment as
-    | { website?: { snippet?: string; url?: string }; providers?: unknown; seg?: string }
+    | { website?: { snippet?: string; url?: string }; php?: { version?: unknown }; providers?: unknown; seg?: string }
     | null;
   const system = loadTemplate(company);
   const user =
@@ -319,6 +343,7 @@ export async function draftMessageForProspect(
           orgName: prospect.orgName,
           observation: enrichment?.website?.snippet ?? null,
           websiteUrl: enrichment?.website?.url || prospect.sourceUrl || null,
+          phpVersion: typeof enrichment?.php?.version === "string" ? enrichment.php.version : null,
         })
       : buildDraftUserMessage({
           orgName: prospect.orgName,
