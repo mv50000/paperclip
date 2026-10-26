@@ -131,7 +131,7 @@ describeDb("no agent tool writes anything that can spend (real Postgres, fake Gr
 
   it("flags the writes it must catch (self-check of the detector)", () => {
     const write = (path: string, fields: Record<string, string>): RecordedRequest => ({
-      url: `https://graph.facebook.com/v23.0/${path}`,
+      url: `https://graph.facebook.com/v25.0/${path}`,
       method: "POST",
       fields,
     });

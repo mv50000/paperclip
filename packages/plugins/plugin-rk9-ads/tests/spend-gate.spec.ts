@@ -360,7 +360,8 @@ describe("guard and state refusals: no Meta write", () => {
   it.each([
     ["spend_cap missing", (meta: FakeMeta) => (meta.account.spend_cap = "0"), "no_spend_cap"],
     ["spend_cap above the cap", (meta: FakeMeta) => (meta.account.spend_cap = "50000"), "spend_cap_headroom_exceeds_remaining"],
-    ["projection above monthlyCapEur", (meta: FakeMeta) => (meta.adsets[0]!.daily_budget = "900"), "projection_exceeds_cap"],
+    // Above the 100 € cap even on the last day of the month: the rig runs on real time.
+    ["projection above monthlyCapEur", (meta: FakeMeta) => (meta.adsets[0]!.daily_budget = "20000"), "projection_exceeds_cap"],
   ])("denies on %s and edits the reason into the card", async (_label, mutate, reason) => {
     const meta = freshMeta();
     const r = await rig({ meta });

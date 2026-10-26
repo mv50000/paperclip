@@ -1,8 +1,8 @@
 {
-  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); paging.next on a newer version (the live answer header showed v25.0 on 2026-10-14)",
+  "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); paging.next on a version newer than GRAPH_VERSION",
   "status": 200,
   "headers": {
-    "facebook-api-version": "v23.0"
+    "facebook-api-version": "v25.0"
   },
   "body": {
     "data": [
@@ -34,7 +34,7 @@
         "before": "QVFIVDI3a25jakhWWDFfdklkdXJ4NlJ2WERXcUZAiVld6d3ZAJYkVwTWQzOTVFeXVZAWVBGS1dBakszQUZA4QUZAKTnFXSVpCVS1vbGt1RlV4eTk5cjBJQkZAibVlB",
         "after": "QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
       },
-      "next": "https://graph.facebook.com/v25.0/act_1336862981968191/ads?access_token=__TOKEN__&fields=id%2Cname%2Cstatus%2Ceffective_status%2Cadset_id%2Ccampaign_id%2Ccreative%7Bid%7D&limit=2&after=QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
+      "next": "https://graph.facebook.com/v26.0/act_1336862981968191/ads?access_token=__TOKEN__&fields=id%2Cname%2Cstatus%2Ceffective_status%2Cadset_id%2Ccampaign_id%2Ccreative%7Bid%7D&limit=2&after=QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
     }
   }
 }

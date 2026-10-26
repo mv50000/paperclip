@@ -2,7 +2,7 @@
   "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); shape of the recorded insights call (Sunspot had 0 rows yesterday)",
   "status": 200,
   "headers": {
-    "facebook-api-version": "v23.0"
+    "facebook-api-version": "v25.0"
   },
   "body": {
     "data": [

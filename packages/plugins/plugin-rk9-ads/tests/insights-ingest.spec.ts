@@ -44,11 +44,11 @@ function loadSunspot(date: string): SunspotFixture {
 }
 
 function ok(body: unknown): FixtureResponse {
-  return { status: 200, headers: { "facebook-api-version": "v23.0" }, body };
+  return { status: 200, headers: { "facebook-api-version": "v25.0" }, body };
 }
 
 function graphError(status: number, code: number, message: string): FixtureResponse {
-  return { status, headers: { "facebook-api-version": "v23.0" }, body: { error: { message, type: "OAuthException", code } } };
+  return { status, headers: { "facebook-api-version": "v25.0" }, body: { error: { message, type: "OAuthException", code } } };
 }
 
 function account(timezone = "Europe/Helsinki", amountSpent = "4510"): FixtureResponse {

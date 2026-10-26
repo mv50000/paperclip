@@ -58,7 +58,7 @@ const WRITE_CALLS: Array<[string, (client: ReturnType<typeof makeClient>["client
 
 describe("Graph URL and request shape", () => {
   it("builds every URL on the one pinned version", () => {
-    expect(GRAPH_VERSION).toBe("v23.0");
+    expect(GRAPH_VERSION).toBe("v25.0");
     expect(graphUrl("act_1/campaigns", { fields: "id", limit: 5 }).toString()).toBe(
       `${GRAPH_PREFIX}act_1/campaigns?fields=id&limit=5`,
     );
@@ -294,34 +294,34 @@ describe("paging", () => {
     expect(captured.activity[0]).toMatchObject({
       companyId: COMPANY,
       message: "rk9-ads: Meta Graph API version drift",
-      metadata: { expectedVersion: "v23.0", observedVersion: "v25.0", source: "paging" },
+      metadata: { expectedVersion: "v25.0", observedVersion: "v26.0", source: "paging" },
     });
     expect(captured.logs.filter((log) => log.message.includes("drift"))).toHaveLength(1);
-    expect(client.status().drift).toMatchObject({ observedVersion: "v25.0" });
-    expect(health.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v25.0" } });
+    expect(client.status().drift).toMatchObject({ observedVersion: "v26.0" });
+    expect(health.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v26.0" } });
   });
 
   it("writes the drift activity entry once per worker and observed version, and keeps the latest drift", async () => {
     const health = new GraphHealth();
     const header = (version: string) => ({ ...fixture("account"), headers: { "facebook-api-version": version } });
-    const first = makeClient(new FakeGraph(header("v25.0")), { health });
-    const second = makeClient(new FakeGraph(header("v25.0")), { health });
-    const third = makeClient(new FakeGraph(header("v26.0")), { health });
+    const first = makeClient(new FakeGraph(header("v26.0")), { health });
+    const second = makeClient(new FakeGraph(header("v26.0")), { health });
+    const third = makeClient(new FakeGraph(header("v27.0")), { health });
     for (const { client } of [first, second, third]) {
       await getAccountSummary(client, ACT);
       await Promise.resolve();
     }
     expect(first.captured.activity).toHaveLength(1);
     expect(second.captured.activity).toHaveLength(0);
-    expect(second.client.status().drift).toMatchObject({ observedVersion: "v25.0" });
+    expect(second.client.status().drift).toMatchObject({ observedVersion: "v26.0" });
     expect(third.captured.activity).toHaveLength(1);
-    expect(health.snapshot().drift).toMatchObject({ observedVersion: "v26.0" });
+    expect(health.snapshot().drift).toMatchObject({ observedVersion: "v27.0" });
   });
 
   it("createMetaClient feeds the worker-wide graphHealth through ctx", async () => {
     graphHealth.reset();
     try {
-      const graph = new FakeGraph({ ...fixture("account"), headers: { "facebook-api-version": "v25.0" } });
+      const graph = new FakeGraph({ ...fixture("account"), headers: { "facebook-api-version": "v26.0" } });
       const activity: unknown[] = [];
       const client = createMetaClient(
         {
@@ -334,7 +334,7 @@ describe("paging", () => {
       );
       await getAccountSummary(client, ACT);
       await Promise.resolve();
-      expect(graphHealth.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v25.0" } });
+      expect(graphHealth.snapshot()).toMatchObject({ status: "degraded", drift: { observedVersion: "v26.0" } });
       expect(activity).toHaveLength(1);
       expect(graph.calls[0]!.headers.Authorization).toBe(`Bearer ${SENTINEL_TOKEN}`);
     } finally {
@@ -345,7 +345,7 @@ describe("paging", () => {
   it("also notices drift in the facebook-api-version response header", async () => {
     const health = new GraphHealth();
     const account = fixture("account");
-    const graph = new FakeGraph({ ...account, headers: { "facebook-api-version": "v25.0" } });
+    const graph = new FakeGraph({ ...account, headers: { "facebook-api-version": "v26.0" } });
     const { client, captured } = makeClient(graph, { health });
     await getAccountSummary(client, ACT);
     await Promise.resolve();
@@ -633,7 +633,7 @@ describe("read-only and dry-run modes", () => {
   });
 
   it("survives a logger that throws while it reports drift", async () => {
-    const graph = new FakeGraph({ ...fixture("account"), headers: { "facebook-api-version": "v25.0" } });
+    const graph = new FakeGraph({ ...fixture("account"), headers: { "facebook-api-version": "v26.0" } });
     const { client } = makeClient(graph, {
       health: new GraphHealth(),
       logger: {
