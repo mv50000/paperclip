@@ -2,7 +2,7 @@
   "source": "hand-written from the recorded shapes and Meta Marketing API docs (no live write was made); paging.next pointing outside Graph",
   "status": 200,
   "headers": {
-    "facebook-api-version": "v23.0"
+    "facebook-api-version": "v25.0"
   },
   "body": {
     "data": [
@@ -30,7 +30,7 @@
       }
     ],
     "paging": {
-      "next": "https://evil.example/v23.0/act_1336862981968191/ads?after=x"
+      "next": "https://evil.example/v25.0/act_1336862981968191/ads?after=x"
     }
   }
 }

@@ -2,7 +2,7 @@
   "source": "recorded 2026-10-14 from Sunspot act_1336862981968191 with scripts/live-smoke-sunspot.ts --record, token-scrubbed; rows 3-4 of the same response, last page",
   "status": 200,
   "headers": {
-    "facebook-api-version": "v23.0"
+    "facebook-api-version": "v25.0"
   },
   "body": {
     "data": [

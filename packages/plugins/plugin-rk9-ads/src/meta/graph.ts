@@ -37,7 +37,7 @@ import { redactText, redactValue, stripAccessToken } from "./redact.js";
 import type { DryRunResult, WriteResult } from "./types.js";
 
 /** The Graph API version of every call. Bump it here and nowhere else. */
-export const GRAPH_VERSION = "v23.0";
+export const GRAPH_VERSION = "v25.0";
 
 const GRAPH_HOST = "graph.facebook.com";
 const GRAPH_BASE_URL = `https://${GRAPH_HOST}/${GRAPH_VERSION}`;
@@ -168,7 +168,7 @@ export interface GraphDriftEvent {
  * Worker-wide Graph health. Clients record the version drift they see, and
  * `onHealth()` reports the plugin as degraded until the worker restarts with
  * a reviewed `GRAPH_VERSION`. The latest drift wins, so a second upgrade
- * (for example v25 to v26) is visible too.
+ * (for example v26 to v27) is visible too.
  */
 export class GraphHealth {
   private latest: GraphDriftEvent | null = null;

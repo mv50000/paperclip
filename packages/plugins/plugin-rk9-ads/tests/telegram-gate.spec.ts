@@ -661,7 +661,7 @@ describe("gate transitions", () => {
   it("moves an approved card to failed when the handler throws, with a generic card line and a redacted error", async () => {
     const r = await rig({
       handler: async () => {
-        throw new Error("Meta API: (#100) invalid parameter for https://graph.facebook.com/v23.0/act_1/ads?access_token=EAAGsecretvalue123");
+        throw new Error("Meta API: (#100) invalid parameter for https://graph.facebook.com/v25.0/act_1/ads?access_token=EAAGsecretvalue123");
       },
     });
     const card = await photoCard(r);

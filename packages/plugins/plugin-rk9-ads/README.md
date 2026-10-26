@@ -1097,8 +1097,13 @@ build no Graph helpers of their own (G12).
 
 The first live smoke (14.10.2026) showed `facebook-api-version: v25.0` on
 answers to v23.0 requests: Meta upgrades calls to a deprecated Marketing API
-version automatically. Bumping `GRAPH_VERSION` is a one-line change, made as a
-separate, reviewed step.
+version automatically. Marketing API v23.0 expired on 9.6.2026 and v24.0 on
+6.10.2026, so `GRAPH_VERSION` was bumped to v25.0 on 26.10.2026. The bump did
+not change behaviour, because Meta already answered every call as v25.0.
+Bumping `GRAPH_VERSION` is a one-line change, made as a separate, reviewed
+step. Check the expiry dates in Meta's
+[versions table](https://developers.facebook.com/docs/graph-api/changelog/versions/)
+before each bump.
 
 Run the live smoke (read-only, Sunspot G19):
 

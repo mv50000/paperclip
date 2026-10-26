@@ -34,7 +34,7 @@ describe("one GRAPH_VERSION (ADR 2)", () => {
   it("graph.ts exports exactly one GRAPH_VERSION and names the version once", () => {
     const source = readFileSync(GRAPH_FILE, "utf8");
     expect(source.match(/export const GRAPH_VERSION\b/g)).toHaveLength(1);
-    expect(source).toContain('export const GRAPH_VERSION = "v23.0";');
-    expect(source.match(/\bv\d+\.\d+\b/g)).toEqual(["v23.0"]);
+    expect(source).toContain('export const GRAPH_VERSION = "v25.0";');
+    expect(source.match(/\bv\d+\.\d+\b/g)).toEqual(["v25.0"]);
   });
 });

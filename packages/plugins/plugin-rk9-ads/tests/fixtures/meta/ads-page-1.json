@@ -2,7 +2,7 @@
   "source": "recorded 2026-10-14 from Sunspot act_1336862981968191 with scripts/live-smoke-sunspot.ts --record, token-scrubbed; limit cut to 2 rows and paging.next added by hand (Graph puts access_token in next URLs)",
   "status": 200,
   "headers": {
-    "facebook-api-version": "v23.0"
+    "facebook-api-version": "v25.0"
   },
   "body": {
     "data": [
@@ -34,7 +34,7 @@
         "before": "QVFIVDI3a25jakhWWDFfdklkdXJ4NlJ2WERXcUZAiVld6d3ZAJYkVwTWQzOTVFeXVZAWVBGS1dBakszQUZA4QUZAKTnFXSVpCVS1vbGt1RlV4eTk5cjBJQkZAibVlB",
         "after": "QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
       },
-      "next": "https://graph.facebook.com/v23.0/act_1336862981968191/ads?access_token=__TOKEN__&fields=id%2Cname%2Cstatus%2Ceffective_status%2Cadset_id%2Ccampaign_id%2Ccreative%7Bid%7D&limit=2&after=QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
+      "next": "https://graph.facebook.com/v25.0/act_1336862981968191/ads?access_token=__TOKEN__&fields=id%2Cname%2Cstatus%2Ceffective_status%2Cadset_id%2Ccampaign_id%2Ccreative%7Bid%7D&limit=2&after=QVFIVHBIRmY1bGZAaX282YWlQZA0U2em5VRHpqOFVjWnRncGxFeUZAqM0NvRlgtSlhFd2VBVVBId2ZAmZAHNlTlVDWlN2MEtTSGZAheFVZAN1VZAZAWdtR3hlS21IWXl3"
     }
   }
 }
