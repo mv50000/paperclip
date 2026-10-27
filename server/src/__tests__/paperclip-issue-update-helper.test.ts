@@ -222,6 +222,42 @@ describe("paperclip issue update helper", () => {
     expect(requests).toHaveLength(1);
   });
 
+  function unassignedIssueServer(currentStatus: string) {
+    return startServer((request, _attempt, res) => {
+      res.writeHead(request.method === "GET" || !request.body.includes('"status"') ? 200 : 422, {
+        "content-type": "application/json",
+      });
+      if (request.method === "GET") {
+        res.end(JSON.stringify({ id: "issue-1", status: currentStatus }));
+      } else if (request.body.includes('"status"')) {
+        res.end(JSON.stringify({ error: "in_progress issues require an assignee" }));
+      } else {
+        res.end(JSON.stringify({ id: "issue-1", status: currentStatus, comment: JSON.parse(request.body).comment }));
+      }
+    });
+  }
+
+  it("sends only the comment when an unassigned issue is already in_progress", async () => {
+    const { baseUrl, requests } = await unassignedIssueServer("in_progress");
+
+    const result = await runHelper(baseUrl, ["--issue-id", "issue-1", "--status", "in_progress", "--comment", "merge ready"]);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "in_progress", comment: "merge ready" });
+    expect(requests.map((r) => r.method)).toEqual(["PATCH", "GET", "PATCH"]);
+    expect(JSON.parse(requests[2]?.body ?? "{}")).toEqual({ comment: "merge ready" });
+  });
+
+  it("still fails moving an unassigned issue from another status to in_progress", async () => {
+    const { baseUrl, requests } = await unassignedIssueServer("in_review");
+
+    const result = await runHelper(baseUrl, ["--issue-id", "issue-1", "--status", "in_progress", "--comment", "merge ready"]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("the issue is in_review and has no assignee");
+    expect(requests.map((r) => r.method)).toEqual(["PATCH", "GET"]);
+  });
+
   it("retries a 5xx once and succeeds when the retry lands", async () => {
     const { baseUrl, requests } = await startServer((request, attempt, res) => {
       if (attempt === 1) {

@@ -145,6 +145,8 @@ Use comments incrementally:
 
 Read enough ancestor/comment context to understand _why_ the task exists and what changed. Do not reflexively reload the whole thread on every heartbeat.
 
+For these reads, use `bash "$paperclip_skill_dir/scripts/paperclip-api-get.sh" "issues/$PAPERCLIP_TASK_ID/heartbeat-context"` (`paperclip_skill_dir` as described under Step 8). It prints only the JSON body, so it pipes straight into `jq`; a non-2xx answer exits 1 with the status on stderr. Add `--out FILE` to save the body, one file per call. Do not append `-w 'HTTP %{http_code}'` to a body that you pipe into `jq` or save as `.json`.
+
 **Execution-policy review/approval wakes.** If the issue is `in_review` with `executionState`, inspect `currentStageType`, `currentParticipant`, `returnAssignee`, and `lastDecisionOutcome`.
 
 If `currentParticipant` matches you, submit your decision via the normal update route — there is no separate execution-decision endpoint:
