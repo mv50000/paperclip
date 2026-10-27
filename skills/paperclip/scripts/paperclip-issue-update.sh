@@ -155,6 +155,31 @@ while :; do
     exit 0
   fi
 
+  # The server rejects status=in_progress on an issue without an assignee, even
+  # when the issue is already in_progress (an operator worktree clears the
+  # assignee after checkout). Re-asserting the current status is a no-op, so
+  # drop it and send only the comment. Any other current status still fails.
+  if [[ "$curl_exit" -eq 0 && "$http_code" == "422" && "$status" == "in_progress" && "$body" == *"require an assignee"* ]]; then
+    current_body="$(
+      curl -sS -m 30 "$PAPERCLIP_API_URL/api/issues/$issue_id" \
+        -H "Authorization: Bearer $PAPERCLIP_API_KEY" 2>/dev/null || true
+    )"
+    current_status="$(jq -r '.status // empty' <<<"$current_body" 2>/dev/null || true)"
+    if [[ "$current_status" == "in_progress" ]]; then
+      printf 'Issue is already in_progress without an assignee; sending the update without a status change.\n' >&2
+      status=""
+      if [[ -z "$comment" ]]; then
+        printf '%s\n' "$current_body"
+        exit 0
+      fi
+      payload="$(jq -nc --arg comment "$comment" '{comment: $comment}')"
+      continue
+    fi
+    printf 'Issue update rejected (HTTP 422): the issue is %s and has no assignee. Assign it (or check it out) before moving it to in_progress.\n' "${current_status:-<unknown>}" >&2
+    printf '%s\n' "$body" >&2
+    exit 1
+  fi
+
   # 4xx (other than 429) is a definitive rejection; retrying cannot change it.
   if [[ "$curl_exit" -eq 0 && "$http_code" == 4* && "$http_code" != "429" ]]; then
     printf 'Issue update rejected (HTTP %s).\n' "$http_code" >&2
