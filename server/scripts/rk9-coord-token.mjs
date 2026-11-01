@@ -16,7 +16,8 @@
 // Usage:
 //   node server/scripts/rk9-coord-token.mjs issue (--host <name> | --service <rk9claude|grok>) --out <file>
 //        [--label <text>] [--expires-at <iso>] [--force]
-//   node server/scripts/rk9-coord-token.mjs rotate --id <token-id> --out <file> [--label <text>] [--force]
+//   node server/scripts/rk9-coord-token.mjs rotate --id <token-id> --out <file> [--label <text>]
+//        [--expires-at <iso> | --no-expiry] [--force]
 //   node server/scripts/rk9-coord-token.mjs revoke --id <token-id>
 //   node server/scripts/rk9-coord-token.mjs list
 //
@@ -29,6 +30,7 @@
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,6 +61,7 @@ function parse(argv) {
       label: { type: "string" },
       "expires-at": { type: "string" },
       company: { type: "string" },
+      "no-expiry": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
     },
   });
@@ -102,9 +105,12 @@ export async function writeCoordEnvFile(target, { coordUrl, companyId, token, re
   try {
     await handle.writeFile(body, "utf8");
     await handle.sync();
-  } finally {
-    await handle.close();
+  } catch (err) {
+    await handle.close().catch(() => undefined);
+    await rm(temp, { force: true });
+    throw err;
   }
+  await handle.close();
   try {
     await chmod(temp, 0o600);
     await rename(temp, target);
@@ -189,8 +195,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     });
   } else {
     if (!values.id || !UUID_RE.test(values.id)) throw new UsageError("--id <token-id> is required");
+    if (values["no-expiry"] && values["expires-at"]) {
+      throw new UsageError("pass --expires-at or --no-expiry, not both");
+    }
     result = await api("POST", `${base}/${values.id}/rotate`, apiKey, {
       ...(values.label ? { label: values.label } : {}),
+      ...(values["expires-at"] ? { expiresAt: values["expires-at"] } : {}),
+      ...(values["no-expiry"] ? { expiresAt: null } : {}),
     });
   }
   try {
@@ -204,7 +215,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   return [summary(result.record, { envFile: target })];
 }
 
-const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname;
+async function isInvokedDirectly() {
+  if (!process.argv[1]) return false;
+  const { realpath } = await import("node:fs/promises");
+  try {
+    return (await realpath(process.argv[1])) === (await realpath(fileURLToPath(import.meta.url)));
+  } catch {
+    return false;
+  }
+}
+const invokedDirectly = await isInvokedDirectly();
 if (invokedDirectly) {
   main().then(
     (rows) => process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`),

@@ -53,6 +53,21 @@ export function isRk9CoordRoutePath(path: string): boolean {
   return COORD_ROUTE_PATH.test(path);
 }
 
+/**
+ * Decide whether a coord-token request may pass. Both the raw request target
+ * and the pathname Express routes on (`req.path`, from parseurl) must be under
+ * the coord prefix. parseurl falls back to the legacy url.parse for a target
+ * with `#`, `\` or whitespace, which drops the fragment and turns `\` into
+ * `/`, so the raw and the routed path can differ: such targets are denied
+ * outright. Express matches routes case-insensitively, this check does not,
+ * so a case variant is denied rather than let through.
+ */
+export function isRk9CoordGuardAllowed(rawUrl: string, routedPath: string): boolean {
+  if (/[#\\\s]/.test(rawUrl)) return false;
+  const rawPath = rawUrl.split("?", 1)[0] ?? "";
+  return isRk9CoordRoutePath(rawPath) && isRk9CoordRoutePath(routedPath);
+}
+
 /** Deny-by-default guard for coord-token callers on non-coord routes. */
 export function rk9CoordTokenGuard(): RequestHandler {
   return (req, res, next) => {
@@ -60,11 +75,7 @@ export function rk9CoordTokenGuard(): RequestHandler {
       next();
       return;
     }
-    // originalUrl keeps the full path even under a mounted sub-app; strip the
-    // query. Express matches routes case-insensitively, this check does not,
-    // so a case variant is denied rather than let through.
-    const path = (req.originalUrl ?? req.url).split("?", 1)[0] ?? "";
-    if (isRk9CoordRoutePath(path)) {
+    if (isRk9CoordGuardAllowed(req.originalUrl ?? req.url, req.path)) {
       next();
       return;
     }

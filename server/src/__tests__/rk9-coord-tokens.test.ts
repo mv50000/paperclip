@@ -2,6 +2,7 @@
 // deny-by-default guard, the token service and the operator-only management
 // routes. Contract: docs/implementation-notes/coord-identity.md.
 import { readFile } from "node:fs/promises";
+import net from "node:net";
 import { randomUUID } from "node:crypto";
 import express, { Router } from "express";
 import request from "supertest";
@@ -11,7 +12,12 @@ import { activityLog, companies, createDb, rk9CoordTokens, type Db } from "@pape
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import type { Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
-import { isRk9CoordRoutePath, rk9CoordTokenGuard, type Rk9CoordTokenResolver } from "../middleware/rk9-coord-token-auth.js";
+import {
+  isRk9CoordGuardAllowed,
+  isRk9CoordRoutePath,
+  rk9CoordTokenGuard,
+  type Rk9CoordTokenResolver,
+} from "../middleware/rk9-coord-token-auth.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
 import { rk9CoordTokenRoutes } from "../routes/rk9-coord-tokens.js";
 import {
@@ -172,6 +178,50 @@ describe("deny by default: a coord token gets 403 on every non-coord route", () 
     expect(isRk9CoordRoutePath(`/api/companies/${RK9}/rk9/coord-tokens`)).toBe(false);
     expect(isRk9CoordRoutePath(`/api/companies/${RK9}/issues/rk9/coord/x`)).toBe(false);
     expect(isRk9CoordRoutePath(`//api/companies/${RK9}/rk9/coord/whoami`)).toBe(false);
+  });
+
+  // Verifier round 1 (H1): parseurl falls back to url.parse for a target with
+  // `#`, `\\` or whitespace, so Express could route a path the raw-URL check
+  // never saw. supertest normalises URLs, so these go over a raw socket.
+  it.each([
+    `/api/companies/${RK9}\\issues#/rk9/coord/`,
+    `/api/companies/${RK9}\\rk9\\coord-tokens#/rk9/coord/`,
+    `/api/companies/${RK9}#/rk9/coord/`,
+    `/api/companies/${RK9}/rk9/coord/whoami\\..\\..\\..\\issues`,
+  ])("denies the crafted raw target %s", async (target) => {
+    const { app } = makeApp();
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise((resolve) => server.once("listening", resolve));
+    try {
+      const port = (server.address() as net.AddressInfo).port;
+      const raw = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(port, "127.0.0.1", () => {
+          socket.write(
+            `GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${HOST_TOKEN}\r\nConnection: close\r\n\r\n`,
+          );
+        });
+        let data = "";
+        socket.on("data", (chunk) => (data += chunk.toString("utf8")));
+        socket.on("end", () => resolve(data));
+        socket.on("error", reject);
+      });
+      const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(raw)?.[1]);
+      expect(status, raw.slice(0, 200)).not.toBe(200);
+      expect(raw).not.toContain('"reached":true');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("requires the raw and the routed path to agree", () => {
+    const coord = `/api/companies/${RK9}/rk9/coord/whoami`;
+    expect(isRk9CoordGuardAllowed(coord, coord)).toBe(true);
+    expect(isRk9CoordGuardAllowed(`${coord}?x=1`, coord)).toBe(true);
+    expect(isRk9CoordGuardAllowed(`/api/companies/${RK9}#/rk9/coord/`, `/api/companies/${RK9}`)).toBe(false);
+    expect(isRk9CoordGuardAllowed(coord, `/api/companies/${RK9}/issues`)).toBe(false);
+    expect(isRk9CoordGuardAllowed(`/api/companies/${RK9}/issues`, coord)).toBe(false);
+    expect(isRk9CoordGuardAllowed(`${coord}\\x`, coord)).toBe(false);
+    expect(isRk9CoordGuardAllowed(`http://evil${coord}`, coord)).toBe(false);
   });
 
   it("is mounted in app.ts right after the actor middleware, before every API router", async () => {
@@ -337,6 +387,28 @@ if (!support.supported) {
     });
     expect(await service.resolve(token)).toMatchObject({ principalName: "grok" });
     expect(await service.resolve(token, new Date(Date.now() + 120_000))).toBeNull();
+  });
+
+  it("refuses to rotate an expired token into another dead token", async () => {
+    const service = rk9CoordTokenService(db);
+    const { record } = await service.issue({
+      companyId,
+      principalKind: "host",
+      principalName: "short-lived",
+      expiresAt: new Date(Date.now() + 1_000),
+    });
+    await db.update(rk9CoordTokens).set({ expiresAt: new Date(Date.now() - 1_000) }).where(eq(rk9CoordTokens.id, record.id));
+    const app = manageApp(operatorKey);
+    const refused = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${record.id}/rotate`).send({});
+    expect(refused.status).toBe(422);
+    expect(refused.body.code).toBe("rk9_coord_token_expiry_past");
+    const [still] = await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.id, record.id));
+    expect(still!.revokedAt).toBeNull();
+    const rotated = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens/${record.id}/rotate`)
+      .send({ expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    expect(rotated.status).toBe(201);
+    expect(await service.resolve(rotated.body.token)).toMatchObject({ principalName: "short-lived" });
   });
 
   it("does not rotate or revoke another company's token", async () => {

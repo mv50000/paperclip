@@ -17,7 +17,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { rk9CoordTokens } from "@paperclipai/db";
 import { RK9_COORD_TOKEN_PREFIX } from "@paperclipai/shared";
-import { conflict, notFound } from "../errors.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import type { Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
 
 /** Full token grammar; anything else is rejected before the DB lookup. */
@@ -186,6 +186,13 @@ export function rk9CoordTokenService(db: Db) {
         .for("update")
         .limit(1);
       if (!old) throw notFound("No active coord token with this id", { code: "rk9_coord_token_not_found" });
+      // An inherited expiry that has already passed would mint a dead token
+      // and take the active-principal slot: ask for an explicit expiry.
+      if (input.expiresAt === undefined && old.expiresAt && old.expiresAt.getTime() <= Date.now()) {
+        throw unprocessable("The token has expired; pass expiresAt (or null for no expiry) to rotate it", {
+          code: "rk9_coord_token_expiry_past",
+        });
+      }
       const [revoked] = await tx
         .update(rk9CoordTokens)
         .set({ revokedAt: new Date() })
