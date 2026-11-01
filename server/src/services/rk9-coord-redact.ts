@@ -3,8 +3,10 @@
 // Port of RK9_SESSIONS_SECRET_RX from ~/.claude/bin/rk9-sessions.sh (line 27,
 // RK9-549). The bash default is a Python `re` pattern used with re.I; every
 // construct in it (\s, character classes, alternation) means the same in a JS
-// RegExp, so the string is copied verbatim with the shell quoting removed
-// (`["'"'"']` in the script is the class `["']`).
+// RegExp except `\s`, which in Python also matches \x1c-\x1f. The string is
+// copied verbatim with the shell quoting removed (`["'"'"']` in the script is
+// the class `["']`); toRk9CoordLine() turns every control character into a
+// space before matching, which covers the `\s` difference.
 //
 // The same env var may override the pattern on a host. An override that is
 // not a valid JS RegExp falls back to the default (fail closed: redaction
@@ -59,8 +61,13 @@ export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = proces
   return text.replace(rx, RK9_COORD_REDACTED).replace(COORD_TOKEN_RX, RK9_COORD_REDACTED);
 }
 
+/** True when the text contains anything the redaction would replace. */
+export function rk9CoordTextHasSecret(text: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return redactRk9CoordText(text, env) !== text;
+}
+
 /**
- * Redact, collapse to one line, trim and cap at `max` code points. Returns
+ * Collapse to one line, redact, trim and cap at `max` code points. Returns
  * null for text that is empty after cleaning. Redaction runs before the cap,
  * so a cap can never cut a secret in half and leave its prefix visible.
  */
@@ -70,10 +77,15 @@ export function toRk9CoordLine(
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
   if (text === null || text === undefined) return null;
-  const line = redactRk9CoordText(text, env)
+  // Collapse BEFORE redacting: JS \s misses most C0 controls (Python's \s
+  // matches \x1c-\x1f), so "Bearer\x01<token>" must become "Bearer <token>"
+  // before the pattern sees it, or the collapse would rebuild a secret the
+  // pattern skipped.
+  const collapsed = text
     // eslint-disable-next-line no-control-regex
-    .replace(/[\s\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
     .trim();
+  const line = redactRk9CoordText(collapsed, env);
   if (line.length === 0) return null;
   const points = Array.from(line);
   return points.length > max ? points.slice(0, max).join("").trimEnd() : line;

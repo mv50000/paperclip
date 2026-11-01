@@ -57,6 +57,16 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     expect(redactRk9CoordText(input, env)).toBe(expected);
   });
 
+  it.each([
+    // C0 controls that JS \s misses must not hide a secret (verifier round 1).
+    ["Bearer\u0001abcdefghijklmnop", "[redacted]"],
+    ["token\u0001=\u0001supersecret123", "[redacted]"],
+    ["password\u0002:hunter2hunter2", "[redacted]"],
+    ["Bearer\u001fabcdefghijk", "[redacted]"],
+  ])("collapses control characters before redacting %j", (input, expected) => {
+    expect(toRk9CoordLine(input, 140, env)).toBe(expected);
+  });
+
   it("collapses to one line, caps at 140 code points and redacts before the cap", () => {
     expect(toRk9CoordLine("  a\n\tb  ", 140, env)).toBe("a b");
     expect(toRk9CoordLine("   ", 140, env)).toBeNull();
@@ -244,6 +254,49 @@ if (!support.supported) {
     expect(await registrations("cc:paperclip-01:stub")).toHaveLength(1);
   });
 
+  it("logs exactly one registration for concurrent first PUTs", async () => {
+    const app = makeApp(operatorKey());
+    const ref = "cc:paperclip-01:race";
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => request(app).put(`${base()}/me`).set("X-RK9-Actor", ref).send({ phase: "go" })),
+    );
+    expect(results.map((r) => r.status).sort()).toEqual([200, 200, 200, 200, 200, 201]);
+    expect(await registrations(ref)).toHaveLength(1);
+  });
+
+  it("keeps the registration marker out of client hands", async () => {
+    const app = makeApp(operatorKey());
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ metadata: { presence_registered_at: "x", a: 1 } });
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ metadata: { b: 2 } });
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({});
+    const [row] = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, CC));
+    expect(row!.metadata).toMatchObject({ b: 2 });
+    expect(row!.metadata).not.toHaveProperty("a");
+    expect(String(row!.metadata.presence_registered_at)).not.toBe("x");
+    expect(await registrations(CC)).toHaveLength(1);
+  });
+
+  it("answers 422 to a secret in a field that is stored verbatim", async () => {
+    const app = makeApp(operatorKey());
+    for (const body of [
+      { branch: "fix/token=supersecret123" },
+      { external_id: "rk9_coord_AbCdEfGhIjKl" },
+      { metadata: { note: "rk9_coord_AbCdEfGhIjKl" } },
+    ]) {
+      const res = await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);
+      expect(res.status).toBe(422);
+    }
+    expect(await db.select().from(rk9CoordActors)).toHaveLength(0);
+  });
+
+  it("refreshes trust on phase updates and ends", async () => {
+    await db.insert(rk9CoordActors).values({ companyId, kind: "cc", actorRef: CC, host: "paperclip-01", trust: "verified" });
+    const app = makeApp(operatorKey());
+    await request(app).post(`${base()}/me/phase`).set("X-RK9-Actor", CC).send({ phase: "x" });
+    const [row] = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, CC));
+    expect(row!.trust).toBe("attributed");
+  });
+
   it("updates phase without an activity row and shows it in GET at once", async () => {
     const app = makeApp(operatorKey());
     await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ phase: "start" });
@@ -324,7 +377,10 @@ if (!support.supported) {
     expect(byRepo.body.actors).toEqual([
       expect.objectContaining({ actorId: CC, kind: "cc", host: "paperclip-01", name: "A", issue: "RKP-7", repoBranch: "mv50000/paperclip@work/RKP-7", phase: null, ageS: 0 }),
     ]);
-    const byIssue = await request(app).get(`${base()}?issue=RKP-8`);
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", "worktree:RKP-9").send({ repo: "o/myXrepo" });
+    const underscore = await request(app).get(`${base()}?repo=my_repo`);
+    expect(underscore.body.actors).toEqual([]);
+        const byIssue = await request(app).get(`${base()}?issue=RKP-8`);
     expect(byIssue.body.actors.map((a: { actorId: string }) => a.actorId)).toEqual(["worktree:RKP-8"]);
   });
 
@@ -376,6 +432,11 @@ if (!support.supported) {
     const mine = list.body.actors.filter((a: { actorId: string }) => a.actorId === `agent_run:${runningRunId}`);
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ source: "presence", phase: "working" });
+    // Ending the presence row does not hide a run that is still running.
+    await request(app).delete(`${base()}/me`);
+    const after = await request(app).get(`${base()}?active=1`);
+    const projected = after.body.actors.filter((a: { actorId: string }) => a.actorId === `agent_run:${runningRunId}`);
+    expect(projected).toEqual([expect.objectContaining({ source: "heartbeat_run", runStatus: "running" })]);
   });
 
   it("rejects another company's cid for agent keys and board users", async () => {
@@ -399,6 +460,9 @@ if (!support.supported) {
     [{ issue: "not an issue" }],
     [{ repo: "a/b/c" }],
     [{ pid: -1 }],
+    [{ branch: "a\u0000b" }],
+    [{ branch: "a\u0001b" }],
+    [{ metadata: { a: "x\u0000y" } }],
     [{ unknown: true }],
   ])("answers 422 to an invalid PUT body %j", async (body) => {
     const res = await request(makeApp(operatorKey())).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);

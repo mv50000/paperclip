@@ -71,8 +71,9 @@ export type RotateRk9CoordToken = z.infer<typeof rotateRk9CoordTokenSchema>;
 //
 // The rk9 CLI (RK9-624) sends snake_case bodies; camelCase aliases are
 // accepted too. `kind`, `host` and `external_id` are advisory: the server
-// derives the actor from the credential and X-RK9-Actor, validates the format
-// here (422) and rejects a value that contradicts the resolved actor (403).
+// derives the actor from the credential and X-RK9-Actor and validates the
+// format here (422). A `kind` or `host` that contradicts the resolved actor is
+// 403; a different `external_id` is kept as metadata.client_external_id.
 // Phase and name are redacted and capped on the server, so the raw limits
 // here only bound the work the redaction does.
 
@@ -86,7 +87,12 @@ const coordRepoSchema = z
   .string()
   .max(200)
   .regex(/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)?$/, "repo must be <name> or <owner>/<name>");
-const coordBranchSchema = z.string().min(1).max(255).regex(/^[^\s]+$/, "branch must not contain whitespace");
+const coordBranchSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  // eslint-disable-next-line no-control-regex
+  .regex(/^[^\s\u0000-\u001f\u007f]+$/, "branch must not contain whitespace or control characters");
 const coordExternalIdSchema = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "external_id must be 1-128 characters [A-Za-z0-9._-]");
@@ -117,6 +123,8 @@ export const upsertRk9CoordActorSchema = z
     metadata: z
       .record(z.string(), z.unknown())
       .refine((value) => JSON.stringify(value).length <= 4096, "metadata must be at most 4096 bytes of JSON")
+      // Postgres rejects NUL in jsonb; answer 422, not 500.
+      .refine((value) => !JSON.stringify(value).includes("\\u0000"), "metadata must not contain NUL characters")
       .optional(),
   })
   .strict();

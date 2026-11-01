@@ -261,7 +261,7 @@ router reads `req.rk9CoordActor` and never parses `X-RK9-Actor` itself.
 | `PUT /actors/me` | `name`, `issue`, `repo`, `branch`, `phase`, `pid`, `liveness_source`, `metadata`; advisory `kind`, `host`, `external_id`, `client_event_id` | 201 on the first insert, 200 after: `{id, actorId, kind, host, trust, created, ttlS}` |
 | `POST /actors/me/phase` | `phase` (string or null) | 200 `{id, actorId, phase}`; 404 `rk9_coord_actor_not_found` without an open row |
 | `DELETE /actors/me` | optional advisory fields | 204, also when the actor already ended or never registered |
-| `GET /actors` | `active` (`1` default, `0` = include ended and stale rows), `repo`, `issue`, `limit` (1-500, default 200) | `{actors: [row], ttlS}` |
+| `GET /actors` | `active` (`1` default, `0` = include ended and stale rows), `repo` (exact, or `<name>` matches `<owner>/<name>`), `issue`, `limit` (1-500, default 200, per source) | `{actors: [row], ttlS}` |
 
 Rules:
 
@@ -281,19 +281,31 @@ Rules:
   so PUT is also the presence heartbeat. A `worktree:<issue>` actor gets
   `issue` from its id when the body does not name one.
 - **Activity log.** Only the first registration writes `activity_log`
-  (`rk9.coord.actor_registered`, entity `rk9_coord_actor`). It is detected by
-  the server-set marker `metadata.presence_registered_at`, so a stub row
-  inserted first by another coord route (RK9-626 inserts a minimal row
-  `ON CONFLICT DO NOTHING`) still logs exactly one registration. The existing
-  row is locked `FOR UPDATE` first, so two concurrent first PUTs log once.
-  Phase updates, refreshes and ends write no activity rows.
+  (`rk9.coord.actor_registered`, entity `rk9_coord_actor`). The upsert offers
+  a per-request nonce as the server-set marker
+  `metadata.presence_registered_at` and keeps an existing marker (coalesce).
+  The request is the first registration exactly when the returned marker is
+  its own nonce. So a stub row inserted by another coord route (RK9-626
+  inserts a minimal row `ON CONFLICT DO NOTHING`), at any moment, still logs
+  exactly one registration, and concurrent first PUTs log once. The activity
+  row is written in the same transaction as the marker. Clients cannot set
+  the marker. Phase updates, refreshes and ends write no activity rows.
+- **Secrets in verbatim fields.** `branch`, `external_id` and `metadata` are
+  stored as sent, so a value that matches the redaction pattern is 422
+  (`rk9_coord_secret_in_field`) instead of being stored. Control characters
+  in `branch` and NUL in `metadata` are 422 too.
+- **Trust.** Every write (PUT, phase, end) stores the trust of the current
+  writer, so a row never shows a stale higher trust.
 - **Liveness.** Live means `ended_at IS NULL AND last_seen_at > now -
   RK9_COORD_PRESENCE_TTL_S`. It is a read rule, so a crashed actor drops out
   after one TTL and no cleanup job runs. Its row stays until retention.
-- **Phase and name.** Both are matched case-insensitively against
-  `RK9_SESSIONS_SECRET_RX` and every match becomes `[redacted]`. `rk9_coord_`
-  tokens are always redacted on top. The text is then collapsed to one line
-  and capped: phase at 140 code points, name at 200. The raw input limit is
+- **Phase and name.** The text is first collapsed to one line: every run of
+  whitespace and control characters becomes one space (JS `\s` misses most
+  C0 controls, so redacting first would let `Bearer\x01<token>` through).
+  It is then matched case-insensitively against `RK9_SESSIONS_SECRET_RX`
+  and every match becomes `[redacted]`. `rk9_coord_` tokens are always
+  redacted on top. Last, the text is capped: phase at 140 code points, name
+  at 200. The raw input limit is
   1000 characters (422 beyond). `phase_at` changes only when the phase text
   changes.
 - **Agent runs.** `heartbeat_runs` rows of the company with status `running`
@@ -302,7 +314,9 @@ Rules:
   `startedAt`. A run with no activity (latest of `last_output_at`,
   `updated_at`, `started_at`, `created_at`) for `RK9_COORD_AGENT_RUN_STALE_S`
   is treated as an orphan and left out. A run that registered itself with
-  `PUT me` is listed once, as its presence row. A `repo` filter excludes
+  `PUT me` is listed once, as its presence row. After `DELETE me` the run is
+  still listed, as a projected row, while it is `running`. `limit` applies to
+  each source on its own, so ended presence rows never hide running runs. A `repo` filter excludes
   projected runs, because runs have no repo. The whole list runs in one
   `READ ONLY` transaction, so the projection cannot write. The heartbeat
   service is not changed.

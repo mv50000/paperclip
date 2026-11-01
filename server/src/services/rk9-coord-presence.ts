@@ -19,6 +19,7 @@ import { and, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, rk9CoordActors } from "@paperclipai/db";
 import { parseRk9CoordActorId, RK9_COORD_PHASE_MAX, type Rk9CoordActorKind, type Rk9CoordTrust } from "@paperclipai/shared";
+import { randomUUID } from "node:crypto";
 import { toRk9CoordLine } from "./rk9-coord-redact.js";
 
 export const RK9_COORD_PRESENCE_TTL_S_DEFAULT = 300;
@@ -128,8 +129,22 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
    * Upsert the caller's row. Returns the row id and whether this call was the
    * actor's first registration (insert, or the first PUT on a stub row that
    * another coord route inserted).
+   *
+   * First registration is decided inside the upsert itself: this request
+   * offers a nonce as the registration marker, the update keeps an existing
+   * marker (coalesce), and the request is first exactly when the returned
+   * marker is its own nonce. That holds for an insert, for a stub row that
+   * appeared at any moment before the upsert, and for concurrent first PUTs
+   * (ON CONFLICT serializes them on the row lock).
+   *
+   * `onFirstRegistration` runs in the same transaction, so the activity row
+   * and the marker commit together or not at all.
    */
-  async function upsert(identity: Rk9CoordPresenceIdentity, fields: Rk9CoordPresenceFields) {
+  async function upsert(
+    identity: Rk9CoordPresenceIdentity,
+    fields: Rk9CoordPresenceFields,
+    onFirstRegistration?: (tx: Db, rowId: string) => Promise<void>,
+  ) {
     const at = now();
     const expiresAt = new Date(at.getTime() + ttlS() * 1000);
     const parsed = parseRk9CoordActorId(identity.actorId);
@@ -138,55 +153,49 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
     const name = fields.name === undefined ? undefined : toRk9CoordLine(fields.name, NAME_MAX, env);
     const issue =
       fields.issue !== undefined ? fields.issue : identity.kind === "worktree" ? (parsed?.ref ?? null) : undefined;
+    const nonce = `${at.toISOString()}#${randomUUID()}`;
+
+    // Server-owned keys: the client cannot set the marker.
+    const serverKeys: Record<string, unknown> = {};
+    if (fields.clientExternalId && fields.clientExternalId !== externalId) {
+      serverKeys.client_external_id = fields.clientExternalId;
+    }
+    const clientMetadata = { ...(fields.metadata ?? {}) };
+    delete clientMetadata[RK9_COORD_REGISTERED_MARKER];
+    const insertMetadata = { ...clientMetadata, ...serverKeys, [RK9_COORD_REGISTERED_MARKER]: nonce };
+    const markerSql = sql`jsonb_build_object(${RK9_COORD_REGISTERED_MARKER}::text, coalesce(${rk9CoordActors.metadata} ->> ${RK9_COORD_REGISTERED_MARKER}::text, ${nonce}::text))`;
+    // An omitted metadata key keeps the stored object; a sent one replaces it.
+    const metadataUpdate =
+      fields.metadata !== undefined
+        ? sql`${JSON.stringify({ ...clientMetadata, ...serverKeys })}::jsonb || ${markerSql}`
+        : sql`${rk9CoordActors.metadata} || ${JSON.stringify(serverKeys)}::jsonb || ${markerSql}`;
+
+    const set: Partial<typeof rk9CoordActors.$inferInsert> = {
+      kind: identity.kind,
+      host: identity.host,
+      externalId,
+      trust: identity.trust,
+      agentId: identity.agentId ?? null,
+      runId: identity.runId ?? null,
+      lastSeenAt: at,
+      expiresAt,
+      endedAt: null,
+      updatedAt: at,
+    };
+    if (name !== undefined) set.name = name;
+    if (issue !== undefined) set.issue = issue;
+    if (fields.repo !== undefined) set.repo = fields.repo;
+    if (fields.branch !== undefined) set.branch = fields.branch;
+    if (fields.pid !== undefined) set.pid = fields.pid;
+    if (fields.livenessSource !== undefined) set.livenessSource = fields.livenessSource;
+
+    const updateSet: Record<string, unknown> = { ...set, metadata: metadataUpdate };
+    if (phase !== undefined) {
+      updateSet.phase = phase;
+      updateSet.phaseAt = sql`case when ${rk9CoordActors.phase} is distinct from ${phase}::text then ${ts(at)} else ${rk9CoordActors.phaseAt} end`;
+    }
 
     return db.transaction(async (tx) => {
-      // Lock an existing row (a stub, or a previous registration) so two
-      // concurrent first PUTs cannot both count as the registration.
-      const [prior] = await tx
-        .select({
-          id: rk9CoordActors.id,
-          registered: sql<string | null>`${rk9CoordActors.metadata} ->> ${RK9_COORD_REGISTERED_MARKER}`,
-          metadata: rk9CoordActors.metadata,
-        })
-        .from(rk9CoordActors)
-        .where(and(eq(rk9CoordActors.companyId, identity.companyId), eq(rk9CoordActors.actorRef, identity.actorId)))
-        .for("update");
-
-      const registeredAt = prior?.registered ?? at.toISOString();
-      const clientMetadata = { ...(fields.metadata ?? {}) };
-      delete clientMetadata[RK9_COORD_REGISTERED_MARKER];
-      const baseMetadata = fields.metadata !== undefined ? clientMetadata : { ...(prior?.metadata ?? {}) };
-      const metadata: Record<string, unknown> = { ...baseMetadata, [RK9_COORD_REGISTERED_MARKER]: registeredAt };
-      if (fields.clientExternalId && fields.clientExternalId !== externalId) {
-        metadata.client_external_id = fields.clientExternalId;
-      }
-
-      const set: Partial<typeof rk9CoordActors.$inferInsert> = {
-        kind: identity.kind,
-        host: identity.host,
-        externalId,
-        trust: identity.trust,
-        agentId: identity.agentId ?? null,
-        runId: identity.runId ?? null,
-        metadata,
-        lastSeenAt: at,
-        expiresAt,
-        endedAt: null,
-        updatedAt: at,
-      };
-      if (name !== undefined) set.name = name;
-      if (issue !== undefined) set.issue = issue;
-      if (fields.repo !== undefined) set.repo = fields.repo;
-      if (fields.branch !== undefined) set.branch = fields.branch;
-      if (fields.pid !== undefined) set.pid = fields.pid;
-      if (fields.livenessSource !== undefined) set.livenessSource = fields.livenessSource;
-
-      const updateSet: Record<string, unknown> = { ...set };
-      if (phase !== undefined) {
-        updateSet.phase = phase;
-        updateSet.phaseAt = sql`case when ${rk9CoordActors.phase} is distinct from ${phase}::text then ${ts(at)} else ${rk9CoordActors.phaseAt} end`;
-      }
-
       const [row] = await tx
         .insert(rk9CoordActors)
         .values({
@@ -195,6 +204,7 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
           actorRef: identity.actorId,
           kind: identity.kind,
           trust: identity.trust,
+          metadata: insertMetadata,
           phase: phase ?? null,
           phaseAt: phase ? at : null,
           createdAt: at,
@@ -203,10 +213,15 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
           target: [rk9CoordActors.companyId, rk9CoordActors.actorRef],
           set: updateSet,
         })
-        .returning({ id: rk9CoordActors.id, inserted: sql<boolean>`(xmax = 0)` });
+        .returning({
+          id: rk9CoordActors.id,
+          inserted: sql<boolean>`(xmax = 0)`,
+          marker: sql<string | null>`${rk9CoordActors.metadata} ->> ${RK9_COORD_REGISTERED_MARKER}::text`,
+        });
 
-      const inserted = row!.inserted === true;
-      return { id: row!.id, inserted, firstRegistration: inserted || (prior !== undefined && !prior.registered) };
+      const firstRegistration = row!.marker === nonce;
+      if (firstRegistration && onFirstRegistration) await onFirstRegistration(tx as unknown as Db, row!.id);
+      return { id: row!.id, inserted: row!.inserted === true, firstRegistration };
     });
   }
 
@@ -219,6 +234,8 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
       .set({
         phase,
         phaseAt: sql`case when ${rk9CoordActors.phase} is distinct from ${phase}::text then ${ts(at)} else ${rk9CoordActors.phaseAt} end`,
+        // The row shows the trust of its latest writer, never a stale higher one.
+        trust: identity.trust,
         lastSeenAt: at,
         expiresAt: new Date(at.getTime() + ttlS() * 1000),
         updatedAt: at,
@@ -235,11 +252,11 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
   }
 
   /** End the actor. Idempotent: an ended or unknown actor is a no-op. */
-  async function end(identity: Pick<Rk9CoordPresenceIdentity, "companyId" | "actorId">) {
+  async function end(identity: Pick<Rk9CoordPresenceIdentity, "companyId" | "actorId" | "trust">) {
     const at = now();
     const rows = await db
       .update(rk9CoordActors)
-      .set({ endedAt: at, updatedAt: at })
+      .set({ endedAt: at, updatedAt: at, trust: identity.trust })
       .where(
         and(
           eq(rk9CoordActors.companyId, identity.companyId),
@@ -275,7 +292,11 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
           conds.push(
             filter.repo.includes("/")
               ? eq(rk9CoordActors.repo, filter.repo)
-              : or(eq(rk9CoordActors.repo, filter.repo), sql`${rk9CoordActors.repo} like ${`%/${filter.repo}`}`)!,
+              : or(
+                  eq(rk9CoordActors.repo, filter.repo),
+                  // Exact suffix compare, not LIKE: `_` in a repo name is no wildcard.
+                  sql`right(${rk9CoordActors.repo}, ${filter.repo.length + 1}::int) = ${`/${filter.repo}`}::text`,
+                )!,
           );
         }
         const actorRows = await tx
@@ -314,8 +335,9 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
           source: "presence",
         }));
 
-        // Agent runs have no repo, so a repo filter excludes them.
-        if (filter.repo || rows.length >= limit) return rows;
+        // Agent runs have no repo, so a repo filter excludes them. `limit`
+        // applies per source, so ended presence rows never hide running runs.
+        if (filter.repo) return rows;
 
         const contextIssueId = sql`coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId', ${heartbeatRuns.contextSnapshot} ->> 'taskId')`;
         const runConds: SQL[] = [eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, "running")];
@@ -350,7 +372,7 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
           )
           .where(and(...runConds))
           .orderBy(desc(heartbeatRuns.startedAt))
-          .limit(limit - rows.length);
+          .limit(limit);
 
         const seen = new Set(rows.map((r) => r.actorId));
         for (const r of runRows) {

@@ -25,7 +25,8 @@ import {
 } from "@paperclipai/shared";
 import { HttpError, unprocessable } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
-import { logActivity } from "../services/activity-log.js";
+import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
+import { rk9CoordTextHasSecret } from "../services/rk9-coord-redact.js";
 import {
   rk9CoordPresenceService,
   type Rk9CoordPresenceIdentity,
@@ -77,9 +78,34 @@ function checkAdvisory(actor: Rk9CoordResolvedActor, body: AdvisoryIdentity) {
     throw coordError(403, "rk9_coord_actor_spoof", "Body kind differs from the resolved actor");
   }
   if (body.host !== undefined && body.host !== actor.host) {
-    throw coordError(403, "rk9_coord_host_mismatch", "Body host differs from the host the server attributes the actor to");
+    throw coordError(
+      403,
+      "rk9_coord_host_mismatch",
+      "Body host differs from the host the server attributes the actor to",
+    );
   }
   return body.external_id ?? body.externalId ?? null;
+}
+
+/**
+ * Fields the server stores verbatim (no redaction) must not carry a secret:
+ * answer 422 instead of storing it. Phase and name are redacted instead.
+ */
+function rejectSecrets(fields: {
+  branch?: string | null;
+  external_id?: string | null;
+  metadata?: Record<string, unknown>;
+}) {
+  const bad: string[] = [];
+  if (fields.branch && rk9CoordTextHasSecret(fields.branch)) bad.push("branch");
+  if (fields.external_id && rk9CoordTextHasSecret(fields.external_id)) bad.push("external_id");
+  if (fields.metadata && rk9CoordTextHasSecret(JSON.stringify(fields.metadata))) bad.push("metadata");
+  if (bad.length > 0) {
+    throw new HttpError(422, "Field looks like it contains a secret", {
+      code: "rk9_coord_secret_in_field",
+      fields: bad,
+    });
+  }
 }
 
 function identityOf(req: Request, actor: Rk9CoordResolvedActor): Rk9CoordPresenceIdentity {
@@ -104,21 +130,29 @@ export function rk9CoordActorRoutes(db: Db, opts: Rk9CoordActorRouteOptions = {}
       const actor = requireActor(req);
       const body = req.body as UpsertRk9CoordActor;
       const clientExternalId = checkAdvisory(actor, body);
-      const identity = identityOf(req, actor);
-      const result = await presence.upsert(identity, {
-        name: body.name,
-        issue: body.issue,
-        repo: body.repo,
+      rejectSecrets({
         branch: body.branch,
-        phase: body.phase,
-        pid: body.pid,
-        livenessSource: body.liveness_source ?? body.livenessSource,
+        external_id: clientExternalId,
         metadata: body.metadata,
-        clientExternalId,
       });
-      if (result.firstRegistration) {
-        await logRegistration(req, actor, identity, result.id);
-      }
+      const identity = identityOf(req, actor);
+      const publications: ActivityPublication[] = [];
+      const result = await presence.upsert(
+        identity,
+        {
+          name: body.name,
+          issue: body.issue,
+          repo: body.repo,
+          branch: body.branch,
+          phase: body.phase,
+          pid: body.pid,
+          livenessSource: body.liveness_source ?? body.livenessSource,
+          metadata: body.metadata,
+          clientExternalId,
+        },
+        (tx, rowId) => logRegistration(tx, req, actor, identity, rowId, publications),
+      );
+      for (const publication of publications) publishActivity(publication);
       res.status(result.inserted ? 201 : 200).json({
         id: result.id,
         actorId: actor.actorId,
@@ -152,7 +186,11 @@ export function rk9CoordActorRoutes(db: Db, opts: Rk9CoordActorRouteOptions = {}
     try {
       const actor = requireActor(req);
       checkAdvisory(actor, req.body as AdvisoryIdentity);
-      await presence.end({ companyId: req.params.companyId as string, actorId: actor.actorId });
+      await presence.end({
+        companyId: req.params.companyId as string,
+        actorId: actor.actorId,
+        trust: actor.trust,
+      });
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -169,11 +207,14 @@ export function rk9CoordActorRoutes(db: Db, opts: Rk9CoordActorRouteOptions = {}
     }
   });
 
+  /** Runs inside the upsert transaction; publications go out after the commit. */
   async function logRegistration(
+    tx: Db,
     req: Request,
     actor: Rk9CoordResolvedActor,
     identity: Rk9CoordPresenceIdentity,
     rowId: string,
+    publications: ActivityPublication[],
   ) {
     const reqActor = req.actor;
     const who =
@@ -189,20 +230,24 @@ export function rk9CoordActorRoutes(db: Db, opts: Rk9CoordActorRouteOptions = {}
           ? { actorType: "user" as const, actorId: reqActor.userId }
           : // Coord tokens leave req.actor anonymous; the coord actor is the author.
             { actorType: "system" as const, actorId: actor.actorId };
-    await logActivity(db, {
-      companyId: identity.companyId,
-      ...who,
-      action: "rk9.coord.actor_registered",
-      entityType: "rk9_coord_actor",
-      entityId: rowId,
-      details: {
-        actorRef: actor.actorId,
-        kind: actor.kind,
-        host: actor.host,
-        trust: actor.trust,
-        principal: actor.principal,
+    await logActivity(
+      tx,
+      {
+        companyId: identity.companyId,
+        ...who,
+        action: "rk9.coord.actor_registered",
+        entityType: "rk9_coord_actor",
+        entityId: rowId,
+        details: {
+          actorRef: actor.actorId,
+          kind: actor.kind,
+          host: actor.host,
+          trust: actor.trust,
+          principal: actor.principal,
+        },
       },
-    });
+      publications,
+    );
   }
 
   return router;
