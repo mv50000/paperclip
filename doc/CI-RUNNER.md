@@ -33,7 +33,7 @@ runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
 | `ai-auto-merge.yml` | `auto-merge` | `workflow_run` (PR-workflow valmis) |
 | `e2e.yml` | `e2e` | `workflow_dispatch` |
 | `release-smoke.yml` | `smoke` | `workflow_dispatch`, `workflow_call` |
-| `rust-cache-warm.yml` (vain forkissa, RK9-637) | `warm` | push masteriin (polut `packages/paperclip-runner/runner/**`, `rust-toolchain.toml`), `workflow_dispatch`, päivittäinen `schedule` |
+| `rust-cache-warm.yml` (vain forkissa, RK9-637) | `warm` | push masteriin (polut `packages/paperclip-runner/runner/**`, `rust-toolchain.toml`, `rust-cache-warm.yml`), `workflow_dispatch`, päivittäinen `schedule` |
 
 `deploy-dev.yml` poistettiin, ks. [Poistettu: deploy-dev.yml](#poistettu-deploy-devyml).
 
@@ -334,13 +334,27 @@ ollut Rust-cachea, joten jokainen PR käänsi riippuvuudet alusta.
 ### Avain
 
 `rust-cache` muodostaa avaimen näistä: `shared-key` (`paperclip-runner`), runnerin OS ja
-arkkitehtuuri, asennettujen toolchainien `rustc -vV`, `CARGO*`/`RUST*`/`CC*`-ympäristömuuttujat
-sekä `runner/Cargo.toml`- ja `Cargo.lock`-tiedostojen hash. Toolchain-askel ennen cachea tuo
+arkkitehtuuri, asennettujen toolchainien `rustc -vV` (myös runner-imagen oletus-`stable`),
+`CARGO*`-, `CC*`-, `CFLAGS*`-, `CXX*`-, `CMAKE*`- ja `RUST*`-ympäristömuuttujat sekä workspacen
+`Cargo.toml`-tiedostojen (`runner/` ja `runner/crates/*`) ja `Cargo.lock`in hash. Toolchain-askel ennen cachea tuo
 kiinnitetyn version avaimeen, koska `rust-toolchain.toml` on workspacen ulkopuolella.
 
 Pidä `pr.yml`:n RK9-637-lohko ja `rust-cache-warm.yml` samanlaisina. Eroava syöte tai
 ympäristömuuttuja vaihtaa avaimen, ja jokainen PR kääntää taas alusta. Kylmä polku
 (ensimmäinen ajo tai avaimen muutos) toimii kuten ennen, vain hitaammin.
+
+Tunnetut rajat:
+
+- Kun GitHub vaihtaa runner-imagen oletus-rustc:n, osa PR:istä voi ohittaa cachen, kunnes
+  päivittäinen warm-ajo on tallentanut uuden avaimen. Tämä hidastaa, mutta ei kaada mitään.
+- Jos `vars.CI_RUNNER` asetetaan omaan runneriin, warm-ajo tallentaa sen runnerin avaimella.
+  Fork-PR:t ajavat yhä `ubuntu-latest`illa, joten ne eivät silloin osu cacheen.
+- `rust-cache` v2.9.2 karsii vanhoja riippuvuusversioita vain osittain (korjattu v2.9.3:ssa,
+  upstreamin PR #377). Jokainen `Cargo.lock`-muutos masterissa voi kasvattaa entryä, kunnes
+  avain vaihtuu. Seuraa kokoa alla olevalla komennolla. Kiinnitys on sama kuin upstreamin
+  `release-verify.yml`:ssä.
+- Restore-askel asettaa `CARGO_INCREMENTAL=0` jobin myöhemmille askelille. Mikään tarkistus ei
+  lue sitä.
 
 ### Mittaukset
 
@@ -349,6 +363,9 @@ Ennen (PR-ajo 27.10.2026 22:12Z, run 40592946827, vihreä): PR:n seinäkello 17,
 
 Lämmin cache: mitataan kahdella PR-ajolla mergen jälkeen ja kirjataan tähän sekä
 RK9-637:n kommenttiin. Tavoite: `Build`-jobi ≤ 8 min, repo-cache yhteensä < 8 G.
+Baseline-lokin mukaan riippuvuuksien käännös oli noin 5,3 min (debug 94 s, check 53 s,
+release 174 s). Workspace-crate, TypeScript ja vitest käännetään yhä, joten lämmin `Build`
+asettuu arviolta 11–12 minuuttiin (arvio, ei mitattu).
 
 Tarkista cachen koko:
 
