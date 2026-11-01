@@ -61,9 +61,19 @@ export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = proces
   return text.replace(rx, RK9_COORD_REDACTED).replace(COORD_TOKEN_RX, RK9_COORD_REDACTED);
 }
 
-/** True when the text contains anything the redaction would replace. */
+/** Every run of whitespace and control characters (C0, DEL, C1, line separators) becomes one space. */
+export function collapseRk9CoordText(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+}
+
+/**
+ * True when the text contains anything the redaction would replace. The text
+ * is collapsed first, for the same reason as in toRk9CoordLine().
+ */
 export function rk9CoordTextHasSecret(text: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  return redactRk9CoordText(text, env) !== text;
+  const collapsed = collapseRk9CoordText(text);
+  return redactRk9CoordText(collapsed, env) !== collapsed;
 }
 
 /**
@@ -81,10 +91,7 @@ export function toRk9CoordLine(
   // matches \x1c-\x1f), so "Bearer\x01<token>" must become "Bearer <token>"
   // before the pattern sees it, or the collapse would rebuild a secret the
   // pattern skipped.
-  const collapsed = text
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
-    .trim();
+  const collapsed = collapseRk9CoordText(text);
   const line = redactRk9CoordText(collapsed, env);
   if (line.length === 0) return null;
   const points = Array.from(line);

@@ -77,6 +77,22 @@ export type RotateRk9CoordToken = z.infer<typeof rotateRk9CoordTokenSchema>;
 // Phase and name are redacted and capped on the server, so the raw limits
 // here only bound the work the redaction does.
 
+const SURROGATE_PAIR_RX = /[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
+
+/**
+ * True when `predicate` holds for every string key and value inside `value`
+ * (objects and arrays, recursively). The server also uses it to scan metadata
+ * for secrets string by string, because JSON.stringify escapes whitespace.
+ */
+export function everyRk9CoordString(value: unknown, predicate: (text: string) => boolean): boolean {
+  if (typeof value === "string") return predicate(value);
+  if (Array.isArray(value)) return value.every((item) => everyRk9CoordString(item, predicate));
+  if (value && typeof value === "object") {
+    return Object.entries(value).every(([key, item]) => predicate(key) && everyRk9CoordString(item, predicate));
+  }
+  return true;
+}
+
 /** Raw phase input bound; the stored phase is redacted and capped at 140. */
 export const RK9_COORD_PHASE_INPUT_MAX = 1000;
 /** Stored phase cap (rk9_coord_actors.phase CHECK). */
@@ -92,7 +108,7 @@ const coordBranchSchema = z
   .min(1)
   .max(255)
   // eslint-disable-next-line no-control-regex
-  .regex(/^[^\s\u0000-\u001f\u007f]+$/, "branch must not contain whitespace or control characters");
+  .regex(/^[^\s\u0000-\u001f\u007f-\u009f]+$/, "branch must not contain whitespace or control characters");
 const coordExternalIdSchema = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "external_id must be 1-128 characters [A-Za-z0-9._-]");
@@ -123,8 +139,11 @@ export const upsertRk9CoordActorSchema = z
     metadata: z
       .record(z.string(), z.unknown())
       .refine((value) => JSON.stringify(value).length <= 4096, "metadata must be at most 4096 bytes of JSON")
-      // Postgres rejects NUL in jsonb; answer 422, not 500.
-      .refine((value) => !JSON.stringify(value).includes("\\u0000"), "metadata must not contain NUL characters")
+      // Postgres rejects NUL and unpaired surrogates in jsonb; answer 422, not 500.
+      .refine(
+        (value) => everyRk9CoordString(value, (text) => !/[\u0000]|\p{Cs}/u.test(text.replace(SURROGATE_PAIR_RX, ""))),
+        "metadata must not contain NUL characters or unpaired surrogates",
+      )
       .optional(),
   })
   .strict();

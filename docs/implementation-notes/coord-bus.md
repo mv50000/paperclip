@@ -292,8 +292,10 @@ Rules:
   the marker. Phase updates, refreshes and ends write no activity rows.
 - **Secrets in verbatim fields.** `branch`, `external_id` and `metadata` are
   stored as sent, so a value that matches the redaction pattern is 422
-  (`rk9_coord_secret_in_field`) instead of being stored. Control characters
-  in `branch` and NUL in `metadata` are 422 too.
+  (`rk9_coord_secret_in_field`) instead of being stored. Metadata is checked
+  key by key and value by value, each collapsed first. Control characters
+  (C0, DEL, C1) in `branch`, and NUL or unpaired surrogates in `metadata`,
+  are 422 too.
 - **Trust.** Every write (PUT, phase, end) stores the trust of the current
   writer, so a row never shows a stale higher trust.
 - **Liveness.** Live means `ended_at IS NULL AND last_seen_at > now -
@@ -314,8 +316,9 @@ Rules:
   `startedAt`. A run with no activity (latest of `last_output_at`,
   `updated_at`, `started_at`, `created_at`) for `RK9_COORD_AGENT_RUN_STALE_S`
   is treated as an orphan and left out. A run that registered itself with
-  `PUT me` is listed once, as its presence row. After `DELETE me` the run is
-  still listed, as a projected row, while it is `running`. `limit` applies to
+  `PUT me` is listed once, as its live presence row. After `DELETE me`, or
+  once that row is stale, the run is listed as a projected row while it is
+  `running` (with `active=0` both rows appear). `limit` applies to
   each source on its own, so ended presence rows never hide running runs. A `repo` filter excludes
   projected runs, because runs have no repo. The whole list runs in one
   `READ ONLY` transaction, so the projection cannot write. The heartbeat

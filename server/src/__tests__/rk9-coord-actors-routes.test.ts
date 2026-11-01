@@ -282,11 +282,36 @@ if (!support.supported) {
       { branch: "fix/token=supersecret123" },
       { external_id: "rk9_coord_AbCdEfGhIjKl" },
       { metadata: { note: "rk9_coord_AbCdEfGhIjKl" } },
+      // JSON escaping must not hide whitespace from the pattern (verifier round 2).
+      { metadata: { note: "Bearer\nabcdefghijklmnop" } },
+      { metadata: { note: "Bearer\tabcdefghijklmnop" } },
+      { metadata: { note: "token\u0001=\u0001supersecret123" } },
+      { metadata: { nested: [{ "token=supersecret123": 1 }] } },
+      { branch: "Bearer\u0085abcdefghijk" },
     ]) {
       const res = await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);
       expect(res.status).toBe(422);
     }
     expect(await db.select().from(rk9CoordActors)).toHaveLength(0);
+  });
+
+  it("accepts legitimate metadata: a backslash-u0000 literal and a real emoji", async () => {
+    const app = makeApp(operatorKey());
+    const res = await request(app)
+      .put(`${base()}/me`)
+      .set("X-RK9-Actor", CC)
+      .send({ metadata: { path: "C:\\u0000dir", face: "😀" } });
+    expect(res.status).toBe(201);
+  });
+
+  it("clears a stale client_external_id once the client id matches", async () => {
+    const app = makeApp(operatorKey());
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ external_id: "other" });
+    let [row] = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, CC));
+    expect(row!.metadata.client_external_id).toBe("other");
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ external_id: "sess-1" });
+    [row] = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, CC));
+    expect(row!.metadata).not.toHaveProperty("client_external_id");
   });
 
   it("refreshes trust on phase updates and ends", async () => {
@@ -437,6 +462,9 @@ if (!support.supported) {
     const after = await request(app).get(`${base()}?active=1`);
     const projected = after.body.actors.filter((a: { actorId: string }) => a.actorId === `agent_run:${runningRunId}`);
     expect(projected).toEqual([expect.objectContaining({ source: "heartbeat_run", runStatus: "running" })]);
+    const all = await request(app).get(`${base()}?active=0`);
+    const both = all.body.actors.filter((a: { actorId: string }) => a.actorId === `agent_run:${runningRunId}`);
+    expect(both.map((a: { source: string }) => a.source).sort()).toEqual(["heartbeat_run", "presence"]);
   });
 
   it("rejects another company's cid for agent keys and board users", async () => {
@@ -463,6 +491,8 @@ if (!support.supported) {
     [{ branch: "a\u0000b" }],
     [{ branch: "a\u0001b" }],
     [{ metadata: { a: "x\u0000y" } }],
+    [{ metadata: { a: "\ud800" } }],
+    [{ metadata: { "\udc00": 1 } }],
     [{ unknown: true }],
   ])("answers 422 to an invalid PUT body %j", async (body) => {
     const res = await request(makeApp(operatorKey())).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);

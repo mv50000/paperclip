@@ -18,7 +18,12 @@
 import { and, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, rk9CoordActors } from "@paperclipai/db";
-import { parseRk9CoordActorId, RK9_COORD_PHASE_MAX, type Rk9CoordActorKind, type Rk9CoordTrust } from "@paperclipai/shared";
+import {
+  parseRk9CoordActorId,
+  RK9_COORD_PHASE_MAX,
+  type Rk9CoordActorKind,
+  type Rk9CoordTrust,
+} from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
 import { toRk9CoordLine } from "./rk9-coord-redact.js";
 
@@ -168,7 +173,10 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
     const metadataUpdate =
       fields.metadata !== undefined
         ? sql`${JSON.stringify({ ...clientMetadata, ...serverKeys })}::jsonb || ${markerSql}`
-        : sql`${rk9CoordActors.metadata} || ${JSON.stringify(serverKeys)}::jsonb || ${markerSql}`;
+        : // A client id that now matches the derived one clears the stale copy.
+          fields.clientExternalId && !serverKeys.client_external_id
+          ? sql`(${rk9CoordActors.metadata} - 'client_external_id') || ${markerSql}`
+          : sql`${rk9CoordActors.metadata} || ${JSON.stringify(serverKeys)}::jsonb || ${markerSql}`;
 
     const set: Partial<typeof rk9CoordActors.$inferInsert> = {
       kind: identity.kind,
@@ -312,6 +320,7 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
             trust: rk9CoordActors.trust,
             createdAt: rk9CoordActors.createdAt,
             lastSeenAt: rk9CoordActors.lastSeenAt,
+            endedAt: rk9CoordActors.endedAt,
           })
           .from(rk9CoordActors)
           .where(and(...conds))
@@ -354,9 +363,10 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
             status: heartbeatRuns.status,
             startedAt: heartbeatRuns.startedAt,
             createdAt: heartbeatRuns.createdAt,
-            lastActivityAt: sql<Date>`greatest(${heartbeatRuns.lastOutputAt}, ${heartbeatRuns.updatedAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt})`.mapWith(
-              heartbeatRuns.updatedAt,
-            ),
+            lastActivityAt:
+              sql<Date>`greatest(${heartbeatRuns.lastOutputAt}, ${heartbeatRuns.updatedAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt})`.mapWith(
+                heartbeatRuns.updatedAt,
+              ),
             agentName: agents.name,
             issue: issues.identifier,
           })
@@ -374,7 +384,13 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
           .orderBy(desc(heartbeatRuns.startedAt))
           .limit(limit);
 
-        const seen = new Set(rows.map((r) => r.actorId));
+        // Only a LIVE presence row stands in for a run; with active=0 an ended
+        // row of a still-running run must not hide its projection.
+        const seen = new Set(
+          actorRows
+            .filter((r) => r.endedAt === null && r.lastSeenAt.getTime() > cutoff.getTime())
+            .map((r) => r.actorRef),
+        );
         for (const r of runRows) {
           const actorId = `agent_run:${r.runId.toLowerCase()}`;
           // A run that registered itself through PUT me is already listed.

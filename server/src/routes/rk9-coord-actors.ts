@@ -16,6 +16,7 @@ import { ZodError, type ZodSchema } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
   endRk9CoordActorSchema,
+  everyRk9CoordString,
   listRk9CoordActorsQuerySchema,
   updateRk9CoordActorPhaseSchema,
   upsertRk9CoordActorSchema,
@@ -99,7 +100,11 @@ function rejectSecrets(fields: {
   const bad: string[] = [];
   if (fields.branch && rk9CoordTextHasSecret(fields.branch)) bad.push("branch");
   if (fields.external_id && rk9CoordTextHasSecret(fields.external_id)) bad.push("external_id");
-  if (fields.metadata && rk9CoordTextHasSecret(JSON.stringify(fields.metadata))) bad.push("metadata");
+  // String by string: JSON.stringify would escape a tab or newline into `\t`,
+  // which the pattern's `\s` no longer sees (verifier round 2).
+  if (fields.metadata && !everyRk9CoordString(fields.metadata, (text) => !rk9CoordTextHasSecret(text))) {
+    bad.push("metadata");
+  }
   if (bad.length > 0) {
     throw new HttpError(422, "Field looks like it contains a secret", {
       code: "rk9_coord_secret_in_field",
