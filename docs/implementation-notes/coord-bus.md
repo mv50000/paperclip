@@ -295,8 +295,11 @@ Rules:
   (`rk9_coord_secret_in_field`) instead of being stored. Metadata is
   flagged when any of three views matches: its JSON text (catches
   `{"password": "..."}`), each key and string value alone (raw and
-  collapsed, catches whitespace that JSON escapes), and `key: value` per leaf.
-  Nesting is capped at 16 levels. `client_external_id` and the registration
+  collapsed, catches whitespace that JSON escapes), every leaf of 6+
+  characters under a credential-named key at any depth (`password`,
+  `secrets`, `github_token`, ...; arrays and nested objects included), and
+  `key: value` for every ancestor key of a leaf. Nesting is capped at 16
+  levels, the size at 4096 UTF-8 bytes of JSON. `client_external_id` and the registration
   marker are server-owned keys; a client cannot set them. Control characters
   (C0, DEL, C1) in `branch`, and NUL or unpaired surrogates in `metadata`,
   are 422 too.
@@ -308,9 +311,11 @@ Rules:
 - **Phase and name.** The text is first collapsed to one line: every run of
   whitespace and control characters becomes one space (JS `\s` misses most
   C0 controls, so redacting first would let `Bearer\x01<token>` through).
-  It is then matched case-insensitively against `RK9_SESSIONS_SECRET_RX`
-  and every match becomes `[redacted]`. `rk9_coord_` tokens are always
-  redacted on top. Last, the text is capped: phase at 140 code points, name
+  Zero-width characters (U+200B-U+200D, U+2060, U+FEFF) are removed in the
+  same step. It is then matched case-insensitively against
+  `RK9_SESSIONS_SECRET_RX` and every match becomes `[redacted]`.
+  `rk9_coord_` tokens and the plural keyword forms (`tokens=`, `secrets:`,
+  `passwords=`, `api_keys=`) are always redacted on top. Last, the text is capped: phase at 140 code points, name
   at 200. The raw input limit is
   1000 characters (422 beyond). `phase_at` changes only when the phase text
   changes.

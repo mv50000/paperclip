@@ -165,7 +165,8 @@ export const upsertRk9CoordActorSchema = z
           ctx.addIssue({ code: "custom", message: "metadata is not serializable" });
           return;
         }
-        if (json.length > 4096) {
+        // UTF-8 bytes, not UTF-16 units (TextEncoder works in Node and the browser).
+        if (new TextEncoder().encode(json).length > 4096) {
           ctx.addIssue({ code: "custom", message: "metadata must be at most 4096 bytes of JSON" });
           return;
         }

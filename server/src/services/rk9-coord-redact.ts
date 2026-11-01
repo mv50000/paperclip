@@ -30,6 +30,12 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   "|((token|secret|password|passwd|api[_-]?key|apikey)[\"']?\\s*[=:]\\s*)[\"']?[^\\s\"',;]{6,}";
 
 const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
+/**
+ * Plural keyword forms (`tokens=`, `secrets:`, `passwords=`, `api_keys=`) that
+ * the copied default misses; always applied on top, like the coord token.
+ */
+const PLURAL_KEYWORD_RX =
+  /((tokens|secrets|passwords|passwds|api[_-]?keys|apikeys)["']?\s*[=:]\s*)["']?[^\s"',;]{6,}/gi;
 export const RK9_COORD_REDACTED = "[redacted]";
 
 let cached: { source: string | undefined; rx: RegExp } | null = null;
@@ -58,13 +64,25 @@ export function rk9CoordSecretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
 export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = process.env): string {
   const rx = rk9CoordSecretRx(env);
   rx.lastIndex = 0;
-  return text.replace(rx, RK9_COORD_REDACTED).replace(COORD_TOKEN_RX, RK9_COORD_REDACTED);
+  return text
+    .replace(rx, RK9_COORD_REDACTED)
+    .replace(COORD_TOKEN_RX, RK9_COORD_REDACTED)
+    .replace(PLURAL_KEYWORD_RX, RK9_COORD_REDACTED);
 }
 
-/** Every run of whitespace and control characters (C0, DEL, C1, line separators) becomes one space. */
+/**
+ * Zero-width characters (U+200B-U+200D, U+2060, U+FEFF) are removed, then
+ * every run of whitespace and control characters (C0, DEL, C1, line
+ * separators) becomes one space.
+ */
 export function collapseRk9CoordText(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+  return (
+    text
+      .replace(/[\u200b-\u200d\u2060\ufeff]/g, "")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+      .trim()
+  );
 }
 
 /**

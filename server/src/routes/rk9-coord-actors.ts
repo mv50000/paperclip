@@ -113,25 +113,53 @@ function rejectSecrets(fields: {
 }
 
 /**
- * Three views of metadata, flagged when any one matches (verifier rounds 2-3):
+ * A metadata key that names a credential (singular, plural or compound:
+ * `password`, `secrets`, `github_token`, `db_passwd`, `apiKeys`, ...).
+ */
+const SECRET_KEY_RX = /(token|secret|password|passwd|api[_-]?key|apikey)/i;
+/** The value part of the key=value branch of RK9_SESSIONS_SECRET_RX. */
+const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
+
+/**
+ * Metadata is flagged when any view matches (verifier rounds 2-4):
  * - the JSON text catches key/value pairs such as {"password": "..."};
- * - each key and string value alone, collapsed, catches whitespace that JSON
- *   escapes into `\t` or `\n`;
- * - `key: value` per primitive leaf catches a pair the JSON quoting splits.
+ * - each key and string value alone, raw and collapsed, catches whitespace
+ *   that JSON escapes into `\t` or `\n`;
+ * - every leaf under a credential-named key at ANY depth, so arrays and
+ *   nested objects ({"password": ["..."]}, {"secrets": {"db": "..."}}) do not
+ *   hide the value from the key;
+ * - `key: value` per leaf, with the full ancestor key path.
  */
 function metadataHasSecret(metadata: Record<string, unknown>): boolean {
   if (rk9CoordTextHasSecret(JSON.stringify(metadata))) return true;
   if (!everyRk9CoordString(metadata, (text) => !rk9CoordTextHasSecret(text))) return true;
-  const pairs: string[] = [];
-  const walk = (value: unknown, depth: number) => {
-    if (depth <= 0 || value === null || typeof value !== "object") return;
-    for (const [key, item] of Object.entries(value)) {
-      if (item !== null && typeof item === "object") walk(item, depth - 1);
-      else pairs.push(`${key}: ${String(item)}`);
+  let found = false;
+  const walk = (value: unknown, path: string[], underSecretKey: boolean, depth: number) => {
+    if (found) return;
+    if (value === null || typeof value !== "object") {
+      const leaf = String(value);
+      if (underSecretKey && (typeof value === "string" || typeof value === "number") && SECRET_VALUE_RX.test(leaf)) {
+        found = true;
+        return;
+      }
+      if (path.some((key) => rk9CoordTextHasSecret(`${key}: ${leaf}`))) found = true;
+      return;
+    }
+    // The schema caps depth; a deeper value here is treated as suspect.
+    if (depth <= 0) {
+      found = true;
+      return;
+    }
+    const entries: [string | null, unknown][] = Array.isArray(value)
+      ? value.map((item) => [null, item])
+      : Object.entries(value);
+    for (const [key, item] of entries) {
+      const nextPath = key === null ? path : [...path, key];
+      walk(item, nextPath, underSecretKey || (key !== null && SECRET_KEY_RX.test(key)), depth - 1);
     }
   };
-  walk(metadata, RK9_COORD_METADATA_MAX_DEPTH);
-  return pairs.some((pair) => rk9CoordTextHasSecret(pair));
+  walk(metadata, [], false, RK9_COORD_METADATA_MAX_DEPTH + 1);
+  return found;
 }
 
 function identityOf(req: Request, actor: Rk9CoordResolvedActor): Rk9CoordPresenceIdentity {

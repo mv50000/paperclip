@@ -53,6 +53,9 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     [`${"AKIA" + "ABCDEFGHIJ"}KLMNOP leaked`, "[redacted] leaked"],
     // the bus's own token is always redacted
     ["coord rk9_coord_AbCdEfGhIjKlMnOp", "coord [redacted]"],
+    // plural keyword forms (verifier round 4)
+    ["tokens=abcdefghijkl ok", "[redacted] ok"],
+    ["passwords: hunter2hunter2", "[redacted]"],
   ])("redacts %j", (input, expected) => {
     expect(redactRk9CoordText(input, env)).toBe(expected);
   });
@@ -63,6 +66,9 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     ["token\u0001=\u0001supersecret123", "[redacted]"],
     ["password\u0002:hunter2hunter2", "[redacted]"],
     ["Bearer\u001fabcdefghijk", "[redacted]"],
+    // zero-width characters are removed before matching
+    ["token\u200b=supersecret123", "[redacted]"],
+    ["Bear\ufeffer abcdefghijkl", "[redacted]"],
   ])("collapses control characters before redacting %j", (input, expected) => {
     expect(toRk9CoordLine(input, 140, env)).toBe(expected);
   });
@@ -292,12 +298,36 @@ if (!support.supported) {
       { metadata: { github_token: "abcdefghijkl" } },
       { metadata: { aws: { secret: "abcdefghijkl" } } },
       { metadata: { url: "https://user:pass\tword@host" } },
+      // a credential-named key above an array or nested object (verifier round 4)
+      { metadata: { password: ["hunter2hunter2"] } },
+      { metadata: { api_key: ["abcdef123456"] } },
+      { metadata: { secret: { db: "hunter2hunter2" } } },
+      { metadata: { secrets: { db: "hunter2hunter2" } } },
+      { metadata: { passwords: { prod: ["hunter2hunter2"] } } },
+      { metadata: { tokens: "abcdefghijkl" } },
+      { metadata: { note: "secrets=abcdefghijkl" } },
       { branch: "Bearer\u0085abcdefghijk" },
     ]) {
       const res = await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);
       expect(res.status).toBe(422);
     }
     expect(await db.select().from(rk9CoordActors)).toHaveLength(0);
+  });
+
+  it("measures the metadata cap in UTF-8 bytes", async () => {
+    const app = makeApp(operatorKey());
+    // 1500 emoji = 3000 UTF-16 units but 6000 UTF-8 bytes.
+    const res = await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ metadata: { e: "😀".repeat(1500) } });
+    expect(res.status).toBe(422);
+  });
+
+  it("accepts plain metadata under keys that are not credential names", async () => {
+    const app = makeApp(operatorKey());
+    const res = await request(app)
+      .put(`${base()}/me`)
+      .set("X-RK9-Actor", CC)
+      .send({ metadata: { tmux: { window: "@12", panes: ["main-pane", "logs-pane"] }, attempt: 3 } });
+    expect(res.status).toBe(201);
   });
 
   it("accepts legitimate metadata: a backslash-u0000 literal and a real emoji", async () => {
