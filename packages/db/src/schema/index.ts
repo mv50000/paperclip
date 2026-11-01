@@ -236,3 +236,14 @@ export {
 } from "./outreach.js";
 // RK9-319: server-side taint mark for runs that received untrusted content.
 export { rk9RunTaints, type Rk9RunTaintSource } from "./rk9_run_taints.js";
+// RK9-623: coordination bus (epic RK9-620), migration 9015.
+export {
+  rk9CoordActors,
+  rk9CoordLeases,
+  rk9CoordLeaseWaiters,
+  rk9CoordEvents,
+  rk9CoordCursors,
+  rk9CoordInbox,
+  rk9CoordTokens,
+  rk9CoordEscalations,
+} from "./rk9_coord.js";

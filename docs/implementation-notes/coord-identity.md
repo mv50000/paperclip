@@ -139,7 +139,8 @@ rk9claude | grok | operator`.
 - Lease resource prefixes: `prod | migrate | repo | vault | host`, as
   `<prefix>:<name>`. Hard-gate prefixes are `prod`, `migrate` and `host`.
 - Event types: `decision | deploy | handoff | blocker | done | ask-operator |
-  lease | phase | break-glass | decision-vaulted | escalated`.
+  lease | phase | break-glass | decision-vaulted | escalated | headsup`.
+  `headsup` was amended by RK9-623 for RK9-636 (2026-11-01).
 - Route prefix: `/api/companies/:companyId/rk9/coord/*`.
 - Coord token: `rk9_coord_` + 43 base64url characters (32 random bytes).
 - Reserved header `X-RK9-Coord-Token`: the server never reads it. The HTTP
@@ -341,6 +342,19 @@ Conditions for the remote-access child:
   compared in memory, use `timingSafeEqual`.
 - **Audit:** issue, rotate and revoke write `activity_log` rows. The token
   value never appears in logs, argv, comments or the vault.
+- **Implementation (RK9-623):** routes
+  `GET|POST /api/companies/:companyId/rk9/coord-tokens` and
+  `POST .../coord-tokens/:tokenId/{rotate,revoke}`
+  (`server/src/routes/rk9-coord-tokens.ts`). They sit outside the coord
+  prefix, so the guard keeps every coord token out of them. Only a signed-in
+  instance-admin session or an instance-admin board key (on
+  `RK9_COORD_BOARD_KEY_IDS` when set) may call them. The command
+  `server/scripts/rk9-coord-token.mjs` reads the board key from
+  `PAPERCLIP_API_KEY` and writes a new token only to its `--out` env file
+  (mode 0600). Service: `server/src/services/rk9-coord-tokens.ts`. Bearer
+  hook and guard: `server/src/middleware/rk9-coord-token-auth.ts`. A
+  coord-token request outside the coord prefix gets 403 with code
+  `rk9_coord_token_route_forbidden`.
 
 ### Client storage
 

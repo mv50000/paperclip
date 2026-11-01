@@ -26,6 +26,13 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { captureRunIdentity } from "../services/run-identity.js";
 import { boardAuthService } from "../services/board-auth.js";
+// --- RK9 Custom (RK9-623) ---
+import {
+  defaultRk9CoordTokenResolver,
+  resolveRk9CoordBearer,
+  type Rk9CoordTokenResolver,
+} from "./rk9-coord-token-auth.js";
+// --- /RK9 Custom ---
 
 const CLOUD_TENANT_WRITE_DEBOUNCE_MS = 5_000;
 const CLOUD_TENANT_WRITE_DEBOUNCE_MAX = 1_000;
@@ -210,12 +217,18 @@ async function auditAgentKeyMissingResponsibleUser(
 interface ActorMiddlewareOptions {
   deploymentMode: DeploymentMode;
   resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
+  // --- RK9 Custom (RK9-623): coord token lookup; injected in tests ---
+  resolveRk9CoordToken?: Rk9CoordTokenResolver;
+  // --- /RK9 Custom ---
 }
 
 const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
+  // --- RK9 Custom (RK9-623) ---
+  const resolveRk9CoordToken = opts.resolveRk9CoordToken ?? defaultRk9CoordTokenResolver(db);
+  // --- /RK9 Custom ---
   return async (req, res, next) => {
     req.actor =
       opts.deploymentMode === "local_trusted"
@@ -311,6 +324,17 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       next(unauthorized("Empty bearer token; provide valid agent credentials and retry"));
       return;
     }
+
+    // --- RK9 Custom (RK9-623): a `rk9_coord_` bearer is a coord token. It is
+    // resolved before the board-key and agent-key lookups, leaves req.actor
+    // anonymous and never falls through (401 on a miss). See
+    // middleware/rk9-coord-token-auth.ts and the coord-identity ADR. ---
+    const coord = await resolveRk9CoordBearer(req, token, resolveRk9CoordToken);
+    if (coord.handled) {
+      next(coord.error);
+      return;
+    }
+    // --- /RK9 Custom ---
 
     const boardKey = await boardAuth.findBoardApiKeyByToken(token);
     if (boardKey) {
