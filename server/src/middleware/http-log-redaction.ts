@@ -13,6 +13,10 @@ export const HTTP_LOG_REDACT_PATHS = [
   // Telegram's optional webhook verification header is a reusable bearer
   // secret sent on every provider callback.
   'req.headers["x-telegram-bot-api-secret-token"]',
+  // --- RK9 Custom (RK9-621): reserved coord-token header. Clients send the
+  // token as `Authorization: Bearer rk9_coord_...` (covered above); redact
+  // this name too in case a client sends the token in a custom header. ---
+  'req.headers["x-rk9-coord-token"]',
   // The structured failure logger adds a sanitized request-body copy under
   // `reqBody`. Keep the standard connector credential envelope covered again
   // at the final serialization boundary in case a future custom serializer

@@ -673,3 +673,55 @@ describe("HTTP logger redaction", () => {
     },
   );
 });
+
+// --- RK9 Custom (RK9-621): a coord token never reaches serialized request logs ---
+describe("HTTP logger redaction: RK9 coord token", () => {
+  it("lists the reserved coord-token header", () => {
+    expect(HTTP_LOG_REDACT_PATHS).toContain('req.headers["x-rk9-coord-token"]');
+  });
+
+  it.each([200, 403, 500])(
+    "keeps the coord token out of the %s request log, in Authorization and in a custom header",
+    async (status) => {
+      const bearerCanary = "rk9_coord_bearerCanary0123456789abcdefABCDEF";
+      const headerCanary = "rk9_coord_headerCanary0123456789abcdefABCDEF";
+      const chunks: string[] = [];
+      const stream = new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(chunk.toString());
+          callback();
+        },
+      });
+      const app = express();
+      app.use(createHttpLogger(pino({ level: "debug", redact: [...HTTP_LOG_REDACT_PATHS] }, stream)));
+      app.get("/api/companies/:companyId/rk9/coord/whoami", (_req, res) => {
+        if (status === 500) {
+          (res as any).err = new Error("coord failure");
+        }
+        res.status(status).json({ ok: status === 200 });
+      });
+      await request(app)
+        .get("/api/companies/11111111-1111-4111-8111-111111111111/rk9/coord/whoami")
+        .set("Authorization", `Bearer ${bearerCanary}`)
+        .set("X-RK9-Coord-Token", headerCanary)
+        .set("X-RK9-Actor", "remote:mv-laptop");
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const output = chunks.join("");
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).not.toContain(bearerCanary);
+      expect(output).not.toContain(headerCanary);
+      expect(output).not.toMatch(/rk9_coord_[A-Za-z0-9]/);
+      const line = output
+        .trim()
+        .split("\n")
+        .map((entry) => JSON.parse(entry) as { req?: { headers?: Record<string, string> } })
+        .find((entry) => entry.req?.headers);
+      expect(line?.req?.headers).toBeDefined();
+      expect(line!.req!.headers!.authorization).toBe("[Redacted]");
+      expect(line!.req!.headers!["x-rk9-coord-token"]).toBe("[Redacted]");
+      // The actor claim is not a secret and stays visible for debugging.
+      expect(line!.req!.headers!["x-rk9-actor"]).toBe("remote:mv-laptop");
+    },
+  );
+});

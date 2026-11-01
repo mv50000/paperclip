@@ -128,6 +128,8 @@ import { remoteAgentProfileRoutes } from "./routes/remote-agent-profiles.js";
 import { riskRoutes } from "./routes/risk.js";
 // RK9-317: upstream v2026.916.1 owns routes/email.ts (AgentMail); the fork Resend routes moved.
 import { rk9EmailRoutes } from "./routes/rk9-email.js";
+// RK9-621: coordination bus router skeleton (epic RK9-620).
+import { rk9CoordRoutes } from "./routes/rk9-coord.js";
 import { outreachRoutes } from "./routes/outreach.js";
 import { outreachSenderRoutes } from "./routes/outreach-sender.js";
 import { outreachInboundRoutes } from "./routes/outreach-inbound.js";
@@ -668,6 +670,11 @@ export async function createApp(
     }),
   );
   api.use(openApiRoutes());
+  // --- RK9 Custom (RK9-621): coordination bus at /companies/:companyId/rk9/coord/*.
+  // Mounted before the generic /companies router so no company middleware
+  // shadows it; the router's own actor middleware enforces company scope. ---
+  api.use(rk9CoordRoutes(db));
+  // --- /RK9 Custom ---
   api.use("/cloud", cloudRoutes());
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(llmRoutes(db));
