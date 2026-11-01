@@ -24,6 +24,13 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
 
 /** Coord tokens are always redacted, whatever the env pattern says. */
 const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
+/**
+ * Plural keyword forms (`passwords=...`, `secrets: ...`, `api_keys=...`) are
+ * always redacted too: the copied default only has the singular forms.
+ */
+const PLURAL_KEYWORD_RX = /((tokens|secrets|passwords|passwds|api[_-]?keys|apikeys)["']?\s*[=:]\s*)["']?[^\s"',;]{6,}/gi;
+/** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
+const ALWAYS_RX = [COORD_TOKEN_RX, PLURAL_KEYWORD_RX];
 const REDACTED = "[redacted]";
 /** Whitespace (tab, newline, Unicode spaces, line/paragraph separators). */
 const WHITESPACE_RX = /\s+/g;
@@ -58,7 +65,9 @@ function secretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
 export function redactRk9CoordText(text: string): string {
   const rx = secretRx();
   rx.lastIndex = 0;
-  return text.replace(rx, REDACTED).replace(COORD_TOKEN_RX, REDACTED);
+  let out = text.replace(rx, REDACTED);
+  for (const always of ALWAYS_RX) out = out.replace(always, REDACTED);
+  return out;
 }
 
 /** True when the text contains something the secret pattern matches. */
@@ -73,7 +82,7 @@ export function rk9CoordTextHasSecret(text: string): boolean {
  * `pcp_board_...` at the start of a part are not.
  */
 export function rk9CoordIdentifierHasSecret(text: string): boolean {
-  const patterns = [secretRx(), COORD_TOKEN_RX];
+  const patterns = [secretRx(), ...ALWAYS_RX];
   for (const pattern of patterns) {
     const rx = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
     for (const match of text.matchAll(rx)) {

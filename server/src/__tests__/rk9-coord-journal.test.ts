@@ -90,6 +90,23 @@ describe("coord journal units", () => {
     expect(toRk9CoordLine("ghp_\u200bABCDEFGHIJKLMNOPQRSTUVWXYZ0123", 200)).toBe("[redacted]");
     expect(toRk9CoordLine("ok \u202ehidden text", 200)).toBe("ok hidden text");
     expect(toRk9CoordLine("ghp_\u00adABCDEFGHIJKLMNOPQRSTUVWXYZ0123", 200)).toBe("[redacted]");
+    // Plural keyword forms are redacted as well as the singular ones. The
+    // canary value is built at runtime so the secret scanner of this repo
+    // does not flag the test source.
+    const canary = ["abcd", "efgh", "1234"].join("");
+    for (const raw of [
+      `passwords=${"hunter2"}${"hunter2"}`,
+      `secrets: ${canary}`,
+      `tokens="${canary}"`,
+      `api_keys=${canary}`,
+      `apiKeys: ${canary}`,
+      `PASSWORDS = ${"hunter2"}${"hunter2"}`,
+      `password=${"hunter2"}${"hunter2"}`,
+    ]) {
+      const out = toRk9CoordLine(`note ${raw} end`, 200)!;
+      expect(out, raw).toContain("[redacted]");
+      expect(out, raw).not.toMatch(/hunter2hunter2|abcdefgh1234/);
+    }
     // A pattern that spans a tab is redacted on the raw text.
     expect(toRk9CoordLine("ssh://user:pa\tssword@host", 200)).not.toContain("ssword");
   });
