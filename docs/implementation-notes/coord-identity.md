@@ -4,7 +4,7 @@ Part of epic [RK9-620](/RK9/issues/RK9-620), wave 1, key `coord-identity`.
 This ADR decides who may write to the coordination API and as which actor.
 It freezes the names that every later child of the epic uses.
 
-**Operator approval:** ________________ (date, name)
+**Operator approval:** 2026-11-01, Mikko-Ville Lahti (operaattori; kirjattu orkestroijan kautta Claude-sessiosta), ehdolla: operator-kind vain verified-istunnolla (toteutettu tässä PR:ssä).
 
 > coord-schema ([RK9-623](/RK9/issues/RK9-623)) must not merge before the
 > operator approval line above is filled in. The operator fills it in with a
