@@ -159,6 +159,10 @@ jokainen porras tuo rivit takaisin, jos upstream muuttaa niitä. Muutokset on me
 - `.github/workflows/deploy-dev.yml` (vain forkissa) — poistettu. Älä palauta mergessä.
 - `.github/workflows/commitperclip-review.yml` (upstream, v2026.609.0) — poistettu forkista (RK9-313).
   Se ajaa `pull_request_target`illa upstreamin botin salaisuuksilla, ja `pull_request_target` on kielletty. Älä palauta mergessä.
+- `.github/workflows/pr.yml` `Build`-jobi — `# --- RK9 Custom (RK9-637) ---` -lohko: kiinnitetyn
+  Rust-toolchainin asennus ja `Swatinem/rust-cache` (SHA-pin, `save-if: false`) ennen askelta
+  `Verify Paperclip Runner`. Lohkon on vastattava `rust-cache-warm.yml`:ää (vain forkissa), muuten avain
+  vaihtuu ja PR:t kääntävät alusta. Säilytä mergessä, ks. `doc/CI-RUNNER.md` "Rust-build-cache".
 - `.github/workflows/agent-runtime-images.yml` (upstream, v2026.618.0) — runner-vipu ja ehto
   `github.repository == 'paperclipai/paperclip'` (RK9-314). Jobi julkaisee `ghcr.io/paperclipai`-kuvia, joten forkissa se ei aja.
 - `e2e`-askeleet (`pr.yml`, `e2e.yml`, `release-smoke.yml`): upstream käyttää runnerin Chromea
