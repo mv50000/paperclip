@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   parseRk9CoordActorId,
+  rk9CoordBoardKeyActorIdSchema,
+  rk9CoordBoardKeyMayClaim,
   rk9CoordActorIdSchema,
   rk9CoordTrustCanHoldHardGate,
   RK9_COORD_ACTOR_KINDS,
@@ -55,6 +57,16 @@ describe("parseRk9CoordActorId", () => {
     expect(RK9_COORD_ACTOR_KINDS).toEqual([
       "cc", "worktree", "headless", "agent_run", "orch", "remote", "rk9claude", "grok", "operator",
     ]);
+  });
+
+  it("never lets a board-key caller claim operator or a remote kind", () => {
+    for (const ok of ["cc:paperclip-01:s1", "worktree:RK9-621", "headless:r1", "orch:implement"]) {
+      expect(rk9CoordBoardKeyActorIdSchema.safeParse(ok).success).toBe(true);
+    }
+    for (const bad of ["operator", "remote:htpc", "rk9claude", "grok", "agent_run:3f1c2a9e-1111-4222-8333-944455556666", "nope"]) {
+      expect(rk9CoordBoardKeyActorIdSchema.safeParse(bad).success).toBe(false);
+    }
+    expect(rk9CoordBoardKeyMayClaim("operator")).toBe(false);
   });
 
   it("lets only vouched-for actors hold hard-gate leases", () => {

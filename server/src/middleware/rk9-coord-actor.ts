@@ -18,9 +18,11 @@
 //    supplied X-RK9-Actor header must equal the derived id, else 403.
 // 3. Board-key callers must be instance admins, and when RK9_COORD_BOARD_KEY_IDS
 //    is set the key id must be on that list (the operator key the paperclip-01
-//    sessions use). They may claim cc / worktree / headless / orch / operator.
-//    A cc claim must name the board host. The claim is attributed, not
-//    authenticated: every local session shares the key.
+//    sessions use). They may claim cc / worktree / headless / orch. A cc claim
+//    must name the board host. The claim is attributed, not authenticated:
+//    every local session shares the key. `operator` through the board key is
+//    403: the operator actor exists only behind a signed-in instance-admin
+//    session (condition of the operator's ADR approval, 2026-11-01).
 // 4. A signed-in instance admin is `operator` (verified).
 // 5. A coord-token principal (set by RK9-623's auth hook on
 //    `req.rk9CoordPrincipal`) is bound to one company and one host or service;
@@ -36,6 +38,7 @@ import { heartbeatRuns } from "@paperclipai/db";
 import {
   isUuidLike,
   parseRk9CoordActorId,
+  rk9CoordBoardKeyMayClaim,
   rk9CoordTrustCanHoldHardGate,
   RK9_COORD_ACTOR_HEADER,
   RK9_COORD_BOARD_HOST_DEFAULT,
@@ -92,7 +95,6 @@ export interface Rk9CoordActorOptions {
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-const BOARD_KEY_KINDS = new Set<Rk9CoordActorKind>(["cc", "worktree", "headless", "orch", "operator"]);
 
 function coordError(status: number, code: string, message: string) {
   return new HttpError(status, message, { code });
@@ -224,7 +226,14 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
       }
       requireClaimOnMutation(claim, method);
       if (!claim) return null;
-      if (!BOARD_KEY_KINDS.has(claim.kind)) {
+      if (claim.kind === "operator") {
+        throw coordError(
+          403,
+          "rk9_coord_operator_requires_session",
+          "The operator actor requires a signed-in instance-admin session; AI sessions use their own kind",
+        );
+      }
+      if (!rk9CoordBoardKeyMayClaim(claim.kind)) {
         throw coordError(
           403,
           "rk9_coord_kind_not_allowed",

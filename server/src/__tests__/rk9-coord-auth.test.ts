@@ -98,12 +98,25 @@ describe("coord whoami: board key on paperclip-01", () => {
     });
   });
 
-  it.each(["worktree:RK9-621", "headless:run-1", "orch:implement", "operator"])("accepts local kind %s", async (claim) => {
+  it.each(["worktree:RK9-621", "headless:run-1", "orch:implement"])("accepts local kind %s", async (claim) => {
     const { app } = makeApp(boardKeyActor);
     const res = await request(app).get(whoami()).set("X-RK9-Actor", claim);
     expect(res.status).toBe(200);
     expect(res.body.actor.actorId).toBe(claim);
     expect(res.body.actor.host).toBe("paperclip-01");
+  });
+
+  it("rejects board key + operator on reads and mutations (operator only behind a signed-in session)", async () => {
+    const { app } = makeApp(boardKeyActor);
+    const read = await request(app).get(whoami()).set("X-RK9-Actor", "operator");
+    expect(read.status).toBe(403);
+    expect(read.body.code).toBe("rk9_coord_operator_requires_session");
+    const post = await request(app).post(mutate()).set("X-RK9-Actor", "operator").send({});
+    expect(post.status).toBe(403);
+    expect(post.body.code).toBe("rk9_coord_operator_requires_session");
+    // The key pin does not change that.
+    const pinned = makeApp(boardKeyActor, undefined, ["board-key-1"]);
+    expect((await request(pinned.app).get(whoami()).set("X-RK9-Actor", "operator")).status).toBe(403);
   });
 
   it("returns a null actor for a read without a claim", async () => {
@@ -181,9 +194,9 @@ describe("coord whoami: board key on paperclip-01", () => {
 
   it("pins board keys by id when RK9_COORD_BOARD_KEY_IDS is configured", async () => {
     const allowed = makeApp(boardKeyActor, undefined, ["board-key-1"]);
-    expect((await request(allowed.app).get(whoami()).set("X-RK9-Actor", "operator")).status).toBe(200);
+    expect((await request(allowed.app).get(whoami()).set("X-RK9-Actor", "worktree:RK9-621")).status).toBe(200);
     const other = makeApp({ ...boardKeyActor, keyId: "board-key-2" }, undefined, ["board-key-1"]);
-    const res = await request(other.app).get(whoami()).set("X-RK9-Actor", "operator");
+    const res = await request(other.app).get(whoami()).set("X-RK9-Actor", "worktree:RK9-621");
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("rk9_coord_board_key_not_allowed");
   });
@@ -202,6 +215,14 @@ describe("coord whoami: signed-in operator", () => {
     const res = await request(app).get(whoami());
     expect(res.status).toBe(200);
     expect(res.body.actor).toMatchObject({ kind: "operator", actorId: "operator", trust: "verified" });
+    expect(res.body.principal.source).toBe("session");
+  });
+
+  it("accepts an explicit operator claim from the signed-in admin session", async () => {
+    const { app } = makeApp(sessionActor(true));
+    const res = await request(app).get(whoami()).set("X-RK9-Actor", "operator");
+    expect(res.status).toBe(200);
+    expect(res.body.actor).toMatchObject({ kind: "operator", trust: "verified", canHoldHardGate: true });
   });
 
   it("rejects a session claiming another actor", async () => {

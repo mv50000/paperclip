@@ -27,8 +27,8 @@ export type Rk9CoordActorKind = (typeof RK9_COORD_ACTOR_KINDS)[number];
  * - verified: the server derived the identity from a credential bound to it
  *   (agent run with a run JWT, signed-in operator, a service token for one
  *   service).
- * - attributed: a local claim made with the paperclip-01 board key (the
- *   server knows the host but cannot tell sessions apart), or an agent-key
+ * - attributed: a local AI-session claim made with the paperclip-01 board key
+ *   (the server knows the host but cannot tell sessions apart), or an agent-key
  *   run (the server knows the agent but not which of its running runs).
  * - unverified: advisory only (grok, remote:*); cannot hold hard-gate leases
  *   without operator escalation.
@@ -52,6 +52,17 @@ export type Rk9CoordTable = (typeof RK9_COORD_TABLES)[number];
 /** Lease resource prefixes: `<prefix>:<name>`. */
 export const RK9_COORD_RESOURCE_PREFIXES = ["prod", "migrate", "repo", "vault", "host"] as const;
 export type Rk9CoordResourcePrefix = (typeof RK9_COORD_RESOURCE_PREFIXES)[number];
+
+/**
+ * Kinds a board-key caller (AI sessions on paperclip-01) may claim. `operator`
+ * is not among them: per the operator's approval of the ADR (2026-11-01), the
+ * operator actor exists only behind a signed-in instance-admin session.
+ */
+export const RK9_COORD_BOARD_KEY_ACTOR_KINDS = ["cc", "worktree", "headless", "orch"] as const satisfies readonly Rk9CoordActorKind[];
+
+export function rk9CoordBoardKeyMayClaim(kind: Rk9CoordActorKind): boolean {
+  return (RK9_COORD_BOARD_KEY_ACTOR_KINDS as readonly Rk9CoordActorKind[]).includes(kind);
+}
 
 /** Hard-gate prefixes: deploys, migrations and Proxmox host outages. */
 export const RK9_COORD_HARD_GATE_PREFIXES = ["prod", "migrate", "host"] as const satisfies readonly Rk9CoordResourcePrefix[];

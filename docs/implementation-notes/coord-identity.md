@@ -47,13 +47,19 @@ It freezes the names that every later child of the epic uses.
    callers are always `agent_run:<runId>`: verified with a run JWT,
    attributed with an agent key. A signed-in admin session is always
    `operator`. A service token is always its own service.
+   **`operator` exists only behind a signed-in instance-admin session**
+   (trust `verified`). This is the condition of the operator's approval
+   (2026-11-01). AI sessions always act as their own kind.
 3. Only an instance-admin board key may call coord routes. When
    `RK9_COORD_BOARD_KEY_IDS` is set, the key id must also be on that list
    (recommended: the id of the operator key the paperclip-01 sessions use).
    The server logs `rk9_coord_board_key_pin_unset` at startup while the pin
    is unset.
-   Board-key claims are **attributed**: the server attributes them to
-   paperclip-01 by policy and trusts the session part as stated.
+   Board-key callers may claim `cc`, `worktree`, `headless` and `orch` only.
+   Board key + `X-RK9-Actor: operator` is 403
+   (`rk9_coord_operator_requires_session`). Board-key claims are
+   **attributed**: the server attributes them to paperclip-01 by policy and
+   trusts the session part as stated.
 4. Remote hosts get a **per-host coord token** bound to one company and one
    host. They reach `:3100` directly over the tailnet. Grok reaches the API
    only through the vault-mcp proxy, which holds the `grok` service token.
@@ -153,7 +159,7 @@ rk9claude | grok | operator`.
 | remote | tailnet host name | host coord token | CLI heartbeat, TTL | unverified | token host |
 | rk9claude | the rk9claude service | `rk9claude` service token | service heartbeat, TTL | verified | `rk9claude` |
 | grok | Grok behind vault-mcp | `grok` service token, held only by vault-mcp | TTL from the last request | unverified | `grok` |
-| operator | the human operator | signed-in instance-admin session (verified), or board key + `X-RK9-Actor: operator` (attributed) | none: always reachable through Telegram | verified / attributed | none or `paperclip-01` |
+| operator | the human operator | signed-in instance-admin session only; board key + `X-RK9-Actor: operator` is 403 | none: always reachable through Telegram | verified | none (null) |
 
 Local `cc`, `worktree`, `headless` and `orch` actors are **attributed, not
 authenticated per session**. They all share the board key. The server can
@@ -166,7 +172,8 @@ optional key-id pin.
 
 - `verified`: the server derived the identity from a credential bound to it.
 - `attributed`: the server knows the host but not the session, or the agent
-  but not the run. These actors coordinate in good faith.
+  but not the run. These actors coordinate in good faith. `operator` is
+  never attributed: it is always `verified`.
 - `unverified`: advisory only. `grok` and every `remote:*` actor are
   unverified.
 - Hard-gate leases (`prod:*`, `migrate:*`, `host:*`) need `verified` or
@@ -208,11 +215,13 @@ route, including sibling sub-routers. It applies these rules in order.
      `verified`. The actor is `agent_run:<runId>`. A header that differs from
      the derived id is 403 (`rk9_coord_actor_spoof`). A missing key scope is
      rejected (fail closed).
-   - **Session:** only an instance admin, always `operator`. Any other claim
-     is 403.
+   - **Session:** only an instance admin, always `operator` (verified). Any
+     other claim is 403. This is the only way to act as `operator`.
    - **Board key:** the key's user must be an instance admin, and the key id
      must be on `RK9_COORD_BOARD_KEY_IDS` when that is set (403 otherwise).
-     Kinds `cc`, `worktree`, `headless`, `orch` and `operator`.
+     Kinds `cc`, `worktree`, `headless` and `orch`. `operator` is 403
+     (`rk9_coord_operator_requires_session`): 403, not 422, because the
+     claim is well-formed and only this credential is not allowed to make it.
      A `cc` claim must name the board host (`RK9_COORD_BOARD_HOST`, default
      `paperclip-01`). Kinds `agent_run`, `remote`, `rk9claude` and `grok` are
      403. A read without a claim resolves to a null actor.
@@ -235,6 +244,7 @@ Error codes in the JSON `code` field:
 | `rk9_coord_scoped_key` | 403 | task-bridge or skill-test agent key |
 | `rk9_coord_actor_spoof` | 403 | claim differs from the derived actor |
 | `rk9_coord_kind_not_allowed` | 403 | this credential cannot act as that kind |
+| `rk9_coord_operator_requires_session` | 403 | `operator` claimed with a board key |
 | `rk9_coord_host_mismatch` | 403 | claim names another host |
 | `rk9_coord_agent_run_required` | 403 | agent call outside a run |
 | `rk9_coord_agent_run_unbound` | 403 | run belongs to another agent or company |
@@ -381,7 +391,7 @@ mounted before the generic `/companies` router in `app.ts`.
   for their own company. Whether they should coordinate inside the RK9
   company is a decision for the presence-api child. It would need an explicit
   cross-company grant, not a relaxed company check.
-- The operator `cc` sessions on paperclip-01 cannot be told apart by the
+- The `cc` sessions on paperclip-01 cannot be told apart by the
   server. A per-session credential is a later hardening step, not part of
   this epic.
 
