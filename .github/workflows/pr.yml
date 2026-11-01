@@ -307,6 +307,30 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # --- RK9 Custom (RK9-637) --- Rust build cache for the runner checks below.
+      # PR runs only restore (save-if: false). The cache is saved by
+      # .github/workflows/rust-cache-warm.yml on master, because a cache saved by a
+      # pull_request run is visible only to that PR. Keep this block identical to
+      # the warm workflow (same toolchain step, shared-key and inputs), otherwise
+      # the keys differ and every PR builds from scratch. See doc/CI-RUNNER.md.
+      - name: Install pinned Rust toolchain
+        working-directory: packages/paperclip-runner
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: paperclip-runner
+          workspaces: packages/paperclip-runner/runner -> target
+          cache-targets: "true"
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-bin: "false"
+          save-if: "false"
+      # --- /RK9 Custom (RK9-637) ---
+
       - name: Verify Paperclip Runner
         run: pnpm --filter @paperclipai/paperclip-runner check:all
 

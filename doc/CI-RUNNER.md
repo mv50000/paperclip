@@ -33,6 +33,7 @@ runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
 | `ai-auto-merge.yml` | `auto-merge` | `workflow_run` (PR-workflow valmis) |
 | `e2e.yml` | `e2e` | `workflow_dispatch` |
 | `release-smoke.yml` | `smoke` | `workflow_dispatch`, `workflow_call` |
+| `rust-cache-warm.yml` (vain forkissa, RK9-637) | `warm` | push masteriin (polut `packages/paperclip-runner/runner/**`, `rust-toolchain.toml`, `rust-cache-warm.yml`), `workflow_dispatch`, päivittäinen `schedule` |
 
 `deploy-dev.yml` poistettiin, ks. [Poistettu: deploy-dev.yml](#poistettu-deploy-devyml).
 
@@ -303,6 +304,84 @@ gh api -X DELETE "repos/mv50000/paperclip/actions/runners/${ID:?}"
 
 `ai-auto-merge.yml` dispatchasi `deploy-dev.yml`:n jokaisen mergen jälkeen. Dispatch poistettiin,
 ja jobin `actions`-oikeus laskettiin arvosta `write` arvoon `read`.
+
+## Rust-build-cache (RK9-637)
+
+PR-workflow'n `Build`-jobi ajaa askeleen `Verify Paperclip Runner`
+(`pnpm --filter @paperclipai/paperclip-runner check:all`). Askel kääntää
+`packages/paperclip-runner/runner`-workspacen: `cargo check`, debug-binäärit,
+`cargo test --release` ja `pnpm build`in release-daemonin. Ennen RK9-637:ää jobissa ei
+ollut Rust-cachea, joten jokainen PR käänsi riippuvuudet alusta.
+
+### Mekanismi
+
+- `pr.yml`:n `Build`-jobi asentaa ensin kiinnitetyn toolchainin
+  (`packages/paperclip-runner/rust-toolchain.toml`) ja palauttaa sitten cachen
+  `Swatinem/rust-cache`illa. Action on kiinnitetty commit-SHA:han, versio on kommentissa.
+- PR-ajot vain palauttavat (`save-if: false`). Syy: `pull_request`-ajon tallentama cache
+  näkyy vain samalle PR:lle, ja jokainen PR täyttäisi 10 G:n repo-cachea omalla kopiollaan.
+- `rust-cache-warm.yml` tallentaa cachen masterin scopeen. Kaikki PR:t, myös fork-PR:t,
+  voivat lukea masterin cachea. Workflow ajaa vain luotettua koodia: push masteriin,
+  `workflow_dispatch` ja päivittäinen `schedule`. Se tallentaa vain, kun ref on master.
+  Oikeudet ovat `contents: read`, ja checkout ei jätä tokenia levylle.
+- Täsmäosumalla warm-ajo vain palauttaa cachen ja ohittaa käännöksen. Palautus pitää
+  entryn elossa (GitHub poistaa 7 päivää lukemattoman cachen). Päivittäinen ajo korjaa myös
+  avaimen muutoksen, kun runner-imagen oletus-rustc vaihtuu.
+- Cachessa ovat riippuvuudet, ei workspace-crateja (`cache-workspace-crates: false`,
+  `cache-all-crates: false`, `cache-bin: false`). Varmennus ei muutu: samat komennot,
+  sama `--release` ja samat testit.
+
+### Avain
+
+`rust-cache` muodostaa avaimen näistä: `shared-key` (`paperclip-runner`), runnerin OS ja
+arkkitehtuuri, asennettujen toolchainien `rustc -vV` (myös runner-imagen oletus-`stable`),
+`CARGO*`-, `CC*`-, `CFLAGS*`-, `CXX*`-, `CMAKE*`- ja `RUST*`-ympäristömuuttujat sekä workspacen
+`Cargo.toml`-tiedostojen (`runner/` ja `runner/crates/*`) ja `Cargo.lock`in hash. Toolchain-askel ennen cachea tuo
+kiinnitetyn version avaimeen, koska `rust-toolchain.toml` on workspacen ulkopuolella.
+
+Pidä `pr.yml`:n RK9-637-lohko ja `rust-cache-warm.yml` samanlaisina. Eroava syöte tai
+ympäristömuuttuja vaihtaa avaimen, ja jokainen PR kääntää taas alusta. Kylmä polku
+(ensimmäinen ajo tai avaimen muutos) toimii kuten ennen, vain hitaammin.
+
+Tunnetut rajat:
+
+- Kun GitHub vaihtaa runner-imagen oletus-rustc:n, osa PR:istä voi ohittaa cachen, kunnes
+  päivittäinen warm-ajo on tallentanut uuden avaimen. Tämä hidastaa, mutta ei kaada mitään.
+- Jos `vars.CI_RUNNER` asetetaan omaan runneriin, warm-ajo tallentaa sen runnerin avaimella.
+  Fork-PR:t ajavat yhä `ubuntu-latest`illa, joten ne eivät silloin osu cacheen.
+- `rust-cache` v2.9.2 karsii vanhoja riippuvuusversioita vain osittain (korjattu v2.9.3:ssa,
+  upstreamin PR #377). Jokainen `Cargo.lock`-muutos masterissa voi kasvattaa entryä, kunnes
+  avain vaihtuu. Seuraa kokoa alla olevalla komennolla. Kiinnitys on sama kuin upstreamin
+  `release-verify.yml`:ssä.
+- Restore-askel asettaa `CARGO_INCREMENTAL=0` jobin myöhemmille askelille. Mikään tarkistus ei
+  lue sitä.
+
+### Mittaukset
+
+Ennen (PR-ajo 27.10.2026 22:12Z, run 40592946827, vihreä): PR:n seinäkello 17,5 min,
+`Build`-jobi 16,9 min, josta `Verify Paperclip Runner` 878 s. Repo-cache 2,1 G (pnpm).
+
+Lämmin cache: mitataan kahdella PR-ajolla mergen jälkeen ja kirjataan tähän sekä
+RK9-637:n kommenttiin. Tavoite: `Build`-jobi ≤ 8 min, repo-cache yhteensä < 8 G.
+Baseline-lokin mukaan riippuvuuksien käännös oli noin 5,3 min (debug 94 s, check 53 s,
+release 174 s). Workspace-crate, TypeScript ja vitest käännetään yhä, joten lämmin `Build`
+asettuu arviolta 11–12 minuuttiin (arvio, ei mitattu).
+
+Tarkista cachen koko:
+
+```sh
+gh api 'repos/mv50000/paperclip/actions/caches?key=v0-rust-paperclip-runner' \
+  --jq '.actions_caches[] | {key, ref, size_in_bytes, last_accessed_at}'
+gh api repos/mv50000/paperclip/actions/cache/usage
+```
+
+Palautus: poista RK9-637-lohko `pr.yml`:stä ja tiedosto `rust-cache-warm.yml`. Vanha cache
+vanhenee itsestään 7 päivässä. Heti poisto id:llä:
+
+```sh
+gh api 'repos/mv50000/paperclip/actions/caches?key=v0-rust-paperclip-runner' --jq '.actions_caches[].id' \
+  | xargs -r -n1 gh cache delete -R mv50000/paperclip
+```
 
 ## Upstream-merge
 

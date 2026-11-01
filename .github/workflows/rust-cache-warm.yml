@@ -1,0 +1,87 @@
+# --- RK9 Custom (RK9-637) --- fork-only workflow, see doc/CI-RUNNER.md.
+#
+# Saves the Rust build cache that the PR `Build` job restores. A cache saved by a
+# pull_request run is visible only to that PR, so the shared cache must be saved
+# from master. This workflow runs only on trusted code (push to master, manual
+# dispatch, schedule); PR runs never save.
+#
+# Keep the toolchain step and the rust-cache inputs identical to the `Build` job
+# in pr.yml. The cache key includes the job's rustc versions, CARGO*/RUST* env,
+# shared-key and the hash of runner/Cargo.toml + Cargo.lock; any difference makes
+# PRs miss the cache.
+name: Rust Cache Warm
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "packages/paperclip-runner/runner/**"
+      - "packages/paperclip-runner/rust-toolchain.toml"
+      - ".github/workflows/rust-cache-warm.yml"
+  workflow_dispatch:
+  schedule:
+    # Daily. GitHub evicts a cache that nobody reads for 7 days, and a runner
+    # image update changes the default rustc and thus the key. On an exact hit the
+    # job only restores (keeps the entry alive) and skips the build.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-cache-warm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm Rust cache
+    # Same runner lever as the other jobs (RK9-350). Not a pull_request workflow,
+    # so no fork guard is needed.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: packages/paperclip-runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: paperclip-runner
+          workspaces: packages/paperclip-runner/runner -> target
+          cache-targets: "true"
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # The same cargo invocations as `pnpm --filter @paperclipai/paperclip-runner
+      # check:all` and `build:binary` in the PR Build job: check, debug bins,
+      # release tests and the release daemon. Tests are compiled, not run.
+      - name: Build dependencies (cargo check)
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo check --manifest-path runner/Cargo.toml --locked --workspace
+
+      - name: Build dependencies (debug bins)
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo build --manifest-path runner/Cargo.toml --locked --workspace --bins
+
+      - name: Build dependencies (release tests)
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo test --release --manifest-path runner/Cargo.toml --locked --workspace --no-run
+
+      - name: Build dependencies (release daemon)
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo build --release --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd
