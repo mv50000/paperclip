@@ -141,16 +141,30 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
   return result;
 }
 
-/** Run the prune on startup and then every `intervalMs` (default 6 h). Returns a stop function. */
+/**
+ * Run the prune on startup and then every `intervalMs` (default 6 h). Returns
+ * a stop function. A self-rescheduling timeout (not setInterval): the next run
+ * starts only after the previous one has finished, and the startup order of
+ * the server's setInterval schedulers stays as it was.
+ */
 export function startRk9CoordRetention(db: Db, intervalMs: number = 6 * 3600 * 1000): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   const run = () => {
-    pruneRk9Coord(db).catch((err) => {
-      logger.warn({ err }, "rk9 coord retention sweep failed");
-    });
+    void pruneRk9Coord(db)
+      .catch((err) => {
+        logger.warn({ err }, "rk9 coord retention sweep failed");
+      })
+      .finally(() => {
+        if (stopped) return;
+        timer = setTimeout(run, intervalMs);
+        timer.unref?.();
+      });
   };
-  const timer = setInterval(run, intervalMs);
-  timer.unref?.();
   run();
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }
 // --- /RK9 Custom ---
