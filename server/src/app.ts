@@ -130,6 +130,8 @@ import { riskRoutes } from "./routes/risk.js";
 import { rk9EmailRoutes } from "./routes/rk9-email.js";
 // RK9-621: coordination bus router skeleton (epic RK9-620).
 import { rk9CoordRoutes } from "./routes/rk9-coord.js";
+import { rk9CoordTokenRoutes } from "./routes/rk9-coord-tokens.js";
+import { rk9CoordTokenGuard } from "./middleware/rk9-coord-token-auth.js";
 import { outreachRoutes } from "./routes/outreach.js";
 import { outreachSenderRoutes } from "./routes/outreach-sender.js";
 import { outreachInboundRoutes } from "./routes/outreach-inbound.js";
@@ -588,6 +590,11 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // --- RK9 Custom (RK9-623): deny by default. A coord token reaches only
+  // /api/companies/:companyId/rk9/coord/*; every other route is 403. Mounted
+  // right after the actor middleware, before every API router. ---
+  app.use(rk9CoordTokenGuard());
+  // --- /RK9 Custom ---
   // After the actor middleware on purpose: a valid Cloud control assertion
   // REPLACES whatever actor the request otherwise resolved to, and only on
   // the one endpoint it authorizes (see the middleware for the contract).
@@ -674,6 +681,9 @@ export async function createApp(
   // Mounted before the generic /companies router so no company middleware
   // shadows it; the router's own actor middleware enforces company scope. ---
   api.use(rk9CoordRoutes(db));
+  // RK9-623: operator-only coord token issue/rotate/revoke, outside the coord
+  // prefix so the guard above keeps every coord token out of it.
+  api.use(rk9CoordTokenRoutes(db));
   // --- /RK9 Custom ---
   api.use("/cloud", cloudRoutes());
   api.use("/companies", companyRoutes(db, opts.storageService));

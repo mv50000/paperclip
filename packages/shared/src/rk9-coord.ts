@@ -80,6 +80,8 @@ export const RK9_COORD_EVENT_TYPES = [
   "break-glass",
   "decision-vaulted",
   "escalated",
+  // Amended by RK9-623 for RK9-636 (heads-up on the coord bus).
+  "headsup",
 ] as const;
 export type Rk9CoordEventType = (typeof RK9_COORD_EVENT_TYPES)[number];
 
@@ -91,8 +93,15 @@ export const RK9_COORD_ACTOR_HEADER = "x-rk9-actor";
  * but the HTTP logger redacts it in case a client sends it anyway.
  */
 export const RK9_COORD_TOKEN_HEADER = "x-rk9-coord-token";
-/** Bearer prefix of a coord token (resolution lands in RK9-623). */
+/** Bearer prefix of a coord token (resolved in server/src/middleware/auth.ts, RK9-623). */
 export const RK9_COORD_TOKEN_PREFIX = "rk9_coord_";
+/** Coord token principal kinds: a tailnet host or one named service. */
+export const RK9_COORD_TOKEN_PRINCIPAL_KINDS = ["host", "service"] as const;
+export type Rk9CoordTokenPrincipalKind = (typeof RK9_COORD_TOKEN_PRINCIPAL_KINDS)[number];
+/** Services that may hold a coord service token. */
+export const RK9_COORD_TOKEN_SERVICES = ["rk9claude", "grok"] as const;
+/** Host token name: a lower-case DNS label (the tailnet host name). */
+export const RK9_COORD_HOST_LABEL_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 /** Canonical host name of the machine that holds the board key. */
 export const RK9_COORD_BOARD_HOST_DEFAULT = "paperclip-01";
 /** Route prefix under `/api`. */
