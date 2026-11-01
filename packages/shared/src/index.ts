@@ -2876,3 +2876,7 @@ export * from "./ai-connections.js";
 export * from "./types/email.js";
 export * from "./validators/email.js";
 export * from "./announcements.js";
+
+// --- RK9 Custom (RK9-621): coordination bus identity contract ---
+export * from "./rk9-coord.js";
+export * from "./validators/rk9-coord.js";

@@ -88,6 +88,8 @@ const RK9_FORK_ROUTE_FILES = new Set([
   "resend-inbound.ts",
   "risk.ts",
   "rk9-email.ts",
+  // RK9-621: coordination bus router skeleton (epic RK9-620).
+  "rk9-coord.ts",
   "ses-inbound.ts",
   "slack-interactions.ts",
   "unsubscribe.ts",

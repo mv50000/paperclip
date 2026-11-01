@@ -1032,3 +1032,6 @@ export * from "./app-definition.js";
 export * from "./chat-channels.js";
 
 export * from "./email.js";
+
+// --- RK9 Custom (RK9-621) ---
+export * from "./rk9-coord.js";
