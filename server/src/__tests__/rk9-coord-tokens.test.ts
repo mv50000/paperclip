@@ -181,8 +181,8 @@ describe("deny by default: a coord token gets 403 on every non-coord route", () 
   });
 
   // Verifier round 1 (H1): parseurl falls back to url.parse for a target with
-  // `#`, `\\` or whitespace, so Express could route a path the raw-URL check
-  // never saw. supertest normalises URLs, so these go over a raw socket.
+  // `#` or whitespace; url.parse drops the fragment and turns `\\` into `/`,
+  // so Express could route a path the raw-URL check never saw. supertest normalises URLs, so these go over a raw socket.
   it.each([
     `/api/companies/${RK9}\\issues#/rk9/coord/`,
     `/api/companies/${RK9}\\rk9\\coord-tokens#/rk9/coord/`,

@@ -57,9 +57,9 @@ export function isRk9CoordRoutePath(path: string): boolean {
  * Decide whether a coord-token request may pass. Both the raw request target
  * and the pathname Express routes on (`req.path`, from parseurl) must be under
  * the coord prefix. parseurl falls back to the legacy url.parse for a target
- * with `#`, `\` or whitespace, which drops the fragment and turns `\` into
- * `/`, so the raw and the routed path can differ: such targets are denied
- * outright. Express matches routes case-insensitively, this check does not,
+ * with `#` or whitespace, and url.parse then drops the fragment and turns `\`
+ * into `/`, so the raw and the routed path can differ. Targets with `#`, `\`
+ * or whitespace are denied outright (`\` as defence in depth). Express matches routes case-insensitively, this check does not,
  * so a case variant is denied rather than let through.
  */
 export function isRk9CoordGuardAllowed(rawUrl: string, routedPath: string): boolean {
