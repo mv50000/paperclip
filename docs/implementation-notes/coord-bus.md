@@ -215,10 +215,10 @@ FK, so an actor delete does not scan the referencing tables.
 
 ### Retention
 
-Retention is documented here and implemented by a later child. This child has
-no UPDATE or DELETE path on the journal.
-RK9-626 sets the event, decision and ended-actor periods. The other periods
-are proposals for the child that builds the retention job.
+RK9-626 implements the retention job in
+`server/src/services/rk9-coord-retention.ts` (`pruneRk9Coord`). The server
+runs it on startup and every 6 hours. The periods below are the ones it uses.
+Escalations and revoked tokens are not pruned yet.
 
 | Data | Keep | How |
 |---|---|---|
@@ -230,14 +230,212 @@ are proposals for the child that builds the retention job.
 | Escalations | 1 year | DELETE |
 | Revoked tokens | kept | audit trail; `rotated_from_token_id` chains stay intact |
 
-The prune deletes in batches by `id` and never touches a row newer than the
-oldest cursor that is still live.
+The prune deletes in batches of 5,000 by `id`. It does not wait for old
+cursors: an actor whose cursor points at a pruned event simply continues
+with the oldest remaining one. A re-run over pruned data deletes nothing.
 
 ### ask-operator interface
 
-`ask-operator` is the contract for the separate operator_todo epic. The
-journal row carries `summary` (the question in one line) and
-`payload = { question, options?, urgency, issue?, actor, reply_to? }`
-(RK9-626). The operator_todo view reads these events by
-`rk9_coord_events_company_type_idx`; the answer is a follow-up event with
-`ref_event_id` set. This epic does not build the view.
+`ask-operator` is the contract for the separate operator_todo epic. See
+"ask-operator JSON schema" under the journal API below. This epic does not
+build the view.
+
+## Journal and inbox API (RK9-626)
+
+Part of epic [RK9-620](/RK9/issues/RK9-620), wave 3, key `journal-inbox-api`.
+
+- Routes: `server/src/routes/rk9-coord-{events,inbox,board}.ts`, mounted in
+  the sibling block of `server/src/routes/rk9-coord.ts`.
+- Services: `server/src/services/rk9-coord-journal.ts` (append, delta, line
+  format, board), `rk9-coord-inbox.ts` (send, claim),
+  `rk9-coord-retention.ts` (prune), `rk9-coord-text.ts` (redaction).
+- Bodies: `packages/shared/src/validators/rk9-coord-journal.ts`.
+- Tests: `server/src/__tests__/rk9-coord-journal.test.ts` and
+  `rk9-coord-inbox.test.ts` (embedded Postgres).
+
+Every route runs behind the actor middleware of the ADR
+([`coord-identity.md`](coord-identity.md)): company scope, the RK9-616
+loopback rule and the actor claim. A route that acts as an actor needs a
+resolved actor. A board-key call without `X-RK9-Actor` gets 400
+`rk9_coord_actor_required`. Request and response fields are snake_case.
+
+### Free text
+
+Every free-text field (titles, rationale, summaries, questions, message
+bodies) is redacted, collapsed to one line and capped before the insert. No
+model is called.
+
+- The pattern is the `RK9_SESSIONS_SECRET_RX` default of `rk9-sessions.sh`
+  (RK9-549). The env var overrides it on the server too. An invalid value
+  falls back to the default. `rk9_coord_` tokens are always redacted.
+- Matches become `[redacted]`. Whitespace, control, zero-width and bidi
+  characters collapse to one space.
+- Caps: `summary` 300, each payload text field 500 (`rationale` 1000), an
+  inbox `body` 500 characters. A cut ends with `…`.
+
+### POST /events
+
+Appends one event. The body is a zod discriminated union on `type`. An
+unknown type, a server-only type (`lease`, `phase`, ...) or a missing
+required field is 400. Common optional fields: `client_event_id`,
+`occurred_at` (ISO time of a spooled event), `repo` (`owner/repo`).
+
+| type | Required | Optional | summary |
+|---|---|---|---|
+| `decision` | `title`, `rationale` | `issue`, `vault_note` (stored in `vault_path`) | title |
+| `deploy` | `app`, `sha` (7–40 hex), `result` (`started`, `success`, `failure`, `rolled_back`) | `issue` | `<app> <sha7> <result>` |
+| `handoff` | `issue`, `summary` | `to` | `-> <to>: <summary>` |
+| `blocker` | `issue`, `what` | | what |
+| `done` | `issue` | `pr` (number or URL) | `PR #<n>` |
+| `ask-operator` | `question`, `urgency` | `options`, `issue`, `reply_to` | `[<urgency>] <question>` |
+
+- Answer: 201 `{ event, duplicate: false }`. A repeat of a stored
+  `client_event_id` is 200 `{ event, duplicate: true }` with the stored row.
+  This is the spool dedupe of the rk9 CLI.
+- `trust` comes from the server, never from the body. Rows of a host coord
+  token (also its `cc` claims) and of Grok are always `unverified`.
+- Each new event writes one `activity_log` row
+  (`rk9.coord.event_appended`).
+- There is no PATCH, PUT or DELETE route; those methods get the coord 404.
+  The DB trigger rejects UPDATE and DELETE as well (see "Append-only").
+
+### ask-operator JSON schema
+
+This is the interface for the separate operator_todo epic. The natural
+producer is the heads-up and stall path of
+[RK9-608](/RK9/issues/RK9-608); the rk9 CLI accepts the type as
+`rk9 log ask-operator`. This epic builds no consumer.
+
+```json
+{
+  "type": "ask-operator",
+  "question": "Merge PR #244 now or wait for the deploy window?",
+  "options": ["merge now", "wait"],
+  "urgency": "low | normal | high | urgent",
+  "issue": "RK9-626",
+  "actor": "worktree:RK9-626",
+  "reply_to": 1234
+}
+```
+
+- `question` and `urgency` are required. `options` has 1–10 entries of at
+  most 200 characters.
+- `actor` is always the resolved caller. A client value is ignored.
+- `reply_to` is the journal id of the event this one follows up. It is also
+  stored as `ref_event_id`.
+- The stored row has `type = 'ask-operator'`, `summary = "[<urgency>]
+  <question>"` and the fields above in `payload`. A consumer lists open asks
+  with `rk9_coord_events_company_type_idx`. The answer is a follow-up event
+  whose `ref_event_id` points at the ask.
+
+### GET /events/delta
+
+Returns the events after the caller's cursor that concern it:
+
+- events whose `repo` is the actor's repo, or whose `issue` is the actor's
+  issue (the presence row, or the issue in `worktree:<issue>`);
+- events whose `resource` is a lease the actor holds now;
+- every `deploy` and `ask-operator` event;
+- never the actor's own events.
+
+Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
+`issue` as extra filters for a caller whose presence row has none yet.
+`actorId` is optional. When given, it must equal the resolved actor (403
+`rk9_coord_actor_spoof`): it never selects another actor's cursor.
+
+- The cursor row is read FOR UPDATE, and the cursor moves in the same
+  transaction to the newest company event the read saw. Two concurrent calls
+  of one actor serialize, so the event goes to one of them. An immediate
+  second call is 204.
+- `peek=1` reads without a lock and leaves the cursor as it is.
+- A new cursor starts at the newest event older than 24 hours, so a new
+  session is not flooded with old history.
+- JSON: `{ events, total, more, cursor, previous_cursor, peek }`. `events`
+  holds the newest `limit` matches in ascending id order. `total` counts all
+  matches after the old cursor.
+- Nothing new: 204 with an empty body, also with `fmt=line`.
+- The actor row: when the caller has no row in `rk9_coord_actors`, the
+  route inserts a stub (kind, actor_ref, host, trust; ON CONFLICT DO
+  NOTHING). The presence API (RK9-625) owns every other column.
+- Known limit: event ids come from a sequence. An event whose transaction
+  commits after a newer id is already visible can be skipped by a cursor
+  that has passed it. Appends are single-row autocommits, so the window is
+  tiny. The board shows everything.
+
+### Line format (`fmt=line`)
+
+`text/plain`, at most 400 characters (~100 tokens), newest event first:
+
+```text
+rk9: deploy: saatavilla 1a2b3c4 success @SAA-12 · blocker RK9-626: waits for 9015 @cc:3f9e2a1b · +7 more: rk9 board
+```
+
+- One item per event: `<type>[ <issue>]: <summary> @<short actor>`. Short
+  actor: the issue for a worktree, `cc:<8 chars of the session>`,
+  `run:<8 chars of the run id>`, else the actor id.
+- Items are joined with ` · `. When matches do not fit, the line ends with
+  `+N more: rk9 board`. N counts every match after the old cursor that the
+  line does not show.
+- A single first item that is too long is cut with `…`.
+
+### POST /inbox
+
+Body: `{ to, body, kind?, issue?, expires_in_s? }`. `to` resolves in this
+order:
+
+1. **Issue identifier** (`RKI-9`): an inbox row with `to_issue`. The first
+   actor that claims with that issue gets it, exactly once.
+2. **`agent_run:<runId>`**: a Paperclip agent. The message becomes a comment
+   on the run's issue (`contextSnapshot.issueId`), or on `issue` when given.
+3. **Other actor id**: `to_actor_id` when the actor has a row, else
+   `to_name = <actor id>`. The actor gets it when it claims.
+4. **Name**: when a coord actor has that `name`, an inbox row with `to_name`.
+   Otherwise, when an agent of the company has that name
+   (case-insensitive), a comment on `issue`, which is then required. Otherwise
+   an inbox row with `to_name` for a future actor of that name.
+
+Answer 201: `{ delivery: "inbox" | "issue_comment", id, to: { kind, value },
+target_live, name, issue, comment_id }`. `target_live` is true when the
+target is a live coord actor now (`ended_at IS NULL` and `last_seen_at`
+within `RK9_COORD_PRESENCE_TTL_S`, default 300 s). `name` is its session
+name. The CLI uses both to suggest SendMessage instead.
+
+Paperclip agent targets:
+
+- The comment goes through `issueService.addComment`. It is authored by the
+  board user or the calling agent, and one `activity_log` row
+  (`rk9.coord.message_commented`) records it. No inbox row is left.
+- The comment does not wake the agent. The agent sees it on its next
+  heartbeat, so a message never buys a heartbeat run.
+- A coord-token caller cannot write comments (403
+  `rk9_coord_kind_not_allowed`), per the least-privilege rule of the ADR.
+- No issue: 422 `rk9_coord_inbox_issue_required`. Run or issue not found:
+  404 `rk9_coord_inbox_target_not_found`. The rk9 CLI dead-letters a
+  spooled write only on that 404 code.
+
+Each inbox row also writes one `activity_log` row (`rk9.coord.inbox_sent`).
+
+### GET /inbox/me
+
+Claims every pending message for the caller and marks it delivered:
+
+- rows with `to_actor_id` = its row, `to_name` = its actor id or its name,
+  or `to_issue` = its issue;
+- not expired, at most 50 per call, ascending id.
+
+One statement claims the rows:
+`UPDATE ... SET delivered_at, delivered_to_actor_id WHERE delivered_at IS NULL
+AND id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`. Two simultaneous
+claimers never get the same row (tests: two claimers on one issue message,
+and five claimers on 30 messages).
+
+Answer: 200 `{ actor, messages: [{ id, kind, body, from, name, target_live,
+to, created_at }] }`, or 204 when nothing is pending. `name` and
+`target_live` describe the sender, for a SendMessage reply.
+
+### GET /board
+
+The full view for an explicit `rk9 board`. Hook paths never call it. It
+returns live actors, active leases with holder phase and FIFO queue, the
+newest events (`?events=`, default 20) and the pending inbox. Unverified
+viewers (remote hosts, Grok) get the inbox without message bodies.

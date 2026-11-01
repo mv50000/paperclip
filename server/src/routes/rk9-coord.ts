@@ -13,6 +13,10 @@ import {
   rk9CoordActorView,
   type Rk9CoordActorOptions,
 } from "../middleware/rk9-coord-actor.js";
+// RK9 Custom (RK9-626): journal, inbox and board sub-routers
+import { rk9CoordEventRoutes } from "./rk9-coord-events.js";
+import { rk9CoordInboxRoutes } from "./rk9-coord-inbox.js";
+import { rk9CoordBoardRoutes } from "./rk9-coord-board.js";
 
 export type Rk9CoordRouteOptions = Rk9CoordActorOptions;
 
@@ -38,10 +42,10 @@ export function rk9CoordRoutes(db: Db, opts: Rk9CoordRouteOptions = {}) {
 
   // --- Sibling mount points (RK9-620): one line per child, keep this order ---
   // coord.use("/actors", rk9CoordActorRoutes(db));   // presence-api
-  // coord.use("/events", rk9CoordEventRoutes(db));   // journal-inbox-api
-  // coord.use("/inbox", rk9CoordInboxRoutes(db));    // journal-inbox-api
+  coord.use("/events", rk9CoordEventRoutes(db));   // journal-inbox-api
+  coord.use("/inbox", rk9CoordInboxRoutes(db));    // journal-inbox-api
   // coord.use("/leases", rk9CoordLeaseRoutes(db));   // lease-engine
-  // coord.use("/board", rk9CoordBoardRoutes(db));    // rk9-cli board view
+  coord.use("/board", rk9CoordBoardRoutes(db));    // journal-inbox-api (RK9-626)
   // --- end sibling mount points ---
 
   coord.use((_req, res) => {

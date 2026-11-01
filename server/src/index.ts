@@ -131,6 +131,8 @@ import { initTelemetry, getTelemetryClient } from "./telemetry.js";
 import { conflict } from "./errors.js";
 import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
 import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
+// RK9 Custom (RK9-626): coord bus retention
+import { startRk9CoordRetention } from "./services/rk9-coord-retention.js";
 import {
   closeHttpListenerForShutdown,
   coordinateHeartbeatSchedulerShutdown,
@@ -2016,6 +2018,10 @@ async function startServerWithDatabaseTeardown(
     });
   }
 
+  // --- RK9 Custom (RK9-626): coord bus retention (events 90 d, decisions 1 y, ended actors 7 d) ---
+  const stopRk9CoordRetention = startRk9CoordRetention(db as any);
+  // --- /RK9 Custom ---
+
   if (config.databaseBackupEnabled) {
     const backupIntervalMs = config.databaseBackupIntervalMinutes * 60 * 1000;
 
@@ -2110,6 +2116,7 @@ async function startServerWithDatabaseTeardown(
     await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     heartbeatSchedulerStopped = true;
     clearInterval(executionControlInterval);
+    stopRk9CoordRetention(); // RK9 Custom (RK9-626)
     if (heartbeatSchedulerInterval) {
       clearInterval(heartbeatSchedulerInterval);
       heartbeatSchedulerInterval = null;
