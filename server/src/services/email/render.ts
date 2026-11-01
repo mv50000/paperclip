@@ -53,16 +53,24 @@ export function buildFromAddress(routeKey: string, sendingDomain: string, displa
   return `"${safe}" <${addr}>`;
 }
 
-// Minimal markdown → HTML: paragraphs, line breaks, links. Deliberately tiny —
-// agents writing transactional emails do not need code blocks or tables. If we
-// need richer formatting we'll add it later behind a flag.
+// `**bold**` on one line. The span must not start or end with whitespace, so
+// a stray pair of asterisks ("2 ** 3 ** 4") is not bold, as in CommonMark.
+const BOLD_RE = /\*\*(?=\S)([^\n]*?\S)\*\*/g;
+
+// Minimal markdown → HTML: paragraphs, line breaks, bold, links. Deliberately
+// tiny — agents writing transactional emails do not need code blocks or
+// tables. If we need richer formatting we'll add it later behind a flag.
+// The text part stays verbatim: `**bold**` is readable as plain text.
 export function renderMarkdown(md: string): { html: string; text: string } {
   const text = md;
   const escaped = md
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
-  const linked = escaped.replace(
+  // Bold runs before autolinking: the URL pattern stops at "<", so a URL that
+  // ends a bold span does not swallow the closing tag.
+  const bolded = escaped.replace(BOLD_RE, "<strong>$1</strong>");
+  const linked = bolded.replace(
     /(https?:\/\/[^\s<>"]+)/g,
     (url) => `<a href="${url}">${url}</a>`,
   );
