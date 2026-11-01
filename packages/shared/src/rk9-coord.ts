@@ -25,7 +25,8 @@ export type Rk9CoordActorKind = (typeof RK9_COORD_ACTOR_KINDS)[number];
 /**
  * How far the server can vouch for an actor claim.
  * - verified: the server derived the identity from a credential bound to it
- *   (agent run, signed-in operator, a service token for one service).
+ *   (agent run with a run JWT, signed-in operator, a service token for one
+ *   service).
  * - attributed: a local claim made with the paperclip-01 board key (the
  *   server knows the host but cannot tell sessions apart), or an agent-key
  *   run (the server knows the agent but not which of its running runs).

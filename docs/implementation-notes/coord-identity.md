@@ -385,6 +385,13 @@ mounted before the generic `/companies` router in `app.ts`.
   server. A per-session credential is a later hardening step, not part of
   this epic.
 
+- Agent-key runs are `attributed`, and `attributed` may hold hard-gate
+  leases. An agent key can still name a sibling running run of the same
+  agent and act as that run. The lease service
+  ([RK9-627](/RK9/issues/RK9-627)) must either require a run JWT
+  (`verified`) for hard-gate leases held by `agent_run` actors, or check
+  lease ownership against the agent id rather than the run id.
+
 ## Related notes
 
 - This repository: `docs/implementation-notes/` (this file).
