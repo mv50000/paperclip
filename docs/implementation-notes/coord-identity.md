@@ -12,7 +12,7 @@ It freezes the names that every later child of the epic uses.
 
 ## Status and scope
 
-- Status: proposed, 2026-11-01.
+- Status: accepted with a condition, 2026-11-01 (see the approval line above).
 - This child (RK9-621) ships the ADR, the shared contract module, the coord
   router skeleton and the actor middleware.
 - RK9-623 ships the `rk9_coord_tokens` table and the migration. It also ships
