@@ -98,6 +98,35 @@ describe("renderMarkdown", () => {
     expect(html).toContain('<a href="https://ololla.fi">https://ololla.fi</a>');
   });
 
+  it("renders **bold** as <strong> in the HTML part", () => {
+    const { html, text } = renderMarkdown(
+      "1. **Palvelut ovat piilossa.** Avaa Palvelut.\n2. **Aukioloajat puuttuvat.** Lisää ne.",
+    );
+    expect(html).toContain("1. <strong>Palvelut ovat piilossa.</strong> Avaa Palvelut.<br>");
+    expect(html).toContain("2. <strong>Aukioloajat puuttuvat.</strong> Lisää ne.");
+    expect(html).not.toContain("**");
+    expect(text).toContain("**Palvelut ovat piilossa.**");
+  });
+
+  it("escapes HTML inside a bold span", () => {
+    const { html } = renderMarkdown("**<img src=x onerror=alert(1)>**");
+    expect(html).toContain("<strong>&lt;img src=x onerror=alert(1)&gt;</strong>");
+    expect(html).not.toContain("<img");
+  });
+
+  it("does not bold across lines or around whitespace", () => {
+    expect(renderMarkdown("**alku\nloppu**").html).not.toContain("<strong>");
+    expect(renderMarkdown("2 ** 3 ** 4").html).not.toContain("<strong>");
+    expect(renderMarkdown("****").html).not.toContain("<strong>");
+  });
+
+  it("keeps a URL at the end of a bold span intact", () => {
+    const { html } = renderMarkdown("**https://saatavilla.fi**");
+    expect(html).toContain(
+      '<strong><a href="https://saatavilla.fi">https://saatavilla.fi</a></strong>',
+    );
+  });
+
   it("preserves the original text version verbatim", () => {
     const md = "Hei,\n\nKiitos.";
     expect(renderMarkdown(md).text).toBe(md);
