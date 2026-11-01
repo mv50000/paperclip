@@ -26,8 +26,12 @@ It freezes the names that every later child of the epic uses.
 
 ## Context
 
-- Every interactive session on paperclip-01 uses the same instance-wide
-  `pcp_board_` key. The server cannot tell those sessions apart.
+- Every interactive session on paperclip-01 uses the same `pcp_board_` key:
+  the operator's instance-admin board key. The server cannot tell those
+  sessions apart.
+- Board keys are per user. Any signed-in user can mint one
+  (`POST /api/board-api-keys`). A board key alone therefore proves neither
+  operator authority nor the host it is used on.
 - Paperclip agents authenticate with agent keys or run JWTs.
 - Other hosts, rk9claude (skynet, CT 342) and Grok have no Paperclip
   principal.
@@ -42,8 +46,11 @@ It freezes the names that every later child of the epic uses.
 2. The server derives the actor wherever the credential allows it. Agent
    callers are always `agent_run:<runId>`. A signed-in admin session is always
    `operator`. A service token is always its own service.
-3. Board-key claims are **attributed**: the server knows the host
-   (paperclip-01) but trusts the session part of the claim as stated.
+3. Only an instance-admin board key may call coord routes. When
+   `RK9_COORD_BOARD_KEY_IDS` is set, the key id must also be on that list
+   (recommended: the id of the operator key the paperclip-01 sessions use).
+   Board-key claims are **attributed**: the server attributes them to
+   paperclip-01 by policy and trusts the session part as stated.
 4. Remote hosts get a **per-host coord token** bound to one company and one
    host. They reach `:3100` directly over the tailnet. Grok reaches the API
    only through the vault-mcp proxy, which holds the `grok` service token.
@@ -138,7 +145,7 @@ rk9claude | grok | operator`.
 | cc (other host) | Claude Code session id | host coord token + `X-RK9-Actor` | hook heartbeats over the tailnet, TTL | attributed | token host |
 | worktree | issue identifier of the `/implement` worktree | board key + `X-RK9-Actor` | tmux window of the worktree session; heartbeats | attributed | `paperclip-01` |
 | headless | run id of `pcp-headless-run.sh` | board key + `X-RK9-Actor` | headless process; heartbeats | attributed | `paperclip-01` |
-| agent_run | `heartbeat_runs.id`, derived server-side | agent key (run id checked against `heartbeat_runs`) or run JWT (signed `run_id`) | `heartbeat_runs.status` | verified | none (null) |
+| agent_run | `heartbeat_runs.id`, derived server-side | standard-scope agent key (run id checked against `heartbeat_runs`) or run JWT (signed `run_id`); the run must be `running` | `heartbeat_runs.status` | verified | none (null) |
 | orch | orchestrator name | board key + `X-RK9-Actor` | orchestrator heartbeat, TTL | attributed | `paperclip-01` |
 | remote | tailnet host name | host coord token | CLI heartbeat, TTL | unverified | token host |
 | rk9claude | the rk9claude service | `rk9claude` service token | service heartbeat, TTL | verified | `rk9claude` |
@@ -147,8 +154,10 @@ rk9claude | grok | operator`.
 
 Local `cc`, `worktree`, `headless` and `orch` actors are **attributed, not
 authenticated per session**. They all share the board key. The server can
-bind the host claim only for coord tokens. For the board key, the host is
-implied: the key never leaves paperclip-01.
+bind the host claim only for coord tokens. For the board key, the host is a
+policy, not a proof: the operator key never leaves paperclip-01, and the
+server narrows who can use the route with the instance-admin check and the
+optional key-id pin.
 
 ## Trust model
 
@@ -178,19 +187,25 @@ route, including sibling sub-routers. It applies these rules in order.
    matters. Being on loopback or 127.0.0.1 never gives company scope.
 3. Company access: `assertCompanyAccess` for board and agent callers.
    For a coord token, the token's `company_id` must equal `:companyId` (403).
+   The company check runs before the header check for every principal.
 4. A present but malformed `X-RK9-Actor` is 400 on every method.
 5. A mutation (any method except GET, HEAD and OPTIONS) without an actor id
    is 400 for the board key and coord tokens. Agent and session callers have
    a derived id.
 6. Per principal:
-   - **Agent key or run JWT:** the run id must exist in `heartbeat_runs` for
-     the same agent and company. An agent key's run id comes from
-     `X-Paperclip-Run-Id`, which `auth.ts` only format-checks, so the lookup
-     is required. The actor is `agent_run:<runId>`. A header that differs
-     from the derived id is 403 (`rk9_coord_actor_spoof`).
+   - **Agent key or run JWT:** only a standard-scope credential qualifies;
+     task-bridge and skill-test keys are 403. The run id must exist in
+     `heartbeat_runs` for the same agent and company, with status `running`.
+     An agent key's run id comes from `X-Paperclip-Run-Id`, which `auth.ts`
+     only format-checks, so the lookup is required: without the status check
+     one key could act as a finished or sibling run. The actor is
+     `agent_run:<runId>`. A header that differs from the derived id is 403
+     (`rk9_coord_actor_spoof`).
    - **Session:** only an instance admin, always `operator`. Any other claim
      is 403.
-   - **Board key:** kinds `cc`, `worktree`, `headless`, `orch` and `operator`.
+   - **Board key:** the key's user must be an instance admin, and the key id
+     must be on `RK9_COORD_BOARD_KEY_IDS` when that is set (403 otherwise).
+     Kinds `cc`, `worktree`, `headless`, `orch` and `operator`.
      A `cc` claim must name the board host (`RK9_COORD_BOARD_HOST`, default
      `paperclip-01`). Kinds `agent_run`, `remote`, `rk9claude` and `grok` are
      403. A read without a claim resolves to a null actor.
@@ -208,12 +223,15 @@ Error codes in the JSON `code` field:
 | `rk9_coord_company_invalid` | 400 | `companyId` is not a UUID |
 | `rk9_coord_actor_malformed` | 400 | header outside the grammar |
 | `rk9_coord_actor_required` | 400 | mutation without an actor id |
-| `rk9_coord_untrusted_principal` | 401 / 403 | anonymous, local implicit, non-admin session or unknown source |
+| `rk9_coord_untrusted_principal` | 401 / 403 | anonymous, local implicit, non-admin session or board key, or unknown source |
+| `rk9_coord_board_key_not_allowed` | 403 | board key not on `RK9_COORD_BOARD_KEY_IDS` |
+| `rk9_coord_scoped_key` | 403 | task-bridge or skill-test agent key |
 | `rk9_coord_actor_spoof` | 403 | claim differs from the derived actor |
 | `rk9_coord_kind_not_allowed` | 403 | this credential cannot act as that kind |
 | `rk9_coord_host_mismatch` | 403 | claim names another host |
 | `rk9_coord_agent_run_required` | 403 | agent call outside a run |
 | `rk9_coord_agent_run_unbound` | 403 | run belongs to another agent or company |
+| `rk9_coord_agent_run_not_live` | 403 | run is not `running` |
 | `rk9_coord_wrong_company` | 403 | coord token bound to another company |
 | `rk9_coord_mixed_credentials` | 403 | coord token plus another credential |
 | `rk9_coord_not_found` | 404 | no such coord sub-route |
@@ -264,8 +282,9 @@ Justification against RK9-323 (SoD/POLP):
   company. RK9-623's global guard returns 403 for every other route. A
   stolen token exposes presence, leases and the journal of one company. It
   does not expose issues, agents, secrets or board mutations.
-- **Separation of duties:** the board key (operator authority) stays on
-  paperclip-01. Remote hosts, rk9claude and Grok each hold a separate,
+- **Separation of duties:** the operator's board key (operator authority)
+  stays on paperclip-01, and `RK9_COORD_BOARD_KEY_IDS` can pin coord access
+  to that one key. Remote hosts, rk9claude and Grok each hold a separate,
   individually revocable credential. Revoking one does not affect the others.
 - **One hop, one holder:** a vault-mcp proxy for every CLI would add a hop
   and a second holder of a broader credential. Only Grok needs the proxy,

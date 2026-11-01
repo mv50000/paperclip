@@ -7,7 +7,7 @@ import type { Db } from "@paperclipai/db";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import type { Rk9CoordAgentRun, Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
-import { resolveRk9CoordBoardHost } from "../middleware/rk9-coord-actor.js";
+import { resolveRk9CoordBoardHost, resolveRk9CoordBoardKeyIds } from "../middleware/rk9-coord-actor.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
 
 const RK9 = "11111111-1111-4111-8111-111111111111";
@@ -16,6 +16,7 @@ const AGENT = "33333333-3333-4333-8333-333333333333";
 const RUN = "44444444-4444-4444-8444-444444444444";
 const OTHER_RUN = "55555555-5555-4555-8555-555555555555";
 const FOREIGN_AGENT = "66666666-6666-4666-8666-666666666666";
+const FINISHED_RUN = "88888888-8888-4888-8888-888888888888";
 
 type Actor = Express.Request["actor"];
 
@@ -49,11 +50,16 @@ const agentActor = (source: "agent_key" | "agent_jwt", runId: string | null = RU
 });
 
 const runs: Record<string, Rk9CoordAgentRun> = {
-  [RUN]: { companyId: RK9, agentId: AGENT },
-  [OTHER_RUN]: { companyId: RK9, agentId: FOREIGN_AGENT },
+  [RUN]: { companyId: RK9, agentId: AGENT, status: "running" },
+  [OTHER_RUN]: { companyId: RK9, agentId: FOREIGN_AGENT, status: "running" },
+  [FINISHED_RUN]: { companyId: RK9, agentId: AGENT, status: "succeeded" },
 };
 
-function makeApp(actor: Actor, principal?: Rk9CoordTokenPrincipal) {
+function makeApp(
+  actor: Actor,
+  principal?: Rk9CoordTokenPrincipal,
+  boardKeyIds: readonly string[] | null = null,
+) {
   const findAgentRun = vi.fn(async (runId: string) => runs[runId] ?? null);
   const app = express();
   app.use(express.json());
@@ -62,7 +68,7 @@ function makeApp(actor: Actor, principal?: Rk9CoordTokenPrincipal) {
     if (principal) req.rk9CoordPrincipal = principal;
     next();
   });
-  app.use("/api", rk9CoordRoutes({} as Db, { boardHost: "paperclip-01", findAgentRun }));
+  app.use("/api", rk9CoordRoutes({} as Db, { boardHost: "paperclip-01", boardKeyIds, findAgentRun }));
   app.use("/api", (_req, res) => res.status(418).json({ fellThrough: true }));
   app.use(errorHandler);
   return { app, findAgentRun };
@@ -159,6 +165,26 @@ describe("coord whoami: board key on paperclip-01", () => {
     expect(res.status).toBe(403);
   });
 
+  it("rejects a board key of a non-admin company member (board keys are per user)", async () => {
+    const { app } = makeApp({ ...boardKeyActor, isInstanceAdmin: false });
+    for (const claim of ["operator", "cc:paperclip-01:abc"]) {
+      const res = await request(app).get(whoami()).set("X-RK9-Actor", claim);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("rk9_coord_untrusted_principal");
+    }
+    const post = await request(app).post(mutate()).set("X-RK9-Actor", "operator").send({});
+    expect(post.status).toBe(403);
+  });
+
+  it("pins board keys by id when RK9_COORD_BOARD_KEY_IDS is configured", async () => {
+    const allowed = makeApp(boardKeyActor, undefined, ["board-key-1"]);
+    expect((await request(allowed.app).get(whoami()).set("X-RK9-Actor", "operator")).status).toBe(200);
+    const other = makeApp({ ...boardKeyActor, keyId: "board-key-2" }, undefined, ["board-key-1"]);
+    const res = await request(other.app).get(whoami()).set("X-RK9-Actor", "operator");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("rk9_coord_board_key_not_allowed");
+  });
+
   it("rejects a non-UUID company id", async () => {
     const { app } = makeApp(boardKeyActor);
     const res = await request(app).get(whoami("RK9")).set("X-RK9-Actor", "operator");
@@ -232,6 +258,30 @@ describe("coord whoami: agent callers are agent_run, derived server-side", () =>
     const res = await request(app).get(whoami());
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("rk9_coord_agent_run_unbound");
+  });
+
+  it("rejects a run id of the same agent that is no longer running", async () => {
+    for (const source of ["agent_key", "agent_jwt"] as const) {
+      const { app } = makeApp(agentActor(source, FINISHED_RUN));
+      const res = await request(app).get(whoami());
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("rk9_coord_agent_run_not_live");
+    }
+  });
+
+  it.each([
+    { kind: "task_bridge", projectIds: [] },
+    { kind: "skill_test", issueId: "99999999-9999-4999-8999-999999999999" },
+  ])("rejects a scoped agent key ($kind)", async (keyScope) => {
+    const { app } = makeApp({ ...agentActor("agent_key"), keyScope: keyScope as never });
+    const res = await request(app).get(whoami());
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("rk9_coord_scoped_key");
+  });
+
+  it("accepts a standard-scope agent key", async () => {
+    const { app } = makeApp({ ...agentActor("agent_key"), keyScope: { kind: "standard" } });
+    expect((await request(app).get(whoami())).status).toBe(200);
   });
 
   it("rejects an agent key with an unknown run id", async () => {
@@ -331,6 +381,9 @@ describe("coord token principal (contract for RK9-623)", () => {
     const res = await request(app).get(whoami(OTHER));
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("rk9_coord_wrong_company");
+    const malformed = await request(app).get(whoami(OTHER)).set("X-RK9-Actor", "remote:");
+    expect(malformed.status).toBe(403);
+    expect(malformed.body.code).toBe("rk9_coord_wrong_company");
   });
 
   it("requires an actor id on a mutation", async () => {
@@ -368,6 +421,14 @@ describe("non-coord paths", () => {
     const { app } = makeApp(boardKeyActor);
     const res = await request(app).get(`/api/companies/${RK9}/issues`);
     expect(res.status).toBe(418);
+  });
+});
+
+describe("resolveRk9CoordBoardKeyIds", () => {
+  it("parses a comma list and treats empty as unset", () => {
+    expect(resolveRk9CoordBoardKeyIds({})).toBeNull();
+    expect(resolveRk9CoordBoardKeyIds({ RK9_COORD_BOARD_KEY_IDS: " , " })).toBeNull();
+    expect(resolveRk9CoordBoardKeyIds({ RK9_COORD_BOARD_KEY_IDS: "a, b" })).toEqual(["a", "b"]);
   });
 });
 
