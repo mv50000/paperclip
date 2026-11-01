@@ -167,6 +167,7 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
     }
     const clientMetadata = { ...(fields.metadata ?? {}) };
     delete clientMetadata[RK9_COORD_REGISTERED_MARKER];
+    delete clientMetadata.client_external_id;
     const insertMetadata = { ...clientMetadata, ...serverKeys, [RK9_COORD_REGISTERED_MARKER]: nonce };
     const markerSql = sql`jsonb_build_object(${RK9_COORD_REGISTERED_MARKER}::text, coalesce(${rk9CoordActors.metadata} ->> ${RK9_COORD_REGISTERED_MARKER}::text, ${nonce}::text))`;
     // An omitted metadata key keeps the stored object; a sent one replaces it.

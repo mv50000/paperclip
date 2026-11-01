@@ -68,10 +68,14 @@ export function collapseRk9CoordText(text: string): string {
 }
 
 /**
- * True when the text contains anything the redaction would replace. The text
- * is collapsed first, for the same reason as in toRk9CoordLine().
+ * True when the raw or the collapsed text contains anything the redaction
+ * would replace.
  */
 export function rk9CoordTextHasSecret(text: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  // Both forms: the raw text is what gets stored (a tab inside a URL
+  // credential only matches raw), the collapsed one defeats control-char
+  // obfuscation.
+  if (redactRk9CoordText(text, env) !== text) return true;
   const collapsed = collapseRk9CoordText(text);
   return redactRk9CoordText(collapsed, env) !== collapsed;
 }

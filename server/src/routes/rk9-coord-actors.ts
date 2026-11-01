@@ -17,6 +17,7 @@ import type { Db } from "@paperclipai/db";
 import {
   endRk9CoordActorSchema,
   everyRk9CoordString,
+  RK9_COORD_METADATA_MAX_DEPTH,
   listRk9CoordActorsQuerySchema,
   updateRk9CoordActorPhaseSchema,
   upsertRk9CoordActorSchema,
@@ -102,15 +103,35 @@ function rejectSecrets(fields: {
   if (fields.external_id && rk9CoordTextHasSecret(fields.external_id)) bad.push("external_id");
   // String by string: JSON.stringify would escape a tab or newline into `\t`,
   // which the pattern's `\s` no longer sees (verifier round 2).
-  if (fields.metadata && !everyRk9CoordString(fields.metadata, (text) => !rk9CoordTextHasSecret(text))) {
-    bad.push("metadata");
-  }
+  if (fields.metadata && metadataHasSecret(fields.metadata)) bad.push("metadata");
   if (bad.length > 0) {
     throw new HttpError(422, "Field looks like it contains a secret", {
       code: "rk9_coord_secret_in_field",
       fields: bad,
     });
   }
+}
+
+/**
+ * Three views of metadata, flagged when any one matches (verifier rounds 2-3):
+ * - the JSON text catches key/value pairs such as {"password": "..."};
+ * - each key and string value alone, collapsed, catches whitespace that JSON
+ *   escapes into `\t` or `\n`;
+ * - `key: value` per primitive leaf catches a pair the JSON quoting splits.
+ */
+function metadataHasSecret(metadata: Record<string, unknown>): boolean {
+  if (rk9CoordTextHasSecret(JSON.stringify(metadata))) return true;
+  if (!everyRk9CoordString(metadata, (text) => !rk9CoordTextHasSecret(text))) return true;
+  const pairs: string[] = [];
+  const walk = (value: unknown, depth: number) => {
+    if (depth <= 0 || value === null || typeof value !== "object") return;
+    for (const [key, item] of Object.entries(value)) {
+      if (item !== null && typeof item === "object") walk(item, depth - 1);
+      else pairs.push(`${key}: ${String(item)}`);
+    }
+  };
+  walk(metadata, RK9_COORD_METADATA_MAX_DEPTH);
+  return pairs.some((pair) => rk9CoordTextHasSecret(pair));
 }
 
 function identityOf(req: Request, actor: Rk9CoordResolvedActor): Rk9CoordPresenceIdentity {

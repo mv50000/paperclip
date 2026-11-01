@@ -292,8 +292,12 @@ Rules:
   the marker. Phase updates, refreshes and ends write no activity rows.
 - **Secrets in verbatim fields.** `branch`, `external_id` and `metadata` are
   stored as sent, so a value that matches the redaction pattern is 422
-  (`rk9_coord_secret_in_field`) instead of being stored. Metadata is checked
-  key by key and value by value, each collapsed first. Control characters
+  (`rk9_coord_secret_in_field`) instead of being stored. Metadata is
+  flagged when any of three views matches: its JSON text (catches
+  `{"password": "..."}`), each key and string value alone (raw and
+  collapsed, catches whitespace that JSON escapes), and `key: value` per leaf.
+  Nesting is capped at 16 levels. `client_external_id` and the registration
+  marker are server-owned keys; a client cannot set them. Control characters
   (C0, DEL, C1) in `branch`, and NUL or unpaired surrogates in `metadata`,
   are 422 too.
 - **Trust.** Every write (PUT, phase, end) stores the trust of the current

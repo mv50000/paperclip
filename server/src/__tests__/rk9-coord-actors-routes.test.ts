@@ -287,6 +287,11 @@ if (!support.supported) {
       { metadata: { note: "Bearer\tabcdefghijklmnop" } },
       { metadata: { note: "token\u0001=\u0001supersecret123" } },
       { metadata: { nested: [{ "token=supersecret123": 1 }] } },
+      // key/value form (verifier round 3)
+      { metadata: { password: "hunter2hunter2" } },
+      { metadata: { github_token: "abcdefghijkl" } },
+      { metadata: { aws: { secret: "abcdefghijkl" } } },
+      { metadata: { url: "https://user:pass\tword@host" } },
       { branch: "Bearer\u0085abcdefghijk" },
     ]) {
       const res = await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);
@@ -311,6 +316,13 @@ if (!support.supported) {
     expect(row!.metadata.client_external_id).toBe("other");
     await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ external_id: "sess-1" });
     [row] = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, CC));
+    expect(row!.metadata).not.toHaveProperty("client_external_id");
+  });
+
+  it("keeps client_external_id server-owned", async () => {
+    const app = makeApp(operatorKey());
+    await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send({ metadata: { client_external_id: "forged" } });
+    const [row] = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, CC));
     expect(row!.metadata).not.toHaveProperty("client_external_id");
   });
 
@@ -493,6 +505,8 @@ if (!support.supported) {
     [{ metadata: { a: "x\u0000y" } }],
     [{ metadata: { a: "\ud800" } }],
     [{ metadata: { "\udc00": 1 } }],
+    [{ metadata: JSON.parse(`{"a":${"[".repeat(3000)}${"]".repeat(3000)}}`) }],
+    [{ metadata: JSON.parse(`{"a":${"[".repeat(20)}1${"]".repeat(20)}}`) }],
     [{ unknown: true }],
   ])("answers 422 to an invalid PUT body %j", async (body) => {
     const res = await request(makeApp(operatorKey())).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);

@@ -84,14 +84,23 @@ const SURROGATE_PAIR_RX = /[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
  * (objects and arrays, recursively). The server also uses it to scan metadata
  * for secrets string by string, because JSON.stringify escapes whitespace.
  */
-export function everyRk9CoordString(value: unknown, predicate: (text: string) => boolean): boolean {
+export function everyRk9CoordString(
+  value: unknown,
+  predicate: (text: string) => boolean,
+  maxDepth = RK9_COORD_METADATA_MAX_DEPTH,
+): boolean {
   if (typeof value === "string") return predicate(value);
-  if (Array.isArray(value)) return value.every((item) => everyRk9CoordString(item, predicate));
-  if (value && typeof value === "object") {
-    return Object.entries(value).every(([key, item]) => predicate(key) && everyRk9CoordString(item, predicate));
-  }
-  return true;
+  if (value === null || typeof value !== "object") return true;
+  // Depth-capped so a deeply nested body is a 422, never a stack overflow.
+  if (maxDepth <= 0) return false;
+  if (Array.isArray(value)) return value.every((item) => everyRk9CoordString(item, predicate, maxDepth - 1));
+  return Object.entries(value).every(
+    ([key, item]) => predicate(key) && everyRk9CoordString(item, predicate, maxDepth - 1),
+  );
 }
+
+/** Metadata nesting limit (objects and arrays). */
+export const RK9_COORD_METADATA_MAX_DEPTH = 16;
 
 /** Raw phase input bound; the stored phase is redacted and capped at 140. */
 export const RK9_COORD_PHASE_INPUT_MAX = 1000;
@@ -134,16 +143,44 @@ export const upsertRk9CoordActorSchema = z
     branch: coordBranchSchema.nullable().optional(),
     phase: coordPhaseSchema.nullable().optional(),
     pid: z.number().int().positive().max(2_147_483_647).nullable().optional(),
-    liveness_source: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).nullable().optional(),
-    livenessSource: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).nullable().optional(),
+    liveness_source: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,31}$/)
+      .nullable()
+      .optional(),
+    livenessSource: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,31}$/)
+      .nullable()
+      .optional(),
     metadata: z
       .record(z.string(), z.unknown())
-      .refine((value) => JSON.stringify(value).length <= 4096, "metadata must be at most 4096 bytes of JSON")
-      // Postgres rejects NUL and unpaired surrogates in jsonb; answer 422, not 500.
-      .refine(
-        (value) => everyRk9CoordString(value, (text) => !/[\u0000]|\p{Cs}/u.test(text.replace(SURROGATE_PAIR_RX, ""))),
-        "metadata must not contain NUL characters or unpaired surrogates",
-      )
+      // One superRefine with early returns: the size check runs first, so the
+      // walk only ever sees a small value (verifier round 3).
+      .superRefine((value, ctx) => {
+        let json: string;
+        try {
+          json = JSON.stringify(value);
+        } catch {
+          ctx.addIssue({ code: "custom", message: "metadata is not serializable" });
+          return;
+        }
+        if (json.length > 4096) {
+          ctx.addIssue({ code: "custom", message: "metadata must be at most 4096 bytes of JSON" });
+          return;
+        }
+        // Postgres rejects NUL and unpaired surrogates in jsonb; answer 422, not 500.
+        const clean = everyRk9CoordString(
+          value,
+          (text) => !/[\u0000]|\p{Cs}/u.test(text.replace(SURROGATE_PAIR_RX, "")),
+        );
+        if (!clean) {
+          ctx.addIssue({
+            code: "custom",
+            message: `metadata must not contain NUL characters or unpaired surrogates, or nest deeper than ${RK9_COORD_METADATA_MAX_DEPTH}`,
+          });
+        }
+      })
       .optional(),
   })
   .strict();
