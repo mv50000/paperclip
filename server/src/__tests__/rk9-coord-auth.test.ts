@@ -17,6 +17,7 @@ const RUN = "44444444-4444-4444-8444-444444444444";
 const OTHER_RUN = "55555555-5555-4555-8555-555555555555";
 const FOREIGN_AGENT = "66666666-6666-4666-8666-666666666666";
 const FINISHED_RUN = "88888888-8888-4888-8888-888888888888";
+const SIBLING_RUN = "99999999-9999-4999-8999-aaaaaaaaaaaa";
 
 type Actor = Express.Request["actor"];
 
@@ -45,6 +46,7 @@ const agentActor = (source: "agent_key" | "agent_jwt", runId: string | null = RU
   agentId: AGENT,
   companyId: RK9,
   keyId: source === "agent_key" ? "agent-key-1" : undefined,
+  keyScope: { kind: "standard" },
   runId: runId ?? undefined,
   source,
 });
@@ -53,6 +55,7 @@ const runs: Record<string, Rk9CoordAgentRun> = {
   [RUN]: { companyId: RK9, agentId: AGENT, status: "running" },
   [OTHER_RUN]: { companyId: RK9, agentId: FOREIGN_AGENT, status: "running" },
   [FINISHED_RUN]: { companyId: RK9, agentId: AGENT, status: "succeeded" },
+  [SIBLING_RUN]: { companyId: RK9, agentId: AGENT, status: "running" },
 };
 
 function makeApp(
@@ -224,7 +227,8 @@ describe("coord whoami: agent callers are agent_run, derived server-side", () =>
       kind: "agent_run",
       actorId: `agent_run:${RUN}`,
       host: null,
-      trust: "verified",
+      // A run JWT is signed for one run; an agent key is not bound to a run.
+      trust: source === "agent_jwt" ? "verified" : "attributed",
       canHoldHardGate: true,
     });
     expect(res.body.principal).toMatchObject({ source, agentId: AGENT, runId: RUN });
@@ -274,6 +278,20 @@ describe("coord whoami: agent callers are agent_run, derived server-side", () =>
     { kind: "skill_test", issueId: "99999999-9999-4999-8999-999999999999" },
   ])("rejects a scoped agent key ($kind)", async (keyScope) => {
     const { app } = makeApp({ ...agentActor("agent_key"), keyScope: keyScope as never });
+    const res = await request(app).get(whoami());
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("rk9_coord_scoped_key");
+  });
+
+  it("treats an agent key naming a sibling running run as attributed, never verified", async () => {
+    const { app } = makeApp(agentActor("agent_key", SIBLING_RUN));
+    const res = await request(app).get(whoami());
+    expect(res.status).toBe(200);
+    expect(res.body.actor).toMatchObject({ actorId: `agent_run:${SIBLING_RUN}`, trust: "attributed" });
+  });
+
+  it("rejects an agent actor without a key scope (fail closed)", async () => {
+    const { app } = makeApp({ ...agentActor("agent_key"), keyScope: undefined });
     const res = await request(app).get(whoami());
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("rk9_coord_scoped_key");

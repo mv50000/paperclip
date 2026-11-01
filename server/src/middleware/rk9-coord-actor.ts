@@ -12,8 +12,10 @@
 //    gets company scope by being local (RK9-616).
 // 2. Agent callers are always `agent_run:<runId>`, derived server-side from
 //    req.actor. Only standard-scope credentials qualify, and the run must be
-//    `running` and belong to the same agent and company. A supplied
-//    X-RK9-Actor header must equal the derived id, else 403.
+//    `running` and belong to the same agent and company. A run JWT is signed
+//    for one run (verified). An agent key belongs to the agent, not to one
+//    run, so it could name a sibling running run: it is attributed. A
+//    supplied X-RK9-Actor header must equal the derived id, else 403.
 // 3. Board-key callers must be instance admins, and when RK9_COORD_BOARD_KEY_IDS
 //    is set the key id must be on that list (the operator key the paperclip-01
 //    sessions use). They may claim cc / worktree / headless / orch / operator.
@@ -43,6 +45,7 @@ import {
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { assertCompanyAccess } from "../routes/authz.js";
+import { logger } from "./logger.js";
 
 /** Credential behind a coord call. */
 export type Rk9CoordPrincipalSource = "board_key" | "session" | "agent_key" | "agent_jwt" | "coord_token";
@@ -168,7 +171,7 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
     }
     // Task-bridge and skill-test keys are limited to some issues or one
     // issue; they must not get a verified, hard-gate-capable identity.
-    if (actor.keyScope && actor.keyScope.kind !== "standard") {
+    if (actor.keyScope?.kind !== "standard") {
       throw coordError(403, "rk9_coord_scoped_key", "Scoped agent keys cannot call coord routes");
     }
     const runId = actor.runId?.trim();
@@ -179,8 +182,9 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
     if (!run || run.companyId !== actor.companyId || run.agentId !== actor.agentId) {
       throw coordError(403, "rk9_coord_agent_run_unbound", "The run does not belong to this agent and company");
     }
-    // An agent key's run id is a client-chosen header: without this check one
-    // key could act as a finished or sibling run of the same agent.
+    // An agent key's run id is a client-chosen header: this check stops one
+    // key from acting as a finished run. It cannot stop a sibling run that is
+    // running at the same time, so agent-key actors are only attributed.
     if (run.status !== "running") {
       throw coordError(403, "rk9_coord_agent_run_not_live", "The run is not running");
     }
@@ -188,7 +192,13 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
     if (claim && claim.actorId !== actorId) {
       throw coordError(403, "rk9_coord_actor_spoof", "Agent callers are always their own agent_run actor");
     }
-    return { kind: "agent_run", actorId, host: null, trust: "verified", principal: actor.source };
+    return {
+      kind: "agent_run",
+      actorId,
+      host: null,
+      trust: actor.source === "agent_jwt" ? "verified" : "attributed",
+      principal: actor.source,
+    };
   }
 
   if (actor.type === "board") {
@@ -290,6 +300,12 @@ function defaultFindAgentRun(db: Db) {
 export function rk9CoordActorMiddleware(db: Db, opts: Rk9CoordActorOptions = {}): RequestHandler {
   const boardHost = opts.boardHost ?? resolveRk9CoordBoardHost();
   const boardKeyIds = opts.boardKeyIds === undefined ? resolveRk9CoordBoardKeyIds() : opts.boardKeyIds;
+  if (!boardKeyIds || boardKeyIds.length === 0) {
+    logger.warn(
+      { event: "rk9_coord_board_key_pin_unset" },
+      "RK9_COORD_BOARD_KEY_IDS is unset: every instance-admin board key may act as a local coord actor",
+    );
+  }
   const findAgentRun = opts.findAgentRun ?? defaultFindAgentRun(db);
   return async (req, _res, next) => {
     try {

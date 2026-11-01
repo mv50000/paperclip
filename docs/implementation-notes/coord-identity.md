@@ -44,11 +44,14 @@ It freezes the names that every later child of the epic uses.
    grammar. The server resolves the actor from the credential and the
    `X-RK9-Actor` header.
 2. The server derives the actor wherever the credential allows it. Agent
-   callers are always `agent_run:<runId>`. A signed-in admin session is always
+   callers are always `agent_run:<runId>`: verified with a run JWT,
+   attributed with an agent key. A signed-in admin session is always
    `operator`. A service token is always its own service.
 3. Only an instance-admin board key may call coord routes. When
    `RK9_COORD_BOARD_KEY_IDS` is set, the key id must also be on that list
    (recommended: the id of the operator key the paperclip-01 sessions use).
+   The server logs `rk9_coord_board_key_pin_unset` at startup while the pin
+   is unset.
    Board-key claims are **attributed**: the server attributes them to
    paperclip-01 by policy and trusts the session part as stated.
 4. Remote hosts get a **per-host coord token** bound to one company and one
@@ -145,7 +148,7 @@ rk9claude | grok | operator`.
 | cc (other host) | Claude Code session id | host coord token + `X-RK9-Actor` | hook heartbeats over the tailnet, TTL | attributed | token host |
 | worktree | issue identifier of the `/implement` worktree | board key + `X-RK9-Actor` | tmux window of the worktree session; heartbeats | attributed | `paperclip-01` |
 | headless | run id of `pcp-headless-run.sh` | board key + `X-RK9-Actor` | headless process; heartbeats | attributed | `paperclip-01` |
-| agent_run | `heartbeat_runs.id`, derived server-side | standard-scope agent key (run id checked against `heartbeat_runs`) or run JWT (signed `run_id`); the run must be `running` | `heartbeat_runs.status` | verified | none (null) |
+| agent_run | `heartbeat_runs.id`, derived server-side | run JWT (signed `run_id`), or standard-scope agent key (run id from `X-Paperclip-Run-Id`, checked against `heartbeat_runs`); the run must be `running` | `heartbeat_runs.status` | verified (JWT) / attributed (agent key) | none (null) |
 | orch | orchestrator name | board key + `X-RK9-Actor` | orchestrator heartbeat, TTL | attributed | `paperclip-01` |
 | remote | tailnet host name | host coord token | CLI heartbeat, TTL | unverified | token host |
 | rk9claude | the rk9claude service | `rk9claude` service token | service heartbeat, TTL | verified | `rk9claude` |
@@ -162,8 +165,8 @@ optional key-id pin.
 ## Trust model
 
 - `verified`: the server derived the identity from a credential bound to it.
-- `attributed`: the server knows the host, not the session. Local actors
-  coordinate in good faith.
+- `attributed`: the server knows the host but not the session, or the agent
+  but not the run. These actors coordinate in good faith.
 - `unverified`: advisory only. `grok` and every `remote:*` actor are
   unverified.
 - Hard-gate leases (`prod:*`, `migrate:*`, `host:*`) need `verified` or
@@ -197,10 +200,14 @@ route, including sibling sub-routers. It applies these rules in order.
      task-bridge and skill-test keys are 403. The run id must exist in
      `heartbeat_runs` for the same agent and company, with status `running`.
      An agent key's run id comes from `X-Paperclip-Run-Id`, which `auth.ts`
-     only format-checks, so the lookup is required: without the status check
-     one key could act as a finished or sibling run. The actor is
-     `agent_run:<runId>`. A header that differs from the derived id is 403
-     (`rk9_coord_actor_spoof`).
+     only format-checks, so the lookup is required. The status check stops
+     one key from acting as a finished run. It cannot stop a sibling run of
+     the same agent that runs at the same time (up to 5 per agent), because
+     the key belongs to the agent, not to one run. Agent-key actors are
+     therefore `attributed`; run-JWT actors, whose `run_id` is signed, are
+     `verified`. The actor is `agent_run:<runId>`. A header that differs from
+     the derived id is 403 (`rk9_coord_actor_spoof`). A missing key scope is
+     rejected (fail closed).
    - **Session:** only an instance admin, always `operator`. Any other claim
      is 403.
    - **Board key:** the key's user must be an instance admin, and the key id
