@@ -28,7 +28,7 @@ import {
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
-import { rk9CoordTextHasSecret, toRk9CoordLine } from "./rk9-coord-text.js";
+import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "./rk9-coord-text.js";
 
 /** DB CHECK: summary is 1..300 characters. */
 export const RK9_COORD_SUMMARY_MAX = 300;
@@ -203,7 +203,7 @@ function requiredLine(text: string, max = RK9_COORD_PAYLOAD_TEXT_MAX): string {
  */
 export function assertRk9CoordNoSecretFields(fields: Record<string, string | null | undefined>) {
   for (const [field, value] of Object.entries(fields)) {
-    if (value && rk9CoordTextHasSecret(value)) {
+    if (value && rk9CoordIdentifierHasSecret(value)) {
       throw new HttpError(422, `${field} looks like it contains a secret`, { code: "rk9_coord_secret_in_field", field });
     }
   }

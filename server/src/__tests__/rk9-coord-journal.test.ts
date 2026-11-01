@@ -21,7 +21,7 @@ import type { Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
 import { formatRk9CoordDeltaLine, RK9_COORD_LINE_MAX } from "../services/rk9-coord-journal.js";
 import { pruneRk9Coord } from "../services/rk9-coord-retention.js";
-import { toRk9CoordLine } from "../services/rk9-coord-text.js";
+import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "../services/rk9-coord-text.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -85,10 +85,22 @@ describe("coord journal units", () => {
     // Control characters cannot split a secret past the pattern (\s misses C0).
     expect(toRk9CoordLine("Bearer\u0001abcdefgh12345", 200)).toBe("[redacted]");
     expect(toRk9CoordLine("token\u0001=\u0001secretvalue1", 200)).not.toContain("secretvalue1");
-    expect(toRk9CoordLine("a\u0000b", 200)).toBe("a b");
+    expect(toRk9CoordLine("a\u0000b", 200)).toBe("ab");
     // Zero-width and bidi characters cannot split a secret either.
     expect(toRk9CoordLine("ghp_\u200bABCDEFGHIJKLMNOPQRSTUVWXYZ0123", 200)).toBe("[redacted]");
     expect(toRk9CoordLine("ok \u202ehidden text", 200)).toBe("ok hidden text");
+    expect(toRk9CoordLine("ghp_\u00adABCDEFGHIJKLMNOPQRSTUVWXYZ0123", 200)).toBe("[redacted]");
+    // A pattern that spans a tab is redacted on the raw text.
+    expect(toRk9CoordLine("ssh://user:pa\tssword@host", 200)).not.toContain("ssword");
+  });
+
+  it("flags secrets in identifiers only at a word start", () => {
+    for (const ok of ["rk9-ai/task-runner", "kiosk-frontend", "disk-monitor", "task-3f9e2a1b-aaaa"]) {
+      expect(rk9CoordIdentifierHasSecret(ok), ok).toBe(false);
+    }
+    for (const bad of ["sk-abcdefghijklmnop", "pcp_board_abcdefghijkl", "rk9-ai/ghp_abcdefghijkl", "rk9_coord_AAAAAAAA"]) {
+      expect(rk9CoordIdentifierHasSecret(bad), bad).toBe(true);
+    }
   });
 
   it("keeps the line within 400 UTF-16 units with astral characters", () => {
@@ -274,6 +286,15 @@ if (!support.supported) {
     const theirs = await post(companyId, "worktree:RK9-625", { type: "blocker", issue: "RK9-625", what: "b", client_event_id: "shared-1" });
     expect(theirs.status).toBe(409);
     expect(theirs.body.code).toBe("rk9_coord_client_event_conflict");
+    // Ordinary names that contain `sk-` mid-word are not secrets.
+    const normal = await post(companyId, "worktree:RK9-626", {
+      type: "deploy",
+      app: "kiosk-frontend",
+      repo: "rk9-ai/task-runner",
+      sha: "abcdef1",
+      result: "success",
+    });
+    expect(normal.status).toBe(201);
   });
 
   it("has no PATCH, PUT or DELETE route for events", async () => {

@@ -32,7 +32,11 @@ const WHITESPACE_RX = /\s+/g;
  * whitespace), C1, zero-width, bidi controls, word joiners, BOM. They can
  * split a secret so the pattern misses it (JS \s misses most of them).
  */
-const INVISIBLE_RX = new RegExp("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]", "g");
+const INVISIBLE_RX = new RegExp(
+  "[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u061c\\u180e" +
+    "\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufe00-\\ufe0f\\ufeff\\u{E0000}-\\u{E007F}]",
+  "gu",
+);
 
 let cachedSource: string | undefined;
 let cachedRx: RegExp | null = null;
@@ -63,6 +67,24 @@ export function rk9CoordTextHasSecret(text: string): boolean {
 }
 
 /**
+ * Secret check for grammar-restricted identifiers (repo, app, names, ids).
+ * A match counts only at a word start: `task-runner` or `kiosk-frontend`
+ * contain `sk-...` mid-word and are ordinary names, while `sk-abc...` or
+ * `pcp_board_...` at the start of a part are not.
+ */
+export function rk9CoordIdentifierHasSecret(text: string): boolean {
+  const patterns = [secretRx(), COORD_TOKEN_RX];
+  for (const pattern of patterns) {
+    const rx = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+    for (const match of text.matchAll(rx)) {
+      const index = match.index ?? 0;
+      if (index === 0 || !/[A-Za-z0-9]/.test(text[index - 1]!)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Redact, collapse whitespace to single spaces, trim and cap at `max` code
  * points (an ellipsis marks a cut). Empty -> null.
  *
@@ -77,12 +99,17 @@ export function toRk9CoordLine(text: string | null | undefined, max: number): st
   INVISIBLE_RX.lastIndex = 0;
   const hasInvisible = INVISIBLE_RX.test(text);
   INVISIBLE_RX.lastIndex = 0;
-  const asSpaces = text.replace(INVISIBLE_RX, " ").replace(WHITESPACE_RX, " ").trim();
+  // Redact the raw text first: a pattern may span a tab or newline
+  // (`[^ /@]+` matches a tab but not the space it collapses to).
+  const raw = redactRk9CoordText(text);
+  const removed = raw.replace(INVISIBLE_RX, "").replace(WHITESPACE_RX, " ").trim();
   if (hasInvisible) {
-    const removed = text.replace(INVISIBLE_RX, "").replace(WHITESPACE_RX, " ").trim();
+    const asSpaces = raw.replace(INVISIBLE_RX, " ").replace(WHITESPACE_RX, " ").trim();
     if (rk9CoordTextHasSecret(removed) || rk9CoordTextHasSecret(asSpaces)) return REDACTED;
   }
-  const line = redactRk9CoordText(asSpaces);
+  // Neither reading shows a secret: keep the removed reading, so emoji ZWJ
+  // sequences lose only their joiners, not gain spaces.
+  const line = redactRk9CoordText(removed);
   if (!line) return null;
   const points = Array.from(line);
   if (points.length <= max) return line;

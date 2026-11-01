@@ -270,12 +270,16 @@ model is called.
   falls back to the default. `rk9_coord_` tokens are always redacted.
 - Matches become `[redacted]`. Whitespace collapses to one space.
 - Control, zero-width and bidi characters can split a secret past the
-  pattern. When a text has any, the server checks it twice: with them
-  removed and with them as spaces. If either reading shows a secret, the
+  pattern (C0/C1 controls, soft hyphen, zero-width, bidi, variation selectors,
+  tag characters). When a text has any, the server checks it twice: with
+  them removed and with them as spaces. If either reading shows a secret, the
   whole field becomes `[redacted]` (fail closed).
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
   `client_event_id`) are grammar-restricted. A secret-looking value there is
-  422 `rk9_coord_secret_in_field`, not a silent store.
+  422 `rk9_coord_secret_in_field`, not a silent store. A match counts only at
+  a word start, so `rk9-ai/task-runner` or `kiosk-frontend` pass.
+- The raw text is redacted before the collapse too, so a pattern that spans
+  a tab or newline is caught.
 - Caps: `summary` 300, each payload text field 500 (`rationale` 1000), an
   inbox `body` 500 characters. A cut ends with `…`.
 
@@ -352,9 +356,10 @@ Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
 
 - The cursor row is read FOR UPDATE. The read first fixes its window
   (cursor, newest company event id]. Count, rows and the new cursor all use
-  that window, so an event that commits during the read is neither lost nor
-  returned twice. The cursor moves to the window end in the same
-  transaction. Two concurrent calls
+  that window, so an event is never returned twice. The cursor moves to the
+  window end in the same transaction. Count and rows are two READ COMMITTED
+  statements, so a late commit inside the window can make `more` differ from
+  the rows by one; see the known limit below. Two concurrent calls
   of one actor serialize, so the event goes to one of them. An immediate
   second call is 204.
 - `peek=1` reads without a lock and writes nothing: no cursor move, no stub
