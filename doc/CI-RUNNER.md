@@ -361,8 +361,11 @@ Tunnetut rajat:
 Ennen (PR-ajo 27.10.2026 22:12Z, run 40592946827, vihreä): PR:n seinäkello 17,5 min,
 `Build`-jobi 16,9 min, josta `Verify Paperclip Runner` 878 s. Repo-cache 2,1 G (pnpm).
 
-Lämmin cache: mitataan kahdella PR-ajolla mergen jälkeen ja kirjataan tähän sekä
-RK9-637:n kommenttiin. Tavoite: `Build`-jobi ≤ 8 min, repo-cache yhteensä < 8 G.
+Warm-ajo masterissa (1.11.2026, run 41353449384, merge `afcc4b9`): 6,0 min, josta käännös
+5,6 min. Tallennettu cache `v0-rust-paperclip-runner-Linux-x64-4d0ce471-a95b0328` on 710 M
+(scope `refs/heads/master`).
+
+Lämmin cache: mitataan kahdella PR-ajolla ja kirjataan tähän sekä RK9-637:n kommenttiin. Tavoite: `Build`-jobi ≤ 8 min, repo-cache yhteensä < 8 G.
 Baseline-lokin mukaan riippuvuuksien käännös oli noin 5,3 min (debug 94 s, check 53 s,
 release 174 s). Workspace-crate, TypeScript ja vitest käännetään yhä, joten lämmin `Build`
 asettuu arviolta 11–12 minuuttiin (arvio, ei mitattu).
