@@ -223,7 +223,7 @@ Escalations and revoked tokens are not pruned yet.
 | Data | Keep | How |
 |---|---|---|
 | Events | 90 days | prune transaction with `SET LOCAL rk9.coord_events_prune = 'on'` |
-| `decision` and `decision-vaulted` events | at least 1 year | excluded from the 90-day prune |
+| `decision` and `decision-vaulted` events | 366 days (at least 1 year) | excluded from the 90-day prune |
 | Ended actors | 7 days after `ended_at` | DELETE (cascades to their leases, waiters, cursors, inbox) |
 | Released leases | 30 days | DELETE |
 | Delivered or expired inbox rows | 30 days | DELETE |
@@ -268,8 +268,14 @@ model is called.
 - The pattern is the `RK9_SESSIONS_SECRET_RX` default of `rk9-sessions.sh`
   (RK9-549). The env var overrides it on the server too. An invalid value
   falls back to the default. `rk9_coord_` tokens are always redacted.
-- Matches become `[redacted]`. Whitespace, control, zero-width and bidi
-  characters collapse to one space.
+- Matches become `[redacted]`. Whitespace collapses to one space.
+- Control, zero-width and bidi characters can split a secret past the
+  pattern. When a text has any, the server checks it twice: with them
+  removed and with them as spaces. If either reading shows a secret, the
+  whole field becomes `[redacted]` (fail closed).
+- Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
+  `client_event_id`) are grammar-restricted. A secret-looking value there is
+  422 `rk9_coord_secret_in_field`, not a silent store.
 - Caps: `summary` 300, each payload text field 500 (`rationale` 1000), an
   inbox `body` 500 characters. A cut ends with `…`.
 
@@ -291,7 +297,8 @@ required field is 400. Common optional fields: `client_event_id`,
 
 - Answer: 201 `{ event, duplicate: false }`. A repeat of a stored
   `client_event_id` is 200 `{ event, duplicate: true }` with the stored row.
-  This is the spool dedupe of the rk9 CLI.
+  This is the spool dedupe of the rk9 CLI. A `client_event_id` that another
+  actor stored first is 409 `rk9_coord_client_event_conflict`.
 - `trust` comes from the server, never from the body. Rows of a host coord
   token (also its `cc` claims) and of Grok are always `unverified`.
 - Each new event writes one `activity_log` row
@@ -343,19 +350,23 @@ Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
 `actorId` is optional. When given, it must equal the resolved actor (403
 `rk9_coord_actor_spoof`): it never selects another actor's cursor.
 
-- The cursor row is read FOR UPDATE, and the cursor moves in the same
-  transaction to the newest company event the read saw. Two concurrent calls
+- The cursor row is read FOR UPDATE. The read first fixes its window
+  (cursor, newest company event id]. Count, rows and the new cursor all use
+  that window, so an event that commits during the read is neither lost nor
+  returned twice. The cursor moves to the window end in the same
+  transaction. Two concurrent calls
   of one actor serialize, so the event goes to one of them. An immediate
   second call is 204.
-- `peek=1` reads without a lock and leaves the cursor as it is.
+- `peek=1` reads without a lock and writes nothing: no cursor move, no stub
+  actor row.
 - A new cursor starts at the newest event older than 24 hours, so a new
   session is not flooded with old history.
 - JSON: `{ events, total, more, cursor, previous_cursor, peek }`. `events`
   holds the newest `limit` matches in ascending id order. `total` counts all
   matches after the old cursor.
 - Nothing new: 204 with an empty body, also with `fmt=line`.
-- The actor row: when the caller has no row in `rk9_coord_actors`, the
-  route inserts a stub (kind, actor_ref, host, trust; ON CONFLICT DO
+- The actor row: when the caller has no row in `rk9_coord_actors`, a
+  non-peek delta or an inbox claim inserts a stub (kind, actor_ref, host, trust; ON CONFLICT DO
   NOTHING). The presence API (RK9-625) owns every other column.
 - Known limit: event ids come from a sequence. An event whose transaction
   commits after a newer id is already visible can be skipped by a cursor
@@ -402,13 +413,24 @@ name. The CLI uses both to suggest SendMessage instead.
 
 Paperclip agent targets:
 
-- The comment goes through `issueService.addComment`. It is authored by the
-  board user or the calling agent, and one `activity_log` row
-  (`rk9.coord.message_commented`) records it. No inbox row is left.
+- Only a board user (the operator's board key or session) may turn a
+  message into a comment. An agent caller gets 403
+  `rk9_coord_kind_not_allowed`: agents comment through the issue comment
+  API, which applies the low-trust boundary, the watchdog scope and the
+  visibility checks.
+- The comment goes through `issueService.addComment`, authored by the board
+  user. One `activity_log` row (`rk9.coord.message_commented`) records it.
+  No inbox row is left.
+- Agent Chat conversation issues are 422
+  `rk9_coord_inbox_target_not_allowed`. A paused issue tree is 409
+  `rk9_coord_inbox_issue_paused`, as on the board comment route.
 - The comment does not wake the agent. The agent sees it on its next
   heartbeat, so a message never buys a heartbeat run.
 - A coord-token caller cannot write comments (403
   `rk9_coord_kind_not_allowed`), per the least-privilege rule of the ADR.
+  The check runs before any run or agent lookup, so the answer tells a
+  token nothing about agents or runs. For a token, an agent name is just an
+  inbox name.
 - No issue: 422 `rk9_coord_inbox_issue_required`. Run or issue not found:
   404 `rk9_coord_inbox_target_not_found`. The rk9 CLI dead-letters a
   spooled write only on that 404 code.

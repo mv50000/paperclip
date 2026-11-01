@@ -6,7 +6,11 @@
 //     issue (exactly once);
 //   * a Paperclip agent target (`agent_run:<runId>`, or the name of an agent of
 //     the company when no coord actor has that name) -> an issue comment
-//     through issueService.addComment plus an activity_log row; no inbox row;
+//     through issueService.addComment plus an activity_log row; no inbox row.
+//     Only a board user (the operator's key or session) may do this: agents
+//     comment through the issue comment API, which applies the low-trust
+//     boundary, watchdog scope and visibility checks; coord tokens never
+//     reach issues or agents (ADR least privilege), not even by lookup;
 //   * anything else -> an inbox row for that actor (to_actor_id) or name.
 //   The answer carries target_live + name, so the CLI can suggest SendMessage.
 // - claim(): GET /inbox/me. One UPDATE ... WHERE id IN (SELECT ... FOR UPDATE
@@ -21,7 +25,9 @@ import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity } from "./activity-log.js";
 import { issueService } from "./issues.js";
+import { issueTreeControlService } from "./issue-tree-control.js";
 import {
+  assertRk9CoordNoSecretFields,
   ensureRk9CoordActorRow,
   findRk9CoordActorRow,
   isRk9CoordActorLive,
@@ -92,6 +98,24 @@ function activityActor(caller: Rk9CoordInboxCaller) {
   return { actorType: "system" as const, actorId: caller.actor.actorId, agentId: null, runId: null };
 }
 
+/**
+ * Only a board user may turn a coord message into an issue comment. Checked
+ * before any agent or run lookup, so a coord token learns nothing about
+ * agents or runs from the answer.
+ */
+function assertMayMessageAgents(caller: Rk9CoordInboxCaller) {
+  if (caller.paperclip.type === "coord_token") {
+    throw coordError(403, "rk9_coord_kind_not_allowed", "A coord token cannot message a Paperclip agent");
+  }
+  if (caller.paperclip.type === "agent") {
+    throw coordError(
+      403,
+      "rk9_coord_kind_not_allowed",
+      "Agents message other agents through the issue comment API, not the coord inbox",
+    );
+  }
+}
+
 export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
   const clock = opts.now ?? (() => new Date());
 
@@ -130,7 +154,7 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
 
   async function findIssue(companyId: string, identifier: string) {
     const [row] = await db
-      .select({ id: issues.id, identifier: issues.identifier })
+      .select({ id: issues.id, identifier: issues.identifier, conversationAgentId: issues.conversationAgentId })
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier)))
       .limit(1);
@@ -139,7 +163,7 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
 
   async function findIssueById(companyId: string, issueId: string) {
     const [row] = await db
-      .select({ id: issues.id, identifier: issues.identifier })
+      .select({ id: issues.id, identifier: issues.identifier, conversationAgentId: issues.conversationAgentId })
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
       .limit(1);
@@ -154,11 +178,9 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     body: string,
     target: { agentId: string; agentName: string; runIssueId: string | null; toValue: string },
   ): Promise<Rk9CoordInboxSendResult> {
-    // Least privilege (ADR): a coord token never reaches issues or comments.
-    if (caller.paperclip.type === "coord_token") {
-      throw coordError(403, "rk9_coord_kind_not_allowed", "A coord token cannot message a Paperclip agent");
-    }
-    let issue: { id: string; identifier: string | null } | null = null;
+    assertMayMessageAgents(caller);
+    if (caller.paperclip.type !== "user") throw new Error("unreachable");
+    let issue: { id: string; identifier: string | null; conversationAgentId: string | null } | null = null;
     if (input.issue) {
       issue = await findIssue(companyId, input.issue);
     } else if (target.runIssueId) {
@@ -173,11 +195,17 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     if (!issue) {
       throw coordError(404, "rk9_coord_inbox_target_not_found", "The issue for this agent message was not found");
     }
+    // Agent Chat conversations have their own message contract.
+    if (issue.conversationAgentId) {
+      throw coordError(422, "rk9_coord_inbox_target_not_allowed", "Agent Chat conversations do not take coord messages");
+    }
+    // Same rule as the board comment route: no new messages into a paused tree.
+    const hold = await issueTreeControlService(db).getActivePauseHoldGate(companyId, issue.id);
+    if (hold) {
+      throw coordError(409, "rk9_coord_inbox_issue_paused", "The issue is paused; resume it before sending a message");
+    }
     const commentBody = `${COMMENT_PREFIX} from \`${caller.actor.actorId}\` to ${target.agentName}:\n\n${body}`;
-    const author =
-      caller.paperclip.type === "agent"
-        ? { agentId: caller.paperclip.agentId, runId: caller.paperclip.runId }
-        : { userId: caller.paperclip.userId };
+    const author = { userId: caller.paperclip.userId };
     // issueService.addComment does not wake the assignee: the agent sees the
     // comment on its next heartbeat. A message must not buy a heartbeat run.
     const comment = await issueService(db).addComment(issue.id, commentBody, author);
@@ -253,6 +281,8 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     const body = toRk9CoordLine(input.body, RK9_COORD_INBOX_BODY_MAX);
     if (!body) throw coordError(400, "rk9_coord_inbox_body_empty", "The message body is empty after redaction");
     const to = input.to;
+    // `to` is stored verbatim (to_name) and shown on the board.
+    assertRk9CoordNoSecretFields({ to });
 
     // 1. Issue identifier: the first actor that claims with this issue gets it.
     if (RK9_COORD_ISSUE_PATTERN.test(to)) {
@@ -273,6 +303,7 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     const parsed = parseRk9CoordActorId(to);
     if (parsed) {
       if (parsed.kind === "agent_run") {
+        assertMayMessageAgents(caller);
         const [run] = await db
           .select({
             agentId: heartbeatRuns.agentId,
@@ -316,13 +347,15 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
 
     // 3. Name: a coord actor name first, then a Paperclip agent name.
     const named = await actorsByName(companyId, to);
-    if (named.length === 0) {
+    // Coord tokens never look agents up (ADR: a token does not expose agents).
+    if (named.length === 0 && caller.paperclip.type !== "coord_token") {
       const [agent] = await db
         .select({ id: agents.id, name: agents.name })
         .from(agents)
         .where(and(eq(agents.companyId, companyId), sql`lower(${agents.name}) = lower(${to})`))
         .limit(1);
       if (agent) {
+        // An agent caller gets 403 here instead of a message nobody claims.
         return commentForAgent(companyId, caller, input, body, {
           agentId: agent.id,
           agentName: agent.name,

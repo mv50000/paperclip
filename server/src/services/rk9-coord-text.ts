@@ -25,8 +25,14 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
 /** Coord tokens are always redacted, whatever the env pattern says. */
 const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
 const REDACTED = "[redacted]";
-/** Whitespace, C0/C1 controls, zero-width and bidi controls, line/paragraph separators. */
-const LINE_BREAKING_RX = new RegExp("[\\s\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e\\u2066-\\u2069]+", "g");
+/** Whitespace (tab, newline, Unicode spaces, line/paragraph separators). */
+const WHITESPACE_RX = /\s+/g;
+/**
+ * Controls and invisible characters: C0 (except tab/newline/CR, which are
+ * whitespace), C1, zero-width, bidi controls, word joiners, BOM. They can
+ * split a secret so the pattern misses it (JS \s misses most of them).
+ */
+const INVISIBLE_RX = new RegExp("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff]", "g");
 
 let cachedSource: string | undefined;
 let cachedRx: RegExp | null = null;
@@ -51,18 +57,32 @@ export function redactRk9CoordText(text: string): string {
   return text.replace(rx, REDACTED).replace(COORD_TOKEN_RX, REDACTED);
 }
 
+/** True when the text contains something the secret pattern matches. */
+export function rk9CoordTextHasSecret(text: string): boolean {
+  return redactRk9CoordText(text) !== text;
+}
+
 /**
- * Redact, collapse whitespace and control characters to single spaces, trim
- * and cap at `max` code points (an ellipsis marks a cut). Empty -> null.
- * Redaction runs before and after the collapse, so a secret split over two
- * lines (`Bearer\nxyz…`) is caught either way.
+ * Redact, collapse whitespace to single spaces, trim and cap at `max` code
+ * points (an ellipsis marks a cut). Empty -> null.
+ *
+ * Control and invisible characters are rare in real text but can hide a
+ * secret from the pattern (`ghp_\u200bABC...`, `Bearer\u0001xyz...`). When a
+ * text has any, both readings are checked: with them removed and with them
+ * as spaces. If either reading shows a secret, the whole field becomes
+ * `[redacted]` (fail closed).
  */
 export function toRk9CoordLine(text: string | null | undefined, max: number): string | null {
   if (text === null || text === undefined) return null;
-  const collapsed = redactRk9CoordText(text)
-    .replace(LINE_BREAKING_RX, " ")
-    .trim();
-  const line = redactRk9CoordText(collapsed);
+  INVISIBLE_RX.lastIndex = 0;
+  const hasInvisible = INVISIBLE_RX.test(text);
+  INVISIBLE_RX.lastIndex = 0;
+  const asSpaces = text.replace(INVISIBLE_RX, " ").replace(WHITESPACE_RX, " ").trim();
+  if (hasInvisible) {
+    const removed = text.replace(INVISIBLE_RX, "").replace(WHITESPACE_RX, " ").trim();
+    if (rk9CoordTextHasSecret(removed) || rk9CoordTextHasSecret(asSpaces)) return REDACTED;
+  }
+  const line = redactRk9CoordText(asSpaces);
   if (!line) return null;
   const points = Array.from(line);
   if (points.length <= max) return line;

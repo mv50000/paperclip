@@ -82,6 +82,23 @@ describe("coord journal units", () => {
     expect(out.startsWith("deploy ok [redacted]")).toBe(true);
     expect(toRk9CoordLine("a".repeat(50), 10)).toBe(`${"a".repeat(9)}…`);
     expect(toRk9CoordLine(" \n ", 10)).toBeNull();
+    // Control characters cannot split a secret past the pattern (\s misses C0).
+    expect(toRk9CoordLine("Bearer\u0001abcdefgh12345", 200)).toBe("[redacted]");
+    expect(toRk9CoordLine("token\u0001=\u0001secretvalue1", 200)).not.toContain("secretvalue1");
+    expect(toRk9CoordLine("a\u0000b", 200)).toBe("a b");
+    // Zero-width and bidi characters cannot split a secret either.
+    expect(toRk9CoordLine("ghp_\u200bABCDEFGHIJKLMNOPQRSTUVWXYZ0123", 200)).toBe("[redacted]");
+    expect(toRk9CoordLine("ok \u202ehidden text", 200)).toBe("ok hidden text");
+  });
+
+  it("keeps the line within 400 UTF-16 units with astral characters", () => {
+    const emoji = "\u{1F680}".repeat(290);
+    const events = Array.from({ length: 5 }, (_, i) => ({ ...fakeEvent(i), summary: emoji }));
+    const line = formatRk9CoordDeltaLine(events, 5);
+    expect(line.length).toBeLessThanOrEqual(RK9_COORD_LINE_MAX);
+    expect(line).toMatch(/\+4 more: rk9 board$/);
+    // No lone surrogate from a cut inside a pair.
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(line)).toBe(false);
   });
 
   it("validates the discriminated union", () => {
@@ -236,6 +253,29 @@ if (!support.supported) {
     expect(first.body.event.summary).toBe("PR #244");
   });
 
+  it("rejects secrets in verbatim fields and a client_event_id of another actor", async () => {
+    const vault = await post(companyId, "worktree:RK9-626", {
+      type: "decision",
+      title: "t",
+      rationale: "r",
+      vault_note: "pcp_board_abcdefghijklmnop1234",
+    });
+    expect(vault.status).toBe(422);
+    expect(vault.body.code).toBe("rk9_coord_secret_in_field");
+    const app = await post(companyId, "worktree:RK9-626", {
+      type: "deploy",
+      app: "sk-abcdefghijklmnopqrstuv",
+      sha: "abcdef1",
+      result: "success",
+    });
+    expect(app.status).toBe(422);
+    const mine = await post(companyId, "worktree:RK9-626", { type: "blocker", issue: "RK9-626", what: "a", client_event_id: "shared-1" });
+    expect(mine.status).toBe(201);
+    const theirs = await post(companyId, "worktree:RK9-625", { type: "blocker", issue: "RK9-625", what: "b", client_event_id: "shared-1" });
+    expect(theirs.status).toBe(409);
+    expect(theirs.body.code).toBe("rk9_coord_client_event_conflict");
+  });
+
   it("has no PATCH, PUT or DELETE route for events", async () => {
     const created = await post(companyId, "worktree:RK9-626", { type: "blocker", issue: "RK9-626", what: "x" });
     const id = created.body.event.id;
@@ -274,6 +314,11 @@ if (!support.supported) {
     const delta = (query = "") =>
       request(app).get(`${base(cid)}/events/delta${query}`).set("X-RK9-Actor", me);
 
+    // A peek writes nothing, not even the stub row.
+    expect((await delta("?peek=1")).status).toBe(204);
+    expect(
+      await db.select().from(rk9CoordActors).where(and(eq(rk9CoordActors.companyId, cid), eq(rk9CoordActors.actorRef, me))),
+    ).toHaveLength(0);
     // The actor registers (stub row) with a repo; it holds a lease.
     expect((await delta()).status).toBe(204);
     const [self] = await db
@@ -423,6 +468,7 @@ if (!support.supported) {
       event("deploy", 10, "new deploy"),
       event("decision", 200, "decision 200d"),
       event("decision-vaulted", 300, "vaulted 300d"),
+      event("decision", 365, "decision 365d"),
       event("decision", 400, "decision 400d"),
     ]);
     await db.insert(rk9CoordActors).values([
@@ -439,7 +485,7 @@ if (!support.supported) {
     const first = await pruneRk9Coord(db, { now });
     expect(first.events).toBeGreaterThanOrEqual(2);
     const events = await db.select({ summary: rk9CoordEvents.summary }).from(rk9CoordEvents).where(eq(rk9CoordEvents.companyId, cid));
-    expect(events.map((row) => row.summary).sort()).toEqual(["decision 200d", "new deploy", "vaulted 300d"]);
+    expect(events.map((row) => row.summary).sort()).toEqual(["decision 200d", "decision 365d", "new deploy", "vaulted 300d"]);
     const actors = await db.select({ ref: rk9CoordActors.actorRef }).from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
     expect(actors.map((row) => row.ref).sort()).toEqual(["orch:ended-new", "orch:live"]);
     const inbox = await db.select({ body: rk9CoordInbox.body }).from(rk9CoordInbox).where(eq(rk9CoordInbox.companyId, cid));

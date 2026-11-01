@@ -26,8 +26,9 @@ import {
   type AppendRk9CoordEvent,
   type Rk9CoordTrust,
 } from "@paperclipai/shared";
+import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
-import { toRk9CoordLine } from "./rk9-coord-text.js";
+import { rk9CoordTextHasSecret, toRk9CoordLine } from "./rk9-coord-text.js";
 
 /** DB CHECK: summary is 1..300 characters. */
 export const RK9_COORD_SUMMARY_MAX = 300;
@@ -196,6 +197,18 @@ function requiredLine(text: string, max = RK9_COORD_PAYLOAD_TEXT_MAX): string {
   return line(text, max) ?? "[empty]";
 }
 
+/**
+ * Fields stored verbatim (grammar-restricted, not one-lined) must not carry
+ * a secret: a match is 422 instead of a silent store.
+ */
+export function assertRk9CoordNoSecretFields(fields: Record<string, string | null | undefined>) {
+  for (const [field, value] of Object.entries(fields)) {
+    if (value && rk9CoordTextHasSecret(value)) {
+      throw new HttpError(422, `${field} looks like it contains a secret`, { code: "rk9_coord_secret_in_field", field });
+    }
+  }
+}
+
 interface BuiltEvent {
   summary: string;
   payload: Record<string, unknown>;
@@ -314,6 +327,8 @@ export function formatRk9CoordDeltaLine(
   total: number,
   max: number = RK9_COORD_LINE_MAX,
 ): string {
+  // Lengths are UTF-16 units (String.length), the stricter of the two
+  // counts: a line within `max` units is within `max` code points too.
   const head = "rk9:";
   const sep = " · ";
   const tail = (rest: number, hasItems: boolean) =>
@@ -325,14 +340,19 @@ export function formatRk9CoordDeltaLine(
     const prefix = shown === 0 ? " " : sep;
     const restAfter = total - (shown + 1);
     const room = max - out.length - prefix.length - tail(restAfter, true).length;
-    if (Array.from(item).length <= room) {
+    if (item.length <= room) {
       out += prefix + item;
       shown += 1;
       continue;
     }
     // A single long first item is cut rather than dropped.
     if (shown === 0 && room >= 24) {
-      out += prefix + Array.from(item).slice(0, room - 1).join("") + "…";
+      let cut = "";
+      for (const point of Array.from(item)) {
+        if (cut.length + point.length > room - 1) break;
+        cut += point;
+      }
+      out += `${prefix}${cut}…`;
       shown += 1;
     }
     break;
@@ -346,6 +366,12 @@ export function rk9CoordJournalService(db: Db) {
     actor: Rk9CoordResolvedActor,
     input: AppendRk9CoordEvent,
   ): Promise<{ event: Rk9CoordEventView; duplicate: boolean }> {
+    assertRk9CoordNoSecretFields({
+      repo: input.repo,
+      client_event_id: input.client_event_id,
+      vault_note: input.type === "decision" ? input.vault_note : undefined,
+      app: input.type === "deploy" ? input.app : undefined,
+    });
     const built = buildRk9CoordEvent(input, actor.actorId);
     const summary = toRk9CoordLine(built.summary, RK9_COORD_SUMMARY_MAX) ?? input.type;
     const inserted = await db
@@ -375,6 +401,12 @@ export function rk9CoordJournalService(db: Db) {
         .from(rk9CoordEvents)
         .where(and(eq(rk9CoordEvents.companyId, companyId), eq(rk9CoordEvents.clientEventId, input.client_event_id)))
         .limit(1);
+      // A client event id belongs to the actor that stored it first.
+      if (existing && existing.actorRef !== actor.actorId) {
+        throw new HttpError(409, "client_event_id was already used by another actor", {
+          code: "rk9_coord_client_event_conflict",
+        });
+      }
       if (existing) return { event: rk9CoordEventView(existing), duplicate: true };
     }
     throw new Error("rk9 coord event insert conflicted without a client_event_id");
@@ -394,11 +426,20 @@ export function rk9CoordJournalService(db: Db) {
   ): Promise<Rk9CoordDelta | null> {
     const peek = opts.peek === true;
     const limit = Math.min(Math.max(opts.limit ?? DEFAULT_DELTA_LIMIT, 1), MAX_DELTA_LIMIT);
-    const self = await ensureRk9CoordActorRow(db, companyId, actor, opts.agentId ?? null);
+    // A peek writes nothing: without an actor row it reads with a virtual one.
+    const self: { id: string | null; issue: string | null; repo: string | null; actorRef: string } = peek
+      ? (await findRk9CoordActorRow(db, companyId, actor.actorId)) ?? {
+          id: null,
+          issue: null,
+          repo: null,
+          actorRef: actor.actorId,
+        }
+      : await ensureRk9CoordActorRow(db, companyId, actor, opts.agentId ?? null);
     const now = opts.now ?? new Date();
 
     return db.transaction(async (tx) => {
-      const lockCursor = () => {
+      const lockCursor = async () => {
+        if (!self.id) return [];
         const query = tx
           .select({ lastEventId: rk9CoordCursors.lastEventId })
           .from(rk9CoordCursors)
@@ -417,22 +458,34 @@ export function rk9CoordJournalService(db: Db) {
         if (peek) {
           cursorRow = { lastEventId: initial };
         } else {
-          await tx.insert(rk9CoordCursors).values({ companyId, actorId: self.id, lastEventId: initial }).onConflictDoNothing();
+          await tx.insert(rk9CoordCursors).values({ companyId, actorId: self.id!, lastEventId: initial }).onConflictDoNothing();
           [cursorRow] = await lockCursor();
         }
       }
       const cursor = Number(cursorRow!.lastEventId);
 
-      const held = await tx
-        .select({ resource: rk9CoordLeases.resource })
-        .from(rk9CoordLeases)
-        .where(
-          and(
-            eq(rk9CoordLeases.companyId, companyId),
-            eq(rk9CoordLeases.holderActorId, self.id),
-            isNull(rk9CoordLeases.releasedAt),
-          ),
-        );
+      const held = self.id
+        ? await tx
+            .select({ resource: rk9CoordLeases.resource })
+            .from(rk9CoordLeases)
+            .where(
+              and(
+                eq(rk9CoordLeases.companyId, companyId),
+                eq(rk9CoordLeases.holderActorId, self.id),
+                isNull(rk9CoordLeases.releasedAt),
+              ),
+            )
+        : [];
+
+      // Fix the window first: count, rows and the new cursor all use
+      // (cursor, newCursor]. READ COMMITTED gives each statement a fresh
+      // snapshot, so an unbounded later read could see an event the cursor
+      // has not passed (returned twice) or skip one (count 0, cursor past it).
+      const [newest] = await tx
+        .select({ id: sql<number | null>`max(${rk9CoordEvents.id})` })
+        .from(rk9CoordEvents)
+        .where(and(eq(rk9CoordEvents.companyId, companyId), gt(rk9CoordEvents.id, cursor)));
+      const newCursor = Math.max(cursor, Number(newest?.id ?? 0));
 
       const repos = [...new Set([self.repo, opts.repo].filter((value): value is string => Boolean(value)))];
       const issues = [
@@ -448,6 +501,7 @@ export function rk9CoordJournalService(db: Db) {
       const matching = and(
         eq(rk9CoordEvents.companyId, companyId),
         gt(rk9CoordEvents.id, cursor),
+        lte(rk9CoordEvents.id, newCursor),
         // An actor is never told about its own events.
         ne(rk9CoordEvents.actorRef, actor.actorId),
         or(...concerns),
@@ -457,18 +511,13 @@ export function rk9CoordJournalService(db: Db) {
         .select({ total: sql<number>`count(*)::int` })
         .from(rk9CoordEvents)
         .where(matching);
-      const [newest] = await tx
-        .select({ id: sql<number | null>`max(${rk9CoordEvents.id})` })
-        .from(rk9CoordEvents)
-        .where(and(eq(rk9CoordEvents.companyId, companyId), gt(rk9CoordEvents.id, cursor)));
-      const newCursor = Math.max(cursor, Number(newest?.id ?? 0));
       const total = Number(counts?.total ?? 0);
 
       if (!peek && newCursor > cursor) {
         await tx
           .update(rk9CoordCursors)
           .set({ lastEventId: newCursor, updatedAt: now })
-          .where(and(eq(rk9CoordCursors.companyId, companyId), eq(rk9CoordCursors.actorId, self.id)));
+          .where(and(eq(rk9CoordCursors.companyId, companyId), eq(rk9CoordCursors.actorId, self.id!)));
       }
       if (total === 0) return null;
 

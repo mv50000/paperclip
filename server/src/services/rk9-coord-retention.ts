@@ -1,7 +1,7 @@
 // --- RK9 Custom (RK9-626): coord bus retention ---
 //
 // Periods (coord-bus.md "Retention"):
-// - events: 90 days; `decision` and `decision-vaulted`: 365 days (>= 1 year);
+// - events: 90 days; `decision` and `decision-vaulted`: 366 days (>= 1 year);
 // - ended actors: 7 days after ended_at (cascades to their cursors, inbox
 //   rows, leases and waiters);
 // - delivered inbox rows and expired undelivered ones: 30 days;
@@ -22,7 +22,8 @@ const MAX_BATCHES = 100;
 
 export const RK9_COORD_RETENTION = {
   eventDays: 90,
-  decisionDays: 365,
+  // 366 days: at least one calendar year, also across a leap day.
+  decisionDays: 366,
   endedActorDays: 7,
   inboxDays: 30,
   releasedLeaseDays: 30,

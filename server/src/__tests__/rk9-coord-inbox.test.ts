@@ -238,6 +238,45 @@ if (!support.supported) {
     expect(unknownRun.body.code).toBe("rk9_coord_inbox_target_not_found");
   });
 
+  it("does not let an agent caller turn a message into an issue comment", async () => {
+    const inbox = rk9CoordInboxService(db);
+    const caller = {
+      actor: { kind: "agent_run", actorId: `agent_run:${runId}`, host: null, trust: "verified", principal: "agent_jwt" } as Rk9CoordResolvedActor,
+      paperclip: { type: "agent" as const, agentId, runId, agentApiKeyId: null },
+    };
+    for (const to of [`agent_run:${runId}`, "Tuki"]) {
+      await expect(inbox.send(companyId, caller, { to, body: "x", issue: "RKI-77" })).rejects.toMatchObject({
+        status: 403,
+      });
+    }
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments.every((comment) => !comment.body.includes("agent_run:" + runId + "` to"))).toBe(true);
+  });
+
+  it("refuses Agent Chat conversation issues", async () => {
+    await db
+      .insert(issues)
+      .values({
+        companyId,
+        title: "Chat",
+        identifier: "RKI-88",
+        issueNumber: 88,
+        assigneeAgentId: agentId,
+        conversationAgentId: agentId,
+        conversationUserId: "operator-user",
+        conversationState: "active",
+      });
+    const res = await send("worktree:RKI-1", { to: "Tuki", body: "x", issue: "RKI-88" });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("rk9_coord_inbox_target_not_allowed");
+  });
+
+  it("rejects a secret in the verbatim to field", async () => {
+    const res = await send("orch:main", { to: "ghp_abcdefghijklmnopqrst", body: "x" });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe("rk9_coord_secret_in_field");
+  });
+
   it("does not let a coord token write issue comments", async () => {
     const principal: Rk9CoordTokenPrincipal = { tokenId: "t", companyId, principalKind: "host", principalName: "mv-laptop" };
     const res = await request(appFor({ type: "none", source: "none" } as Actor, principal))
@@ -246,6 +285,19 @@ if (!support.supported) {
       .send({ to: `agent_run:${runId}`, body: "x" });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("rk9_coord_kind_not_allowed");
+    // No run oracle: an unknown run id answers the same 403, not 404.
+    const unknownRun = await request(appFor({ type: "none", source: "none" } as Actor, principal))
+      .post(`${base()}/inbox`)
+      .set("X-RK9-Actor", "remote:mv-laptop")
+      .send({ to: `agent_run:${randomUUID()}`, body: "x" });
+    expect(unknownRun.status).toBe(403);
+    // No agent-name oracle: an agent name is just an inbox name for a token.
+    const byName = await request(appFor({ type: "none", source: "none" } as Actor, principal))
+      .post(`${base()}/inbox`)
+      .set("X-RK9-Actor", "remote:mv-laptop")
+      .send({ to: "Tuki", body: "x" });
+    expect(byName.status).toBe(201);
+    expect(byName.body.delivery).toBe("inbox");
     // Plain inbox messages still work for a remote host.
     const plain = await request(appFor({ type: "none", source: "none" } as Actor, principal))
       .post(`${base()}/inbox`)
