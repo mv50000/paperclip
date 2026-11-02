@@ -279,10 +279,36 @@ if (!support.supported) {
       .send({ resource: res });
     expect(noToken.status).toBe(422);
     expect(noToken.body.code).toBe("rk9_coord_lease_fencing_required");
+    // The holder check comes first: a non-holder without a token is 403, not 422.
+    const stranger = await request(appFor(boardKey()))
+      .post(`${base()}/${got.body.lease_id}/release`)
+      .set("X-RK9-Actor", cc("nt9"))
+      .send({ resource: res });
+    expect(stranger.status).toBe(403);
     await acquire(cc("nt2"), { resource: res, ttl_s: 600, wait: true });
     const again = await acquire(cc("nt2"), { resource: res, ttl_s: 600, wait: false });
     expect(again.status).toBe(200);
     expect(again.body).toMatchObject({ granted: false, queued: true, position: 1 });
+    // Released once with the token, a replay without it is still a 200 no-op.
+    const app = appFor(boardKey());
+    const ok = await request(app)
+      .post(`${base()}/${got.body.lease_id}/release`)
+      .set("X-RK9-Actor", cc("nt1"))
+      .send({ resource: res, fencing_token: got.body.fencing_token });
+    expect(ok.status).toBe(200);
+    const replay = await request(app).post(`${base()}/${got.body.lease_id}/release`).set("X-RK9-Actor", cc("nt1")).send({});
+    expect(replay.status).toBe(200);
+    expect(replay.body.noop).toBe(true);
+    // nt2 was promoted with a short claim window; its next poll extends it to the TTL.
+    const [promoted] = await db
+      .select()
+      .from(rk9CoordLeases)
+      .where(and(eq(rk9CoordLeases.resource, res), sql`${rk9CoordLeases.releasedAt} is null`));
+    const windowS = (promoted!.expiresAt.getTime() - promoted!.acquiredAt.getTime()) / 1000;
+    expect(windowS).toBeLessThanOrEqual(300);
+    const claim = await acquire(cc("nt2"), { resource: res, ttl_s: 3600, wait: true });
+    expect(claim.body).toMatchObject({ granted: true, already_held: true });
+    expect(new Date(claim.body.expires_at).getTime() - Date.now()).toBeGreaterThan(3000 * 1000);
   });
 
   it("validates the resource format with 422", async () => {

@@ -518,6 +518,34 @@ function waiterAlive(ctx: Pick<Ctx, "now" | "graceS">, actor: ActorInfo, waiter:
   });
 }
 
+/** Remove every waiter of `resource` that no longer polls (one `dequeue` event each). */
+async function dequeueDeadWaiters(ctx: Ctx, resource: string): Promise<number> {
+  const waiters = await ctx.tx
+    .select()
+    .from(rk9CoordLeaseWaiters)
+    .where(and(eq(rk9CoordLeaseWaiters.companyId, ctx.companyId), eq(rk9CoordLeaseWaiters.resource, resource)))
+    .orderBy(asc(rk9CoordLeaseWaiters.id))
+    .for("update");
+  const actors = await loadActors(ctx.tx, waiters.map((waiter) => waiter.actorId));
+  let removed = 0;
+  for (const waiter of waiters) {
+    const actor = actors.get(waiter.actorId);
+    if (actor && waiterAlive(ctx, actor, waiter)) continue;
+    await ctx.tx.delete(rk9CoordLeaseWaiters).where(eq(rk9CoordLeaseWaiters.id, waiter.id));
+    const actorRef = actor?.actorRef ?? "unknown";
+    await transition(ctx, {
+      subtype: "dequeue",
+      resource,
+      leaseId: null,
+      summary: `dequeue ${resource}: ${actorRef} (waiter_gone)`,
+      payload: { actor: actorRef, dequeue_reason: "waiter_gone" },
+    });
+    removed += 1;
+    if (ctx.stats) ctx.stats.dequeued += 1;
+  }
+  return removed;
+}
+
 /** True when a live waiter stands ahead of `selfActorId` (or anywhere, when the caller is not queued). */
 async function hasLiveWaiterAhead(ctx: Ctx, resource: string, selfActorId: string): Promise<boolean> {
   const waiters = await ctx.tx
@@ -573,7 +601,10 @@ async function promoteNext(
     const lease = await insertLease(ctx, {
       resource,
       holderActorId: waiter.actorId,
-      ttlS: waiter.requestedTtlSeconds ?? RK9_COORD_LEASE_TTL_DEFAULT_S,
+      // Claim window: a promoted waiter may have gone (Ctrl-C on `rk9 lease
+      // wait`). The lease first lives for at most the grace period; the
+      // holder's next acquire poll (already_held) extends it to its TTL.
+      ttlS: Math.min(waiter.requestedTtlSeconds ?? RK9_COORD_LEASE_TTL_DEFAULT_S, ctx.graceS),
       reason: waiter.reason,
       mode: waiter.mode,
     });
@@ -775,6 +806,19 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
         holder = (await loadActors(ctx.tx, [active.holderActorId])).get(active.holderActorId);
         const expired = isExpired(active, ctx.now);
         if (active.holderActorId === self.id && !expired) {
+          if (active.renewedAt === null) {
+            // First poll of the holder (a promoted waiter claiming its lease):
+            // extend the claim window to the requested TTL, never shorten it.
+            const claimed = addSeconds(ctx.now, ttlS);
+            if (claimed.getTime() > active.expiresAt.getTime()) {
+              const [updated] = await ctx.tx
+                .update(rk9CoordLeases)
+                .set({ expiresAt: claimed, renewedAt: ctx.now })
+                .where(eq(rk9CoordLeases.id, active.id))
+                .returning();
+              if (updated) active = updated;
+            }
+          }
           return grantedView(active, self.actorRef, true, null);
         }
         const verdict = holderVerdict(holder, active, ctx);
@@ -928,19 +972,19 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
   ): Promise<Rk9CoordLeaseMutationResult> {
     const { lease: found, parsed, selfId } = await loadOwnLease(companyId, caller, leaseId);
     return inTx(companyId, authorFor(caller), found.resource, async (ctx) => {
-      // Hard gate: the token proves the caller holds the grant, not only the actor name
-      // (board-key sessions on one host are attributed, not authenticated).
+      const { lease, fencingMismatch } = await lockedOwnLease(ctx, caller, leaseId, selfId, parsed, input.fencingToken);
+      if (lease.releasedAt && lease.releaseReason === "released") {
+        return { ok: true, lease_id: lease.id, resource: lease.resource, expires_at: null, noop: true, release_reason: "released" };
+      }
+      // Hard gate: an ACCIDENT guard (a stale local lease record, a wrong id),
+      // not authentication. Board-key sessions on one host are attributed, so
+      // a session that names another actor id can still act as it (ADR), and
+      // fencing tokens come from one global sequence. Downstream gates must
+      // check the holder identity, not only a valid token.
       if (parsed.hardGate && (input.fencingToken === null || input.fencingToken === undefined)) {
         throw coordError(422, "rk9_coord_lease_fencing_required", "Releasing a hard-gate lease needs its fencing_token");
       }
-      const { lease, fencingMismatch } = await lockedOwnLease(ctx, caller, leaseId, selfId, parsed, input.fencingToken);
-      if (fencingMismatch) {
-        return { ok: false, code: "rk9_coord_lease_stale", lease_id: lease.id, resource: lease.resource, release_reason: lease.releaseReason };
-      }
-      if (lease.releasedAt) {
-        if (lease.releaseReason === "released") {
-          return { ok: true, lease_id: lease.id, resource: lease.resource, expires_at: null, noop: true, release_reason: "released" };
-        }
+      if (fencingMismatch || lease.releasedAt) {
         return { ok: false, code: "rk9_coord_lease_stale", lease_id: lease.id, resource: lease.resource, release_reason: lease.releaseReason };
       }
       if (isExpired(lease, ctx.now)) {
@@ -1195,6 +1239,19 @@ export async function sweepRk9CoordLeases(
     });
   }
 
+  // 2b. waiters that stopped polling: dequeue them (one `dequeue` event each),
+  // so status, ETA and the stuck signal do not count abandoned rows.
+  const staleQueues = await db
+    .selectDistinct({ companyId: rk9CoordLeaseWaiters.companyId, resource: rk9CoordLeaseWaiters.resource })
+    .from(rk9CoordLeaseWaiters)
+    .where(sql`${rk9CoordLeaseWaiters.expiresAt} is null or ${rk9CoordLeaseWaiters.expiresAt} <= ${now.toISOString()}::timestamptz`)
+    .limit(SWEEP_BATCH);
+  for (const queue of staleQueues) {
+    await inResourceTx(queue.companyId, queue.resource, async (ctx) => {
+      await dequeueDeadWaiters(ctx, queue.resource);
+    });
+  }
+
   // 3. stuck signal: one event per lease whose head waiter waits too long.
   const stuckCutoff = new Date(now.getTime() - stuckS * 1000);
   const stuck = await db
@@ -1215,7 +1272,8 @@ export async function sweepRk9CoordLeases(
         eq(rk9CoordLeaseWaiters.resource, rk9CoordLeases.resource),
       ),
     )
-    .where(isNull(rk9CoordLeases.releasedAt))
+    // Only waiters that still poll count: an abandoned queue row is no escalation.
+    .where(and(isNull(rk9CoordLeases.releasedAt), sql`${rk9CoordLeaseWaiters.expiresAt} > ${now.toISOString()}::timestamptz`))
     .groupBy(rk9CoordLeases.id, rk9CoordLeases.companyId, rk9CoordLeases.resource, rk9CoordActors.actorRef)
     .having(sql`min(${rk9CoordLeaseWaiters.enqueuedAt}) <= ${stuckCutoff.toISOString()}::timestamptz`)
     .limit(SWEEP_BATCH);

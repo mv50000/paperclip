@@ -19,7 +19,7 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
 
 | Route | Body or query | Answer |
 |---|---|---|
-| `POST /acquire` | `resource`, `ttl_s` (10..86400, default 1800), `reason`, `wait`, `mode` | `{granted:true, lease_id, fencing_token, expires_at, holder, already_held, adopted_from}`, or `{granted:false, queued:true, position, holder, holder_phase, expires_at, eta}`. With `wait=false` and a live holder: 409 `rk9_coord_lease_held` with the same holder fields and no queue entry. |
+| `POST /acquire` | `resource`, `ttl_s` (10..86400, default 1800), `reason`, `wait`, `mode` | `{granted:true, lease_id, fencing_token, expires_at, holder, already_held, adopted_from}`, or `{granted:false, queued:true, position, holder, holder_phase, expires_at, eta}`. With `wait=false` and a live holder: 409 `rk9_coord_lease_held` with the same holder fields and no queue entry, unless the caller is already queued (then 200 `queued:true`). |
 | `POST /:leaseId/renew` | `fencing_token`, `ttl_s` | `{expires_at}`. 409 `rk9_coord_lease_stale` when the lease is lost. |
 | `POST /:leaseId/release` | `resource`, `fencing_token` (required for a hard-gate lease, 422 `rk9_coord_lease_fencing_required` otherwise), `client_event_id` (ignored) | `{released, noop}`. A second release is 200 with `noop:true` and writes nothing. 409 when the lease was lost. |
 | `POST /break` | `resource`, `reason` (required) | `{broken, previous_holder, release_reason, promoted}` |
@@ -144,8 +144,14 @@ and the subtype in `payload.subtype`. The activity action is
   longer waits, and promoting it would block the resource for a whole TTL.
 - A waiter is also dead when its agent run is terminal or its presence
   ended after its last poll.
-- A dead waiter is dequeued at the next promotion (`dequeue` event,
-  `dequeue_reason: waiter_gone`).
+- A dead waiter is dequeued at the next promotion or by the next sweep
+  (`dequeue` event, `dequeue_reason: waiter_gone`). The `stuck` signal
+  counts only waiters that still poll.
+- **Claim window:** a promoted waiter may already be gone (Ctrl-C on
+  `rk9 lease wait`). Its lease first lives for at most the grace period.
+  The holder's next acquire poll (`already_held`) extends it to the
+  requested TTL. An unclaimed promotion therefore expires after the grace
+  period, not after the full TTL.
 
 ## Break
 

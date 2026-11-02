@@ -339,6 +339,21 @@ if (!support.supported) {
     expect(await activeHolder(res)).toBe(cc("o2"));
   });
 
+  it("dequeues waiters that stopped polling and does not escalate them as stuck", async () => {
+    const res = "host:abandoned-node";
+    await acquire(cc("ab1"), res);
+    await acquire(cc("ab2"), res, true);
+    await db
+      .update(rk9CoordLeaseWaiters)
+      .set({ enqueuedAt: sql`now() - interval '2 hours'`, expiresAt: sql`now() - interval '1 second'` })
+      .where(eq(rk9CoordLeaseWaiters.resource, res));
+    const result = await sweepRk9CoordLeases(db, { env });
+    expect(result).toMatchObject({ dequeued: 1, stuck: 0 });
+    expect(await subtypes(res)).toEqual(["grant", "queue", "dequeue"]);
+    expect(await db.select().from(rk9CoordLeaseWaiters).where(eq(rk9CoordLeaseWaiters.resource, res))).toHaveLength(0);
+    expect(await activeHolder(res)).toBe(cc("ab1"));
+  });
+
   it("emits one stuck event per lease whose head waiter waits too long", async () => {
     const res = "host:stuck-node";
     await acquire(cc("s1"), res);
