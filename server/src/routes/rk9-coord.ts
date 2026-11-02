@@ -13,12 +13,16 @@ import {
   rk9CoordActorView,
   type Rk9CoordActorOptions,
 } from "../middleware/rk9-coord-actor.js";
+import { rk9CoordActorRoutes, type Rk9CoordActorRouteOptions } from "./rk9-coord-actors.js";
 // RK9 Custom (RK9-626): journal, inbox and board sub-routers
 import { rk9CoordEventRoutes } from "./rk9-coord-events.js";
 import { rk9CoordInboxRoutes } from "./rk9-coord-inbox.js";
 import { rk9CoordBoardRoutes } from "./rk9-coord-board.js";
 
-export type Rk9CoordRouteOptions = Rk9CoordActorOptions;
+export type Rk9CoordRouteOptions = Rk9CoordActorOptions & {
+  /** Presence clock/env injection (tests). RK9-625. */
+  presence?: Rk9CoordActorRouteOptions;
+};
 
 export function rk9CoordRoutes(db: Db, opts: Rk9CoordRouteOptions = {}) {
   const coord = Router({ mergeParams: true });
@@ -41,9 +45,9 @@ export function rk9CoordRoutes(db: Db, opts: Rk9CoordRouteOptions = {}) {
   });
 
   // --- Sibling mount points (RK9-620): one line per child, keep this order ---
-  // coord.use("/actors", rk9CoordActorRoutes(db));   // presence-api
-  coord.use("/events", rk9CoordEventRoutes(db));   // journal-inbox-api
-  coord.use("/inbox", rk9CoordInboxRoutes(db));    // journal-inbox-api
+  coord.use("/actors", rk9CoordActorRoutes(db, opts.presence)); // presence-api (RK9-625)
+  coord.use("/events", rk9CoordEventRoutes(db));   // journal-inbox-api (RK9-626)
+  coord.use("/inbox", rk9CoordInboxRoutes(db));    // journal-inbox-api (RK9-626)
   // coord.use("/leases", rk9CoordLeaseRoutes(db));   // lease-engine
   coord.use("/board", rk9CoordBoardRoutes(db));    // journal-inbox-api (RK9-626)
   // --- end sibling mount points ---

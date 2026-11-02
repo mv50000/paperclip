@@ -240,6 +240,120 @@ with the oldest remaining one. A re-run over pruned data deletes nothing.
 "ask-operator JSON schema" under the journal API below. This epic does not
 build the view.
 
+## Presence API (RK9-625)
+
+Routes under `/api/companies/:companyId/rk9/coord/actors`. They are mounted
+in `server/src/routes/rk9-coord.ts` behind the actor middleware, so company
+scope, the RK9-616 loopback rule and the actor claim come from the ADR. The
+router reads `req.rk9CoordActor` and never parses `X-RK9-Actor` itself.
+
+- Router: `server/src/routes/rk9-coord-actors.ts`.
+- Service: `server/src/services/rk9-coord-presence.ts`.
+- Redaction: `server/src/services/rk9-coord-redact.ts`.
+- Bodies and query: `packages/shared/src/validators/rk9-coord.ts`.
+- Tests: `server/src/__tests__/rk9-coord-actors-routes.test.ts`
+  (embedded Postgres).
+
+| Call | Body / query | Answer |
+|---|---|---|
+| `PUT /actors/me` | `name`, `issue`, `repo`, `branch`, `phase`, `pid`, `liveness_source`, `metadata`; advisory `kind`, `host`, `external_id`, `client_event_id` | 201 on the first insert, 200 after: `{id, actorId, kind, host, trust, created, ttlS}` |
+| `POST /actors/me/phase` | `phase` (string or null) | 200 `{id, actorId, phase}`; 404 `rk9_coord_actor_not_found` without an open row |
+| `DELETE /actors/me` | optional advisory fields | 204, also when the actor already ended or never registered |
+| `GET /actors` | `active` (`1` default, `0` = include ended and stale rows), `repo` (exact, or `<name>` matches `<owner>/<name>`), `issue`, `limit` (1-500, default 200, per source) | `{actors: [row], ttlS}` |
+
+Rules:
+
+- **Key.** The upsert key is (`company_id`, `actor_ref`), the unique index of
+  9015. The issue text named (`company`, `host`, `external_id`); the ADR and
+  this note win. `host` and `external_id` are derived from the resolved actor:
+  `external_id` is the kind-specific part of the actor id. A different client
+  id (the CLI sends its session id for a worktree) is kept in
+  `metadata.client_external_id`.
+- **Advisory fields.** The rk9 CLI (RK9-624) sends snake_case bodies with
+  `kind`, `host` and `external_id`; camelCase aliases work too. A badly formed
+  value is 422. A well-formed `kind` or `host` that differs from the resolved
+  actor is 403 (`rk9_coord_actor_spoof`, `rk9_coord_host_mismatch`).
+  Unknown keys are 422.
+- **PUT semantics.** An omitted key keeps the stored value, `null` clears it.
+  Every PUT refreshes `last_seen_at` and `expires_at`, and clears `ended_at`,
+  so PUT is also the presence heartbeat. A `worktree:<issue>` actor gets
+  `issue` from its id when the body does not name one.
+- **Activity log.** Only the first registration writes `activity_log`
+  (`rk9.coord.actor_registered`, entity `rk9_coord_actor`). The upsert offers
+  a per-request nonce as the server-set marker
+  `metadata.presence_registered_at` and keeps an existing marker (coalesce).
+  The request is the first registration exactly when the returned marker is
+  its own nonce. So a stub row inserted by another coord route (RK9-626
+  inserts a minimal row `ON CONFLICT DO NOTHING`), at any moment, still logs
+  exactly one registration, and concurrent first PUTs log once. The activity
+  row is written in the same transaction as the marker. Clients cannot set
+  the marker. Phase updates, refreshes and ends write no activity rows.
+- **Secrets in verbatim fields.** `branch`, `external_id` and `metadata` are
+  stored as sent, so a value that matches the redaction pattern is 422
+  (`rk9_coord_secret_in_field`) instead of being stored. Metadata is
+  flagged when any of three views matches: its JSON text (catches
+  `{"password": "..."}`), each key and string value alone (raw and
+  collapsed, catches whitespace that JSON escapes), every leaf of 6+
+  characters under a credential-named key at any depth (`password`,
+  `secrets`, `github_token`, ...; arrays and nested objects included), and
+  `key: value` for every ancestor key of a leaf. Nesting is capped at 16
+  levels, the size at 4096 UTF-8 bytes of JSON. `client_external_id` and the registration
+  marker are server-owned keys; a client cannot set them. Control characters
+  (C0, DEL, C1) in `branch`, and NUL or unpaired surrogates in `metadata`,
+  are 422 too.
+- **Trust.** Every write (PUT, phase, end) stores the trust of the current
+  writer, so a row never shows a stale higher trust.
+- **Liveness.** Live means `ended_at IS NULL AND last_seen_at > now -
+  RK9_COORD_PRESENCE_TTL_S`. It is a read rule, so a crashed actor drops out
+  after one TTL and no cleanup job runs. Its row stays until retention.
+- **Phase and name.** The text is first collapsed to one line: every run of
+  whitespace and control characters becomes one space (JS `\s` misses most
+  C0 controls, so redacting first would let `Bearer\x01<token>` through).
+  Zero-width characters (U+200B-U+200D, U+2060, U+FEFF) are removed in the
+  same step. It is then matched case-insensitively against
+  `RK9_SESSIONS_SECRET_RX` and every match becomes `[redacted]`.
+  `rk9_coord_` tokens and the plural keyword forms (`tokens=`, `secrets:`,
+  `passwords=`, `api_keys=`) are always redacted on top. Last, the text is capped: phase at 140 code points, name
+  at 200. The raw input limit is
+  1000 characters (422 beyond). `phase_at` changes only when the phase text
+  changes.
+- **Agent runs.** `heartbeat_runs` rows of the company with status `running`
+  are projected as `kind=agent_run` rows: agent name, issue identifier from
+  `contextSnapshot->>'issueId'` (fallback `taskId`), `runStatus`, `ageS` from
+  `startedAt`. A run with no activity (latest of `last_output_at`,
+  `updated_at`, `started_at`, `created_at`) for `RK9_COORD_AGENT_RUN_STALE_S`
+  is treated as an orphan and left out. A run that registered itself with
+  `PUT me` is listed once, as its live presence row. After `DELETE me`, or
+  once that row is stale, the run is listed as a projected row while it is
+  `running` (with `active=0` both rows appear). `limit` applies to
+  each source on its own, so ended presence rows never hide running runs. A `repo` filter excludes
+  projected runs, because runs have no repo. The whole list runs in one
+  `READ ONLY` transaction, so the projection cannot write. The heartbeat
+  service is not changed.
+- **Company scope.** Each company sees only its own actors and runs. Agent
+  runs of other companies do not appear on the RK9 board; that would need an
+  explicit cross-company grant (ADR open point, decided here: no).
+
+Row shape:
+
+```json
+{ "actorId": "cc:paperclip-01:<sid>", "kind": "cc", "host": "paperclip-01",
+  "name": "...", "issue": "RK9-625", "repo": "paperclip", "branch": "work/RK9-625",
+  "repoBranch": "paperclip@work/RK9-625", "phase": "running tests", "trust": "attributed",
+  "ageS": 120, "lastSeenS": 4, "runStatus": null, "source": "presence" }
+```
+
+`ageS` counts from registration (agent runs: from `startedAt`). `lastSeenS`
+counts from the last refresh (agent runs: from the last run activity).
+
+Env vars:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RK9_COORD_PRESENCE_TTL_S` | 300 (10-86400) | presence TTL; the client should refresh at most every TTL/3 |
+| `RK9_COORD_AGENT_RUN_STALE_S` | 7200 (0 = off) | orphan cutoff for projected running runs |
+| `RK9_SESSIONS_SECRET_RX` | the `rk9-sessions.sh` default | redaction pattern; an invalid JS RegExp falls back to the default |
+
 ## Journal and inbox API (RK9-626)
 
 Part of epic [RK9-620](/RK9/issues/RK9-620), wave 3, key `journal-inbox-api`.
