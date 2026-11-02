@@ -133,6 +133,8 @@ import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
 import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
 // RK9 Custom (RK9-626): coord bus retention
 import { startRk9CoordRetention } from "./services/rk9-coord-retention.js";
+// RK9 Custom (RK9-627): coord lease sweeper
+import { startRk9CoordLeaseSweeper } from "./services/rk9-coord-leases.js";
 import {
   closeHttpListenerForShutdown,
   coordinateHeartbeatSchedulerShutdown,
@@ -2020,6 +2022,8 @@ async function startServerWithDatabaseTeardown(
 
   // --- RK9 Custom (RK9-626): coord bus retention (events 90 d, decisions 1 y, ended actors 7 d) ---
   const stopRk9CoordRetention = startRk9CoordRetention(db as any);
+  // RK9 Custom (RK9-627): lease sweeper (TTL expiry, dead-holder release, FIFO promotion), every 30 s
+  const stopRk9CoordLeaseSweeper = startRk9CoordLeaseSweeper(db as any);
   // --- /RK9 Custom ---
 
   if (config.databaseBackupEnabled) {
@@ -2117,6 +2121,7 @@ async function startServerWithDatabaseTeardown(
     heartbeatSchedulerStopped = true;
     clearInterval(executionControlInterval);
     stopRk9CoordRetention(); // RK9 Custom (RK9-626)
+    stopRk9CoordLeaseSweeper(); // RK9 Custom (RK9-627)
     if (heartbeatSchedulerInterval) {
       clearInterval(heartbeatSchedulerInterval);
       heartbeatSchedulerInterval = null;

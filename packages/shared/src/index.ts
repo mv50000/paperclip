@@ -2882,3 +2882,5 @@ export * from "./rk9-coord.js";
 export * from "./validators/rk9-coord.js";
 // RK9 Custom (RK9-626): coord journal + inbox bodies
 export * from "./validators/rk9-coord-journal.js";
+// RK9 Custom (RK9-627): coord lease bodies
+export * from "./validators/rk9-coord-leases.js";

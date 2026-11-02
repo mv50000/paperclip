@@ -390,6 +390,12 @@ vi.mock("../services/risk-event-listeners.js", () => ({
   startRiskEventListeners: vi.fn(),
 }));
 
+// --- RK9 Custom (RK9-627): the lease sweeper imports rk9-coord-journal.ts, which reads
+// @paperclipai/db tables at module load. ---
+vi.mock("../services/rk9-coord-leases.js", () => ({
+  startRk9CoordLeaseSweeper: vi.fn(() => () => {}),
+}));
+
 vi.mock("../services/question-response-delivery.js", () => ({
   questionResponseDeliveryService: vi.fn(() => ({
     sweepPending: vi.fn(async () => ({
