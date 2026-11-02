@@ -827,7 +827,21 @@ export type MigrationHistoryReconcileResult = {
   remainingMigrations: string[];
 };
 
+// --- RK9 Custom (RK9-635): the journal repair writes migration rows, so it runs under the same
+// advisory lock as applyPendingMigrations. The locked internals call the Unlocked variant (a second
+// lock request from another connection would wait on the lock this process already holds).
 export async function reconcilePendingMigrationHistory(
+  url: string,
+): Promise<MigrationHistoryReconcileResult> {
+  const state = await inspectMigrations(url);
+  if (state.status !== "needsMigrations" || state.reason !== "pending-migrations") {
+    return { repairedMigrations: [], remainingMigrations: [] };
+  }
+  return await withRk9MigrationLock(url, () => reconcilePendingMigrationHistoryUnlocked(url));
+}
+// --- end RK9 Custom ---
+
+async function reconcilePendingMigrationHistoryUnlocked(
   url: string,
 ): Promise<MigrationHistoryReconcileResult> {
   const state = await inspectMigrations(url);
@@ -1036,7 +1050,7 @@ async function applyPendingMigrationsUnlocked(url: string): Promise<void> {
     let bootstrappedState = await inspectMigrations(url);
     if (bootstrappedState.status === "upToDate") return;
     if (bootstrappedState.reason === "pending-migrations") {
-      const repair = await reconcilePendingMigrationHistory(url);
+      const repair = await reconcilePendingMigrationHistoryUnlocked(url);
       if (repair.repairedMigrations.length > 0) {
         bootstrappedState = await inspectMigrations(url);
       }
@@ -1060,7 +1074,7 @@ async function applyPendingMigrationsUnlocked(url: string): Promise<void> {
   let state = await inspectMigrations(url);
   if (state.status === "upToDate") return;
 
-  const repair = await reconcilePendingMigrationHistory(url);
+  const repair = await reconcilePendingMigrationHistoryUnlocked(url);
   if (repair.repairedMigrations.length > 0) {
     state = await inspectMigrations(url);
     if (state.status === "upToDate") return;

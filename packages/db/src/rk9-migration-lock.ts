@@ -2,7 +2,8 @@
 //
 // Every Paperclip migration path ends in applyPendingMigrations (client.ts): server startup
 // (server/src/index.ts), the dev-runner's `pnpm db:migrate` on restart, and a manual
-// `pnpm db:migrate` / `tsx src/migrate.ts`. Neither that path nor drizzle-orm's pg migrator took a
+// `pnpm db:migrate` / `tsx src/migrate.ts`. The journal repair reconcilePendingMigrationHistory
+// (also called directly by server startup) takes the same lock. Neither that path nor drizzle-orm's pg migrator took a
 // lock, so two of them could apply the same migrations at once. This module takes a session-level
 // pg_advisory_lock on a fixed key over a DEDICATED single-connection client: the lock, the work's
 // "who holds it" lookup and the unlock all run on that one backend, the client is never shared with
@@ -113,6 +114,7 @@ async function lockHolder(sql: postgres.Sql): Promise<string | null> {
       select a.pid, a.application_name, a.backend_start
         from pg_locks l join pg_stat_activity a on a.pid = l.pid
        where l.locktype = 'advisory' and l.granted and l.classid = ${classid} and l.objid = ${objid} and l.objsubid = 1
+         and l.database = (select oid from pg_database where datname = current_database())
        limit 1`;
     const r = rows[0];
     if (!r) return null;

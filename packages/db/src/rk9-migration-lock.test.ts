@@ -1,7 +1,7 @@
 // --- RK9 Custom (RK9-635): tests of the migration advisory lock ---
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyPendingMigrations } from "./client.js";
+import { applyPendingMigrations, reconcilePendingMigrationHistory } from "./client.js";
 import {
   RK9_MIGRATION_LOCK_KEY,
   Rk9MigrationLockTimeoutError,
@@ -118,6 +118,17 @@ describePostgres("withRk9MigrationLock (embedded Postgres)", () => {
     try {
       const started = Date.now();
       await applyPendingMigrations(url);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      await release();
+    }
+  });
+
+  it("reconcilePendingMigrationHistory on an up-to-date schema returns without waiting for a held lock", async () => {
+    const release = await holdLock();
+    try {
+      const started = Date.now();
+      await expect(reconcilePendingMigrationHistory(url)).resolves.toEqual({ repairedMigrations: [], remainingMigrations: [] });
       expect(Date.now() - started).toBeLessThan(5_000);
     } finally {
       await release();
