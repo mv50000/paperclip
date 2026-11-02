@@ -253,6 +253,7 @@ Error codes in the JSON `code` field:
 | `rk9_coord_wrong_company` | 403 | coord token bound to another company |
 | `rk9_coord_mixed_credentials` | 403 | coord token plus another credential |
 | `rk9_coord_not_found` | 404 | no such coord sub-route |
+| `rk9_coord_actor_not_found` | 404 | the actor has no open presence row (`POST actors/me/phase` before `PUT actors/me`, or after `DELETE`); the rk9 CLI dead-letters a spooled write on this code (RK9-625) |
 
 `GET /api/companies/:companyId/rk9/coord/whoami` returns the resolved actor:
 

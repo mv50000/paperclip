@@ -90,6 +90,8 @@ const RK9_FORK_ROUTE_FILES = new Set([
   "rk9-email.ts",
   // RK9-621: coordination bus router skeleton (epic RK9-620).
   "rk9-coord.ts",
+  // RK9-625: coord presence sub-router (/rk9/coord/actors).
+  "rk9-coord-actors.ts",
   // RK9-623: operator-only coord token management.
   "rk9-coord-tokens.ts",
   "ses-inbound.ts",
