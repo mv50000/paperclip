@@ -99,6 +99,11 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     ["pass\u034fword=hunter2hunter2", "[redacted]"],
     ["pass\u200dword=hunter2hunter2 ok", "[redacted] ok"],
     ["Bearer\u202e abcdefghijkl", "[redacted]"],
+    // verifier round 1 (RK9-642): an invisible character as the only separator, non-Cf fillers
+    ["Bearer\u200babcdefgh12345", "[redacted]"],
+    ["pass\u3164word=hunter2hunter2", "[redacted]"],
+    ["pass\u0301word=hunter2hunter2", "[redacted]"],
+    ["pass\u{E0100}word=hunter2hunter2", "[redacted]"],
   ])("redacts a keyword split by an invisible character %j", (input, expected) => {
     expect(toRk9CoordLine(input, 140, env)).toBe(expected);
   });
@@ -122,12 +127,17 @@ describe("presence metadata secret check", () => {
   it.each([
     "password", "passwords", "PassWords", "secret", "secrets", "github_token", "githubToken", "DB_PASSWORD",
     "api_key", "api-keys", "apiKey", "myApiKey", "passwd", "secret_value", "aws.secret", "pass\u00adword",
+    // compound names (verifier round 1): the keyword need not end the name
+    "SECRET_KEY", "aws_secret_access_key", "secretAccessKey", "api_key_prod", "apiKeyProd", "GITHUB_TOKEN_RW",
+    "token_prod", "password_new", "password1", "secrets_prod", "password_hash", "DBPassword", "GITHUBToken",
+    "Password:",
   ])("treats %j as a credential name", (name) => {
     expect(isRk9CoordCredentialName(name)).toBe(true);
   });
 
   it.each([
     "tokens_used", "token_count", "secret_scan", "tokenizer", "secretary", "password_policy", "tokensUsed", "note",
+    "token_type", "secret_name", "access_token_expiry", "max_tokens_limit",
   ])("does not treat %j as a credential name", (name) => {
     expect(isRk9CoordCredentialName(name)).toBe(false);
   });
@@ -159,6 +169,18 @@ describe("presence metadata secret check", () => {
     ["leading space in the value", { password: " hunter2hunter2" }],
     ["ZWSP after Bearer", { note: "Bearer\u200b abcdefghijkl" }],
     ["numeric password sent as a string", { password: "12345678" }],
+    // verifier round 1 (RK9-642)
+    ["SECRET_KEY", { SECRET_KEY: "django-insecure-abc123xyz" }],
+    ["aws_secret_access_key", { aws_secret_access_key: "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE" }],
+    ["secrets_prod nested", { secrets_prod: { db: "hunter2hunter2" } }],
+    ["acronym camelCase in a pair", { env: [{ name: "DBPassword", value: "hunter2hunter2" }] }],
+    ["trailing punctuation in a pair name", { env: [{ name: "Password:", value: "hunter2hunter2" }] }],
+    ["CloudFormation parameter", { params: [{ ParameterKey: "DbPassword", ParameterValue: "hunter2hunter2" }] }],
+    ["k/v pair", { env: [{ k: "PASSWORD", v: "hunter2hunter2" }] }],
+    ["name, separator, value", { env: [["DB_PASSWORD", "=", "hunter2hunter2"]] }],
+    ["argv flag", { args: ["mysql", "--password", "hunter2hunter2"] }],
+    ["invisible character as the only separator", { note: "Bearer\u200babcdefgh12345" }],
+    ["Hangul filler inside a keyword", { note: "pass\u3164word=hunter2hunter2" }],
   ])("flags %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(true);
   });
@@ -182,6 +204,8 @@ describe("presence metadata secret check", () => {
     ["two-item tuple with a plain name", { env: ["EDITOR", "vim-nox"] }],
     ["three-item list starting with a credential name", { tags: ["token", "billing", "usage"] }],
     ["ZWJ emoji", { face: "\u{1F469}\u200d\u{1F4BB}" }],
+    ["pair object without a value key", { field: "password", status: "rotated" }],
+    ["token_type", { token_type: "Bearer" }],
   ])("accepts %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
   });

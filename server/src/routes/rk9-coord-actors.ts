@@ -113,30 +113,94 @@ function rejectSecrets(fields: {
 }
 
 /**
- * A name that names a credential (RK9-642: anchored to a name segment, so
- * `tokens_used`, `max_tokens`, `secret_scan`, `tokenizer` and `secretary`
- * are not credential names, while `password`, `secrets`, `github_token`,
- * `DB_PASSWORD`, `api-keys` and `secret_value` are). Segments are split by
- * `_`, `-`, `.` or whitespace; camelCase is split too (`githubToken`).
+ * Credential words, matched as whole name segments (RK9-642). A name is
+ * split into segments at every non-alphanumeric character, at camelCase and
+ * acronym boundaries (`githubToken`, `DBPassword`) and between letters and
+ * digits (`password1`); it is also read with only the non-alphanumeric
+ * splits, so `PassWords` and `apiKeys` stay one segment.
  */
-const CREDENTIAL_NAME_RX =
-  /(^|[_\-.\s])(token|secret|password|passwd|api[_-]?key|apikey)s?([_\-.\s]?(value|val))?$/i;
+const CREDENTIAL_WORDS = new Set([
+  "token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passwds", "apikey", "apikeys",
+]);
+/**
+ * A credential word followed by one of these segments names metadata about
+ * a credential, not the credential: `secret_scan`, `token_count`,
+ * `tokens_used`, `password_policy`, `token_type`, `secret_name`.
+ */
+const HARMLESS_SUFFIXES = new Set([
+  "scan", "scanner", "scanning", "policy", "policies", "rule", "rules", "count", "counts", "used", "usage",
+  "limit", "limits", "budget", "max", "min", "total", "totals", "type", "kind", "name", "names", "id", "ids",
+  "ref", "refs", "arn", "path", "file", "expiry", "expires", "expiration", "ttl", "length", "len",
+  "rotation", "rotated", "status", "present", "required", "enabled", "provider", "source", "estimate",
+]);
+
+function nameSegmentations(name: string): string[][] {
+  const text = rk9CoordMatchText(name);
+  const plain = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const split = text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([A-Za-z])([0-9])|([0-9])([A-Za-z])/g, (_m, a, b, c, d) => (a ? `${a} ${b}` : `${c} ${d}`))
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  return [plain, split];
+}
+
+/**
+ * True when the name, without invisible characters, names a credential: a
+ * credential word segment (`api` + `key` counts as one) that is not followed
+ * by a harmless suffix. `password`, `SECRET_KEY`, `aws_secret_access_key`,
+ * `DB_PASSWORD`, `password1`, `apiKeyProd` and `Password:` are credential
+ * names; `tokens_used`, `secret_scan`, `tokenizer` and `secretary` are not.
+ */
+export function isRk9CoordCredentialName(name: string): boolean {
+  for (const segments of nameSegmentations(name)) {
+    for (let i = 0; i < segments.length; i += 1) {
+      let next = i + 1;
+      if (segments[i] === "api" && (segments[next] === "key" || segments[next] === "keys")) next += 1;
+      else if (!CREDENTIAL_WORDS.has(segments[i]!)) continue;
+      const suffix = segments[next];
+      if (suffix === undefined || !HARMLESS_SUFFIXES.has(suffix)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Keys whose string value names the entry in a name/value pair object
- * (`{"name": "PASSWORD", "value": "..."}`, `{"key": "api_key", "val": "..."}`).
+ * (`{"name": "PASSWORD", "value": "..."}`, `{"Key": "db_password", "Value":
+ * "..."}`, CloudFormation `ParameterKey`).
  */
-const PAIR_NAME_KEY_RX = /^(name|key|id|var|variable|env|field|label|header|param)$/i;
+const PAIR_NAME_KEY_RX = /^(k|id|var|variable|env|field|label|header|param|option|setting|flag|arg)$|(name|key)$/i;
+/** Keys that hold the value in such a pair object. */
+const PAIR_VALUE_KEY_RX = /^(v|val|data|content|default)$|value$/i;
 /** The value part of the key=value branch of RK9_SESSIONS_SECRET_RX. */
 const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
-
-/** True when the name, without invisible characters, names a credential. */
-export function isRk9CoordCredentialName(name: string): boolean {
-  const text = rk9CoordMatchText(name);
-  return CREDENTIAL_NAME_RX.test(text) || CREDENTIAL_NAME_RX.test(text.replace(/([a-z0-9])([A-Z])/g, "$1_$2"));
-}
+/** Separator items in an argv-style list (`["DB_PASSWORD", "=", "..."]`). */
+const ARG_SEPARATOR_RX = /^[=:]$/;
 
 function isPairName(key: string, value: unknown): boolean {
   return PAIR_NAME_KEY_RX.test(rk9CoordMatchText(key)) && typeof value === "string" && isRk9CoordCredentialName(value);
+}
+
+/**
+ * Indexes of the array items that hold a credential value: the second item
+ * of a two-item `[name, value]` pair, and the item after a credential flag
+ * (`--password`, `-p` is not covered) or after a `=`/`:` separator item that
+ * follows a credential name.
+ */
+function credentialValueIndexes(items: unknown[]): Set<number> {
+  const out = new Set<number>();
+  const isName = (item: unknown) => typeof item === "string" && isRk9CoordCredentialName(item);
+  if (items.length === 2 && isName(items[0])) out.add(1);
+  items.forEach((item, index) => {
+    if (typeof item !== "string" || !isName(item)) return;
+    const separator = typeof items[index + 1] === "string" && ARG_SEPARATOR_RX.test(items[index + 1] as string);
+    if (separator) out.add(index + 2);
+    else if (item.startsWith("-")) out.add(index + 1);
+  });
+  return out;
 }
 
 /**
@@ -147,9 +211,10 @@ function isPairName(key: string, value: unknown): boolean {
  * - every string leaf under a credential-named key at ANY depth, so arrays
  *   and nested objects ({"password": ["..."]}, {"secrets": {"db": "..."}})
  *   do not hide the value from the key;
- * - a credential name given as a value: the other entries of a name/value
- *   pair object ({"name": "PASSWORD", "value": "..."}) and the second item of
- *   a two-item array (["DB_PASSWORD", "..."]) count as under a credential key;
+ * - a credential name given as a value: the value entry of a name/value
+ *   pair object ({"name": "PASSWORD", "value": "..."}), the second item of a
+ *   two-item array (["DB_PASSWORD", "..."]) and the item after a credential
+ *   flag or `=` item (["--password", "..."]) count as under a credential key;
  * - under a credential key, a key whose value is a scalar or empty is a leaf
  *   too ({"password": {"<secret>": true}});
  * - `key: value` per string leaf, with the full ancestor key path.
@@ -181,9 +246,9 @@ export function rk9CoordMetadataHasSecret(metadata: Record<string, unknown>): bo
       return;
     }
     if (Array.isArray(value)) {
-      // ["DB_PASSWORD", "<secret>"]: a credential name, then its value.
-      const pair = value.length === 2 && typeof value[0] === "string" && isRk9CoordCredentialName(value[0]);
-      value.forEach((item, index) => walk(item, path, underSecretKey || (pair && index === 1), depth - 1));
+      // ["DB_PASSWORD", "<secret>"], [..., "--password", "<secret>"]: a credential name, then its value.
+      const valueIndexes = credentialValueIndexes(value);
+      value.forEach((item, index) => walk(item, path, underSecretKey || valueIndexes.has(index), depth - 1));
       return;
     }
     const entries = Object.entries(value);
@@ -197,7 +262,9 @@ export function rk9CoordMetadataHasSecret(metadata: Record<string, unknown>): bo
         return;
       }
       const secretChild =
-        underSecretKey || isRk9CoordCredentialName(key) || (namedPair && !isPairName(key, item));
+        underSecretKey ||
+        isRk9CoordCredentialName(key) ||
+        (namedPair && PAIR_VALUE_KEY_RX.test(rk9CoordMatchText(key)));
       walk(item, [...path, key], secretChild, depth - 1);
     }
   };

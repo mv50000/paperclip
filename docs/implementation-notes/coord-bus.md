@@ -293,29 +293,40 @@ Rules:
 - **Secrets in verbatim fields.** `branch`, `external_id` and `metadata` are
   stored as sent, so a value that matches the redaction pattern is 422
   (`rk9_coord_secret_in_field`) instead of being stored. Matching runs on
-  the raw text, on the display form and on a matching form without any
-  format character (`\p{Cf}`, so soft hyphen, ZWJ, bidi controls and
-  invisible operators cannot split a keyword). The display form, which the
+  the raw text, on the display form and on two matching forms in which
+  every format character (`\p{Cf}`: soft hyphen, ZWJ, bidi controls,
+  invisible operators), combining mark and Hangul filler is removed or
+  turned into a space, so none of them can split a keyword or glue it to
+  its value. The display form, which the
   stored `phase` and `name` use, keeps ZWJ (U+200D) so emoji sequences
   survive; it strips U+00AD, U+034F, U+180E, U+200B, U+200C, U+2060-U+2064
   and U+FEFF.
 - **Metadata keys that name a credential are rejected** when they carry a
-  string value. The key rule (RK9-642), case-insensitive, after the
-  invisible characters are removed, and also tried on the key with camelCase
-  split (`githubToken` -> `github_Token`):
-  `(^|[_\-.\s])(token|secret|password|passwd|api[_-]?key|apikey)s?([_\-.\s]?(value|val))?$`.
-  So `password`, `secrets`, `github_token`, `DB_PASSWORD`, `api-keys` and
-  `secret_value` are credential names; `tokens_used`, `token_count`,
-  `secret_scan`, `tokenizer`, `secretary` and `password_policy` are not.
+  string value. The key rule (RK9-642), applied after the invisible
+  characters are removed: split the name into segments at every
+  non-alphanumeric character, at camelCase and acronym boundaries
+  (`githubToken`, `DBPassword`) and between letters and digits
+  (`password1`); also read it with only the non-alphanumeric splits
+  (`PassWords`, `apiKeys`). The name is a credential name when a segment is
+  `token`, `secret`, `password`, `passwd` or `apikey` (plural too; `api` +
+  `key` counts as one) and the next segment is not a harmless suffix
+  (`scan`, `policy`, `count`, `used`, `usage`, `limit`, `budget`, `type`,
+  `name`, `id`, `ref`, `path`, `file`, `expiry`, `ttl`, `status`, ...; the
+  full list is `HARMLESS_SUFFIXES` in `server/src/routes/rk9-coord-actors.ts`).
+  So `password`, `secrets`, `github_token`, `DB_PASSWORD`, `SECRET_KEY`,
+  `aws_secret_access_key`, `api_key_prod` and `secret_value` are credential
+  names; `tokens_used`, `token_count`, `secret_scan`, `tokenizer`,
+  `secretary` and `password_policy` are not.
   Metadata is flagged when any view matches: its JSON text (catches
   `{"password": "..."}`), each key and string value alone, every string
   leaf of 6+ characters under a credential key at any depth (arrays and
   nested objects included), `key: value` for every ancestor key of a leaf,
-  and a credential name given as a value: the other entries of a
-  name/value pair object (`{"name": "PASSWORD", "value": "..."}`; name keys
-  `name`, `key`, `id`, `var`, `variable`, `env`, `field`, `label`,
-  `header`, `param`) and the second item of a two-item array
-  (`["DB_PASSWORD", "..."]`). Under a credential key, a key whose value is a
+  and a credential name given as a value: the value entry of a name/value
+  pair object (`{"name": "PASSWORD", "value": "..."}`, `{"Key": ...,
+  "Value": ...}`, `{"k": ..., "v": ...}`, CloudFormation `ParameterKey` /
+  `ParameterValue`), the second item of a two-item array
+  (`["DB_PASSWORD", "..."]`) and the item after a credential flag or a `=`
+  item (`["--password", "..."]`, `["DB_PASSWORD", "=", "..."]`). Under a credential key, a key whose value is a
   scalar or empty is checked like a leaf (`{"password": {"<secret>":
   true}}`). **Numbers are exempt:** a JSON number is never a secret, so
   token counts (`{"max_tokens": 200000}`, `{"tokens": {"input": 1234}}`)

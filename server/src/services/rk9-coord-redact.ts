@@ -81,10 +81,11 @@ const DISPLAY_INVISIBLE_RX = /[\u00ad\u034f\u180e\u200b\u200c\u2060-\u2064\ufeff
 /**
  * Invisible characters removed before matching only: every format character
  * (\p{Cf}: the display list above plus ZWJ, bidi controls, tag characters),
- * the combining grapheme joiner and variation selectors. None of them may
- * split a keyword or a token so that the pattern misses it.
+ * every combining mark (\p{Mn}, \p{Me}: CGJ, accents, variation selectors)
+ * and the Hangul fillers. None of them may split a keyword or a token so
+ * that the pattern misses it.
  */
-const MATCH_INVISIBLE_RX = /[\p{Cf}\u034f\ufe00-\ufe0f]/gu;
+const MATCH_INVISIBLE_RX = /[\p{Cf}\p{Mn}\p{Me}\u115f\u1160\u3164\uffa0]/gu;
 // eslint-disable-next-line no-control-regex
 const WHITESPACE_CONTROL_RX = /[\s\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
 
@@ -106,6 +107,15 @@ export function rk9CoordMatchText(text: string): string {
 }
 
 /**
+ * The other matching reading: every invisible character becomes a space, so
+ * `Bearer\u200b<token>` reads `Bearer <token>` (removing it would glue the
+ * keyword to the token and `\s+` would miss it).
+ */
+function rk9CoordSpacedText(text: string): string {
+  return text.replace(MATCH_INVISIBLE_RX, " ").replace(WHITESPACE_CONTROL_RX, " ").trim();
+}
+
+/**
  * True when the raw, the display or the matching form of the text contains
  * anything the redaction would replace.
  */
@@ -113,10 +123,14 @@ export function rk9CoordTextHasSecret(text: string, env: NodeJS.ProcessEnv = pro
   // All forms: the raw text is what gets stored (a tab inside a URL
   // credential only matches raw), the collapsed ones defeat control-char and
   // zero-width obfuscation.
-  for (const form of [text, collapseRk9CoordText(text), rk9CoordMatchText(text)]) {
+  for (const form of [text, collapseRk9CoordText(text), rk9CoordMatchText(text), rk9CoordSpacedText(text)]) {
     if (redactRk9CoordText(form, env) !== form) return true;
   }
   return false;
+}
+
+function countRedactions(text: string): number {
+  return text.split(RK9_COORD_REDACTED).length - 1;
 }
 
 /**
@@ -136,10 +150,19 @@ export function toRk9CoordLine(
   // pattern skipped.
   const collapsed = collapseRk9CoordText(text);
   let line = redactRk9CoordText(collapsed, env);
-  // The display form keeps ZWJ and bidi controls, so `pass\u200dword=...`
-  // survives the redaction above. When the matching form still shows a
-  // secret, redact the matching form instead (those characters go too).
-  if (rk9CoordTextHasSecret(line, env)) line = redactRk9CoordText(rk9CoordMatchText(collapsed), env);
+  // The display form keeps ZWJ and bidi controls (`pass\u200dword=...`) and
+  // removes a ZWSP that is the only separator (`Bearer\u200b<token>`), so a
+  // secret can survive the redaction above. When a matching reading of the
+  // original text finds more secrets, store the first matching reading that
+  // finds them all and comes out clean; otherwise redact the whole field
+  // (fail closed).
+  const readings = [rk9CoordMatchText(text), rk9CoordSpacedText(text)].map((form) => redactRk9CoordText(form, env));
+  const found = Math.max(...readings.map(countRedactions));
+  if (rk9CoordTextHasSecret(line, env) || found > countRedactions(line)) {
+    line =
+      readings.find((reading) => countRedactions(reading) >= found && !rk9CoordTextHasSecret(reading, env)) ??
+      RK9_COORD_REDACTED;
+  }
   if (line.length === 0) return null;
   const points = Array.from(line);
   return points.length > max ? points.slice(0, max).join("").trimEnd() : line;
