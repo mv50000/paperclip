@@ -650,6 +650,63 @@ if (!support.supported) {
     expect(results.filter((res) => res.status === 204)).toHaveLength(2);
   });
 
+  it("follows the issues the caller handed off in the last 24 h, at most 50 (RK9-650)", async () => {
+    const cid = await newCompany();
+    const app = appFor(boardKey([cid]));
+    const parent = "cc:paperclip-01:parent-650";
+    const child = "worktree:RKD-650";
+    const delta = () => request(app).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", parent);
+    expect((await delta()).status).toBe(204);
+
+    await post(cid, parent, { type: "handoff", issue: "RKD-650", summary: "go", to: "headless" });
+    // Another actor's handoff does not widen the parent's concerns.
+    await post(cid, "cc:paperclip-01:other-650", { type: "handoff", issue: "RKD-651", summary: "go" });
+    await post(cid, child, { type: "done", issue: "RKD-650", pr: 7 });
+    await post(cid, child, { type: "blocker", issue: "RKD-650", what: "stuck" });
+    await post(cid, "worktree:RKD-651", { type: "done", issue: "RKD-651", pr: 8 });
+    await post(cid, "worktree:RKD-652", { type: "done", issue: "RKD-652", pr: 9 });
+    const seen = await delta();
+    expect(seen.status).toBe(200);
+    expect(seen.body.events.map((event: { type: string; issue: string }) => `${event.type}:${event.issue}`)).toEqual([
+      "done:RKD-650",
+      "blocker:RKD-650",
+    ]);
+    // The cursor moved past them.
+    expect((await delta()).status).toBe(204);
+
+    // A handoff older than 24 h is not followed.
+    await db.insert(rk9CoordEvents).values({
+      companyId: cid,
+      type: "handoff",
+      actorRef: parent,
+      actorKind: "cc",
+      trust: "attributed",
+      issue: "RKD-660",
+      summary: "old",
+      createdAt: new Date(Date.now() - 25 * 3600 * 1000),
+    });
+    await post(cid, "worktree:RKD-660", { type: "done", issue: "RKD-660", pr: 10 });
+    expect((await delta()).status).toBe(204);
+
+    // Only the newest 50 handed-off issues are followed.
+    await db.insert(rk9CoordEvents).values(
+      Array.from({ length: 51 }, (_, i) => ({
+        companyId: cid,
+        type: "handoff",
+        actorRef: parent,
+        actorKind: "cc",
+        trust: "attributed",
+        issue: `RKD-7${String(i).padStart(2, "0")}`,
+        summary: "bulk",
+      })),
+    );
+    await post(cid, "worktree:RKD-700", { type: "done", issue: "RKD-700", pr: 11 });
+    await post(cid, "worktree:RKD-750", { type: "done", issue: "RKD-750", pr: 12 });
+    const capped = await delta();
+    expect(capped.status).toBe(200);
+    expect(capped.body.events.map((event: { issue: string }) => event.issue)).toEqual(["RKD-750"]);
+  });
+
   it("gives ask-operator only to cc and never a headsup (RK9-647)", async () => {
     const cid = await newCompany();
     const app = appFor(boardKey([cid]));
