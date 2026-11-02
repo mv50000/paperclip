@@ -547,7 +547,7 @@ reports an observation; the client side lives in claude-config.
 A record that someone bypassed a gate (from [RK9-632](/RK9/issues/RK9-632)).
 
 - Body: `resource` (lease resource grammar, e.g. `prod:<app>`), `reason`
-  (1–1000 raw characters, stored redacted and one line), `gate`
+  (1–1000 characters after trimming, stored redacted and one line), `gate`
   (`deploy | tag | migrate | host | repo`), optional `issue`, plus the
   common fields.
 - Only kinds `cc`, `operator` and `rk9claude` may post it. Every other kind
@@ -555,7 +555,9 @@ A record that someone bypassed a gate (from [RK9-632](/RK9/issues/RK9-632)).
   `rk9_coord_event_kind_not_allowed`; the check runs before body validation.
 - `summary`: `BREAK-GLASS <gate> <resource>: <reason>`, at most 300.
   `payload`: `{ resource, gate, reason }`. The `resource` column is set too.
-  `trust` is the caller's journal trust.
+  `trust` is the caller's journal trust. A `cc` claim through a host coord
+  token is stored `unverified`, as every row of a remote host; the hook line
+  shows it like any other record, so readers check `trust`.
 - It is a record only and changes no lease state. An operator lease break
   stays `POST /leases/break`.
 - The delta shows it to every actor, like `deploy`.
