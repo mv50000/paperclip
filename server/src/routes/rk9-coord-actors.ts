@@ -28,7 +28,7 @@ import {
 import { HttpError, unprocessable } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
-import { rk9CoordTextHasSecret } from "../services/rk9-coord-redact.js";
+import { rk9CoordMatchText, rk9CoordTextHasSecret } from "../services/rk9-coord-redact.js";
 import {
   rk9CoordPresenceService,
   type Rk9CoordPresenceIdentity,
@@ -103,7 +103,7 @@ function rejectSecrets(fields: {
   if (fields.external_id && rk9CoordTextHasSecret(fields.external_id)) bad.push("external_id");
   // String by string: JSON.stringify would escape a tab or newline into `\t`,
   // which the pattern's `\s` no longer sees (verifier round 2).
-  if (fields.metadata && metadataHasSecret(fields.metadata)) bad.push("metadata");
+  if (fields.metadata && rk9CoordMetadataHasSecret(fields.metadata)) bad.push("metadata");
   if (bad.length > 0) {
     throw new HttpError(422, "Field looks like it contains a secret", {
       code: "rk9_coord_secret_in_field",
@@ -113,36 +113,66 @@ function rejectSecrets(fields: {
 }
 
 /**
- * A metadata key that names a credential (singular, plural or compound:
- * `password`, `secrets`, `github_token`, `db_passwd`, `apiKeys`, ...).
+ * A name that names a credential (RK9-642: anchored to a name segment, so
+ * `tokens_used`, `max_tokens`, `secret_scan`, `tokenizer` and `secretary`
+ * are not credential names, while `password`, `secrets`, `github_token`,
+ * `DB_PASSWORD`, `api-keys` and `secret_value` are). Segments are split by
+ * `_`, `-`, `.` or whitespace; camelCase is split too (`githubToken`).
  */
-const SECRET_KEY_RX = /(token|secret|password|passwd|api[_-]?key|apikey)/i;
+const CREDENTIAL_NAME_RX =
+  /(^|[_\-.\s])(token|secret|password|passwd|api[_-]?key|apikey)s?([_\-.\s]?(value|val))?$/i;
+/**
+ * Keys whose string value names the entry in a name/value pair object
+ * (`{"name": "PASSWORD", "value": "..."}`, `{"key": "api_key", "val": "..."}`).
+ */
+const PAIR_NAME_KEY_RX = /^(name|key|id|var|variable|env|field|label|header|param)$/i;
 /** The value part of the key=value branch of RK9_SESSIONS_SECRET_RX. */
 const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
 
+/** True when the name, without invisible characters, names a credential. */
+export function isRk9CoordCredentialName(name: string): boolean {
+  const text = rk9CoordMatchText(name);
+  return CREDENTIAL_NAME_RX.test(text) || CREDENTIAL_NAME_RX.test(text.replace(/([a-z0-9])([A-Z])/g, "$1_$2"));
+}
+
+function isPairName(key: string, value: unknown): boolean {
+  return PAIR_NAME_KEY_RX.test(rk9CoordMatchText(key)) && typeof value === "string" && isRk9CoordCredentialName(value);
+}
+
 /**
- * Metadata is flagged when any view matches (verifier rounds 2-4):
+ * Metadata is flagged when any view matches (verifier rounds 2-5):
  * - the JSON text catches key/value pairs such as {"password": "..."};
  * - each key and string value alone, raw and collapsed, catches whitespace
  *   that JSON escapes into `\t` or `\n`;
- * - every leaf under a credential-named key at ANY depth, so arrays and
- *   nested objects ({"password": ["..."]}, {"secrets": {"db": "..."}}) do not
- *   hide the value from the key;
- * - `key: value` per leaf, with the full ancestor key path.
+ * - every string leaf under a credential-named key at ANY depth, so arrays
+ *   and nested objects ({"password": ["..."]}, {"secrets": {"db": "..."}})
+ *   do not hide the value from the key;
+ * - a credential name given as a value: the other entries of a name/value
+ *   pair object ({"name": "PASSWORD", "value": "..."}) and the second item of
+ *   a two-item array (["DB_PASSWORD", "..."]) count as under a credential key;
+ * - under a credential key, a key whose value is a scalar or empty is a leaf
+ *   too ({"password": {"<secret>": true}});
+ * - `key: value` per string leaf, with the full ancestor key path.
+ *
+ * Numbers are never secrets (RK9-642): `{"max_tokens": 200000}` and
+ * `{"tokens": {"input": 1234}}` are token counts, not credentials. A numeric
+ * password sent as a JSON number is therefore accepted; send it as a string
+ * and it is rejected.
  */
-function metadataHasSecret(metadata: Record<string, unknown>): boolean {
-  if (rk9CoordTextHasSecret(JSON.stringify(metadata))) return true;
+export function rk9CoordMetadataHasSecret(metadata: Record<string, unknown>): boolean {
+  const json = JSON.stringify(metadata, (_key, value: unknown) => (typeof value === "number" ? 0 : value));
+  if (rk9CoordTextHasSecret(json)) return true;
   if (!everyRk9CoordString(metadata, (text) => !rk9CoordTextHasSecret(text))) return true;
   let found = false;
   const walk = (value: unknown, path: string[], underSecretKey: boolean, depth: number) => {
     if (found) return;
     if (value === null || typeof value !== "object") {
-      const leaf = String(value);
-      if (underSecretKey && (typeof value === "string" || typeof value === "number") && SECRET_VALUE_RX.test(leaf)) {
+      if (typeof value !== "string") return;
+      if (underSecretKey && SECRET_VALUE_RX.test(value)) {
         found = true;
         return;
       }
-      if (path.some((key) => rk9CoordTextHasSecret(`${key}: ${leaf}`))) found = true;
+      if (path.some((key) => rk9CoordTextHasSecret(`${key}: ${value}`))) found = true;
       return;
     }
     // The schema caps depth; a deeper value here is treated as suspect.
@@ -150,12 +180,25 @@ function metadataHasSecret(metadata: Record<string, unknown>): boolean {
       found = true;
       return;
     }
-    const entries: [string | null, unknown][] = Array.isArray(value)
-      ? value.map((item) => [null, item])
-      : Object.entries(value);
+    if (Array.isArray(value)) {
+      // ["DB_PASSWORD", "<secret>"]: a credential name, then its value.
+      const pair = value.length === 2 && typeof value[0] === "string" && isRk9CoordCredentialName(value[0]);
+      value.forEach((item, index) => walk(item, path, underSecretKey || (pair && index === 1), depth - 1));
+      return;
+    }
+    const entries = Object.entries(value);
+    const namedPair = entries.some(([key, item]) => isPairName(key, item));
     for (const [key, item] of entries) {
-      const nextPath = key === null ? path : [...path, key];
-      walk(item, nextPath, underSecretKey || (key !== null && SECRET_KEY_RX.test(key)), depth - 1);
+      // A key under a credential key may itself be the secret, unless it
+      // labels a number (a counter map) or a non-empty branch.
+      const branch = item !== null && typeof item === "object" && Object.keys(item).length > 0;
+      if (underSecretKey && typeof item !== "number" && !branch && SECRET_VALUE_RX.test(key)) {
+        found = true;
+        return;
+      }
+      const secretChild =
+        underSecretKey || isRk9CoordCredentialName(key) || (namedPair && !isPairName(key, item));
+      walk(item, [...path, key], secretChild, depth - 1);
     }
   };
   walk(metadata, [], false, RK9_COORD_METADATA_MAX_DEPTH + 1);

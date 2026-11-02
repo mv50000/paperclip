@@ -292,14 +292,36 @@ Rules:
   the marker. Phase updates, refreshes and ends write no activity rows.
 - **Secrets in verbatim fields.** `branch`, `external_id` and `metadata` are
   stored as sent, so a value that matches the redaction pattern is 422
-  (`rk9_coord_secret_in_field`) instead of being stored. Metadata is
-  flagged when any of three views matches: its JSON text (catches
-  `{"password": "..."}`), each key and string value alone (raw and
-  collapsed, catches whitespace that JSON escapes), every leaf of 6+
-  characters under a credential-named key at any depth (`password`,
-  `secrets`, `github_token`, ...; arrays and nested objects included), and
-  `key: value` for every ancestor key of a leaf. Nesting is capped at 16
-  levels, the size at 4096 UTF-8 bytes of JSON. `client_external_id` and the registration
+  (`rk9_coord_secret_in_field`) instead of being stored. Matching runs on
+  the raw text, on the display form and on a matching form without any
+  format character (`\p{Cf}`, so soft hyphen, ZWJ, bidi controls and
+  invisible operators cannot split a keyword). The display form, which the
+  stored `phase` and `name` use, keeps ZWJ (U+200D) so emoji sequences
+  survive; it strips U+00AD, U+034F, U+180E, U+200B, U+200C, U+2060-U+2064
+  and U+FEFF.
+- **Metadata keys that name a credential are rejected** when they carry a
+  string value. The key rule (RK9-642), case-insensitive, after the
+  invisible characters are removed, and also tried on the key with camelCase
+  split (`githubToken` -> `github_Token`):
+  `(^|[_\-.\s])(token|secret|password|passwd|api[_-]?key|apikey)s?([_\-.\s]?(value|val))?$`.
+  So `password`, `secrets`, `github_token`, `DB_PASSWORD`, `api-keys` and
+  `secret_value` are credential names; `tokens_used`, `token_count`,
+  `secret_scan`, `tokenizer`, `secretary` and `password_policy` are not.
+  Metadata is flagged when any view matches: its JSON text (catches
+  `{"password": "..."}`), each key and string value alone, every string
+  leaf of 6+ characters under a credential key at any depth (arrays and
+  nested objects included), `key: value` for every ancestor key of a leaf,
+  and a credential name given as a value: the other entries of a
+  name/value pair object (`{"name": "PASSWORD", "value": "..."}`; name keys
+  `name`, `key`, `id`, `var`, `variable`, `env`, `field`, `label`,
+  `header`, `param`) and the second item of a two-item array
+  (`["DB_PASSWORD", "..."]`). Under a credential key, a key whose value is a
+  scalar or empty is checked like a leaf (`{"password": {"<secret>":
+  true}}`). **Numbers are exempt:** a JSON number is never a secret, so
+  token counts (`{"max_tokens": 200000}`, `{"tokens": {"input": 1234}}`)
+  are accepted; a numeric password sent as a JSON number is accepted too,
+  as a string it is 422. Nesting is capped at 16 levels, the size at 4096
+  UTF-8 bytes of JSON. `client_external_id` and the registration
   marker are server-owned keys; a client cannot set them. Control characters
   (C0, DEL, C1) in `branch`, and NUL or unpaired surrogates in `metadata`,
   are 422 too.

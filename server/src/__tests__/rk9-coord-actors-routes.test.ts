@@ -19,7 +19,14 @@ import {
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/error-handler.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
-import { RK9_COORD_SECRET_RX_DEFAULT, redactRk9CoordText, toRk9CoordLine } from "../services/rk9-coord-redact.js";
+import { isRk9CoordCredentialName, rk9CoordMetadataHasSecret } from "../routes/rk9-coord-actors.js";
+import {
+  RK9_COORD_SECRET_RX_DEFAULT,
+  collapseRk9CoordText,
+  redactRk9CoordText,
+  rk9CoordMatchText,
+  toRk9CoordLine,
+} from "../services/rk9-coord-redact.js";
 import { rk9CoordPresenceService } from "../services/rk9-coord-presence.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -82,10 +89,101 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     expect(toRk9CoordLine(secretAtCap, 140, env)).not.toContain("ghp_");
   });
 
+  // RK9-642: the full invisible list; ZWJ stays in display text, goes for matching.
+  it.each([
+    ["token=\u00adsupersecret123", "[redacted]"],
+    ["pass\u00adword=hunter2hunter2", "[redacted]"],
+    ["pass\u2061word=hunter2hunter2", "[redacted]"],
+    ["pass\u2064word=hunter2hunter2", "[redacted]"],
+    ["pass\u180eword=hunter2hunter2", "[redacted]"],
+    ["pass\u034fword=hunter2hunter2", "[redacted]"],
+    ["pass\u200dword=hunter2hunter2 ok", "[redacted] ok"],
+    ["Bearer\u202e abcdefghijkl", "[redacted]"],
+  ])("redacts a keyword split by an invisible character %j", (input, expected) => {
+    expect(toRk9CoordLine(input, 140, env)).toBe(expected);
+  });
+
+  it("keeps ZWJ in display text and strips it only for matching", () => {
+    const dev = "coding \u{1F469}\u200d\u{1F4BB} now";
+    expect(toRk9CoordLine(dev, 140, env)).toBe(dev);
+    expect(collapseRk9CoordText("a\u00adb\u2061c\u180ed\u034fe\u200df\u200bg")).toBe("abcde\u200dfg");
+    expect(rk9CoordMatchText("a\u00adb\u2061c\u180ed\u034fe\u200df\u202eg")).toBe("abcdefg");
+  });
+
   it("falls back to the default when the env pattern is not a valid JS RegExp", () => {
     expect(redactRk9CoordText("token=supersecret123", { RK9_SESSIONS_SECRET_RX: "(" } as NodeJS.ProcessEnv)).toBe(
       "[redacted]",
     );
+  });
+});
+
+// RK9-642: the RK9-625 round-5 verifier cases. Fake values only.
+describe("presence metadata secret check", () => {
+  it.each([
+    "password", "passwords", "PassWords", "secret", "secrets", "github_token", "githubToken", "DB_PASSWORD",
+    "api_key", "api-keys", "apiKey", "myApiKey", "passwd", "secret_value", "aws.secret", "pass\u00adword",
+  ])("treats %j as a credential name", (name) => {
+    expect(isRk9CoordCredentialName(name)).toBe(true);
+  });
+
+  it.each([
+    "tokens_used", "token_count", "secret_scan", "tokenizer", "secretary", "password_policy", "tokensUsed", "note",
+  ])("does not treat %j as a credential name", (name) => {
+    expect(isRk9CoordCredentialName(name)).toBe(false);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    // round-4 repro
+    ["array under a credential key", { password: ["hunter2hunter2"] }],
+    ["nested object under secret", { secret: { db: "hunter2hunter2" } }],
+    ["nested object under secrets", { secrets: { db: "hunter2hunter2" } }],
+    ["nested object under passwords", { passwords: { prod: "hunter2hunter2" } }],
+    ["array under api_key", { api_key: ["abcdef123456"] }],
+    ["ZWSP inside a keyword in a value", { a: "pass\u200bword=hunter2hunter2" }],
+    // zero-width list (LOW)
+    ["ZWSP inside a key", { "pass\u200bword": ["hunter2hunter2"] }],
+    ["soft hyphen inside a key", { "pass\u00adword": "hunter2hunter2" }],
+    ["invisible separator inside a key", { "pass\u2063word": "hunter2hunter2" }],
+    ["CGJ inside a key", { "pass\u034fword": "hunter2hunter2" }],
+    ["ZWJ inside a key", { "pass\u200dword": "hunter2hunter2" }],
+    // secret used as a key (LOW)
+    ["secret as a key under a credential key", { password: { hunter2hunter2: true } }],
+    ["secret as a key with an empty value", { secrets: { hunter2hunter2: {} } }],
+    // keyword given as a value (MEDIUM)
+    ["name/value pair object", { env: [{ name: "PASSWORD", value: "hunter2hunter2" }] }],
+    ["key/val pair object", { headers: [{ key: "api_key", val: "abcdef123456" }] }],
+    ["two-item tuple in a list", { env: [["DB_PASSWORD", "hunter2hunter2"]] }],
+    ["two-item tuple", { env: ["DB_PASSWORD", "hunter2hunter2"] }],
+    ["camelCase key", { githubToken: "abcdefghijkl" }],
+    ["deep arrays under a mixed-case key", { PassWords: [[["hunter2hunter2"]]] }],
+    ["leading space in the value", { password: " hunter2hunter2" }],
+    ["ZWSP after Bearer", { note: "Bearer\u200b abcdefghijkl" }],
+    ["numeric password sent as a string", { password: "12345678" }],
+  ])("flags %s", (_label, metadata) => {
+    expect(rk9CoordMetadataHasSecret(metadata)).toBe(true);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    // false positives of the unanchored key rule (MEDIUM)
+    ["tokens_used", { tokens_used: 123456 }],
+    ["context_tokens", { context_tokens: 291000 }],
+    ["max_tokens", { max_tokens: 200000 }],
+    ["secret_scan", { secret_scan: "passed" }],
+    ["token_count", { token_count: 12 }],
+    ["tmux_pane", { tmux_pane: "%12" }],
+    ["branch", { branch: "rk9/RK9-625-presence" }],
+    ["tokenizer", { tokenizer: "cl100k_base" }],
+    ["secretary", { secretary: "Anne Lahti" }],
+    ["password_policy", { password_policy: "strict" }],
+    ["counter map under tokens", { tokens: { input: 1234, output: 56 } }],
+    ["input_tokens", { usage: { input_tokens: 123456 } }],
+    ["maxTokens", { maxTokens: 200000 }],
+    ["name/value pair with a plain name", { env: [{ name: "EDITOR", value: "vim-nox" }] }],
+    ["two-item tuple with a plain name", { env: ["EDITOR", "vim-nox"] }],
+    ["three-item list starting with a credential name", { tags: ["token", "billing", "usage"] }],
+    ["ZWJ emoji", { face: "\u{1F469}\u200d\u{1F4BB}" }],
+  ])("accepts %s", (_label, metadata) => {
+    expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
   });
 });
 
@@ -307,6 +405,11 @@ if (!support.supported) {
       { metadata: { tokens: "abcdefghijkl" } },
       { metadata: { note: "secrets=abcdefghijkl" } },
       { branch: "Bearer\u0085abcdefghijk" },
+      // RK9-642 (verifier round 5)
+      { metadata: { env: [{ name: "PASSWORD", value: "hunter2hunter2" }] } },
+      { metadata: { env: [["DB_PASSWORD", "hunter2hunter2"]] } },
+      { metadata: { password: { hunter2hunter2: true } } },
+      { metadata: { "pass\u00adword": "hunter2hunter2" } },
     ]) {
       const res = await request(app).put(`${base()}/me`).set("X-RK9-Actor", CC).send(body);
       expect(res.status).toBe(422);
@@ -327,6 +430,23 @@ if (!support.supported) {
       .put(`${base()}/me`)
       .set("X-RK9-Actor", CC)
       .send({ metadata: { tmux: { window: "@12", panes: ["main-pane", "logs-pane"] }, attempt: 3 } });
+    expect(res.status).toBe(201);
+  });
+
+  it("accepts token counts and keys that only contain a credential word (RK9-642)", async () => {
+    const app = makeApp(operatorKey());
+    const res = await request(app)
+      .put(`${base()}/me`)
+      .set("X-RK9-Actor", CC)
+      .send({
+        metadata: {
+          tokens_used: 123456,
+          max_tokens: 200000,
+          secret_scan: "passed",
+          tokenizer: "cl100k_base",
+          usage: { input_tokens: 123456, tokens: { input: 1234, output: 56 } },
+        },
+      });
     expect(res.status).toBe(201);
   });
 
