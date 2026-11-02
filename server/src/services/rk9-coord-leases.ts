@@ -116,9 +116,12 @@ export function resolveRk9CoordLeaseClaimWindowS(env: NodeJS.ProcessEnv = proces
   return intEnv(env.RK9_COORD_LEASE_CLAIM_WINDOW_S, RK9_COORD_LEASE_CLAIM_WINDOW_S_DEFAULT, 30, 3_600);
 }
 
-/** RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S, default 21 600 s (6 h), 600..86 400 (RK9-648). */
+/**
+ * RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S, default 21 600 s (6 h), 3600..86 400 (RK9-648). The floor of 1 h
+ * keeps every holder that renews at most every 1200 s (the rk9 gate library) inside the cap.
+ */
 export function resolveRk9CoordLeaseHardGateTtlMaxS(env: NodeJS.ProcessEnv = process.env): number {
-  return intEnv(env.RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S, RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S_DEFAULT, 600, 86_400);
+  return intEnv(env.RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S, RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S_DEFAULT, 3_600, 86_400);
 }
 
 /** The TTL a lease of `resource` gets: a hard-gate request above the cap is clamped to it. */
@@ -1149,6 +1152,8 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
   async function leaveQueue(companyId: string, caller: Rk9CoordLeaseCaller, input: { resource: string }) {
     assertRk9CoordLeaseKind(caller.actor);
     const parsed = requireResource(input.resource);
+    // The same trust as acquire: an agent key cannot dequeue a sibling run that waits with its run JWT.
+    assertRk9CoordLeaseTrust(caller.actor, parsed);
     const [self] = await db
       .select({ id: rk9CoordActors.id })
       .from(rk9CoordActors)

@@ -625,6 +625,13 @@ if (!support.supported) {
     expect(await leaseEvents(res)).toHaveLength(4);
     const [lease] = await db.select().from(rk9CoordLeases).where(eq(rk9CoordLeases.id, held.body.lease_id));
     expect(lease!.releasedAt).toBeNull();
+    // An agent key cannot dequeue a sibling run's hard-gate waiter (the same trust rule as acquire).
+    const byKey = await request(appFor(agent("agent_key")))
+      .post(`${base()}/leave`)
+      .set("X-RK9-Actor", `agent_run:${runId}`)
+      .send({ resource: res });
+    expect(byKey.status).toBe(403);
+    expect(byKey.body.code).toBe("rk9_coord_lease_run_jwt_required");
     // Bad bodies and resources.
     const noBody = await request(app).post(`${base()}/leave`).set("X-RK9-Actor", cc("lv-2")).send({});
     expect(noBody.status).toBe(400);
@@ -714,8 +721,8 @@ if (!support.supported) {
     expect(new Date(renewed.body.expires_at).getTime() - Date.now()).toBeLessThanOrEqual(capMs + 5_000);
     const soft = await acquire(cc("cap-s"), { resource: "vault:rk9/areas/cap.md", ttl_s: 86_400 });
     expect(new Date(soft.body.expires_at).getTime() - Date.now()).toBeGreaterThan(86_000 * 1000);
-    // The cap is configurable; a short hard-gate request is never lengthened.
-    vi.stubEnv("RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S", "3600");
+    // The cap is configurable (never below 1 h); a short hard-gate request is never lengthened.
+    vi.stubEnv("RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S", "60");
     const host = await acquire(cc("cap-n"), { resource: "host:cap-node", ttl_s: 86_400 });
     expect(new Date(host.body.expires_at).getTime() - Date.now()).toBeLessThanOrEqual(3_600_000 + 5_000);
     const short = await acquire(cc("cap-p"), { resource: "prod:cap-short", ttl_s: 120 });

@@ -23,7 +23,7 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
 | `POST /:leaseId/renew` | `fencing_token`, `ttl_s` (clamped like acquire) | `{expires_at}`. 409 `rk9_coord_lease_stale` when the lease is lost. |
 | `POST /:leaseId/release` | `resource`, `fencing_token` (required for a hard-gate lease, 422 `rk9_coord_lease_fencing_required` otherwise), `client_event_id` (ignored) | `{released, noop}`. A second release is 200 with `noop:true` and writes nothing. 409 when the lease was lost, and 409 when the token is not this lease's, also after the release (RK9-648 R2). |
 | `POST /break` | `resource`, `reason` (required), `lease_id` (optional, RK9-629) | `{broken, previous_holder, release_reason, promoted}`. With `lease_id`, a different active lease is 409 `rk9_coord_lease_changed` and nothing is broken. |
-| `POST /leave` | `resource` | `{left, resource}` (RK9-648). The caller leaves the wait queue (`dequeue` event, `dequeue_reason: left`). Not queued: 200 `left:false`, nothing written. It never releases a lease. |
+| `POST /leave` | `resource` | `{left, resource}` (RK9-648). Same kind and trust checks as acquire. The caller leaves the wait queue (`dequeue` event, `dequeue_reason: left`). Not queued: 200 `left:false`, nothing written. It never releases a lease. |
 | `POST /validate` | `resource`, `fencing_token` | 200 `{valid:true, holder, expires_at}` or 409 `rk9_coord_lease_stale` |
 | `GET /` | `prefix`, `holder`, `resource` | `{leases:[{lease_id, resource, holder, holder_kind, holder_phase, mode, expires_at, expired, queue:[{actor, position}]}]}` |
 | `GET /status` | `resource` | one row: `held`, `holder`, `holder_phase`, `expires_at`, `queue`, and the caller's `position` |
@@ -175,7 +175,8 @@ and the subtype in `payload.subtype`. The activity action is
 
 - RK9-648: a hard-gate lease (`prod`, `migrate`, `host`) gets at most
   `RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S` (default 21 600 s = 6 h,
-  600..86 400). The cap applies to acquire, to the claim poll and to
+  3600..86 400; the floor keeps a holder that renews every 1200 s inside
+  the cap). The cap applies to acquire, to the claim poll and to
   renew. A larger request is clamped, not rejected: gate clients ask for up
   to 86 400 s. The answer's `expires_at` shows the clamped time. `repo:`
   and `vault:` keep the full 86 400 s.
@@ -183,7 +184,7 @@ and the subtype in `payload.subtype`. The activity action is
   `stuck` signal fires while nobody queues.
 - A holder that needs longer renews the lease. The gate library renews at
   `ttl/3`, at most every 1200 s (RK9-648), so it keeps a lease under any
-  cap of 1 h or more. rk9claude holds a `host:` lease for a scheduled
+  allowed cap. rk9claude holds a `host:` lease for a scheduled
   reboot for at most 6 h (RK9-656), which fits the default cap.
 
 ## Break
