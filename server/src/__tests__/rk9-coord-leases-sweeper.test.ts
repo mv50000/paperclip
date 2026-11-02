@@ -24,6 +24,7 @@ import { rk9CoordRoutes } from "../routes/rk9-coord.js";
 import {
   resolveRk9CoordLeaseDeadGraceS,
   rk9CoordLeaseActorVerdict,
+  rk9CoordLeaseWaiterAlive,
   sweepRk9CoordLeases,
 } from "../services/rk9-coord-leases.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -34,14 +35,15 @@ describe("coord lease liveness rule", () => {
   const now = new Date("2026-11-02T12:00:00Z");
   const old = new Date("2026-11-02T11:00:00Z");
   const fresh = new Date("2026-11-02T11:59:00Z");
-  const opts = { now, graceS: 300 };
+  const opts = { now, graceS: 300, hardGate: false, lastActivityAt: old };
+  const hard = { ...opts, hardGate: true };
 
   it("maps each liveness source to its release reason", () => {
     expect(rk9CoordLeaseActorVerdict({ kind: "cc", endedAt: null, lastSeenAt: old, runStatus: null }, opts)).toEqual({
       alive: false,
       reason: "presence_stale",
     });
-    expect(rk9CoordLeaseActorVerdict({ kind: "headless", endedAt: fresh, lastSeenAt: fresh, runStatus: null }, opts)).toEqual({
+    expect(rk9CoordLeaseActorVerdict({ kind: "headless", endedAt: fresh, lastSeenAt: fresh, runStatus: null }, hard)).toEqual({
       alive: false,
       reason: "headless_run_ended",
     });
@@ -63,13 +65,31 @@ describe("coord lease liveness rule", () => {
     expect(
       rk9CoordLeaseActorVerdict(
         { kind: "worktree", endedAt: null, lastSeenAt: old, runStatus: null },
-        { ...opts, freshUntil: new Date(now.getTime() + 1000) },
+        { ...opts, lastActivityAt: fresh },
       ).alive,
+    ).toBe(true);
+    // Hard gate: a stale presence (a session inside one long tool call) is not a death signal.
+    expect(rk9CoordLeaseActorVerdict({ kind: "cc", endedAt: null, lastSeenAt: old, runStatus: null }, hard).alive).toBe(true);
+    // An ended_at older than the lease activity (a re-registered session) does not count.
+    expect(
+      rk9CoordLeaseActorVerdict({ kind: "cc", endedAt: old, lastSeenAt: old, runStatus: null }, { ...hard, lastActivityAt: fresh }).alive,
     ).toBe(true);
     for (const status of ["running", "queued", "scheduled_retry", "interrupted", null]) {
       expect(rk9CoordLeaseActorVerdict({ kind: "agent_run", endedAt: null, lastSeenAt: old, runStatus: status }, opts).alive).toBe(true);
     }
     expect(rk9CoordLeaseActorVerdict({ kind: "operator", endedAt: old, lastSeenAt: old, runStatus: null }, opts).alive).toBe(true);
+  });
+
+  it("judges a waiter only by its polls, never by presence", () => {
+    const live = { kind: "cc", endedAt: null, lastSeenAt: fresh, runStatus: null };
+    expect(rk9CoordLeaseWaiterAlive(live, { now, pollUntil: old, lastPollAt: old })).toBe(false);
+    expect(rk9CoordLeaseWaiterAlive(live, { now, pollUntil: new Date(now.getTime() + 1000), lastPollAt: fresh })).toBe(true);
+    expect(
+      rk9CoordLeaseWaiterAlive({ ...live, kind: "agent_run", runStatus: "failed" }, { now, pollUntil: new Date(now.getTime() + 1000), lastPollAt: fresh }),
+    ).toBe(false);
+    expect(
+      rk9CoordLeaseWaiterAlive({ ...live, endedAt: now }, { now, pollUntil: new Date(now.getTime() + 1000), lastPollAt: fresh }),
+    ).toBe(false);
   });
 
   it("defaults the grace to 3x the heartbeat, never below the presence TTL", () => {
@@ -216,19 +236,19 @@ if (!support.supported) {
     expect(await activityCount(res)).toBe(4);
   });
 
-  it("releases a dead holder (presence_stale) and skips dead waiters", async () => {
-    const res = "prod:dead";
+  it("releases a dead holder of an advisory lease (presence_stale) and skips dead waiters", async () => {
+    const res = "repo:o/dead@main";
     await acquire(cc("d1"), res);
     await acquire(cc("d2"), res, true);
     await acquire(cc("d3"), res, true);
     await makeStale(cc("d1"));
     await ageLease(res);
-    // d2 is dead too: stale presence and its last poll is past the grace.
-    await makeStale(cc("d2"));
+    // d2 stopped polling (its presence stays fresh): it no longer waits.
+    const [d2] = await db.select({ id: rk9CoordActors.id }).from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, cc("d2")));
     await db
       .update(rk9CoordLeaseWaiters)
       .set({ expiresAt: sql`now() - interval '1 second'` })
-      .where(eq(rk9CoordLeaseWaiters.resource, res));
+      .where(and(eq(rk9CoordLeaseWaiters.resource, res), eq(rk9CoordLeaseWaiters.actorId, d2!.id)));
     const result = await sweepRk9CoordLeases(db, { env });
     expect(result).toMatchObject({ deadReleased: 1, promoted: 1, dequeued: 1 });
     expect(await activeHolder(res)).toBe(cc("d3"));
@@ -241,6 +261,18 @@ if (!support.supported) {
     expect(events[3]!.payload).toMatchObject({ release_reason: "presence_stale", holder: cc("d1") });
     expect(await db.select().from(rk9CoordLeaseWaiters).where(eq(rk9CoordLeaseWaiters.resource, res))).toHaveLength(0);
     expect(await activityCount(res)).toBe(6);
+  });
+
+  it("releases a hard-gate holder only on an explicit signal (presence ended), not on stale presence", async () => {
+    const res = "migrate:longrun";
+    await acquire(cc("h1"), res);
+    await makeStale(cc("h1"));
+    await ageLease(res);
+    expect((await sweepRk9CoordLeases(db, { env })).deadReleased).toBe(0);
+    expect(await activeHolder(res)).toBe(cc("h1"));
+    await db.update(rk9CoordActors).set({ endedAt: sql`now()` }).where(eq(rk9CoordActors.actorRef, cc("h1")));
+    expect((await sweepRk9CoordLeases(db, { env })).deadReleased).toBe(1);
+    expect(await subtypes(res)).toEqual(["grant", "dead_release"]);
   });
 
   it("keeps a live holder whose presence is stale but who renewed recently", async () => {

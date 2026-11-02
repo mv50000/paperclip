@@ -73,6 +73,8 @@ export type Rk9CoordDeadReleaseReason = (typeof RK9_COORD_DEAD_RELEASE_REASONS)[
 export const RK9_COORD_LEASE_BREAK_KINDS: readonly string[] = ["operator", "rk9claude"];
 
 const SWEEP_BATCH = 500;
+/** Up to 50 000 active leases per sweep; the rest wait for the next tick. */
+const SWEEP_MAX_PAGES = 100;
 const LIST_LIMIT = 200;
 
 function intEnv(value: string | undefined, fallback: number, min: number, max: number): number {
@@ -125,27 +127,58 @@ function deadReasonFor(kind: string): Rk9CoordDeadReleaseReason {
   return "presence_stale";
 }
 
+function runIsTerminal(actor: Rk9CoordLeaseActorState): boolean {
+  return Boolean(actor.runStatus && (RK9_COORD_TERMINAL_RUN_STATUSES as readonly string[]).includes(actor.runStatus));
+}
+
+/** Presence ended after the actor last touched the lease (an old ended_at does not count). */
+function endedSince(actor: Rk9CoordLeaseActorState, since: Date | null): boolean {
+  if (!actor.endedAt) return false;
+  return !since || actor.endedAt.getTime() > since.getTime();
+}
+
 /**
- * Pure liveness rule for a lease holder or waiter. `freshUntil` is the end of
- * the grace window opened by lease activity (holder: acquire/renew + grace;
- * waiter: the last acquire poll + grace).
+ * Pure liveness rule for a lease HOLDER.
+ * - operator: never dead (TTL only).
+ * - agent_run: dead only when its heartbeat run is terminal.
+ * - every other kind: dead when its presence ended after `lastActivityAt`
+ *   (the lease's acquire/renew). A hard-gate lease is released early ONLY on
+ *   that explicit signal: the CLI heartbeats presence from hooks, so a session
+ *   inside one long tool call (a migration, a deploy) looks stale while it
+ *   still works. An advisory lease (repo, vault) is also released when
+ *   neither presence nor lease activity is newer than the grace period.
  */
 export function rk9CoordLeaseActorVerdict(
   actor: Rk9CoordLeaseActorState,
-  opts: { now: Date; graceS: number; freshUntil?: Date | null },
+  opts: { now: Date; graceS: number; hardGate: boolean; lastActivityAt: Date | null },
 ): Rk9CoordLeaseVerdict {
   if (actor.kind === "operator") return { alive: true };
   if (actor.kind === "agent_run") {
-    if (actor.runStatus && (RK9_COORD_TERMINAL_RUN_STATUSES as readonly string[]).includes(actor.runStatus)) {
-      return { alive: false, reason: "heartbeat_run_terminal" };
-    }
-    return { alive: true };
+    return runIsTerminal(actor) ? { alive: false, reason: "heartbeat_run_terminal" } : { alive: true };
   }
-  if (actor.endedAt) return { alive: false, reason: deadReasonFor(actor.kind) };
+  if (endedSince(actor, opts.lastActivityAt)) return { alive: false, reason: deadReasonFor(actor.kind) };
+  if (opts.hardGate) return { alive: true };
   const now = opts.now.getTime();
-  if (actor.lastSeenAt.getTime() + opts.graceS * 1000 > now) return { alive: true };
-  if (opts.freshUntil && opts.freshUntil.getTime() > now) return { alive: true };
+  const graceMs = opts.graceS * 1000;
+  if (actor.lastSeenAt.getTime() + graceMs > now) return { alive: true };
+  if (opts.lastActivityAt && opts.lastActivityAt.getTime() + graceMs > now) return { alive: true };
   return { alive: false, reason: deadReasonFor(actor.kind) };
+}
+
+/**
+ * Pure liveness rule for a WAITER: only its own polls count, never its
+ * presence. A session whose `rk9 lease wait` timed out keeps heartbeating
+ * presence from hooks, but it no longer waits; promoting it would block the
+ * resource for a whole TTL. `pollUntil` is the waiter's expires_at (last
+ * acquire poll + grace).
+ */
+export function rk9CoordLeaseWaiterAlive(
+  actor: Rk9CoordLeaseActorState,
+  opts: { now: Date; pollUntil: Date | null; lastPollAt: Date | null },
+): boolean {
+  if (actor.kind === "agent_run" && runIsTerminal(actor)) return false;
+  if (endedSince(actor, opts.lastPollAt)) return false;
+  return Boolean(opts.pollUntil && opts.pollUntil.getTime() > opts.now.getTime());
 }
 
 // ---------------------------------------------------------------- types
@@ -253,8 +286,6 @@ export interface Rk9CoordLeaseView {
   renewed_at: string | null;
   expires_at: string;
   expired: boolean;
-  /** Only shown to the holder itself. */
-  fencing_token: number | null;
   queue: Rk9CoordLeaseQueueEntry[];
 }
 
@@ -292,10 +323,13 @@ async function tryLockResource(tx: Tx, companyId: string, resource: string): Pro
   return row?.locked === true;
 }
 
-/** The DB clock of this transaction (now() is the transaction start time). */
+/**
+ * The DB clock, read after the resource lock (clock_timestamp(), not now():
+ * now() is the transaction start, before a possibly long lock wait).
+ */
 async function dbNow(tx: Tx | Db): Promise<Date> {
   const [row] = await tx.execute<{ now: string }>(
-    sql`select to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as now`,
+    sql`select to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as now`,
   );
   return new Date(row!.now);
 }
@@ -371,7 +405,8 @@ function holderVerdict(holder: ActorInfo | undefined, lease: LeaseRow, ctx: Pick
   return rk9CoordLeaseActorVerdict(holder, {
     now: ctx.now,
     graceS: ctx.graceS,
-    freshUntil: addSeconds(lease.renewedAt ?? lease.acquiredAt, ctx.graceS),
+    hardGate: parseRk9CoordLeaseResource(lease.resource)?.hardGate ?? true,
+    lastActivityAt: lease.renewedAt ?? lease.acquiredAt,
   });
 }
 
@@ -405,6 +440,8 @@ async function transition(
     summary: string;
     payload: Record<string, unknown>;
     dedupeKey?: string;
+    /** Kept out of the journal (every coord reader sees it); activity_log only. */
+    fencingToken?: number | null;
   },
 ): Promise<number | null> {
   const parsed = parseRk9CoordLeaseResource(input.resource);
@@ -428,9 +465,10 @@ async function transition(
   const eventId = rows[0]?.id ?? null;
   if (eventId === null) return null;
   const details: Record<string, unknown> = { subtype: input.subtype, resource: input.resource, event_id: eventId };
-  for (const key of ["holder", "previous_holder", "release_reason", "fencing_token", "position", "actor"]) {
+  for (const key of ["holder", "previous_holder", "release_reason", "position", "actor"]) {
     if (payload[key as keyof typeof payload] !== undefined) details[key] = payload[key as keyof typeof payload];
   }
+  if (input.fencingToken !== undefined && input.fencingToken !== null) details.fencing_token = input.fencingToken;
   await logActivity(
     ctx.tx as unknown as Db,
     {
@@ -472,6 +510,30 @@ async function markReleased(ctx: Ctx, lease: LeaseRow, reason: string) {
     .where(and(eq(rk9CoordLeases.id, lease.id), isNull(rk9CoordLeases.releasedAt)));
 }
 
+function waiterAlive(ctx: Pick<Ctx, "now" | "graceS">, actor: ActorInfo, waiter: WaiterRow): boolean {
+  return rk9CoordLeaseWaiterAlive(actor, {
+    now: ctx.now,
+    pollUntil: waiter.expiresAt,
+    lastPollAt: waiter.expiresAt ? addSeconds(waiter.expiresAt, -ctx.graceS) : waiter.enqueuedAt,
+  });
+}
+
+/** True when a live waiter stands ahead of `selfActorId` (or anywhere, when the caller is not queued). */
+async function hasLiveWaiterAhead(ctx: Ctx, resource: string, selfActorId: string): Promise<boolean> {
+  const waiters = await ctx.tx
+    .select()
+    .from(rk9CoordLeaseWaiters)
+    .where(and(eq(rk9CoordLeaseWaiters.companyId, ctx.companyId), eq(rk9CoordLeaseWaiters.resource, resource)))
+    .orderBy(asc(rk9CoordLeaseWaiters.id));
+  const actors = await loadActors(ctx.tx, waiters.map((waiter) => waiter.actorId));
+  for (const waiter of waiters) {
+    if (waiter.actorId === selfActorId) return false;
+    const actor = actors.get(waiter.actorId);
+    if (actor && waiterAlive(ctx, actor, waiter)) return true;
+  }
+  return false;
+}
+
 /**
  * Promote the first live waiter of `resource`. Dead waiters ahead of it are
  * dequeued (one `dequeue` event each). Stops without promoting when it
@@ -481,7 +543,7 @@ async function markReleased(ctx: Ctx, lease: LeaseRow, reason: string) {
 async function promoteNext(
   ctx: Ctx,
   resource: string,
-  opts: { stopAtActorId?: string | null; reasonSuffix?: string } = {},
+  opts: { stopAtActorId?: string | null } = {},
 ): Promise<{ lease: LeaseRow; holder: ActorInfo } | null> {
   const waiters = await ctx.tx
     .select()
@@ -494,19 +556,17 @@ async function promoteNext(
   for (const waiter of waiters) {
     if (opts.stopAtActorId && waiter.actorId === opts.stopAtActorId) return null;
     const actor = actors.get(waiter.actorId);
-    const verdict = actor
-      ? rk9CoordLeaseActorVerdict(actor, { now: ctx.now, graceS: ctx.graceS, freshUntil: waiter.expiresAt })
-      : ({ alive: false, reason: "presence_stale" } as const);
+    const alive = actor ? waiterAlive(ctx, actor, waiter) : false;
     await ctx.tx.delete(rk9CoordLeaseWaiters).where(eq(rk9CoordLeaseWaiters.id, waiter.id));
     const actorRef = actor?.actorRef ?? "unknown";
-    if (!verdict.alive) {
+    if (!alive) {
       if (ctx.stats) ctx.stats.dequeued += 1;
       await transition(ctx, {
         subtype: "dequeue",
         resource,
         leaseId: null,
-        summary: `dequeue ${resource}: ${actorRef} (${verdict.reason})`,
-        payload: { actor: actorRef, dequeue_reason: verdict.reason },
+        summary: `dequeue ${resource}: ${actorRef} (waiter_gone)`,
+        payload: { actor: actorRef, dequeue_reason: "waiter_gone" },
       });
       continue;
     }
@@ -521,8 +581,9 @@ async function promoteNext(
       subtype: "promote",
       resource,
       leaseId: lease.id,
-      summary: `promote ${resource} -> ${actorRef} (fencing ${lease.fencingToken})`,
-      payload: { holder: actorRef, fencing_token: lease.fencingToken, expires_at: iso(lease.expiresAt) },
+      summary: `promote ${resource} -> ${actorRef}`,
+      payload: { holder: actorRef, expires_at: iso(lease.expiresAt) },
+      fencingToken: lease.fencingToken,
     });
     await ctx.tx.insert(rk9CoordInbox).values({
       companyId: ctx.companyId,
@@ -531,7 +592,7 @@ async function promoteNext(
       kind: "lease_promote",
       body:
         toRk9CoordLine(
-          `Lease granted from the queue: ${resource} (fencing ${lease.fencingToken}, expires ${iso(lease.expiresAt)}). Run rk9 lease wait ${resource} to pick it up.`,
+          `Lease granted from the queue: ${resource} (expires ${iso(lease.expiresAt)}). Run rk9 lease wait ${resource} to pick it up.`,
           500,
         ) ?? `Lease granted: ${resource}`,
     });
@@ -572,10 +633,10 @@ async function releaseAndPromote(
     summary: `${input.subtype} ${lease.resource}: ${holderRef} (${input.reason})`,
     payload: {
       holder: holderRef,
-      fencing_token: lease.fencingToken,
       release_reason: input.reason,
       ...(input.extra ?? {}),
     },
+    fencingToken: lease.fencingToken,
   });
   return promoteNext(ctx, lease.resource);
 }
@@ -682,24 +743,24 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
               eq(rk9CoordLeaseWaiters.actorId, self.id),
             ),
           );
+        if (adopted) await markReleased(ctx, adopted.lease, adopted.reason);
         const lease = await insertLease(ctx, { resource, holderActorId: self.id, ttlS, reason, mode });
         await transition(ctx, {
           subtype: adopted ? "adopt" : "grant",
           resource,
           leaseId: lease.id,
           summary: adopted
-            ? `adopt ${resource} from ${adopted.holderRef} (${adopted.reason}, fencing ${lease.fencingToken})`
-            : `grant ${resource} (fencing ${lease.fencingToken})`,
+            ? `adopt ${resource} from ${adopted.holderRef} (${adopted.reason})`
+            : `grant ${resource}`,
+          fencingToken: lease.fencingToken,
           payload: {
             holder: self.actorRef,
-            fencing_token: lease.fencingToken,
             expires_at: iso(lease.expiresAt),
             ...(reason ? { reason } : {}),
             ...(adopted
               ? {
                   previous_holder: adopted.holderRef,
                   previous_lease_id: adopted.lease.id,
-                  previous_fencing_token: adopted.lease.fencingToken,
                   release_reason: adopted.reason,
                 }
               : {}),
@@ -720,19 +781,16 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
         if (expired || !verdict.alive) {
           const releaseReason = expired ? "ttl_expired" : (verdict as { reason: string }).reason;
           const holderRef = holder?.actorRef ?? "unknown";
-          // FIFO: a live waiter ahead of the caller gets the resource first.
-          await markReleased(ctx, active, releaseReason);
-          const promoted = await promoteNext(ctx, resource, { stopAtActorId: self.id });
-          // Nobody ahead: inline takeover; the adopt event records the release (one event).
-          if (!promoted) return grant({ lease: active, holderRef, reason: releaseReason });
-          // The stale lease went to the head waiter: record its release.
-          await transition(ctx, {
+          // Nobody live ahead of the caller: inline takeover; the adopt event records the release (one event).
+          if (!(await hasLiveWaiterAhead(ctx, resource, self.id))) {
+            return grant({ lease: active, holderRef, reason: releaseReason });
+          }
+          // FIFO: the stale lease goes to the head waiter first (release event, then promote).
+          const promoted = await releaseAndPromote(ctx, active, holderRef, {
             subtype: expired ? "expire" : "dead_release",
-            resource,
-            leaseId: active.id,
-            summary: `${expired ? "expire" : "dead_release"} ${resource}: ${holderRef} (${releaseReason})`,
-            payload: { holder: holderRef, fencing_token: active.fencingToken, release_reason: releaseReason },
+            reason: releaseReason,
           });
+          if (!promoted) return grant(null);
           active = promoted.lease;
           holder = promoted.holder;
         }
@@ -744,7 +802,11 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
       }
 
       // A live holder that is not the caller.
-      if (!wait) return notGranted(ctx, active, holder, self.id, false);
+      if (!wait) {
+        const view = await notGranted(ctx, active, holder, self.id, false);
+        // Already in the queue from an earlier wait: say so (no 409, place kept).
+        return view.position !== null ? { ...view, queued: true } : view;
+      }
       const [waiter] = await ctx.tx
         .insert(rk9CoordLeaseWaiters)
         .values({
@@ -866,6 +928,11 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
   ): Promise<Rk9CoordLeaseMutationResult> {
     const { lease: found, parsed, selfId } = await loadOwnLease(companyId, caller, leaseId);
     return inTx(companyId, authorFor(caller), found.resource, async (ctx) => {
+      // Hard gate: the token proves the caller holds the grant, not only the actor name
+      // (board-key sessions on one host are attributed, not authenticated).
+      if (parsed.hardGate && (input.fencingToken === null || input.fencingToken === undefined)) {
+        throw coordError(422, "rk9_coord_lease_fencing_required", "Releasing a hard-gate lease needs its fencing_token");
+      }
       const { lease, fencingMismatch } = await lockedOwnLease(ctx, caller, leaseId, selfId, parsed, input.fencingToken);
       if (fencingMismatch) {
         return { ok: false, code: "rk9_coord_lease_stale", lease_id: lease.id, resource: lease.resource, release_reason: lease.releaseReason };
@@ -900,6 +967,7 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     const parsed = requireResource(input.resource);
     const reason = toRk9CoordLine(input.reason, 300);
     if (!reason) throw coordError(422, "rk9_coord_lease_break_reason_required", "break needs a non-empty reason");
+    assertRk9CoordLeaseTrust(caller.actor, parsed);
     const mayBreakLive = RK9_COORD_LEASE_BREAK_KINDS.includes(caller.actor.kind);
     return inTx(companyId, authorFor(caller), parsed.resource, async (ctx) => {
       const lease = await selectActiveLease(ctx.tx, companyId, parsed.resource);
@@ -1003,7 +1071,6 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
       renewed_at: row.lease.renewedAt ? iso(row.lease.renewedAt) : null,
       expires_at: iso(row.lease.expiresAt),
       expired: isExpired(row.lease, now),
-      fencing_token: viewerActorId && viewerActorId === row.holder ? row.lease.fencingToken : null,
       queue: queues.get(row.lease.resource) ?? [],
     }));
   }
@@ -1024,7 +1091,6 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
       mode: lease?.mode ?? null,
       expires_at: lease?.expires_at ?? null,
       expired: lease?.expired ?? false,
-      fencing_token: lease?.fencing_token ?? null,
       position: mine?.position ?? null,
       queue,
     };
@@ -1076,16 +1142,23 @@ export async function sweepRk9CoordLeases(
     for (const publication of publications) publishActivity(publication);
   }
 
-  // 1. expired or dead-holder leases.
+  // 1. expired or dead-holder leases, every active lease in keyset pages.
   const now = await dbNow(db);
-  const active = await db
-    .select({ lease: rk9CoordLeases })
-    .from(rk9CoordLeases)
-    .where(isNull(rk9CoordLeases.releasedAt))
-    .orderBy(asc(rk9CoordLeases.expiresAt))
-    .limit(SWEEP_BATCH);
-  const holders = await loadActors(db, active.map((row) => row.lease.holderActorId));
-  for (const { lease: candidate } of active) {
+  const active: LeaseRow[] = [];
+  let afterId: string | null = null;
+  for (let page = 0; page < SWEEP_MAX_PAGES; page += 1) {
+    const rows: LeaseRow[] = await db
+      .select()
+      .from(rk9CoordLeases)
+      .where(and(isNull(rk9CoordLeases.releasedAt), afterId ? sql`${rk9CoordLeases.id} > ${afterId}::uuid` : undefined))
+      .orderBy(asc(rk9CoordLeases.id))
+      .limit(SWEEP_BATCH);
+    active.push(...rows);
+    if (rows.length < SWEEP_BATCH) break;
+    afterId = rows[rows.length - 1]!.id;
+  }
+  const holders = await loadActors(db, active.map((lease) => lease.holderActorId));
+  for (const candidate of active) {
     const expired = isExpired(candidate, now);
     const verdict = holderVerdict(holders.get(candidate.holderActorId), candidate, { now, graceS });
     if (!expired && verdict.alive) continue;
@@ -1147,9 +1220,10 @@ export async function sweepRk9CoordLeases(
     .having(sql`min(${rk9CoordLeaseWaiters.enqueuedAt}) <= ${stuckCutoff.toISOString()}::timestamptz`)
     .limit(SWEEP_BATCH);
   for (const row of stuck) {
-    const publications: ActivityPublication[] = [];
-    await db.transaction(async (tx) => {
-      const ctx: Ctx = { tx, companyId: row.companyId, now, graceS, author: SWEEPER_AUTHOR, publications };
+    await inResourceTx(row.companyId, row.resource, async (ctx) => {
+      // Re-check under the lock: the lease may have been released since the scan.
+      const lease = await selectActiveLease(ctx.tx, ctx.companyId, row.resource, true);
+      if (!lease || lease.id !== row.leaseId) return;
       const eventId = await transition(ctx, {
         subtype: "stuck",
         resource: row.resource,
@@ -1160,7 +1234,6 @@ export async function sweepRk9CoordLeases(
       });
       if (eventId !== null) result.stuck += 1;
     });
-    for (const publication of publications) publishActivity(publication);
   }
 
   if (result.expired + result.deadReleased + result.promoted + result.dequeued + result.stuck > 0) {

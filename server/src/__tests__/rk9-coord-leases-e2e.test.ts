@@ -200,6 +200,10 @@ if (!support.supported) {
     expect(again.body).toMatchObject({ released: false, noop: true });
     expect(await subtypes(res)).toEqual(["grant", "release"]);
     expect(await leaseActivity(res)).toHaveLength(2);
+    for (const event of await leaseEvents(res)) {
+      expect(JSON.stringify(event.payload)).not.toContain("fencing");
+      expect(event.summary).not.toContain("fencing");
+    }
     const status = await request(app).get(`${base()}/status`).query({ resource: res }).set("X-RK9-Actor", cc("cli"));
     expect(status.body).toMatchObject({ resource: res, held: false, holder: null, queue: [] });
   });
@@ -243,7 +247,7 @@ if (!support.supported) {
     expect(status.body.queue).toHaveLength(19);
     expect(status.body.queue[0]).toEqual({ actor: head, position: 1 });
     expect(status.body.position).toBe(1);
-    expect(status.body.fencing_token).toBeNull(); // only the holder sees it
+    expect(status.body).not.toHaveProperty("fencing_token"); // only the granting answer carries it
   });
 
   it("answers 409 without queueing when wait=false and the holder is live", async () => {
@@ -264,6 +268,21 @@ if (!support.supported) {
     const events = await leaseEvents(res);
     expect(events).toHaveLength(1);
     expect(events[0]!.repo).toBe("mv50000/paperclip");
+  });
+
+  it("needs the fencing token to release a hard-gate lease, and reports a queued caller with wait=false", async () => {
+    const res = "prod:needtoken";
+    const got = await acquire(cc("nt1"), { resource: res, ttl_s: 600 });
+    const noToken = await request(appFor(boardKey()))
+      .post(`${base()}/${got.body.lease_id}/release`)
+      .set("X-RK9-Actor", cc("nt1"))
+      .send({ resource: res });
+    expect(noToken.status).toBe(422);
+    expect(noToken.body.code).toBe("rk9_coord_lease_fencing_required");
+    await acquire(cc("nt2"), { resource: res, ttl_s: 600, wait: true });
+    const again = await acquire(cc("nt2"), { resource: res, ttl_s: 600, wait: false });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ granted: false, queued: true, position: 1 });
   });
 
   it("validates the resource format with 422", async () => {
@@ -376,12 +395,15 @@ if (!support.supported) {
     expect(events[1]!.payload).toMatchObject({ previous_holder: cc("a1"), release_reason: "ttl_expired" });
     expect(await leaseActivity(res)).toHaveLength(2);
 
-    // Dead holder: presence and lease activity older than the grace period.
+    // Dead holder of a hard gate: only an explicit signal counts (presence ended after the grant).
     await db
       .update(rk9CoordActors)
       .set({ lastSeenAt: sql`now() - interval '1 hour'` })
       .where(eq(rk9CoordActors.actorRef, cc("a2")));
     await db.update(rk9CoordLeases).set({ acquiredAt: sql`now() - interval '1 hour'` }).where(eq(rk9CoordLeases.id, second.body.lease_id));
+    const stillHeld = await acquire(cc("a3"), { resource: res, ttl_s: 600 });
+    expect(stillHeld.status).toBe(409);
+    await db.update(rk9CoordActors).set({ endedAt: sql`now()` }).where(eq(rk9CoordActors.actorRef, cc("a2")));
     const third = await acquire(cc("a3"), { resource: res, ttl_s: 600 });
     expect(third.body).toMatchObject({ granted: true, adopted_from: cc("a2") });
     const last = (await leaseEvents(res)).at(-1)!;
@@ -424,8 +446,7 @@ if (!support.supported) {
     // A non-operator break on a dead holder runs the dead-release path.
     const res2 = "prod:breakdead";
     await acquire(cc("d1"), { resource: res2, ttl_s: 600 });
-    await db.update(rk9CoordActors).set({ lastSeenAt: sql`now() - interval '1 hour'` }).where(eq(rk9CoordActors.actorRef, cc("d1")));
-    await db.update(rk9CoordLeases).set({ acquiredAt: sql`now() - interval '1 hour'` }).where(eq(rk9CoordLeases.resource, res2));
+    await db.update(rk9CoordActors).set({ endedAt: sql`now()` }).where(eq(rk9CoordActors.actorRef, cc("d1")));
     const dead = await request(appFor(boardKey())).post(`${base()}/break`).set("X-RK9-Actor", cc("d2")).send({ resource: res2, reason: "gone" });
     expect(dead.status).toBe(200);
     expect(dead.body.release_reason).toBe("presence_stale");
@@ -470,7 +491,8 @@ if (!support.supported) {
     expect(list.status).toBe(200);
     for (const lease of list.body.leases) expect(lease.resource.startsWith("prod:")).toBe(true);
     const agentLease = list.body.leases.find((l: { resource: string }) => l.resource === "prod:agent");
-    expect(agentLease).toMatchObject({ holder: `agent_run:${runId}`, holder_phase: "deploying", queue: [], fencing_token: null });
+    expect(agentLease).toMatchObject({ holder: `agent_run:${runId}`, holder_phase: "deploying", queue: [] });
+    expect(agentLease).not.toHaveProperty("fencing_token");
     const byHolder = await request(app).get(base()).query({ holder: `agent_run:${runId}` });
     expect(byHolder.body.leases.map((l: { resource: string }) => l.resource).sort()).toEqual([
       "prod:agent",
