@@ -181,6 +181,11 @@ describe("stall escalation message and config", () => {
       resolveRk9CoordEscalatorConfig({ RK9_COORD_STUCK_S: "86400", RK9_COORD_ESCALATE_LOOKBACK_S: "3600" } as NodeJS.ProcessEnv)
         .lookbackS,
     ).toBe(172_800);
+    // The lookback also outlasts a long recheck.
+    expect(
+      resolveRk9CoordEscalatorConfig({ RK9_COORD_ESCALATE_RECHECK_S: "7200", RK9_COORD_ESCALATE_LOOKBACK_S: "3600" } as NodeJS.ProcessEnv)
+        .lookbackS,
+    ).toBe(1800 + 2 * 7200);
     expect(formatRk9CoordEscalationMessage(candidate(), 900)).toContain('--reason "stuck >15 min"');
   });
 });
@@ -456,6 +461,15 @@ if (!support.supported) {
     expect(event!.payload).toMatchObject({ mode: "shadow", escalation_id: row!.id });
     // Mode off does nothing at all.
     expect(await tick(at(T, 600), { mode: "off" })).toMatchObject({ mode: "off", candidates: 0 });
+    // Switch to enforce: the shadow row never reached the operator, so the
+    // unchanged jam gets a new round after the dedupe window.
+    expect(await tick(at(T, 2 * 60), { mode: "enforce" })).toMatchObject({ deduped: 1, nudged: 0 });
+    expect(await tick(at(T, 7 * 60), { mode: "enforce" })).toMatchObject({ nudged: 1 });
+    expect(await tick(at(T, 7 * 60 + 11), { mode: "enforce" })).toMatchObject({ escalated: 1 });
+    expect((await ledger(`lease:${leaseId}#%`)).map((r) => [r.mode, r.status])).toEqual([
+      ["shadow", "shadow"],
+      ["enforce", "reserved"],
+    ]);
   });
 
   it("escalates an unanswered blocker and ask-operator, but not answered ones or rk9claude's", async () => {

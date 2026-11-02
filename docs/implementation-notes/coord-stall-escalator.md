@@ -111,6 +111,8 @@ share a cap: pcp-headsup has its own file ledger.
   - the last escalation never reached the operator (`failed` or
     `suppressed`), so a failed send or the cap does not silence the jam for
     good;
+  - the last escalation was written in the other mode, for example `shadow`
+    before the switch to `enforce`;
   - the holder made progress after the last escalation and then stalled
     again (a new episode on the same lease).
 
@@ -122,6 +124,10 @@ share a cap: pcp-headsup has its own file ledger.
   that rk9claude has not acked within `recheckS` is shown on the board as
   `unacked`. The board stays fail-open: if this list fails, the field is
   null and the rest of the board still answers.
+- **Unacked rows.** A `reserved` row that rk9claude never acks (rk9claude
+  down) is not escalated again by the server: it stays `unacked` on the
+  board for 7 days and in `GET /escalations?status=reserved`, where
+  rk9claude's catch-up can still send it.
 - **Cap scope.** `cap.used` counts every company, because the cap is
   global. The count is the only cross-company value in a payload.
 
@@ -185,7 +191,7 @@ Telegram button.
 | `RK9_COORD_ESCALATE_RECHECK_S` | 600 | Time from the nudge to the escalation. Capped at half the dedupe window. |
 | `RK9_COORD_ESCALATE_DEDUPE_S` | 21600 | Quiet time per jam after an escalation. |
 | `RK9_COORD_ESCALATE_DAY_MAX` | 6 | Daily cap (0 suppresses everything). |
-| `RK9_COORD_ESCALATE_LOOKBACK_S` | 86400 | Older blocker and ask-operator events are ignored. At least 2 × `RK9_COORD_STUCK_S`. |
+| `RK9_COORD_ESCALATE_LOOKBACK_S` | 86400 | Older blocker and ask-operator events are ignored. At least 2 × `RK9_COORD_STUCK_S`, and at least the threshold plus two rechecks. |
 | `RK9_COORD_ESCALATE_INTERVAL_MS` | 60000 | Tick interval. The first tick runs one interval after startup. |
 
 No secret and no token is configured on the server.
