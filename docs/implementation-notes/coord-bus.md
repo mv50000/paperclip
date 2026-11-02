@@ -394,7 +394,7 @@ model is called.
   a word start, so `rk9-ai/task-runner` or `kiosk-frontend` pass.
 - The raw text is redacted before the collapse too, so a pattern that spans
   a tab or newline is caught.
-- Caps: `summary` 300, each payload text field 500 (`rationale` 1000), an
+- Caps: `summary` 300, each payload text field 500 (`rationale` 2000), an
   inbox `body` 500 characters. A cut ends with `…`.
 
 ### POST /events
@@ -407,6 +407,7 @@ required field is 400. Common optional fields: `client_event_id`,
 | type | Required | Optional | summary |
 |---|---|---|---|
 | `decision` | `title`, `rationale` | `issue`, `vault_note` (stored in `vault_path`) | title |
+| `decision-vaulted` | `ref_event_id`, `vault_path`, `commit` | `pushed` | `#<ref> -> <path> @<commit7>` (see "Decision vault") |
 | `deploy` | `app`, `sha` (7–40 hex), `result` (`started`, `success`, `failure`, `rolled_back`) | `issue` | `<app> <sha7> <result>` |
 | `handoff` | `issue`, `summary` | `to` | `-> <to>: <summary>` |
 | `blocker` | `issue`, `what` | | what |
@@ -452,6 +453,40 @@ producer is the heads-up and stall path of
   <question>"` and the fields above in `payload`. A consumer lists open asks
   with `rk9_coord_events_company_type_idx`. The answer is a follow-up event
   whose `ref_event_id` points at the ask.
+
+### Decision vault (RK9-631)
+
+`rk9 decision --vault` (claude-config `bin/rk9.d/decision`, note
+`docs/implementation-notes/rk9-decision-vault.md` there) writes a
+`decision` with `vault_note`, then the vault note through vault-mcp
+`decision_append`, then this follow-up. The journal stays append-only, so the
+follow-up is the "vault_pending=false" flag.
+
+`POST /events` with `type: "decision-vaulted"`:
+
+| Field | Rule |
+|---|---|
+| `ref_event_id` | required; a `decision` of this company (else 404 `rk9_coord_event_not_found`) |
+| `vault_path` | required; `^rk9/(projects\|areas\|resources\|archives\|tacit)/[a-z0-9][a-z0-9_.-]{0,119}\.md$`, equal to the decision's `vault_path` (else 409 `rk9_coord_vault_path_mismatch`) |
+| `commit` | required; 7–40 lower-case hex |
+| `pushed` | optional boolean, default true; false = committed locally, push pending |
+
+- One follow-up per decision: `dedupe_key = 'decision-vaulted:<ref id>'`
+  hits `rk9_coord_events_dedupe_uq`. A second post (any commit) is 200 with
+  the stored row and `duplicate: true`; concurrent posts store one row.
+- `issue` and `repo` are copied from the decision, so the follow-up reaches
+  the same delta readers. `summary` is `#<ref> -> <path> @<commit7>`, plus
+  ` (push pending)` when `pushed` is false.
+- Only the decision's own actor, or a caller whose rows are not `unverified`,
+  may post it (else 403 `rk9_coord_vault_owner_required`). A remote host token
+  or Grok cannot close someone else's decision.
+- The `decision` rationale cap is 2000 characters (was 1000), the CLI's
+  `--why` limit.
+
+`GET /events/vault-pending[?id=<event id>][&limit=1-100]` lists `decision`
+events with a `vault_path` and no follow-up, oldest first (default 20). It
+needs a resolved actor (400 `rk9_coord_actor_required`). An unverified caller
+sees only its own decisions. Answer: `{ events: [<event view>] }`.
 
 ### GET /events/delta
 

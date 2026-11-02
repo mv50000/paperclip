@@ -22,6 +22,8 @@ export const RK9_COORD_CLIENT_EVENT_TYPES = [
   "blocker",
   "done",
   "ask-operator",
+  // RK9-631: the follow-up of a `decision` whose vault note was written (rk9 decision --vault).
+  "decision-vaulted",
 ] as const;
 export type Rk9CoordClientEventType = (typeof RK9_COORD_CLIENT_EVENT_TYPES)[number];
 
@@ -108,6 +110,28 @@ export const rk9CoordAskOperatorSchema = z.object({
   reply_to: z.number().int().positive().optional(),
 });
 
+/**
+ * Vault note of `rk9 decision --vault` (RK9-631): an rk9/ PARA note, the same
+ * grammar as vault-mcp's decision_append. No `..` segment can match.
+ */
+export const RK9_COORD_DECISION_NOTE_PATTERN = /^rk9\/(projects|areas|resources|archives|tacit)\/[a-z0-9][a-z0-9_.-]{0,119}\.md$/;
+
+/**
+ * decision-vaulted (RK9-631): the vault note of decision `ref_event_id` is
+ * committed. The journal is append-only, so this follow-up event is the
+ * "vault_pending=false" flag. One per decision (server dedupe key).
+ */
+const decisionVaultedSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("decision-vaulted"),
+  ref_event_id: z.number().int().positive(),
+  vault_path: z.string().regex(RK9_COORD_DECISION_NOTE_PATTERN, "vault_path must be rk9/<section>/<name>.md"),
+  /** Vault commit that holds the section (short or full hash). */
+  commit: z.string().regex(/^[0-9a-f]{7,40}$/, "commit must be 7-40 lower-case hex characters"),
+  /** false: committed locally, the push is still pending (the vault-sync rebase pushes it later). */
+  pushed: z.boolean().optional(),
+});
+
 /** POST /companies/:companyId/rk9/coord/events */
 export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
   decisionSchema,
@@ -116,6 +140,7 @@ export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
   blockerSchema,
   doneSchema,
   rk9CoordAskOperatorSchema,
+  decisionVaultedSchema,
 ]);
 export type AppendRk9CoordEvent = z.infer<typeof appendRk9CoordEventSchema>;
 
@@ -146,6 +171,14 @@ export const rk9CoordDeltaQuerySchema = z.object({
   issue: rk9CoordIssueSchema.optional(),
 });
 export type Rk9CoordDeltaQuery = z.infer<typeof rk9CoordDeltaQuerySchema>;
+
+/** GET /companies/:companyId/rk9/coord/events/vault-pending query string (RK9-631). */
+export const rk9CoordVaultPendingQuerySchema = z.object({
+  /** One decision event id; omitted = every pending decision. */
+  id: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type Rk9CoordVaultPendingQuery = z.infer<typeof rk9CoordVaultPendingQuerySchema>;
 
 /** GET /companies/:companyId/rk9/coord/board query string. */
 export const rk9CoordBoardQuerySchema = z.object({
