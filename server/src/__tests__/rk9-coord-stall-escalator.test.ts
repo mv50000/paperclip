@@ -185,7 +185,18 @@ describe("stall escalation message and config", () => {
     expect(
       resolveRk9CoordEscalatorConfig({ RK9_COORD_ESCALATE_RECHECK_S: "7200", RK9_COORD_ESCALATE_LOOKBACK_S: "3600" } as NodeJS.ProcessEnv)
         .lookbackS,
-    ).toBe(1800 + 2 * 7200);
+    ).toBe(1800 + 21_600 + 120);
+    // The lookback outlasts stuck + dedupe + two ticks, so a failed or
+    // suppressed send can still escalate again.
+    expect(
+      resolveRk9CoordEscalatorConfig({ RK9_COORD_ESCALATE_LOOKBACK_S: "3600" } as NodeJS.ProcessEnv).lookbackS,
+    ).toBe(1800 + 21_600 + 120);
+    expect(
+      resolveRk9CoordEscalatorConfig({
+        RK9_COORD_ESCALATE_LOOKBACK_S: "3600",
+        RK9_COORD_ESCALATE_INTERVAL_MS: "600000",
+      } as NodeJS.ProcessEnv).lookbackS,
+    ).toBe(1800 + 21_600 + 1200);
     expect(formatRk9CoordEscalationMessage(candidate(), 900)).toContain('--reason "stuck >15 min"');
   });
 });
@@ -470,6 +481,11 @@ if (!support.supported) {
       ["shadow", "shadow"],
       ["enforce", "reserved"],
     ]);
+    // A mode flap (or a second server in the other mode) does not repeat the
+    // delivered jam: a row of each mode now exists after the last progress.
+    expect(await tick(at(T, 14 * 60), { mode: "shadow" })).toMatchObject({ deduped: 1, nudged: 0 });
+    expect(await tick(at(T, 14 * 60 + 11), { mode: "enforce" })).toMatchObject({ deduped: 1, nudged: 0 });
+    expect(await ledger(`lease:${leaseId}#%`)).toHaveLength(2);
   });
 
   it("escalates an unanswered blocker and ask-operator, but not answered ones or rk9claude's", async () => {
@@ -681,6 +697,15 @@ if (!support.supported) {
       await tick(at(T, 11), { mode: "shadow", dayMax: 100 });
       const [shadowRow] = await ledger(`lease:${shadowJam.leaseId}#%`);
       expect(shadowRow!.status).toBe("shadow");
+
+      // A suppressed shadow row is only a dry run: not on the board.
+      const shadowCapped = await stuckLease("prod:route-shadow-capped", T);
+      await tick(T, { mode: "shadow", dayMax: 0 });
+      await tick(at(T, 11), { mode: "shadow", dayMax: 0 });
+      const [shadowCappedRow] = await ledger(`lease:${shadowCapped.leaseId}#%`);
+      expect(shadowCappedRow).toMatchObject({ status: "suppressed", mode: "shadow" });
+      const board3 = await request(appFor(boardKey())).get(`${coord}/board`);
+      expect(board3.body.escalations_attention.map((r: { id: string }) => r.id)).not.toContain(shadowCappedRow!.id);
       const refused = await request(asSvc())
         .post(`${coord}/escalations/${shadowRow!.id}/ack`)
         .set("X-RK9-Actor", "rk9claude")

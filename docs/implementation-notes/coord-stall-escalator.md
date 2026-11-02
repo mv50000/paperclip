@@ -111,11 +111,11 @@ share a cap: pcp-headsup has its own file ledger.
   - the last escalation never reached the operator (`failed` or
     `suppressed`), so a failed send or the cap does not silence the jam for
     good;
-  - the last escalation was written in the other mode, for example `shadow`
-    before the switch to `enforce`. A mode switch therefore re-sends each
-    open jam once. Do not flap the mode, and give every server the same mode:
-    two servers with different modes alternate rows and repeat an unchanged
-    jam about every 12 h (the cap still holds);
+  - no escalation row of the CURRENT mode exists after the jam's last
+    progress, for example `shadow` before the switch to `enforce`. A mode
+    switch therefore sends each open jam once. A flap (shadow, enforce,
+    shadow) or two servers with different modes do not repeat a delivered
+    jam, and an unacked `reserved` row is not doubled by a mode round trip;
   - the holder made progress after the last escalation and then stalled
     again (a new episode on the same lease).
 
@@ -123,7 +123,7 @@ share a cap: pcp-headsup has its own file ledger.
   an unchanged jam, so a few open blockers cannot fill the daily cap.
 - **Visibility.** A failed or suppressed escalation never vanishes silently.
   It is listed in `GET /escalations` and in `escalations_attention` on
-  `GET /board` (a suppressed row shows `error: daily_cap`). A `reserved` row
+  `GET /board` (a suppressed enforce row shows `error: daily_cap`; a suppressed shadow row is a dry run and is not listed). A `reserved` row
   that rk9claude has not acked within `recheckS` is shown on the board as
   `unacked`. The board stays fail-open: if this list fails, the field is
   null and the rest of the board still answers.
@@ -132,7 +132,9 @@ share a cap: pcp-headsup has its own file ledger.
   board for 7 days and in `GET /escalations?status=reserved`, where
   rk9claude's catch-up can still send it.
 - **Cap scope.** `cap.used` counts every company, because the cap is
-  global. The count is the only cross-company value in a payload.
+  global. The count is the only cross-company value in a payload. The cap
+  window and the row time use the insert time (database clock after the
+  lock), not the tick start.
 
 ## The `escalated` event
 
@@ -194,7 +196,7 @@ Telegram button.
 | `RK9_COORD_ESCALATE_RECHECK_S` | 600 | Time from the nudge to the escalation. Capped at half the dedupe window. |
 | `RK9_COORD_ESCALATE_DEDUPE_S` | 21600 | Quiet time per jam after an escalation. |
 | `RK9_COORD_ESCALATE_DAY_MAX` | 6 | Daily cap (0 suppresses everything). |
-| `RK9_COORD_ESCALATE_LOOKBACK_S` | 86400 | Older blocker and ask-operator events are ignored. At least 2 × `RK9_COORD_STUCK_S`, and at least the threshold plus two rechecks. |
+| `RK9_COORD_ESCALATE_LOOKBACK_S` | 86400 | Older blocker and ask-operator events are ignored. At least 2 × `RK9_COORD_STUCK_S`, the threshold plus two rechecks, and the threshold plus the dedupe window plus two ticks (`RK9_COORD_ESCALATE_INTERVAL_MS`). |
 | `RK9_COORD_ESCALATE_INTERVAL_MS` | 60000 | Tick interval. The first tick runs one interval after startup. |
 
 No secret and no token is configured on the server.
