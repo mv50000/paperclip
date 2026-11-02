@@ -122,25 +122,30 @@ export function resolveRk9CoordEscalatorConfig(env: NodeJS.ProcessEnv = process.
   // RK9_COORD_STUCK_S (spec name); the lease engine's RK9_COORD_LEASE_STUCK_S is the fallback.
   const stuckS = intEnv(env.RK9_COORD_STUCK_S ?? env.RK9_COORD_LEASE_STUCK_S, RK9_COORD_STUCK_S_DEFAULT, 60, 7 * 86_400);
   const dedupeS = intEnv(env.RK9_COORD_ESCALATE_DEDUPE_S, RK9_COORD_ESCALATE_DEDUPE_S_DEFAULT, 600, 7 * 86_400);
+  const recheckS = Math.min(
+    intEnv(env.RK9_COORD_ESCALATE_RECHECK_S, RK9_COORD_ESCALATE_RECHECK_S_DEFAULT, 30, 86_400),
+    Math.floor(dedupeS / 2),
+  );
+  const intervalMs = intEnv(env.RK9_COORD_ESCALATE_INTERVAL_MS, RK9_COORD_ESCALATE_INTERVAL_MS_DEFAULT, 1_000, 3_600_000);
   return {
     mode: resolveRk9CoordEscalateMode(env),
     stuckS,
     // The recheck must end well inside the dedupe window, or a nudge would
     // expire before its recheck and nothing would ever escalate.
-    recheckS: Math.min(
-      intEnv(env.RK9_COORD_ESCALATE_RECHECK_S, RK9_COORD_ESCALATE_RECHECK_S_DEFAULT, 30, 86_400),
-      Math.floor(dedupeS / 2),
-    ),
+    recheckS,
     dedupeS,
     dayMax: intEnv(env.RK9_COORD_ESCALATE_DAY_MAX, RK9_COORD_ESCALATE_DAY_MAX_DEFAULT, 0, 100),
-    // An event must stay in the lookback past its threshold and its recheck.
+    // An event must stay in the lookback past its threshold and its recheck,
+    // and past the dedupe window plus two ticks, so that a failed or
+    // suppressed send can still escalate again (event candidates age out).
     lookbackS: Math.max(
       intEnv(env.RK9_COORD_ESCALATE_LOOKBACK_S, RK9_COORD_ESCALATE_LOOKBACK_S_DEFAULT, 3_600, 30 * 86_400),
       2 * stuckS,
-      stuckS + 2 * Math.min(intEnv(env.RK9_COORD_ESCALATE_RECHECK_S, RK9_COORD_ESCALATE_RECHECK_S_DEFAULT, 30, 86_400), Math.floor(dedupeS / 2)),
+      stuckS + 2 * recheckS,
+      stuckS + dedupeS + 2 * Math.ceil(intervalMs / 1000),
     ),
     graceS: resolveRk9CoordLeaseDeadGraceS(env),
-    intervalMs: intEnv(env.RK9_COORD_ESCALATE_INTERVAL_MS, RK9_COORD_ESCALATE_INTERVAL_MS_DEFAULT, 1_000, 3_600_000),
+    intervalMs,
   };
 }
 
@@ -333,11 +338,22 @@ const isoOf = (column: unknown) => sql<string | null>`to_char(${column} at time 
 const dateOf = (value: string | null | undefined) => (value ? new Date(value) : null);
 
 /** Newest ledger row whose key is `<prefix>#<n>`. */
-async function latestRow(db: Db | Tx, companyId: string, prefix: string): Promise<LedgerRow | null> {
+async function latestRow(
+  db: Db | Tx,
+  companyId: string,
+  prefix: string,
+  mode?: "shadow" | "enforce",
+): Promise<LedgerRow | null> {
   const [row] = await db
     .select()
     .from(rk9CoordEscalations)
-    .where(and(eq(rk9CoordEscalations.companyId, companyId), sql`starts_with(${rk9CoordEscalations.episodeKey}, ${`${prefix}#`})`))
+    .where(
+      and(
+        eq(rk9CoordEscalations.companyId, companyId),
+        sql`starts_with(${rk9CoordEscalations.episodeKey}, ${`${prefix}#`})`,
+        mode ? eq(rk9CoordEscalations.mode, mode) : undefined,
+      ),
+    )
     .orderBy(desc(rk9CoordEscalations.reservedAt))
     .limit(1);
   return row ?? null;
@@ -555,22 +571,28 @@ const ledgerMode = (config: Pick<Rk9CoordEscalatorConfig, "mode">): "shadow" | "
   config.mode === "enforce" ? "enforce" : "shadow";
 
 /**
- * May the jam escalate again after `last`? Never inside the dedupe window.
- * After it: only when `last` never reached the operator (failed, suppressed,
- * or written in another mode, e.g. shadow before the switch to enforce), or
- * when the holder made progress after it and stalled again.
+ * May the jam escalate again after `last` (newest row of any mode)? Never
+ * inside the dedupe window. After it, only when no row of the CURRENT mode
+ * exists after the jam's last progress (`lastOfMode` is the newest row of
+ * that mode), or when that row never reached the operator (failed or
+ * suppressed). A mode flap (shadow, enforce, shadow) or two servers with
+ * different modes therefore do not repeat a delivered jam, and an unacked
+ * `reserved` row is not doubled by a mode round trip.
  */
 export function rk9CoordMayEscalateAgain(
-  last: Pick<LedgerRow, "status" | "reservedAt" | "mode"> | null,
+  last: Pick<LedgerRow, "status" | "reservedAt"> | null,
+  lastOfMode: Pick<LedgerRow, "status" | "reservedAt"> | null,
   candidate: Pick<Rk9CoordStallCandidate, "progressAt">,
   now: Date,
   dedupeS: number,
-  mode: "shadow" | "enforce",
 ): boolean {
   if (!last) return true;
   if (now.getTime() - last.reservedAt.getTime() < dedupeS * 1000) return false;
-  if (last.status === "failed" || last.status === "suppressed" || last.mode !== mode) return true;
-  return candidate.progressAt !== null && candidate.progressAt.getTime() > last.reservedAt.getTime();
+  const covers =
+    lastOfMode !== null &&
+    (candidate.progressAt === null || lastOfMode.reservedAt.getTime() > candidate.progressAt.getTime());
+  if (!covers) return true;
+  return lastOfMode.status === "failed" || lastOfMode.status === "suppressed";
 }
 
 /**
@@ -605,7 +627,8 @@ async function writeNudge(db: Db, candidate: Rk9CoordStallCandidate, now: Date, 
       sql`select pg_advisory_xact_lock(hashtextextended(${`rk9_coord_escalations:nudge:${candidate.companyId}:${candidate.baseKey}`}, 0))`,
     );
     const last = await latestRow(tx, candidate.companyId, candidate.baseKey);
-    if (!rk9CoordMayEscalateAgain(last, candidate, now, config.dedupeS, ledgerMode(config))) return false;
+    const ofMode = await latestRow(tx, candidate.companyId, candidate.baseKey, ledgerMode(config));
+    if (!rk9CoordMayEscalateAgain(last, ofMode, candidate, now, config.dedupeS)) return false;
     const current = await latestRow(tx, candidate.companyId, `nudge:${candidate.baseKey}`);
     if (rk9CoordNudgeCoversRound(current, last, candidate, now, config.dedupeS)) return false;
     const key = await nextKey(tx, candidate.companyId, `nudge:${candidate.baseKey}`);
@@ -683,16 +706,21 @@ export interface Rk9CoordEscalationOutcome {
 async function escalate(
   db: Db,
   candidate: Rk9CoordStallCandidate,
-  now: Date,
+  tickNow: Date,
   config: Rk9CoordEscalatorConfig,
+  dbClock: boolean,
 ): Promise<Rk9CoordEscalationOutcome | null> {
   const publications: ActivityPublication[] = [];
   const mode = config.mode === "enforce" ? "enforce" : "shadow";
   const outcome = await db.transaction(async (tx) => {
     // One cap and one reservation order across every server and company.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${CAP_LOCK_KEY}, 0))`);
+    // The cap window and the row time use the insert time (after the lock
+    // wait), not the tick start; a test clock stays as injected.
+    const now = dbClock ? await dbNow(tx) : tickNow;
     const last = await latestRow(tx, candidate.companyId, candidate.baseKey);
-    if (!rk9CoordMayEscalateAgain(last, candidate, now, config.dedupeS, ledgerMode(config))) return null;
+    const ofMode = await latestRow(tx, candidate.companyId, candidate.baseKey, mode);
+    if (!rk9CoordMayEscalateAgain(last, ofMode, candidate, now, config.dedupeS)) return null;
     const nudge = await latestRow(tx, candidate.companyId, `nudge:${candidate.baseKey}`);
     if (!rk9CoordNudgeCoversRound(nudge, last, candidate, now, config.dedupeS)) return null;
     if (now.getTime() - nudge!.reservedAt.getTime() < config.recheckS * 1000) return null;
@@ -862,7 +890,8 @@ export async function runRk9CoordStallTick(db: Db, opts: Rk9CoordStallTickOption
   for (const candidate of candidates) {
     try {
       const last = await latestRow(db, candidate.companyId, candidate.baseKey);
-      if (!rk9CoordMayEscalateAgain(last, candidate, now, config.dedupeS, ledgerMode(config))) {
+      const ofMode = await latestRow(db, candidate.companyId, candidate.baseKey, ledgerMode(config));
+      if (!rk9CoordMayEscalateAgain(last, ofMode, candidate, now, config.dedupeS)) {
         result.deduped += 1;
         continue;
       }
@@ -875,7 +904,7 @@ export async function runRk9CoordStallTick(db: Db, opts: Rk9CoordStallTickOption
         result.waiting += 1;
         continue;
       }
-      const outcome = await escalate(db, candidate, now, config);
+      const outcome = await escalate(db, candidate, now, config, !opts.now);
       if (!outcome) result.deduped += 1;
       else if (outcome.status === "suppressed") result.suppressed += 1;
       else if (outcome.status === "shadow") result.shadow += 1;
@@ -988,7 +1017,8 @@ export function rk9CoordEscalationService(db: Db) {
 
   /**
    * Escalations that need a look on the board, from the last 7 days: failed
-   * sends, suppressed ones (daily cap: rk9claude never saw them), and reserved
+   * sends, suppressed ones in enforce mode (daily cap: rk9claude never saw
+   * them; a suppressed shadow row is only a dry run), and reserved
    * rows that rk9claude has not acked within recheckS.
    */
   async function attention(companyId: string, now: Date = new Date(), recheckS = RK9_COORD_ESCALATE_RECHECK_S_DEFAULT) {
@@ -1000,7 +1030,7 @@ export function rk9CoordEscalationService(db: Db) {
           eq(rk9CoordEscalations.companyId, companyId),
           ne(rk9CoordEscalations.reason, RK9_COORD_NUDGE_REASON),
           sql`${rk9CoordEscalations.reservedAt} > ${isoSql(new Date(now.getTime() - 7 * 86_400_000))}`,
-          sql`(${rk9CoordEscalations.status} in ('failed', 'suppressed') or (${rk9CoordEscalations.status} = 'reserved' and ${rk9CoordEscalations.reservedAt} <= ${isoSql(new Date(now.getTime() - recheckS * 1000))}))`,
+          sql`(${rk9CoordEscalations.status} = 'failed' or (${rk9CoordEscalations.status} = 'suppressed' and ${rk9CoordEscalations.mode} = 'enforce') or (${rk9CoordEscalations.status} = 'reserved' and ${rk9CoordEscalations.reservedAt} <= ${isoSql(new Date(now.getTime() - recheckS * 1000))}))`,
         ),
       )
       .orderBy(desc(rk9CoordEscalations.reservedAt))
