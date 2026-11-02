@@ -34,6 +34,7 @@ runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
 | `e2e.yml` | `e2e` | `workflow_dispatch` |
 | `release-smoke.yml` | `smoke` | `workflow_dispatch`, `workflow_call` |
 | `rust-cache-warm.yml` (vain forkissa, RK9-637) | `warm` | push masteriin (polut `packages/paperclip-runner/runner/**`, `rust-toolchain.toml`, `rust-cache-warm.yml`), `workflow_dispatch`, päivittäinen `schedule` |
+| `pnpm-cache-warm.yml` (vain forkissa, RK9-644) | `warm` | push masteriin (polut `pnpm-lock.yaml`, `pnpm-cache-warm.yml`), `workflow_dispatch`, päivittäinen `schedule` |
 
 `deploy-dev.yml` poistettiin, ks. [Poistettu: deploy-dev.yml](#poistettu-deploy-devyml).
 
@@ -304,6 +305,24 @@ gh api -X DELETE "repos/mv50000/paperclip/actions/runners/${ID:?}"
 
 `ai-auto-merge.yml` dispatchasi `deploy-dev.yml`:n jokaisen mergen jälkeen. Dispatch poistettiin,
 ja jobin `actions`-oikeus laskettiin arvosta `write` arvoon `read`.
+
+## pnpm-store-cache (RK9-644)
+
+- PR-workflow ei käytä `setup-node`n `cache: pnpm` -asetusta, koska se tallensi jokaiselle PR-refille
+  oman ~710 M entryn ja täytti repon 10 G:n cache-rajan (7,8 G, 9 entryä 2.11.2026).
+- PR-jobit palauttavat storen `actions/cache/restore`lla (SHA-kiinnitetty). Avain on
+  `pnpm-store-<OS>-<arch>-<hash(pnpm-lock.yaml)>`, varalla saman OS:n ja arkkitehtuurin etuliite.
+- `pnpm-cache-warm.yml` tallentaa entryn masterin scopeen (`actions/cache`, tallennus vain
+  avainosuman puuttuessa). Se ajaa pushissa masteriin kun `pnpm-lock.yaml` muuttuu, päivittäin
+  ja käsin. Päivittäinen ajo pitää entryn elossa (GitHub poistaa 7 päivää lukemattoman cachen).
+- Jos `vars.CI_RUNNER` otetaan käyttöön (RK9-350), warm-ajo ja fork-PR:t voivat ajaa eri
+  käyttäjällä. Store-polku sisältää kotihakemiston ja kuuluu cachen versioon, joten fork-PR ei
+  osu cacheen. Tarkista polku ennen kytkentää.
+- `storybook-visual.yml` tallentaa yhä oman `cache: pnpm` -entrynsä labelatuilla PR:illä.
+- Pidä avain ja polku samoina `pr.yml`:ssä ja `pnpm-cache-warm.yml`:ssä.
+- Vanhat PR-refien entryt poistetaan mergen jälkeen: `gh cache delete <id> -R mv50000/paperclip`
+  (vain `refs/pull/*`, ei masterin entryjä).
+- Palautus: palauta `cache: pnpm` setup-nodeen ja poista restore-askeleet sekä warm-workflow.
 
 ## Rust-build-cache (RK9-637)
 

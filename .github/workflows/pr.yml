@@ -153,7 +153,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
+
+      # --- RK9 Custom (RK9-644) --- PRs restore the pnpm store but never save it.
+      # setup-node `cache: pnpm` saved a ~710 MB entry per PR ref. The shared entry
+      # is saved from master by .github/workflows/pnpm-cache-warm.yml; keep the key
+      # identical in both files.
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -239,7 +254,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
+
+      # --- RK9 Custom (RK9-644) --- PRs restore the pnpm store but never save it.
+      # setup-node `cache: pnpm` saved a ~710 MB entry per PR ref. The shared entry
+      # is saved from master by .github/workflows/pnpm-cache-warm.yml; keep the key
+      # identical in both files.
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -302,7 +332,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
+
+      # --- RK9 Custom (RK9-644) --- PRs restore the pnpm store but never save it.
+      # setup-node `cache: pnpm` saved a ~710 MB entry per PR ref. The shared entry
+      # is saved from master by .github/workflows/pnpm-cache-warm.yml; keep the key
+      # identical in both files.
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -390,7 +435,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
+
+      # --- RK9 Custom (RK9-644) --- PRs restore the pnpm store but never save it.
+      # setup-node `cache: pnpm` saved a ~710 MB entry per PR ref. The shared entry
+      # is saved from master by .github/workflows/pnpm-cache-warm.yml; keep the key
+      # identical in both files.
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -426,7 +486,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
+
+      # --- RK9 Custom (RK9-644) --- PRs restore the pnpm store but never save it.
+      # setup-node `cache: pnpm` saved a ~710 MB entry per PR ref. The shared entry
+      # is saved from master by .github/workflows/pnpm-cache-warm.yml; keep the key
+      # identical in both files.
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -503,7 +578,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
+
+      # --- RK9 Custom (RK9-644) --- PRs restore the pnpm store but never save it.
+      # setup-node `cache: pnpm` saved a ~710 MB entry per PR ref. The shared entry
+      # is saved from master by .github/workflows/pnpm-cache-warm.yml; keep the key
+      # identical in both files.
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
