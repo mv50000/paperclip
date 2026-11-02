@@ -71,6 +71,8 @@ export type Rk9CoordDeadReleaseReason = (typeof RK9_COORD_DEAD_RELEASE_REASONS)[
 
 /** Actor kinds that may break a LIVE holder's lease (parent decision on RK9-627, ADR Q5). */
 export const RK9_COORD_LEASE_BREAK_KINDS: readonly string[] = ["operator", "rk9claude"];
+/** Actor kinds that may not acquire, wait on, renew, release or break any lease (RK9-633). */
+export const RK9_COORD_LEASE_DENIED_KINDS: readonly string[] = ["grok"];
 
 const SWEEP_BATCH = 500;
 /** Up to 50 000 active leases per sweep; the rest wait for the next tick. */
@@ -348,12 +350,24 @@ function requireResource(value: string): Rk9CoordLeaseResource {
 }
 
 /**
+ * RK9-633: the grok service may acquire, wait on, renew, release or break no
+ * lease of any prefix. `remote` keeps the ADR rule: soft prefixes are allowed,
+ * hard gates are not.
+ */
+export function assertRk9CoordLeaseKind(actor: Rk9CoordResolvedActor) {
+  if (RK9_COORD_LEASE_DENIED_KINDS.includes(actor.kind)) {
+    throw coordError(403, "rk9_coord_lease_kind_not_allowed", `A ${actor.kind} actor cannot use leases`);
+  }
+}
+
+/**
  * Hard-gate leases (prod, migrate, host) need verified or attributed trust.
  * An agent-key actor is `attributed` but can name any running sibling run of
  * its agent (ADR open point, RK9-621), so an agent_run actor must hold and
  * change a hard-gate lease with a run JWT (`verified`).
  */
 export function assertRk9CoordLeaseTrust(actor: Rk9CoordResolvedActor, resource: Rk9CoordLeaseResource) {
+  assertRk9CoordLeaseKind(actor);
   if (!resource.hardGate) return;
   if (!rk9CoordTrustCanHoldHardGate(actor.trust)) {
     throw coordError(
@@ -913,6 +927,7 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     parsed: Rk9CoordLeaseResource,
     fencingToken: number | null | undefined,
   ) {
+    assertRk9CoordLeaseKind(caller.actor);
     const [lease] = await ctx.tx
       .select()
       .from(rk9CoordLeases)

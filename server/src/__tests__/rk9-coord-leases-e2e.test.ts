@@ -507,6 +507,55 @@ if (!support.supported) {
     expect(remote.body.code).toBe("rk9_coord_lease_trust_insufficient");
   });
 
+  it("denies grok every lease of any prefix and keeps remote on soft prefixes only (RK9-633)", async () => {
+    const grokToken: Rk9CoordTokenPrincipal = { tokenId: "t-grok", companyId, principalKind: "service", principalName: "grok" };
+    const grokApp = appFor(none, grokToken);
+    const asGrok = (path: string, body: Record<string, unknown>) =>
+      request(grokApp).post(`${base()}${path}`).set("X-RK9-Actor", "grok").send(body);
+
+    for (const resource of ["repo:grok-repo@main", "vault:rk9/areas/grok.md", "prod:grok-app"]) {
+      for (const wait of [false, true]) {
+        const res = await asGrok("/acquire", { resource, ttl_s: 600, wait });
+        expect(res.status, `${resource} wait=${wait}`).toBe(403);
+        expect(res.body.code).toBe("rk9_coord_lease_kind_not_allowed");
+      }
+    }
+
+    // A live holder on repo:, then grok tries break, renew and release on it.
+    const held = await acquire(cc("grok-target"), { resource: "repo:grok-target@main", ttl_s: 600 });
+    expect(held.body.granted).toBe(true);
+    const brk = await asGrok("/break", { resource: "repo:grok-target@main", reason: "grok wants it" });
+    expect(brk.status).toBe(403);
+    expect(brk.body.code).toBe("rk9_coord_lease_kind_not_allowed");
+    const renew = await asGrok(`/${held.body.lease_id}/renew`, { fencing_token: held.body.fencing_token, ttl_s: 600 });
+    expect(renew.status).toBe(403);
+    expect(renew.body.code).toBe("rk9_coord_lease_kind_not_allowed");
+    const release = await asGrok(`/${held.body.lease_id}/release`, {
+      resource: "repo:grok-target@main",
+      fencing_token: held.body.fencing_token,
+    });
+    expect(release.status).toBe(403);
+    expect(release.body.code).toBe("rk9_coord_lease_kind_not_allowed");
+    expect(await subtypes("repo:grok-target@main")).toEqual(["grant"]);
+    expect(await subtypes("repo:grok-repo@main")).toEqual([]);
+
+    // remote keeps the ADR rule: soft prefixes yes, hard gates no.
+    const hostToken: Rk9CoordTokenPrincipal = { tokenId: "t-host2", companyId, principalKind: "host", principalName: "mv-laptop" };
+    const remoteApp = appFor(none, hostToken);
+    const remoteRepo = await request(remoteApp)
+      .post(`${base()}/acquire`)
+      .set("X-RK9-Actor", "remote:mv-laptop")
+      .send({ resource: "repo:remote-repo@main", ttl_s: 600 });
+    expect(remoteRepo.status).toBe(200);
+    expect(remoteRepo.body.granted).toBe(true);
+    const remoteProd = await request(remoteApp)
+      .post(`${base()}/acquire`)
+      .set("X-RK9-Actor", "remote:mv-laptop")
+      .send({ resource: "prod:remote-app", ttl_s: 600 });
+    expect(remoteProd.status).toBe(403);
+    expect(remoteProd.body.code).toBe("rk9_coord_lease_trust_insufficient");
+  });
+
   it("lists leases with holder phase and queue, filtered by prefix and holder", async () => {
     const app = appFor(boardKey());
     await db

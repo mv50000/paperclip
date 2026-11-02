@@ -269,6 +269,7 @@ Error codes in the JSON `code` field:
 | `rk9_coord_lease_trust_insufficient` | 403 | an `unverified` actor asked for a hard-gate lease (RK9-627) |
 | `rk9_coord_lease_run_jwt_required` | 403 | an agent-key (`attributed`) agent_run actor asked for or changed a hard-gate lease; it needs its run JWT (RK9-627) |
 | `rk9_coord_break_requires_operator` | 403 | break of a live holder's lease by a kind other than `operator` or `rk9claude` (RK9-627) |
+| `rk9_coord_lease_kind_not_allowed` | 403 | a `grok` actor asked to acquire, wait on, renew, release or break a lease of any prefix (RK9-633 rule in the RK9-627 engine) |
 | `rk9_coord_lease_break_reason_required` | 422 | break reason is empty after redaction (RK9-627) |
 | `rk9_coord_lease_fencing_required` | 422 | release of a hard-gate lease without its `fencing_token` (RK9-627) |
 

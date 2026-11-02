@@ -60,6 +60,12 @@ Hard-gate prefixes are `prod`, `migrate` and `host`.
 
 ## Trust
 
+- Actor kind `grok` may not acquire, wait on, renew, release or break any
+  lease, of any prefix, `repo:` and `vault:` included. It gets 403
+  `rk9_coord_lease_kind_not_allowed` (RK9-633). Grok reaches the bus only
+  through the vault-mcp proxy, which refuses lease calls itself; the server
+  check is the backstop. Kind `remote` keeps the ADR rule: soft prefixes are
+  allowed, hard gates are not.
 - A hard-gate lease needs `verified` or `attributed` trust. An unverified
   actor gets 403 `rk9_coord_lease_trust_insufficient`.
 - An `agent_run` actor needs a run JWT (`verified`) to acquire, renew or
