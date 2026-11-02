@@ -704,6 +704,8 @@ export function rk9CoordJournalService(db: Db) {
         );
       }
       const concerns: SQL[] = [inArray(rk9CoordEvents.type, [...RK9_COORD_GLOBAL_EVENT_TYPES])];
+      // RK9 Custom (RK9-629): rk9claude sends the escalation Telegram, the operator reads it.
+      if (actor.kind === "rk9claude" || actor.kind === "operator") concerns.push(eq(rk9CoordEvents.type, "escalated"));
       if (repos.length > 0) concerns.push(inArray(rk9CoordEvents.repo, repos));
       if (issues.length > 0) concerns.push(inArray(rk9CoordEvents.issue, issues));
       if (resources.length > 0) {

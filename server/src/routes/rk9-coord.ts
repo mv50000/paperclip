@@ -20,6 +20,8 @@ import { rk9CoordInboxRoutes } from "./rk9-coord-inbox.js";
 import { rk9CoordBoardRoutes } from "./rk9-coord-board.js";
 // RK9 Custom (RK9-627): lease engine sub-router
 import { rk9CoordLeaseRoutes } from "./rk9-coord-leases.js";
+// RK9 Custom (RK9-629): stall escalation report and ack
+import { rk9CoordEscalationRoutes } from "./rk9-coord-escalations.js";
 
 export type Rk9CoordRouteOptions = Rk9CoordActorOptions & {
   /** Presence clock/env injection (tests). RK9-625. */
@@ -52,6 +54,7 @@ export function rk9CoordRoutes(db: Db, opts: Rk9CoordRouteOptions = {}) {
   coord.use("/inbox", rk9CoordInboxRoutes(db));    // journal-inbox-api (RK9-626)
   coord.use("/leases", rk9CoordLeaseRoutes(db));   // lease-engine (RK9-627)
   coord.use("/board", rk9CoordBoardRoutes(db));    // journal-inbox-api (RK9-626)
+  coord.use("/escalations", rk9CoordEscalationRoutes(db)); // stall-escalator (RK9-629)
   // --- end sibling mount points ---
 
   coord.use((_req, res) => {

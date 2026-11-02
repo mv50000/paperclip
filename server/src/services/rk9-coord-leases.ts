@@ -1022,7 +1022,11 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
    *   sweeper's path (expire / dead_release with the liveness reason) instead.
    * Both paths promote the next live waiter.
    */
-  async function breakLease(companyId: string, caller: Rk9CoordLeaseCaller, input: { resource: string; reason: string }) {
+  async function breakLease(
+    companyId: string,
+    caller: Rk9CoordLeaseCaller,
+    input: { resource: string; reason: string; leaseId?: string | null },
+  ) {
     const parsed = requireResource(input.resource);
     const reason = toRk9CoordLine(input.reason, 300);
     if (!reason) throw coordError(422, "rk9_coord_lease_break_reason_required", "break needs a non-empty reason");
@@ -1031,6 +1035,15 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     return inTx(companyId, authorFor(caller), parsed.resource, async (ctx) => {
       const lease = await selectActiveLease(ctx.tx, companyId, parsed.resource);
       if (!lease) throw coordError(404, "rk9_coord_lease_not_found", "No active lease on this resource");
+      // RK9 Custom (RK9-629): a break aimed at one lease (the Telegram
+      // escalation button) never breaks the lease of a later holder.
+      if (input.leaseId && lease.id !== input.leaseId.toLowerCase()) {
+        throw coordError(
+          409,
+          "rk9_coord_lease_changed",
+          "The resource now has a different lease; the escalated lease is already released",
+        );
+      }
       const holder = (await loadActors(ctx.tx, [lease.holderActorId])).get(lease.holderActorId);
       const holderRef = holder?.actorRef ?? "unknown";
       const expired = isExpired(lease, ctx.now);

@@ -6,7 +6,8 @@
 //   POST /acquire            { resource, ttl_s, reason, wait } -> granted | queued; 409 when held and wait=false
 //   POST /:leaseId/renew     { fencing_token, ttl_s }          -> { expires_at }; 409 = lost
 //   POST /:leaseId/release   { resource, fencing_token }       -> 200, idempotent; 409 = lost
-//   POST /break              { resource, reason }              -> operator/rk9claude for a live holder
+//   POST /break              { resource, reason, lease_id? }   -> operator/rk9claude for a live holder;
+//                                                                 409 rk9_coord_lease_changed (RK9-629)
 //   POST /validate           { resource, fencing_token }       -> 200 valid; 409 stale
 //   GET  /                   ?prefix=&holder=&resource=        -> { leases: [...] }
 //   GET  /status             ?resource=                        -> one resource
@@ -94,7 +95,13 @@ export function rk9CoordLeaseRoutes(db: Db, opts: Rk9CoordLeaseServiceOptions = 
   router.post("/break", validate(breakRk9CoordLeaseSchema), async (req, res, next) => {
     try {
       const input = req.body as BreakRk9CoordLease;
-      res.json(await leases.breakLease(companyIdOf(req), callerOf(req), input));
+      res.json(
+        await leases.breakLease(companyIdOf(req), callerOf(req), {
+          resource: input.resource,
+          reason: input.reason,
+          leaseId: input.lease_id ?? null, // RK9 Custom (RK9-629)
+        }),
+      );
     } catch (err) {
       next(err);
     }

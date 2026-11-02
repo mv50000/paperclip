@@ -6,7 +6,7 @@
 //   POST /leases/acquire       { resource, ttl_s, reason, wait }
 //   POST /leases/:id/renew     { fencing_token, ttl_s }
 //   POST /leases/:id/release   { resource, fencing_token, client_event_id }
-//   POST /leases/break         { resource, reason }
+//   POST /leases/break         { resource, reason, lease_id? }
 // Unknown keys (e.g. the CLI's client_event_id) are stripped, not rejected.
 //
 // The resource is a plain string here on purpose: the service checks the
@@ -111,6 +111,10 @@ export type ReleaseRk9CoordLease = z.infer<typeof releaseRk9CoordLeaseSchema>;
 export const breakRk9CoordLeaseSchema = z.object({
   resource: resourceSchema,
   reason: z.string().trim().min(1).max(2_000),
+  // RK9 Custom (RK9-629): break only this lease. A different active lease on
+  // the resource is 409 rk9_coord_lease_changed (a late Telegram tap cannot
+  // break a new holder).
+  lease_id: z.string().uuid().optional(),
 });
 export type BreakRk9CoordLease = z.infer<typeof breakRk9CoordLeaseSchema>;
 

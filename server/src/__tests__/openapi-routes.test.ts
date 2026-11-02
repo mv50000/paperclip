@@ -100,6 +100,8 @@ const RK9_FORK_ROUTE_FILES = new Set([
   "rk9-coord-inbox.ts",
   // RK9-627: coord lease sub-router (/rk9/coord/leases).
   "rk9-coord-leases.ts",
+  // RK9-629: coord stall escalation report and ack (/rk9/coord/escalations).
+  "rk9-coord-escalations.ts",
   "ses-inbound.ts",
   "slack-interactions.ts",
   "unsubscribe.ts",
