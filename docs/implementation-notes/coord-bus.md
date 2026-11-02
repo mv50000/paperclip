@@ -415,6 +415,7 @@ required field is 400. Common optional fields: `client_event_id`,
 | `done` | `issue` | `pr` (number or URL) | `PR #<n>` |
 | `ask-operator` | `question`, `urgency` | `options`, `issue`, `reply_to` | `[<urgency>] <question>` |
 | `headsup` | `text`, `class`, `observation_key` | `explanation`, `class_rule`, `session_id`, `issue` | `[Heads up, varmistamaton] <text>` |
+| `break-glass` | `resource`, `reason`, `gate` | `issue` | `BREAK-GLASS <gate> <resource>: <reason>` |
 
 - Answer: 201 `{ event, duplicate: false }`. A repeat of a stored
   `client_event_id` is 200 `{ event, duplicate: true }` with the stored row.
@@ -541,6 +542,24 @@ reports an observation; the client side lives in claude-config.
   delivers it locally. The board lists it in recent events with the labelled
   summary; the board leaves `explanation` out of the payload.
 
+### break-glass (RK9-647)
+
+A record that someone bypassed a gate (from [RK9-632](/RK9/issues/RK9-632)).
+
+- Body: `resource` (lease resource grammar, e.g. `prod:<app>`), `reason`
+  (1–1000 raw characters, stored redacted and one line), `gate`
+  (`deploy | tag | migrate | host | repo`), optional `issue`, plus the
+  common fields.
+- Only kinds `cc`, `operator` and `rk9claude` may post it. Every other kind
+  (`grok`, `remote`, `agent_run`, `worktree`, `headless`, `orch`) gets 403
+  `rk9_coord_event_kind_not_allowed`; the check runs before body validation.
+- `summary`: `BREAK-GLASS <gate> <resource>: <reason>`, at most 300.
+  `payload`: `{ resource, gate, reason }`. The `resource` column is set too.
+  `trust` is the caller's journal trust.
+- It is a record only and changes no lease state. An operator lease break
+  stays `POST /leases/break`.
+- The delta shows it to every actor, like `deploy`.
+
 ### GET /events/delta
 
 Returns the events after the caller's cursor that concern it:
@@ -548,7 +567,7 @@ Returns the events after the caller's cursor that concern it:
 - events whose `repo` is the actor's repo, or whose `issue` is the actor's
   issue (the presence row, or the issue in `worktree:<issue>`);
 - events whose `resource` is a lease the actor holds now;
-- every `deploy` event;
+- every `deploy` and `break-glass` event;
 - `ask-operator` events by the rule below (RK9-647);
 - never the actor's own events;
 - never a `headsup` event, to any actor (RK9-647).

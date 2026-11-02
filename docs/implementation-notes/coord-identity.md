@@ -145,7 +145,9 @@ rk9claude | grok | operator`.
   It returns every `ask-operator` to actor kinds `cc` and `operator`; other
   kinds get only their own questions (an `agent_run` also those of another
   run of the same agent) and the answers to them. A `headsup` row is always
-  `unverified`. Details: `coord-bus.md`.
+  `unverified`. `break-glass` is a client type for kinds `cc`, `operator`
+  and `rk9claude` only; it is a record and changes no lease state.
+  Details: `coord-bus.md`.
 - Route prefix: `/api/companies/:companyId/rk9/coord/*`.
 - Coord token: `rk9_coord_` + 43 base64url characters (32 random bytes).
 - Reserved header `X-RK9-Coord-Token`: the server never reads it. The HTTP
@@ -264,7 +266,7 @@ Error codes in the JSON `code` field:
 | `rk9_coord_inbox_body_empty` | 400 | message body is empty after redaction (RK9-626) |
 | `rk9_coord_inbox_target_not_allowed` | 422 | agent message aimed at an Agent Chat conversation issue (RK9-626) |
 | `rk9_coord_inbox_issue_paused` | 409 | agent message aimed at a paused issue tree (RK9-626) |
-| `rk9_coord_event_kind_not_allowed` | 403 | a `grok` actor posts an event type other than `blocker`, `handoff` or `ask-operator` (also a server-only type) (RK9-647, additive) |
+| `rk9_coord_event_kind_not_allowed` | 403 | a `grok` actor posts an event type other than `blocker`, `handoff` or `ask-operator` (also a server-only type), or a kind other than `cc`, `operator` or `rk9claude` posts `break-glass` (RK9-647, additive) |
 | `rk9_coord_secret_in_field` | 422 | a verbatim field (`to`, `repo`, `app`, `vault_note`, `client_event_id`) looks like a secret (RK9-626) |
 | `rk9_coord_client_event_conflict` | 409 | `client_event_id` already stored by another actor (RK9-626) |
 | `rk9_coord_lease_not_found` | 404 | no such lease, or no active lease to break (RK9-627); the rk9 CLI dead-letters a spooled release on this code |

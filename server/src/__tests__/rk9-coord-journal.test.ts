@@ -301,6 +301,62 @@ if (!support.supported) {
     }
   });
 
+  it("records break-glass for cc, operator and rk9claude only, visible in every delta (RK9-647)", async () => {
+    const cid = await newCompany();
+    const wt = "worktree:RKG-1";
+    const wtDelta = () => request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", wt);
+    expect((await wtDelta()).status).toBe(204);
+    const body = { type: "break-glass", resource: "prod:bk", gate: "deploy", reason: "hotfix\nwhile CI is down" };
+    const cc = await post(cid, "cc:paperclip-01:sess-bg", body);
+    expect(cc.status).toBe(201);
+    expect(cc.body.event).toMatchObject({
+      type: "break-glass",
+      actor_kind: "cc",
+      trust: "attributed",
+      resource: "prod:bk",
+      summary: "BREAK-GLASS deploy prod:bk: hotfix while CI is down",
+      payload: { resource: "prod:bk", gate: "deploy", reason: "hotfix while CI is down" },
+    });
+    const rk9claude = await request(appFor(none, { tokenId: "t-rc", companyId: cid, principalKind: "service", principalName: "rk9claude" }))
+      .post(`${base(cid)}/events`)
+      .set("X-RK9-Actor", "rk9claude")
+      .send({ ...body, gate: "host", resource: "host:pve1", reason: "node down" });
+    expect(rk9claude.status).toBe(201);
+    expect(rk9claude.body.event.trust).toBe("verified");
+    // Denied kinds get 403, also with an invalid body (the gate runs first).
+    for (const actorId of ["worktree:RKG-2", "headless:3f9e2a1b-aaaa", "orch:wave"]) {
+      const denied = await post(cid, actorId, body);
+      expect(denied.status, actorId).toBe(403);
+      expect(denied.body.code).toBe("rk9_coord_event_kind_not_allowed");
+    }
+    expect((await post(cid, "worktree:RKG-2", { type: "break-glass" })).status).toBe(403);
+    for (const [principal, actorId] of [
+      [{ tokenId: "t-g", companyId: cid, principalKind: "service", principalName: "grok" }, "grok"],
+      [hostToken(cid), "remote:mv-laptop"],
+    ] as const) {
+      const denied = await request(appFor(none, principal as Rk9CoordTokenPrincipal))
+        .post(`${base(cid)}/events`)
+        .set("X-RK9-Actor", actorId)
+        .send(body);
+      expect(denied.status, actorId).toBe(403);
+      expect(denied.body.code).toBe("rk9_coord_event_kind_not_allowed");
+    }
+    // An allowed kind with a missing reason, a bad gate or a bad resource is 400.
+    for (const bad of [
+      { type: "break-glass", resource: "prod:bk", gate: "deploy" },
+      { ...body, reason: "   " },
+      { ...body, gate: "lease" },
+      { ...body, resource: "bk" },
+      { ...body, resource: "prod:../x" },
+    ]) {
+      expect((await post(cid, "cc:paperclip-01:sess-bg", bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+    // Every actor sees it, like deploy.
+    const delta = await wtDelta();
+    expect(delta.status).toBe(200);
+    expect(delta.body.events.map((event: { type: string }) => event.type)).toEqual(["break-glass", "break-glass"]);
+  });
+
   it("overwrites the ask-operator actor with the resolved caller", async () => {
     const res = await post(companyId, "worktree:RK9-626", {
       type: "ask-operator",

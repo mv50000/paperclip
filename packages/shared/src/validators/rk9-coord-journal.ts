@@ -8,6 +8,7 @@
 // raw-input caps. Contract: docs/implementation-notes/coord-bus.md.
 import { z } from "zod";
 import { RK9_COORD_ACTOR_ID_MAX_LENGTH } from "../rk9-coord.js";
+import { parseRk9CoordLeaseResource, RK9_COORD_LEASE_RESOURCE_MAX } from "./rk9-coord-leases.js";
 
 /** Issue identifier, the same grammar as the worktree actor id (`RK9-626`). */
 export const RK9_COORD_ISSUE_PATTERN = /^[A-Z][A-Z0-9]{1,9}-[0-9]{1,7}$/;
@@ -26,6 +27,8 @@ export const RK9_COORD_CLIENT_EVENT_TYPES = [
   "decision-vaulted",
   // RK9-647: heads-up from any session (RK9-636). Always stored unverified.
   "headsup",
+  // RK9-647 (from RK9-632): a break-glass record; cc, operator and rk9claude only.
+  "break-glass",
 ] as const;
 export type Rk9CoordClientEventType = (typeof RK9_COORD_CLIENT_EVENT_TYPES)[number];
 
@@ -157,6 +160,26 @@ export const rk9CoordHeadsupSchema = z.object({
   issue: rk9CoordIssueSchema.optional(),
 });
 
+/** Gate a break-glass record bypassed (RK9-632 naming). */
+export const RK9_COORD_BREAK_GLASS_GATES = ["deploy", "tag", "migrate", "host", "repo"] as const;
+
+/**
+ * break-glass (RK9-647, from RK9-632): a record that someone bypassed a gate
+ * on `resource`. It changes no lease state; an operator lease break stays
+ * POST /leases/break. Only kinds cc, operator and rk9claude may post it.
+ */
+export const rk9CoordBreakGlassSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("break-glass"),
+  resource: z
+    .string()
+    .max(RK9_COORD_LEASE_RESOURCE_MAX)
+    .refine((value) => parseRk9CoordLeaseResource(value) !== null, "resource must be a lease resource like prod:<app>"),
+  reason: freeText(1000),
+  gate: z.enum(RK9_COORD_BREAK_GLASS_GATES),
+  issue: rk9CoordIssueSchema.optional(),
+});
+
 /** POST /companies/:companyId/rk9/coord/events */
 export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
   decisionSchema,
@@ -167,6 +190,7 @@ export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
   rk9CoordAskOperatorSchema,
   decisionVaultedSchema,
   rk9CoordHeadsupSchema,
+  rk9CoordBreakGlassSchema,
 ]);
 export type AppendRk9CoordEvent = z.infer<typeof appendRk9CoordEventSchema>;
 
