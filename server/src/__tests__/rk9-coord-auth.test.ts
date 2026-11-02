@@ -7,7 +7,12 @@ import type { Db } from "@paperclipai/db";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import type { Rk9CoordAgentRun, Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
-import { resolveRk9CoordBoardHost, resolveRk9CoordBoardKeyIds } from "../middleware/rk9-coord-actor.js";
+import {
+  resolveRk9CoordBoardHost,
+  resolveRk9CoordBoardKeyIds,
+  resolveRk9CoordOperatorUserIds,
+  rk9CoordOperatorUserAllowed,
+} from "../middleware/rk9-coord-actor.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
 
 const RK9 = "11111111-1111-4111-8111-111111111111";
@@ -62,6 +67,7 @@ function makeApp(
   actor: Actor,
   principal?: Rk9CoordTokenPrincipal,
   boardKeyIds: readonly string[] | null = null,
+  operatorUserIds: readonly string[] | null = null,
 ) {
   const findAgentRun = vi.fn(async (runId: string) => runs[runId] ?? null);
   const app = express();
@@ -71,7 +77,7 @@ function makeApp(
     if (principal) req.rk9CoordPrincipal = principal;
     next();
   });
-  app.use("/api", rk9CoordRoutes({} as Db, { boardHost: "paperclip-01", boardKeyIds, findAgentRun }));
+  app.use("/api", rk9CoordRoutes({} as Db, { boardHost: "paperclip-01", boardKeyIds, operatorUserIds, findAgentRun }));
   app.use("/api", (_req, res) => res.status(418).json({ fellThrough: true }));
   app.use(errorHandler);
   return { app, findAgentRun };
@@ -236,6 +242,75 @@ describe("coord whoami: signed-in operator", () => {
     const { app } = makeApp(sessionActor(false));
     const res = await request(app).get(whoami());
     expect(res.status).toBe(403);
+  });
+});
+
+describe("coord whoami: operator user-id pin (RK9-638)", () => {
+  it("accepts a pinned instance-admin session as the operator", async () => {
+    const { app } = makeApp(sessionActor(true), undefined, null, ["user-1"]);
+    const res = await request(app).get(whoami()).set("X-RK9-Actor", "operator");
+    expect(res.status).toBe(200);
+    expect(res.body.actor).toMatchObject({ kind: "operator", actorId: "operator", trust: "verified" });
+    const post = await request(app).post(mutate()).send({});
+    expect(post.status).toBe(404);
+    expect(post.body.code).toBe("rk9_coord_not_found");
+  });
+
+  it("rejects an unpinned instance admin (a promoted user is not the operator) on reads and mutations", async () => {
+    const promoted: Actor = { ...sessionActor(true), userId: "promoted-admin" };
+    const { app } = makeApp(promoted, undefined, null, ["user-1"]);
+    const read = await request(app).get(whoami());
+    expect(read.status).toBe(403);
+    expect(read.body.code).toBe("rk9_coord_operator_not_allowed");
+    const claimed = await request(app).get(whoami()).set("X-RK9-Actor", "operator");
+    expect(claimed.status).toBe(403);
+    const post = await request(app).post(mutate()).set("X-RK9-Actor", "operator").send({});
+    expect(post.status).toBe(403);
+    expect(post.body.code).toBe("rk9_coord_operator_not_allowed");
+  });
+
+  it("keeps today's behaviour when the pin is unset: any instance-admin session is the operator", async () => {
+    const { app } = makeApp({ ...sessionActor(true), userId: "any-admin" }, undefined, null, null);
+    const res = await request(app).get(whoami());
+    expect(res.status).toBe(200);
+    expect(res.body.actor).toMatchObject({ kind: "operator", trust: "verified" });
+    const empty = makeApp({ ...sessionActor(true), userId: "any-admin" }, undefined, null, []);
+    expect((await request(empty.app).get(whoami())).status).toBe(200);
+  });
+
+  it("accepts every user on a multi-id pin and nobody else", async () => {
+    const pin = ["user-1", "user-2"];
+    for (const userId of pin) {
+      const { app } = makeApp({ ...sessionActor(true), userId }, undefined, null, pin);
+      expect((await request(app).get(whoami())).status, userId).toBe(200);
+    }
+    const other = makeApp({ ...sessionActor(true), userId: "user-3" }, undefined, null, pin);
+    expect((await request(other.app).get(whoami())).status).toBe(403);
+  });
+
+  it("rejects a session without a user id when the pin is set", async () => {
+    const { app } = makeApp({ ...sessionActor(true), userId: undefined } as Actor, undefined, null, ["user-1"]);
+    const res = await request(app).get(whoami());
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("rk9_coord_operator_not_allowed");
+  });
+
+  it("does not gate board keys or agents (their own rules apply)", async () => {
+    const key = makeApp({ ...boardKeyActor, userId: "promoted-admin" }, undefined, null, ["user-1"]);
+    expect((await request(key.app).get(whoami()).set("X-RK9-Actor", "worktree:RK9-638")).status).toBe(200);
+    const agent = makeApp(agentActor("agent_jwt"), undefined, null, ["user-1"]);
+    expect((await request(agent.app).get(whoami())).status).toBe(200);
+  });
+
+  it("parses RK9_COORD_OPERATOR_USER_IDS and treats empty as unset", () => {
+    expect(resolveRk9CoordOperatorUserIds({})).toBeNull();
+    expect(resolveRk9CoordOperatorUserIds({ RK9_COORD_OPERATOR_USER_IDS: " , " })).toBeNull();
+    expect(resolveRk9CoordOperatorUserIds({ RK9_COORD_OPERATOR_USER_IDS: "u1, u2" })).toEqual(["u1", "u2"]);
+    expect(rk9CoordOperatorUserAllowed("anyone", null)).toBe(true);
+    expect(rk9CoordOperatorUserAllowed("u2", ["u1", "u2"])).toBe(true);
+    expect(rk9CoordOperatorUserAllowed("U1", ["u1"])).toBe(false);
+    expect(rk9CoordOperatorUserAllowed("", ["u1"])).toBe(false);
+    expect(rk9CoordOperatorUserAllowed(undefined, ["u1"])).toBe(false);
   });
 });
 
