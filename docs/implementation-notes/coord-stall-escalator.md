@@ -112,7 +112,10 @@ share a cap: pcp-headsup has its own file ledger.
     `suppressed`), so a failed send or the cap does not silence the jam for
     good;
   - the last escalation was written in the other mode, for example `shadow`
-    before the switch to `enforce`;
+    before the switch to `enforce`. A mode switch therefore re-sends each
+    open jam once. Do not flap the mode, and give every server the same mode:
+    two servers with different modes alternate rows and repeat an unchanged
+    jam about every 12 h (the cap still holds);
   - the holder made progress after the last escalation and then stalled
     again (a new episode on the same lease).
 
