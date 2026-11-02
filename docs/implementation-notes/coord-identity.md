@@ -141,6 +141,11 @@ rk9claude | grok | operator`.
 - Event types: `decision | deploy | handoff | blocker | done | ask-operator |
   lease | phase | break-glass | decision-vaulted | escalated | headsup`.
   `headsup` was amended by RK9-623 for RK9-636 (2026-11-01).
+  Additive note (RK9-647, 2026-11-02): the delta never returns `headsup`.
+  It returns every `ask-operator` to actor kinds `cc` and `operator`; other
+  kinds get only their own questions (an `agent_run` also those of another
+  run of the same agent) and the answers to them. A `headsup` row is always
+  `unverified`. Details: `coord-bus.md`.
 - Route prefix: `/api/companies/:companyId/rk9/coord/*`.
 - Coord token: `rk9_coord_` + 43 base64url characters (32 random bytes).
 - Reserved header `X-RK9-Coord-Token`: the server never reads it. The HTTP

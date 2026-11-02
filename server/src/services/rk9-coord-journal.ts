@@ -1,19 +1,25 @@
 // --- RK9 Custom (RK9-626): coord journal (epic RK9-620, key journal-inbox-api) ---
 //
 // The append-only typed journal of the coordination bus:
-// - append(): validated, redacted, one-lined events; client_event_id dedupe;
-//   rows from remote hosts and Grok are always stored as `unverified`.
+// - append(): validated, redacted, one-lined events; client_event_id and
+//   dedupe_key dedupe; rows from remote hosts and Grok, and every headsup,
+//   are always stored as `unverified`.
 // - delta(): the events after the actor's cursor that concern it (its repo,
-//   issue or held leases, plus every deploy and ask-operator event). The
-//   cursor advances in the same transaction; a peek does not move it.
+//   issue or held leases, plus every deploy event). `cc` and `operator` get
+//   every ask-operator; other kinds only their own questions (also of a
+//   sibling run of the same agent) and the answers to them. Never a headsup
+//   (RK9-647). The cursor advances in the same transaction; a peek does not
+//   move it.
 // - formatRk9CoordDeltaLine(): the <= 400-char hook line.
 // - board(): the full view, for explicit requests only (never from hooks).
 //
 // The journal has no UPDATE or DELETE path here; the DB trigger rejects both.
 // Contract: docs/implementation-notes/coord-bus.md.
-import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
+  heartbeatRuns,
   rk9CoordActors,
   rk9CoordCursors,
   rk9CoordEvents,
@@ -43,6 +49,25 @@ export const RK9_COORD_LINE_MAX = 400;
 export const RK9_COORD_LINE_TAIL = "rk9 board";
 /** Event types every actor sees, whatever its repo or issue. */
 export const RK9_COORD_GLOBAL_EVENT_TYPES = ["deploy", "ask-operator"] as const;
+/**
+ * RK9-647: an `ask-operator` is an operator-class question. These actor kinds
+ * get every one in their delta. Any other kind gets only its own questions
+ * (for an agent_run also those of another run of the same agent) and the
+ * answers by a `cc` or `operator` actor whose `ref_event_id` points at one
+ * of them: an agent session that
+ * saw another actor's open question might decide it and bypass the approval
+ * gate.
+ */
+export const RK9_COORD_ASK_OPERATOR_DELTA_KINDS = ["cc", "operator"] as const;
+/** RK9-647: types the delta never returns. A heads-up is delivered locally by the session's own hook. */
+export const RK9_COORD_DELTA_HIDDEN_TYPES = ["headsup"] as const;
+const AGENT_RUN_REF_RX = "^agent_run:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+/** Summary prefix of a heads-up: the label says the observation is unverified. */
+export const RK9_COORD_HEADSUP_SUMMARY_PREFIX = "[Heads up, varmistamaton]";
+
+export function rk9CoordSeesAllAskOperator(kind: string): boolean {
+  return (RK9_COORD_ASK_OPERATOR_DELTA_KINDS as readonly string[]).includes(kind);
+}
 /** A new cursor starts this far back, so a fresh session is not flooded. */
 export const RK9_COORD_NEW_CURSOR_LOOKBACK_MS = 24 * 3600 * 1000;
 const DEFAULT_DELTA_LIMIT = 20;
@@ -61,7 +86,9 @@ export function rk9CoordPresenceTtlSeconds(env: NodeJS.ProcessEnv = process.env)
  * Grok rows are unverified whatever the client sends. rk9claude's service
  * token is bound to that one service, so it keeps its resolved trust.
  */
-export function rk9CoordJournalTrust(actor: Rk9CoordResolvedActor): Rk9CoordTrust {
+export function rk9CoordJournalTrust(actor: Rk9CoordResolvedActor, type?: string): Rk9CoordTrust {
+  // RK9-647: a heads-up is an unverified observation whatever the credential.
+  if (type === "headsup") return "unverified";
   if (actor.kind === "remote" || actor.kind === "grok") return "unverified";
   if (actor.principal === "coord_token" && actor.kind !== "rk9claude") return "unverified";
   return actor.trust;
@@ -218,6 +245,7 @@ interface BuiltEvent {
   payload: Record<string, unknown>;
   vaultPath: string | null;
   refEventId: number | null;
+  /** Producer dedupe key, stored in `dedupe_key` (unique per company and type). */
   dedupeKey?: string | null;
 }
 
@@ -289,6 +317,28 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
         dedupeKey: rk9CoordDecisionVaultedKey(input.ref_event_id),
       };
     }
+    case "headsup": {
+      const text = requiredLine(input.text);
+      const payload: Record<string, unknown> = { text };
+      const explanation = line(input.explanation, 1000);
+      if (explanation) payload.explanation = explanation;
+      payload.class = input.class;
+      // A rule names why a heads-up is operator class; `other` has none.
+      if (input.class === "operator" && input.class_rule) payload.class_rule = input.class_rule;
+      payload.observation_key = input.observation_key;
+      if (input.session_id) payload.session_id = input.session_id;
+      // The observer is the resolved caller, never a client claim.
+      payload.observed_actor = actorId;
+      payload.verified = false;
+      if (input.issue) payload.issue = input.issue;
+      return {
+        summary: `${RK9_COORD_HEADSUP_SUMMARY_PREFIX} ${text}`,
+        payload,
+        vaultPath: null,
+        refEventId: null,
+        dedupeKey: input.observation_key,
+      };
+    }
   }
 }
 
@@ -299,6 +349,16 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
  */
 export function rk9CoordMayVaultDecision(actor: Rk9CoordResolvedActor, decisionActorRef: string): boolean {
   return actor.actorId === decisionActorRef || rk9CoordJournalTrust(actor) !== "unverified";
+}
+
+/** Board view of an event: a heads-up shows its summary, not its explanation. */
+export function rk9CoordBoardEventView(row: EventRow): Rk9CoordEventView {
+  const view = rk9CoordEventView(row);
+  if (view.type === "headsup" && "explanation" in view.payload) {
+    const { explanation: _explanation, ...rest } = view.payload;
+    view.payload = rest;
+  }
+  return view;
 }
 
 export interface Rk9CoordDelta {
@@ -395,6 +455,8 @@ export function rk9CoordJournalService(db: Db) {
       client_event_id: input.client_event_id,
       vault_note: input.type === "decision" ? input.vault_note : undefined,
       app: input.type === "deploy" ? input.app : undefined,
+      session_id: input.type === "headsup" ? input.session_id : undefined,
+      class_rule: input.type === "headsup" ? input.class_rule : undefined,
     });
     let issue = ("issue" in input ? input.issue : undefined) ?? null;
     let repo = input.repo ?? null;
@@ -437,7 +499,7 @@ export function rk9CoordJournalService(db: Db) {
         type: input.type,
         actorRef: actor.actorId,
         actorKind: actor.kind,
-        trust: rk9CoordJournalTrust(actor),
+        trust: rk9CoordJournalTrust(actor, input.type),
         issue,
         repo,
         summary,
@@ -466,7 +528,8 @@ export function rk9CoordJournalService(db: Db) {
       }
       if (existing) return { event: rk9CoordEventView(existing), duplicate: true };
     }
-    // decision-vaulted: one per decision. A second retry gets the stored row.
+    // Producer dedupe (RK9-631 decision-vaulted, RK9-647 headsup): a stored
+    // (company, type, dedupe_key) answers the stored row for any actor.
     if (built.dedupeKey) {
       const [existing] = await db
         .select()
@@ -479,9 +542,13 @@ export function rk9CoordJournalService(db: Db) {
           ),
         )
         .limit(1);
-      if (existing) return { event: rk9CoordEventView(existing), duplicate: true };
+      // Another actor gets the board view: a heads-up explanation stays hidden.
+      if (existing) {
+        const event = existing.actorRef === actor.actorId ? rk9CoordEventView(existing) : rk9CoordBoardEventView(existing);
+        return { event, duplicate: true };
+      }
     }
-    throw new Error("rk9 coord event insert conflicted without a client_event_id");
+    throw new Error("rk9 coord event insert conflicted without a matching client_event_id or dedupe_key");
   }
 
   /**
@@ -564,6 +631,39 @@ export function rk9CoordJournalService(db: Db) {
         ...new Set([rk9CoordActorIssue(self), opts.issue].filter((value): value is string => Boolean(value))),
       ];
       const resources = [...new Set(held.map((lease) => lease.resource))];
+
+      // RK9-647: which ask-operator events this actor may see.
+      const agentId = actor.kind === "agent_run" ? opts.agentId ?? null : null;
+      // "Mine": the actor itself, or another run of the same agent (a primary
+      // key lookup in heartbeat_runs per candidate row; the CASE keeps the
+      // uuid cast off refs that are not agent_run ids).
+      const mine = (ref: AnyColumn): SQL => {
+        const self = eq(ref, actor.actorId);
+        if (!agentId) return self;
+        return or(
+          self,
+          sql`exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${companyId} and ${heartbeatRuns.agentId} = ${agentId} and ${heartbeatRuns.id} = case when ${ref} ~ ${AGENT_RUN_REF_RX} then substring(${ref} from 11)::uuid end)`,
+        )!;
+      };
+      let askOperatorVisible: SQL | undefined;
+      if (!rk9CoordSeesAllAskOperator(actor.kind)) {
+        const asked = alias(rk9CoordEvents, "asked");
+        const myQuestions = tx
+          .select({ id: asked.id })
+          .from(asked)
+          .where(and(eq(asked.companyId, companyId), eq(asked.type, "ask-operator"), mine(asked.actorRef)));
+        askOperatorVisible = or(
+          ne(rk9CoordEvents.type, "ask-operator"),
+          mine(rk9CoordEvents.actorRef),
+          // Only the operator side answers: an agent or an unverified actor
+          // cannot push a forged approval into another agent's delta.
+          and(
+            inArray(rk9CoordEvents.actorKind, [...RK9_COORD_ASK_OPERATOR_DELTA_KINDS]),
+            isNotNull(rk9CoordEvents.refEventId),
+            inArray(rk9CoordEvents.refEventId, myQuestions),
+          ),
+        );
+      }
       const concerns: SQL[] = [inArray(rk9CoordEvents.type, [...RK9_COORD_GLOBAL_EVENT_TYPES])];
       if (repos.length > 0) concerns.push(inArray(rk9CoordEvents.repo, repos));
       if (issues.length > 0) concerns.push(inArray(rk9CoordEvents.issue, issues));
@@ -576,6 +676,9 @@ export function rk9CoordJournalService(db: Db) {
         lte(rk9CoordEvents.id, newCursor),
         // An actor is never told about its own events.
         ne(rk9CoordEvents.actorRef, actor.actorId),
+        // RK9-647: never a heads-up; ask-operator by the rule above.
+        notInArray(rk9CoordEvents.type, [...RK9_COORD_DELTA_HIDDEN_TYPES]),
+        askOperatorVisible,
         or(...concerns),
       );
 
@@ -729,7 +832,7 @@ export function rk9CoordJournalService(db: Db) {
         expires_at: row.expiresAt.toISOString(),
         queue: queues.get(row.resource) ?? [],
       })),
-      events: events.map(rk9CoordEventView),
+      events: events.map(rk9CoordBoardEventView),
       inbox: inbox.map((row) => ({
         id: row.id,
         to: row.toActor ?? row.toIssue ?? row.toName,
