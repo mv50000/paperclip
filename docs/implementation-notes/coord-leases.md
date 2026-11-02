@@ -36,7 +36,9 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
   hard-gate rules guard against accidents, not against a determined local
   session.
 - `wait=false` by a caller that is already queued answers 200
-  `{queued:true, position}` and keeps its place.
+  `{queued:true, position}`. Only a `wait=true` poll refreshes the queue
+  place: without one, the sweeper removes the waiter after the grace
+  period. The rk9 CLI always waits with `wait=true`.
 - A lease id that does not exist in the company, or is not a UUID, is 404
   `rk9_coord_lease_not_found`. The CLI dead-letters a spooled release on
   that code.
