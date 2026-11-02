@@ -1,0 +1,71 @@
+# --- RK9 Custom (RK9-644) --- fork-only workflow, see doc/CI-RUNNER.md.
+#
+# Saves the pnpm store cache that PR jobs restore (actions/cache/restore in
+# pr.yml). PRs never save it: a cache saved by a pull_request run is visible only
+# to that PR and every PR would add its own ~710 MB copy. This workflow runs only
+# on trusted code (push to master, manual dispatch, schedule).
+#
+# Keep the key and path logic identical to the restore step in pr.yml.
+name: pnpm Cache Warm
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "pnpm-lock.yaml"
+      - ".github/workflows/pnpm-cache-warm.yml"
+  workflow_dispatch:
+  schedule:
+    # Daily. GitHub evicts a cache that nobody reads for 7 days. On an exact hit
+    # the job only restores (keeps the entry alive) and saves nothing.
+    - cron: "37 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pnpm-cache-warm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm pnpm cache
+    # Same runner lever as the other jobs (RK9-350). Not a pull_request workflow,
+    # so no fork guard is needed.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      # Restore and save in one step: the post-job save runs only when the exact
+      # key did not hit, so there is one entry per lockfile hash.
+      - name: Restore and save pnpm store cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Populate pnpm store
+        run: pnpm install --frozen-lockfile --ignore-scripts
