@@ -311,7 +311,8 @@ Rules:
   `token`, `secret`, `password`, `passwd` or `apikey` (plural too; `api` +
   `key` counts as one) and the next segment is not a harmless suffix
   (`scan`, `policy`, `count`, `used`, `usage`, `limit`, `budget`, `type`,
-  `name`, `id`, `ref`, `path`, `file`, `expiry`, `ttl`, `status`, ...; the
+  `name`, `ref`, `path`, `file`, `expiry`, `ttl`, `status`, ...; not `id`,
+  because a Vault AppRole `secret_id` is a credential; the
   full list is `HARMLESS_SUFFIXES` in `server/src/routes/rk9-coord-actors.ts`).
   So `password`, `secrets`, `github_token`, `DB_PASSWORD`, `SECRET_KEY`,
   `aws_secret_access_key`, `api_key_prod` and `secret_value` are credential
@@ -321,7 +322,10 @@ Rules:
   `{"password": "..."}`), each key and string value alone, every string
   leaf of 6+ characters under a credential key at any depth (arrays and
   nested objects included), `key: value` for every ancestor key of a leaf,
-  and a credential name given as a value: the value entry of a name/value
+  and a credential name given as a value (one word without whitespace or
+  `/` whose last segment is a credential word, or `secret`/`access`/`private`
+  + `key`, so free text such as `"rk9-642-secret-check"` does not count):
+  the value entry of a name/value
   pair object (`{"name": "PASSWORD", "value": "..."}`, `{"Key": ...,
   "Value": ...}`, `{"k": ..., "v": ...}`, CloudFormation `ParameterKey` /
   `ParameterValue`), the second item of a two-item array

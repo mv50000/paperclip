@@ -125,11 +125,12 @@ const CREDENTIAL_WORDS = new Set([
 /**
  * A credential word followed by one of these segments names metadata about
  * a credential, not the credential: `secret_scan`, `token_count`,
- * `tokens_used`, `password_policy`, `token_type`, `secret_name`.
+ * `tokens_used`, `password_policy`, `token_type`, `secret_name`. `id` is not
+ * on the list: a Vault AppRole `secret_id` is the credential itself.
  */
 const HARMLESS_SUFFIXES = new Set([
   "scan", "scanner", "scanning", "policy", "policies", "rule", "rules", "count", "counts", "used", "usage",
-  "limit", "limits", "budget", "max", "min", "total", "totals", "type", "kind", "name", "names", "id", "ids",
+  "limit", "limits", "budget", "max", "min", "total", "totals", "type", "kind", "name", "names",
   "ref", "refs", "arn", "path", "file", "expiry", "expires", "expiration", "ttl", "length", "len",
   "rotation", "rotated", "status", "present", "required", "enabled", "provider", "source", "estimate",
 ]);
@@ -180,8 +181,30 @@ const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
 /** Separator items in an argv-style list (`["DB_PASSWORD", "=", "..."]`). */
 const ARG_SEPARATOR_RX = /^[=:]$/;
 
+/**
+ * A string VALUE that names a credential (`"PASSWORD"`, `"DB_PASSWORD"`,
+ * `"--db-password"`, `"Password:"`, `"SECRET_KEY"`). Stricter than the key
+ * rule, because values are often free text: the value must be one word
+ * without whitespace or `/`, and the credential word must end it (trailing
+ * punctuation allowed), or be `secret`/`access`/`private` + `key`. So
+ * `"rk9-642-secret-check"`, `"src/token-refresh.ts"` and `"Fix password
+ * reset flow"` are not credential names.
+ */
+function isCredentialValueName(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const text = rk9CoordMatchText(value);
+  if (text.length === 0 || text.length > 100 || /[\s/]/.test(text)) return false;
+  return nameSegmentations(text).some((segments) => {
+    const last = segments.at(-1);
+    const prev = segments.at(-2);
+    if (last === undefined) return false;
+    if (CREDENTIAL_WORDS.has(last)) return true;
+    return (last === "key" || last === "keys") && (prev === "api" || prev === "secret" || prev === "access" || prev === "private");
+  });
+}
+
 function isPairName(key: string, value: unknown): boolean {
-  return PAIR_NAME_KEY_RX.test(rk9CoordMatchText(key)) && typeof value === "string" && isRk9CoordCredentialName(value);
+  return PAIR_NAME_KEY_RX.test(rk9CoordMatchText(key)) && isCredentialValueName(value);
 }
 
 /**
@@ -192,10 +215,10 @@ function isPairName(key: string, value: unknown): boolean {
  */
 function credentialValueIndexes(items: unknown[]): Set<number> {
   const out = new Set<number>();
-  const isName = (item: unknown) => typeof item === "string" && isRk9CoordCredentialName(item);
+  const isName = isCredentialValueName;
   if (items.length === 2 && isName(items[0])) out.add(1);
   items.forEach((item, index) => {
-    if (typeof item !== "string" || !isName(item)) return;
+    if (!isName(item)) return;
     const separator = typeof items[index + 1] === "string" && ARG_SEPARATOR_RX.test(items[index + 1] as string);
     if (separator) out.add(index + 2);
     else if (item.startsWith("-")) out.add(index + 1);

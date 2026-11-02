@@ -153,16 +153,22 @@ export function toRk9CoordLine(
   // The display form keeps ZWJ and bidi controls (`pass\u200dword=...`) and
   // removes a ZWSP that is the only separator (`Bearer\u200b<token>`), so a
   // secret can survive the redaction above. When a matching reading of the
-  // original text finds more secrets, store the first matching reading that
-  // finds them all and comes out clean; otherwise redact the whole field
-  // (fail closed).
+  // original text finds more secrets, keep the stripped reading only if both
+  // redacted readings are the same text apart from whitespace and come out
+  // clean; otherwise redact the whole field (fail closed: each reading may
+  // find a different secret).
   const readings = [rk9CoordMatchText(text), rk9CoordSpacedText(text)].map((form) => redactRk9CoordText(form, env));
   const found = Math.max(...readings.map(countRedactions));
   if (rk9CoordTextHasSecret(line, env) || found > countRedactions(line)) {
-    line =
-      readings.find((reading) => countRedactions(reading) >= found && !rk9CoordTextHasSecret(reading, env)) ??
-      RK9_COORD_REDACTED;
+    const [stripped, spaced] = readings as [string, string];
+    const agree =
+      stripped.replace(/\s+/g, "") === spaced.replace(/\s+/g, "") &&
+      !rk9CoordTextHasSecret(stripped, env) &&
+      !rk9CoordTextHasSecret(spaced, env);
+    line = agree ? stripped : RK9_COORD_REDACTED;
   }
+  // A text of only invisible characters (`\u200d`) is empty.
+  if (rk9CoordMatchText(line).length === 0) return null;
   if (line.length === 0) return null;
   const points = Array.from(line);
   return points.length > max ? points.slice(0, max).join("").trimEnd() : line;

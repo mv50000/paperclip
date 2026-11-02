@@ -97,10 +97,15 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     ["pass\u2064word=hunter2hunter2", "[redacted]"],
     ["pass\u180eword=hunter2hunter2", "[redacted]"],
     ["pass\u034fword=hunter2hunter2", "[redacted]"],
-    ["pass\u200dword=hunter2hunter2 ok", "[redacted] ok"],
+    // a secret only a matching reading finds: the whole field goes (fail closed)
+    ["pass\u200dword=hunter2hunter2 ok", "[redacted]"],
+    // verifier round 2: each reading finds a different secret
+    ["pass\u200dword=hunter2hunter2 Bearer\u200bopaqueTokenValue123", "[redacted]"],
     ["Bearer\u202e abcdefghijkl", "[redacted]"],
     // verifier round 1 (RK9-642): an invisible character as the only separator, non-Cf fillers
     ["Bearer\u200babcdefgh12345", "[redacted]"],
+    // both readings find the same secret: the rest of the line stays
+    ["ok\u200bfine token=\u00adsupersecret123", "okfine [redacted]"],
     ["pass\u3164word=hunter2hunter2", "[redacted]"],
     ["pass\u0301word=hunter2hunter2", "[redacted]"],
     ["pass\u{E0100}word=hunter2hunter2", "[redacted]"],
@@ -111,6 +116,7 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
   it("keeps ZWJ in display text and strips it only for matching", () => {
     const dev = "coding \u{1F469}\u200d\u{1F4BB} now";
     expect(toRk9CoordLine(dev, 140, env)).toBe(dev);
+    expect(toRk9CoordLine("\u200d", 140, env)).toBeNull();
     expect(collapseRk9CoordText("a\u00adb\u2061c\u180ed\u034fe\u200df\u200bg")).toBe("abcde\u200dfg");
     expect(rk9CoordMatchText("a\u00adb\u2061c\u180ed\u034fe\u200df\u202eg")).toBe("abcdefg");
   });
@@ -130,7 +136,7 @@ describe("presence metadata secret check", () => {
     // compound names (verifier round 1): the keyword need not end the name
     "SECRET_KEY", "aws_secret_access_key", "secretAccessKey", "api_key_prod", "apiKeyProd", "GITHUB_TOKEN_RW",
     "token_prod", "password_new", "password1", "secrets_prod", "password_hash", "DBPassword", "GITHUBToken",
-    "Password:",
+    "Password:", "secret_id", "VAULT_SECRET_ID", "secretId",
   ])("treats %j as a credential name", (name) => {
     expect(isRk9CoordCredentialName(name)).toBe(true);
   });
@@ -181,6 +187,9 @@ describe("presence metadata secret check", () => {
     ["argv flag", { args: ["mysql", "--password", "hunter2hunter2"] }],
     ["invisible character as the only separator", { note: "Bearer\u200babcdefgh12345" }],
     ["Hangul filler inside a keyword", { note: "pass\u3164word=hunter2hunter2" }],
+    // verifier round 2
+    ["Vault AppRole secret_id", { vault: { role_id: "abc", secret_id: "6a174c20" + "-f6de-a53c-74d2-6018fcceff64" } }],
+    ["SECRET_KEY given as a pair name", { env: [{ name: "SECRET_KEY", value: "django-insecure-abc123xyz" }] }],
   ])("flags %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(true);
   });
@@ -206,6 +215,12 @@ describe("presence metadata secret check", () => {
     ["ZWJ emoji", { face: "\u{1F469}\u200d\u{1F4BB}" }],
     ["pair object without a value key", { field: "password", status: "rotated" }],
     ["token_type", { token_type: "Bearer" }],
+    // verifier round 2: free-text values are not credential names
+    ["branch names in a two-item list", { branches: ["rk9-642-secret-check", "master"] }],
+    ["file paths in a two-item list", { files: ["src/token-refresh.ts", "src/auth.ts"] }],
+    ["commit subjects", { recent: ["fix(rk9-coord): presence metadata secret check", "feat(db): advisory lock"] }],
+    ["issue title tuple", { issue: ["Fix password reset flow", "in-progress"] }],
+    ["setting label", { setting: { label: "Password reset emails", value: "enabled" } }],
   ])("accepts %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
   });
