@@ -360,6 +360,15 @@ export function rk9CoordActorMiddleware(db: Db, opts: Rk9CoordActorOptions = {})
       "RK9_COORD_OPERATOR_USER_IDS is unset: every instance-admin session resolves to the coord operator",
     );
   }
+  if (operatorUserIds && operatorUserIds.length > 0 && (!boardKeyIds || boardKeyIds.length === 0)) {
+    // RK9-638 verifier: a promoted instance admin can mint their own board
+    // key (POST /api/board-api-keys) and manage coord tokens with it, so the
+    // user pin alone does not close the promotion path.
+    logger.warn(
+      { event: "rk9_coord_operator_pin_without_board_key_pin" },
+      "RK9_COORD_OPERATOR_USER_IDS is set but RK9_COORD_BOARD_KEY_IDS is not: any instance admin can still mint a board key and manage coord tokens; set both",
+    );
+  }
   const findAgentRun = opts.findAgentRun ?? defaultFindAgentRun(db);
   return async (req, _res, next) => {
     try {

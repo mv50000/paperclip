@@ -200,8 +200,15 @@ optional key-id pin.
   is not a fixed set: a holder of an instance-admin board key, including an
   AI session, can promote another user
   (`POST /api/admin/users/:userId/promote-instance-admin`). That user would
-  then sign in as `operator` / `verified`. Set the pin to the operator's own
-  user id to close this path. A session whose user is not on the pin gets
+  then sign in as `operator` / `verified`. Setting the pin to the operator's
+  own user id stops the promoted user's **session** from being `operator`.
+  **It does not close the path alone:** the promoted user can mint their own
+  instance-admin board key (`POST /api/board-api-keys`), and with
+  `RK9_COORD_BOARD_KEY_IDS` unset that key may manage coord tokens (for
+  example issue or rotate the `rk9claude` service token, whose actor is
+  `verified` and may break leases and ack escalations). Set **both** pins.
+  The server logs `rk9_coord_operator_pin_without_board_key_pin` at startup
+  when only the user pin is set. A session whose user is not on the pin gets
   403 (`rk9_coord_operator_not_allowed`) on coord routes and on coord-token
   management.
 - **Setting the pin.** Variable `RK9_COORD_OPERATOR_USER_IDS` in the server
@@ -213,6 +220,11 @@ optional key-id pin.
   a restart. Find the id with SQL
   (`select id, email from "user" where email = '<operator email>';`) or with
   the instance-admin API `GET /api/admin/users?query=<email>` (field `id`).
+- **Board key and the user pin.** A board-key actor's user is the key's
+  owner (`board_api_keys.user_id`). The user pin does not apply to board
+  keys; only `RK9_COORD_BOARD_KEY_IDS` gates them. A board key can never act
+  as `operator` either way. So the coord CLI on paperclip-01, which uses the
+  board key, keeps working when the user pin is set.
 - **Limit of the pin.** `operator` stays one literal actor id. If the pin
   lists several users, the coord journal, leases and presence cannot tell
   them apart. The session user id is not in the actor id, so keep the pin
