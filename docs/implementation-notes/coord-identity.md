@@ -254,6 +254,13 @@ Error codes in the JSON `code` field:
 | `rk9_coord_mixed_credentials` | 403 | coord token plus another credential |
 | `rk9_coord_not_found` | 404 | no such coord sub-route |
 | `rk9_coord_actor_not_found` | 404 | the actor has no open presence row (`POST actors/me/phase` before `PUT actors/me`, or after `DELETE`); the rk9 CLI dead-letters a spooled write on this code (RK9-625) |
+| `rk9_coord_inbox_target_not_found` | 404 | inbox target record missing: no such run or issue for an agent message (RK9-626); the rk9 CLI dead-letters a spooled write on this code |
+| `rk9_coord_inbox_issue_required` | 422 | message to a Paperclip agent without an issue to comment on (RK9-626) |
+| `rk9_coord_inbox_body_empty` | 400 | message body is empty after redaction (RK9-626) |
+| `rk9_coord_inbox_target_not_allowed` | 422 | agent message aimed at an Agent Chat conversation issue (RK9-626) |
+| `rk9_coord_inbox_issue_paused` | 409 | agent message aimed at a paused issue tree (RK9-626) |
+| `rk9_coord_secret_in_field` | 422 | a verbatim field (`to`, `repo`, `app`, `vault_note`, `client_event_id`) looks like a secret (RK9-626) |
+| `rk9_coord_client_event_conflict` | 409 | `client_event_id` already stored by another actor (RK9-626) |
 
 `GET /api/companies/:companyId/rk9/coord/whoami` returns the resolved actor:
 

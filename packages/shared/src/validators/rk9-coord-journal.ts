@@ -1,0 +1,154 @@
+// --- RK9 Custom (RK9-626): coord journal + inbox request bodies ---
+//
+// The six client-writable journal event types and the inbox message body of
+// the RK9 coordination bus (epic RK9-620). Field names are snake_case, as the
+// child spec and the ask-operator interface name them; the rk9 CLI sends them
+// verbatim. The server redacts and one-lines every free-text field before the
+// insert (server/src/services/rk9-coord-text.ts), so the limits here are only
+// raw-input caps. Contract: docs/implementation-notes/coord-bus.md.
+import { z } from "zod";
+import { RK9_COORD_ACTOR_ID_MAX_LENGTH } from "../rk9-coord.js";
+
+/** Issue identifier, the same grammar as the worktree actor id (`RK9-626`). */
+export const RK9_COORD_ISSUE_PATTERN = /^[A-Z][A-Z0-9]{1,9}-[0-9]{1,7}$/;
+/** `owner/repo`. */
+export const RK9_COORD_REPO_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+
+/** Event types a client may POST. The other journal types are server-produced. */
+export const RK9_COORD_CLIENT_EVENT_TYPES = [
+  "decision",
+  "deploy",
+  "handoff",
+  "blocker",
+  "done",
+  "ask-operator",
+] as const;
+export type Rk9CoordClientEventType = (typeof RK9_COORD_CLIENT_EVENT_TYPES)[number];
+
+export const RK9_COORD_DEPLOY_RESULTS = ["started", "success", "failure", "rolled_back"] as const;
+export const RK9_COORD_ASK_OPERATOR_URGENCIES = ["low", "normal", "high", "urgent"] as const;
+
+/** Raw free text: the server collapses it to one line and caps it after redaction. */
+const freeText = (max: number) => z.string().trim().min(1).max(max);
+
+export const rk9CoordIssueSchema = z.string().regex(RK9_COORD_ISSUE_PATTERN, "issue must look like RK9-626");
+export const rk9CoordRepoSchema = z.string().regex(RK9_COORD_REPO_PATTERN, "repo must be owner/repo");
+
+const commonEventFields = {
+  /** Client id for spool replay; a repeat is answered with the stored row. */
+  client_event_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
+  /** Client time of a spooled event. */
+  occurred_at: z.string().datetime({ offset: true }).optional(),
+  repo: rk9CoordRepoSchema.optional(),
+};
+
+const decisionSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("decision"),
+  issue: rk9CoordIssueSchema.optional(),
+  title: freeText(1000),
+  rationale: freeText(4000),
+  /** Vault note path, e.g. `rk9/resources/coord_bus.md`. */
+  vault_note: z
+    .string()
+    .min(1)
+    .max(500)
+    .regex(/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/, "vault_note must be a relative vault path")
+    .refine((value) => !value.split("/").includes(".."), "vault_note must not contain ..")
+    .optional(),
+});
+
+const deploySchema = z.object({
+  ...commonEventFields,
+  type: z.literal("deploy"),
+  issue: rk9CoordIssueSchema.optional(),
+  app: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "app must be a short app name"),
+  sha: z.string().regex(/^[0-9a-fA-F]{7,40}$/, "sha must be 7-40 hex characters"),
+  result: z.enum(RK9_COORD_DEPLOY_RESULTS),
+});
+
+const handoffSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("handoff"),
+  /** Who takes over: an actor id or a name. Free text, not resolved. */
+  to: z.string().trim().min(1).max(RK9_COORD_ACTOR_ID_MAX_LENGTH).optional(),
+  issue: rk9CoordIssueSchema,
+  summary: freeText(2000),
+});
+
+const blockerSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("blocker"),
+  issue: rk9CoordIssueSchema,
+  what: freeText(2000),
+});
+
+const doneSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("done"),
+  issue: rk9CoordIssueSchema,
+  /** PR number or PR URL. */
+  pr: z.union([z.number().int().positive(), z.string().trim().min(1).max(300)]).optional(),
+});
+
+/**
+ * ask-operator: the interface for the separate operator_todo epic
+ * (documented in coord-bus.md). `actor` is always overwritten by the server
+ * with the resolved caller; a client value is ignored.
+ */
+export const rk9CoordAskOperatorSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("ask-operator"),
+  question: freeText(2000),
+  options: z.array(z.string().trim().min(1).max(200)).min(1).max(10).optional(),
+  urgency: z.enum(RK9_COORD_ASK_OPERATOR_URGENCIES),
+  issue: rk9CoordIssueSchema.optional(),
+  actor: z.string().max(RK9_COORD_ACTOR_ID_MAX_LENGTH).optional(),
+  /** Journal id of the event this one answers or follows up. */
+  reply_to: z.number().int().positive().optional(),
+});
+
+/** POST /companies/:companyId/rk9/coord/events */
+export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
+  decisionSchema,
+  deploySchema,
+  handoffSchema,
+  blockerSchema,
+  doneSchema,
+  rk9CoordAskOperatorSchema,
+]);
+export type AppendRk9CoordEvent = z.infer<typeof appendRk9CoordEventSchema>;
+
+/** POST /companies/:companyId/rk9/coord/inbox */
+export const sendRk9CoordInboxSchema = z.object({
+  /** An actor id, an issue identifier or a name (orchestrator, session, Paperclip agent). */
+  to: z.string().trim().min(1).max(RK9_COORD_ACTOR_ID_MAX_LENGTH),
+  body: freeText(4000),
+  /** Lower-case token, default `message`. */
+  kind: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).optional(),
+  /** Issue for a message to a Paperclip agent; it becomes a comment there. */
+  issue: rk9CoordIssueSchema.optional(),
+  /** Undelivered messages expire after this many seconds (60 s to 30 d). */
+  expires_in_s: z.number().int().min(60).max(30 * 24 * 3600).optional(),
+});
+export type SendRk9CoordInbox = z.infer<typeof sendRk9CoordInboxSchema>;
+
+const queryFlag = z.enum(["0", "1", "true", "false"]).transform((value) => value === "1" || value === "true");
+
+/** GET /companies/:companyId/rk9/coord/events/delta query string. */
+export const rk9CoordDeltaQuerySchema = z.object({
+  /** Optional: must equal the resolved caller (header or credential). */
+  actorId: z.string().min(1).max(RK9_COORD_ACTOR_ID_MAX_LENGTH).optional(),
+  peek: queryFlag.optional(),
+  fmt: z.enum(["json", "line"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  repo: rk9CoordRepoSchema.optional(),
+  issue: rk9CoordIssueSchema.optional(),
+});
+export type Rk9CoordDeltaQuery = z.infer<typeof rk9CoordDeltaQuerySchema>;
+
+/** GET /companies/:companyId/rk9/coord/board query string. */
+export const rk9CoordBoardQuerySchema = z.object({
+  events: z.coerce.number().int().min(1).max(100).optional(),
+});
+// --- /RK9 Custom ---

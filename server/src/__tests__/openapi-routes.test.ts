@@ -94,6 +94,10 @@ const RK9_FORK_ROUTE_FILES = new Set([
   "rk9-coord-actors.ts",
   // RK9-623: operator-only coord token management.
   "rk9-coord-tokens.ts",
+  // RK9-626: coord journal, inbox and board sub-routers.
+  "rk9-coord-board.ts",
+  "rk9-coord-events.ts",
+  "rk9-coord-inbox.ts",
   "ses-inbound.ts",
   "slack-interactions.ts",
   "unsubscribe.ts",
