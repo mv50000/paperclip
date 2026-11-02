@@ -74,7 +74,8 @@ here. `~/.claude/docs/implementation-notes/coord-bus.md` only points here.
   resolved it.
 - `agent_id` (FK `agents`, cascade) and `run_id` for `agent_run` actors.
   `run_id` has no FK, because heartbeat runs are pruned on their own schedule.
-  The lease engine can check lease ownership by agent id (RK9-627 comment).
+  The lease engine requires a run JWT for hard-gate leases of `agent_run`
+  actors instead (RK9-627, `coord-leases.md`).
 - `phase` at most 140 characters, `phase_at` when it last changed (stall
   detection, RK9-629). `name`, `issue`, `repo`, `branch` are length-capped.
 - `pid` (positive), `liveness_source` (a lower-case token such as `hook`,
@@ -580,3 +581,8 @@ The full view for an explicit `rk9 board`. Hook paths never call it. It
 returns live actors, active leases with holder phase and FIFO queue, the
 newest events (`?events=`, default 20) and the pending inbox. Unverified
 viewers (remote hosts, Grok) get the inbox without message bodies.
+
+## Lease engine (RK9-627)
+
+Routes, transitions, liveness rules and the sweeper are documented in
+`coord-leases.md`.

@@ -261,6 +261,15 @@ Error codes in the JSON `code` field:
 | `rk9_coord_inbox_issue_paused` | 409 | agent message aimed at a paused issue tree (RK9-626) |
 | `rk9_coord_secret_in_field` | 422 | a verbatim field (`to`, `repo`, `app`, `vault_note`, `client_event_id`) looks like a secret (RK9-626) |
 | `rk9_coord_client_event_conflict` | 409 | `client_event_id` already stored by another actor (RK9-626) |
+| `rk9_coord_lease_not_found` | 404 | no such lease, or no active lease to break (RK9-627); the rk9 CLI dead-letters a spooled release on this code |
+| `rk9_coord_lease_resource_invalid` | 422 | resource outside the `prod|migrate|repo|vault|host:<name>` grammar (RK9-627) |
+| `rk9_coord_lease_held` | 409 | acquire with `wait=false` while a live actor holds the lease; the body carries holder, phase and eta (RK9-627) |
+| `rk9_coord_lease_stale` | 409 | renew, release or validate with a lease lost to expiry, takeover or break, or with a stale fencing token (RK9-627) |
+| `rk9_coord_lease_not_holder` | 403 | renew or release by an actor that does not hold the lease (RK9-627) |
+| `rk9_coord_lease_trust_insufficient` | 403 | an `unverified` actor asked for a hard-gate lease (RK9-627) |
+| `rk9_coord_lease_run_jwt_required` | 403 | an agent-key (`attributed`) agent_run actor asked for or changed a hard-gate lease; it needs its run JWT (RK9-627) |
+| `rk9_coord_break_requires_operator` | 403 | break of a live holder's lease by a kind other than `operator` or `rk9claude` (RK9-627) |
+| `rk9_coord_lease_break_reason_required` | 422 | break reason is empty after redaction (RK9-627) |
 
 `GET /api/companies/:companyId/rk9/coord/whoami` returns the resolved actor:
 
@@ -423,6 +432,10 @@ mounted before the generic `/companies` router in `app.ts`.
   ([RK9-627](/RK9/issues/RK9-627)) must either require a run JWT
   (`verified`) for hard-gate leases held by `agent_run` actors, or check
   lease ownership against the agent id rather than the run id.
+  **Resolved by RK9-627:** an `agent_run` actor must be `verified` (run
+  JWT) to acquire, renew or release a hard-gate lease
+  (`rk9_coord_lease_run_jwt_required`). Agent keys may still hold `repo:`
+  and `vault:` leases. See `coord-leases.md`.
 
 ## Related notes
 
