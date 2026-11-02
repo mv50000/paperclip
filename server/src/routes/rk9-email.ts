@@ -445,7 +445,9 @@ export function rk9EmailRoutes(db: Db) {
       }
     }
 
-    const stamp = sql`coalesce(${rk9EmailMessages.receivedAt}, ${rk9EmailMessages.createdAt})`;
+    // created_at is the insert time. received_at is the SES event time, which a late SNS redelivery
+    // (e.g. during a server restart) can put behind a caller's high-water mark, so never page on it.
+    const stamp = rk9EmailMessages.createdAt;
     const rows = await db
       .select({
         id: rk9EmailMessages.id,

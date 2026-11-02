@@ -215,7 +215,7 @@ describe("email routes", () => {
       expect(db.__captured.limit).toBe(50);
       expect(db.__captured.orderBy).toHaveLength(2);
       const { sql: where, params } = renderWhere(db);
-      expect(where).not.toContain("coalesce");
+      expect(where).not.toContain("created_at");
       expect(params).toEqual(["company-1"]);
     });
 
@@ -234,7 +234,8 @@ describe("email routes", () => {
         .query({ direction: "inbound", since: "2026-04-30T09:00:00Z", limit: "200" })
         .expect(200);
       const { sql: where, params } = renderWhere(db);
-      expect(where).toContain("coalesce");
+      expect(where).toContain("created_at");
+      expect(where).not.toContain("received_at");
       expect(where).toContain("> $");
       expect(params).toEqual(["company-1", "inbound", "2026-04-30T09:00:00.000Z"]);
       expect(db.__captured.limit).toBe(200);

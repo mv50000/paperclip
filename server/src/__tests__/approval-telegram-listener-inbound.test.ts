@@ -100,7 +100,7 @@ beforeAll(async () => {
       const since = url.searchParams.get("since");
       const rows = mails
         .filter((m) => url.searchParams.get("direction") === m.direction)
-        .filter((m) => !since || Date.parse(m.receivedAt ?? m.createdAt) > Date.parse(since))
+        .filter((m) => !since || Date.parse(m.createdAt) > Date.parse(since))
         .map(({ bodyText: _body, ...meta }) => meta);
       return send(200, rows);
     }
@@ -191,7 +191,7 @@ describe("approval-telegram-listener — inbound customer email (RK9-667)", () =
         "Hei, onko aika vapaana?\n\nTerveisin 1",
         "",
         "Tiketti SAA-77 (in_review)",
-        "ℹ️ Agentti käsittelee; vastausluonnos tulee erillisenä hyväksyntäkorttina.",
+        "ℹ️ Agentti käsittelee viestin. Jos se vastaa, luonnos tulee erillisenä hyväksyntäkorttina.",
       ].join("\n"),
     );
     expect(card.text).not.toContain("vanha lainaus");

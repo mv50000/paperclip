@@ -418,7 +418,7 @@ function renderInboundCard(companyName, message, snippet, issue) {
   if (snippet) lines.push("", snippet);
   lines.push("");
   if (issue?.identifier) lines.push(`Tiketti ${issue.identifier} (${issue.status ?? "?"})`);
-  lines.push("ℹ️ Agentti käsittelee; vastausluonnos tulee erillisenä hyväksyntäkorttina.");
+  lines.push("ℹ️ Agentti käsittelee viestin. Jos se vastaa, luonnos tulee erillisenä hyväksyntäkorttina.");
   const text = lines.join("\n");
   return text.length > 4000 ? text.slice(0, 3999) + "…" : text;
 }
@@ -439,7 +439,8 @@ async function scanInbound(companies) {
     if (!res.ok || !Array.isArray(res.json)) continue;
 
     for (const message of res.json) {
-      const stamp = message.receivedAt ?? message.createdAt;
+      // createdAt (insert time) is the paging key of the list route; receivedAt can lag behind it.
+      const stamp = message.createdAt;
       const advance = () => {
         const t = Date.parse(stamp ?? "");
         if (!Number.isNaN(t) && t > Date.parse(state.inboundSince[company.id])) state.inboundSince[company.id] = stamp;
