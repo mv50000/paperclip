@@ -315,6 +315,10 @@ ja jobin `actions`-oikeus laskettiin arvosta `write` arvoon `read`.
 - `pnpm-cache-warm.yml` tallentaa entryn masterin scopeen (`actions/cache`, tallennus vain
   avainosuman puuttuessa). Se ajaa pushissa masteriin kun `pnpm-lock.yaml` muuttuu, päivittäin
   ja käsin. Päivittäinen ajo pitää entryn elossa (GitHub poistaa 7 päivää lukemattoman cachen).
+- Jos `vars.CI_RUNNER` otetaan käyttöön (RK9-350), warm-ajo ja fork-PR:t voivat ajaa eri
+  käyttäjällä. Store-polku sisältää kotihakemiston ja kuuluu cachen versioon, joten fork-PR ei
+  osu cacheen. Tarkista polku ennen kytkentää.
+- `storybook-visual.yml` tallentaa yhä oman `cache: pnpm` -entrynsä labelatuilla PR:illä.
 - Pidä avain ja polku samoina `pr.yml`:ssä ja `pnpm-cache-warm.yml`:ssä.
 - Vanhat PR-refien entryt poistetaan mergen jälkeen: `gh cache delete <id> -R mv50000/paperclip`
   (vain `refs/pull/*`, ei masterin entryjä).
