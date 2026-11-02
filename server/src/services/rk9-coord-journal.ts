@@ -65,6 +65,22 @@ const AGENT_RUN_REF_RX = "^agent_run:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 /** Summary prefix of a heads-up: the label says the observation is unverified. */
 export const RK9_COORD_HEADSUP_SUMMARY_PREFIX = "[Heads up, varmistamaton]";
 
+/**
+ * RK9-647 (from RK9-633): event types a `grok` actor may post. Every other
+ * type, server-only types included, is 403 rk9_coord_event_kind_not_allowed.
+ * Grok rows are always `unverified` (rk9CoordJournalTrust).
+ */
+export const RK9_COORD_GROK_EVENT_TYPES = ["blocker", "handoff", "ask-operator"] as const;
+
+export function assertRk9CoordEventKindAllowed(actor: Pick<Rk9CoordResolvedActor, "kind">, type: unknown) {
+  if (actor.kind !== "grok") return;
+  if (typeof type === "string" && (RK9_COORD_GROK_EVENT_TYPES as readonly string[]).includes(type)) return;
+  throw new HttpError(403, "This actor kind may not post this event type", {
+    code: "rk9_coord_event_kind_not_allowed",
+    allowed: [...RK9_COORD_GROK_EVENT_TYPES],
+  });
+}
+
 export function rk9CoordSeesAllAskOperator(kind: string): boolean {
   return (RK9_COORD_ASK_OPERATOR_DELTA_KINDS as readonly string[]).includes(kind);
 }
@@ -450,6 +466,7 @@ export function rk9CoordJournalService(db: Db) {
     actor: Rk9CoordResolvedActor,
     input: AppendRk9CoordEvent,
   ): Promise<{ event: Rk9CoordEventView; duplicate: boolean }> {
+    assertRk9CoordEventKindAllowed(actor, input.type);
     assertRk9CoordNoSecretFields({
       repo: input.repo,
       client_event_id: input.client_event_id,

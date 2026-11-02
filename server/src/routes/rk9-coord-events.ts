@@ -19,7 +19,11 @@ import { HttpError } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity } from "../services/activity-log.js";
-import { formatRk9CoordDeltaLine, rk9CoordJournalService } from "../services/rk9-coord-journal.js";
+import {
+  assertRk9CoordEventKindAllowed,
+  formatRk9CoordDeltaLine,
+  rk9CoordJournalService,
+} from "../services/rk9-coord-journal.js";
 
 function coordError(status: number, code: string, message: string) {
   return new HttpError(status, message, { code });
@@ -63,7 +67,18 @@ export function rk9CoordEventRoutes(db: Db) {
   const router = Router({ mergeParams: true });
   const journal = rk9CoordJournalService(db);
 
-  router.post("/", validate(appendRk9CoordEventSchema), async (req, res, next) => {
+  // RK9-647: the kind allow-list runs before validation, so a Grok post of
+  // a server-only type is 403, not 400.
+  const eventKindGate = (req: Request, _res: unknown, next: (err?: unknown) => void) => {
+    try {
+      if (req.rk9CoordActor) assertRk9CoordEventKindAllowed(req.rk9CoordActor, (req.body as { type?: unknown } | undefined)?.type);
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  router.post("/", eventKindGate, validate(appendRk9CoordEventSchema), async (req, res, next) => {
     try {
       const companyId = companyIdOf(req);
       const actor = requireRk9CoordActor(req);

@@ -426,6 +426,11 @@ required field is 400. Common optional fields: `client_event_id`,
   is unchanged. Today only `headsup` sets `dedupe_key` from the API.
 - `trust` comes from the server, never from the body. Rows of a host coord
   token (also its `cc` claims) and of Grok are always `unverified`.
+- A `grok` actor may post only `blocker`, `handoff` and `ask-operator`
+  (RK9-647, from RK9-633). Any other type, a server-only type included, is
+  403 `rk9_coord_event_kind_not_allowed`; the check runs before body
+  validation. The vault-mcp proxy adds the `[Grok, varmistamaton]` marker;
+  the server enforces only the allow-list and the trust.
 - Each new event writes one `activity_log` row
   (`rk9.coord.event_appended`).
 - There is no PATCH, PUT or DELETE route; those methods get the coord 404.

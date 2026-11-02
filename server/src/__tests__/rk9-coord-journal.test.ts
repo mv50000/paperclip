@@ -280,6 +280,27 @@ if (!support.supported) {
     expect(row!.payload).not.toHaveProperty("verified");
   });
 
+  it("lets grok post only blocker, handoff and ask-operator, always unverified (RK9-647)", async () => {
+    const grok = request(appFor(none, { tokenId: "t-grok", companyId, principalKind: "service", principalName: "grok" }));
+    const send = (body: Record<string, unknown>) => grok.post(`${base(companyId)}/events`).set("X-RK9-Actor", "grok").send(body);
+    const allowed = await send({ type: "blocker", issue: "RK9-626", what: "grok sees a blocker", trust: "verified" });
+    expect(allowed.status).toBe(201);
+    expect(allowed.body.event).toMatchObject({ actor: "grok", actor_kind: "grok", trust: "unverified" });
+    for (const body of [
+      { type: "decision", title: "t", rationale: "r" },
+      { type: "deploy", app: "bk", sha: "abcdef1", result: "success" },
+      { type: "done", issue: "RK9-626" },
+      { type: "headsup", text: "x", class: "other", observation_key: "abcdef01" },
+      { type: "decision-vaulted", ref_event_id: 1, vault_path: "rk9/resources/x.md", commit: "abcdef1" },
+      { type: "lease", resource: "prod:bk" },
+      {},
+    ]) {
+      const denied = await send(body);
+      expect(denied.status, JSON.stringify(body)).toBe(403);
+      expect(denied.body.code).toBe("rk9_coord_event_kind_not_allowed");
+    }
+  });
+
   it("overwrites the ask-operator actor with the resolved caller", async () => {
     const res = await post(companyId, "worktree:RK9-626", {
       type: "ask-operator",
