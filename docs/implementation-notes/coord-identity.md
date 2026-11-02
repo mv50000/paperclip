@@ -141,6 +141,11 @@ rk9claude | grok | operator`.
 - Event types: `decision | deploy | handoff | blocker | done | ask-operator |
   lease | phase | break-glass | decision-vaulted | escalated | headsup`.
   `headsup` was amended by RK9-623 for RK9-636 (2026-11-01).
+  Additive note (RK9-647, 2026-11-02): the delta never returns `headsup`.
+  It returns every `ask-operator` to actor kinds `cc` and `operator`; other
+  kinds get only their own questions (an `agent_run` also those of another
+  run of the same agent) and the answers to them. A `headsup` row is always
+  `unverified`. Details: `coord-bus.md`.
 - Route prefix: `/api/companies/:companyId/rk9/coord/*`.
 - Coord token: `rk9_coord_` + 43 base64url characters (32 random bytes).
 - Reserved header `X-RK9-Coord-Token`: the server never reads it. The HTTP
@@ -259,6 +264,7 @@ Error codes in the JSON `code` field:
 | `rk9_coord_inbox_body_empty` | 400 | message body is empty after redaction (RK9-626) |
 | `rk9_coord_inbox_target_not_allowed` | 422 | agent message aimed at an Agent Chat conversation issue (RK9-626) |
 | `rk9_coord_inbox_issue_paused` | 409 | agent message aimed at a paused issue tree (RK9-626) |
+| `rk9_coord_event_kind_not_allowed` | 403 | a `grok` actor posts an event type other than `blocker`, `handoff` or `ask-operator` (also a server-only type) (RK9-647, additive) |
 | `rk9_coord_secret_in_field` | 422 | a verbatim field (`to`, `repo`, `app`, `vault_note`, `client_event_id`) looks like a secret (RK9-626) |
 | `rk9_coord_client_event_conflict` | 409 | `client_event_id` already stored by another actor (RK9-626) |
 | `rk9_coord_lease_not_found` | 404 | no such lease, or no active lease to break (RK9-627); the rk9 CLI dead-letters a spooled release on this code |

@@ -24,6 +24,8 @@ export const RK9_COORD_CLIENT_EVENT_TYPES = [
   "ask-operator",
   // RK9-631: the follow-up of a `decision` whose vault note was written (rk9 decision --vault).
   "decision-vaulted",
+  // RK9-647: heads-up from any session (RK9-636). Always stored unverified.
+  "headsup",
 ] as const;
 export type Rk9CoordClientEventType = (typeof RK9_COORD_CLIENT_EVENT_TYPES)[number];
 
@@ -132,6 +134,29 @@ const decisionVaultedSchema = z.object({
   pushed: z.boolean().optional(),
 });
 
+/** Heads-up class (ADR / coord-bus.md naming): operator decision or other. */
+export const RK9_COORD_HEADSUP_CLASSES = ["operator", "other"] as const;
+/** Observation key of a heads-up; stored in the `dedupe_key` column. */
+export const RK9_COORD_OBSERVATION_KEY_PATTERN = /^[0-9a-f]{8,64}$/;
+
+/**
+ * headsup (RK9-647, client side RK9-636): an observation a session reports.
+ * The server stores it as `unverified` whatever the credential, dedupes it
+ * on (company, type, observation_key) and never creates an ask-operator from
+ * it. `class_rule` is dropped from the payload when `class` is `other`.
+ */
+export const rk9CoordHeadsupSchema = z.object({
+  ...commonEventFields,
+  type: z.literal("headsup"),
+  text: freeText(2000),
+  explanation: freeText(4000).optional(),
+  class: z.enum(RK9_COORD_HEADSUP_CLASSES),
+  class_rule: z.string().regex(/^[a-z][a-z_]{0,39}$/, "class_rule must be a lower-case rule name").optional(),
+  observation_key: z.string().regex(RK9_COORD_OBSERVATION_KEY_PATTERN, "observation_key must be 8-64 lower-case hex"),
+  session_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "session_id must be a session id").optional(),
+  issue: rk9CoordIssueSchema.optional(),
+});
+
 /** POST /companies/:companyId/rk9/coord/events */
 export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
   decisionSchema,
@@ -141,6 +166,7 @@ export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
   doneSchema,
   rk9CoordAskOperatorSchema,
   decisionVaultedSchema,
+  rk9CoordHeadsupSchema,
 ]);
 export type AppendRk9CoordEvent = z.infer<typeof appendRk9CoordEventSchema>;
 

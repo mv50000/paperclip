@@ -390,13 +390,13 @@ model is called.
   them removed and with them as spaces. If either reading shows a secret, the
   whole field becomes `[redacted]` (fail closed).
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
-  `client_event_id`) are grammar-restricted. A secret-looking value there is
+  `client_event_id`, the heads-up `session_id`) are grammar-restricted. A secret-looking value there is
   422 `rk9_coord_secret_in_field`, not a silent store. A match counts only at
   a word start, so `rk9-ai/task-runner` or `kiosk-frontend` pass.
 - The raw text is redacted before the collapse too, so a pattern that spans
   a tab or newline is caught.
-- Caps: `summary` 300, each payload text field 500 (`rationale` 2000), an
-  inbox `body` 500 characters. A cut ends with `…`.
+- Caps: `summary` 300, each payload text field 500 (`rationale` 2000, the
+  heads-up `explanation` 1000), an inbox `body` 500 characters. A cut ends with `…`.
 
 ### POST /events
 
@@ -414,13 +414,24 @@ required field is 400. Common optional fields: `client_event_id`,
 | `blocker` | `issue`, `what` | | what |
 | `done` | `issue` | `pr` (number or URL) | `PR #<n>` |
 | `ask-operator` | `question`, `urgency` | `options`, `issue`, `reply_to` | `[<urgency>] <question>` |
+| `headsup` | `text`, `class`, `observation_key` | `explanation`, `class_rule`, `session_id`, `issue` | `[Heads up, varmistamaton] <text>` |
 
 - Answer: 201 `{ event, duplicate: false }`. A repeat of a stored
   `client_event_id` is 200 `{ event, duplicate: true }` with the stored row.
   This is the spool dedupe of the rk9 CLI. A `client_event_id` that another
   actor stored first is 409 `rk9_coord_client_event_conflict`.
+- Producer dedupe (RK9-647, every type): an insert that hits
+  `rk9_coord_events_dedupe_uq` on (`company_id`, `type`, `dedupe_key`) is 200
+  `{ event, duplicate: true }` with the stored row, for any actor. Before
+  RK9-647 this conflict was a 500. The `client_event_id` check runs first and
+  is unchanged. Today only `headsup` sets `dedupe_key` from the API.
 - `trust` comes from the server, never from the body. Rows of a host coord
   token (also its `cc` claims) and of Grok are always `unverified`.
+- A `grok` actor may post only `blocker`, `handoff` and `ask-operator`
+  (RK9-647, from RK9-633). Any other type, a server-only type included, is
+  403 `rk9_coord_event_kind_not_allowed`; the check runs before body
+  validation. The vault-mcp proxy adds the `[Grok, varmistamaton]` marker;
+  the server enforces only the allow-list and the trust.
 - Each new event writes one `activity_log` row
   (`rk9.coord.event_appended`).
 - There is no PATCH, PUT or DELETE route; those methods get the coord 404.
@@ -489,6 +500,47 @@ events with a `vault_path` and no follow-up, oldest first (default 20). It
 needs a resolved actor (400 `rk9_coord_actor_required`). An unverified caller
 sees only its own decisions. Answer: `{ events: [<event view>] }`.
 
+### headsup (RK9-647)
+
+The API side of the heads-up of [RK9-636](/RK9/issues/RK9-636). Any session
+reports an observation; the client side lives in claude-config.
+
+```json
+{
+  "type": "headsup",
+  "text": "CI on master is red since 10:12",
+  "explanation": "Three PRs failed the same e2e spec.",
+  "class": "operator | other",
+  "class_rule": "prod_write",
+  "observation_key": "3f9e2a1b0c",
+  "session_id": "3f9e2a1b-aaaa",
+  "issue": "RK9-636"
+}
+```
+
+- `text` 1–2000 raw characters, stored redacted, one line, at most 500.
+  `explanation` 1–4000 raw, stored at most 1000.
+- `class` is `operator` or `other`. `class_rule` (`^[a-z][a-z_]{0,39}$`)
+  names the rule that made it operator class. The server drops it when
+  `class` is `other`.
+- `observation_key` (`^[0-9a-f]{8,64}$`) is stored in `dedupe_key`. The same
+  key again, from any actor, is 200 `{ event, duplicate: true }`. Another
+  actor gets the board view of the stored row, without `explanation`.
+- `session_id` and `class_rule` are stored verbatim, so a secret-looking value
+  is 422 `rk9_coord_secret_in_field`.
+- `session_id` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`) and `issue` are
+  optional.
+- `trust` is always `unverified`, whatever the credential.
+- `payload`: `{ text, explanation?, class, class_rule?, observation_key,
+  session_id?, observed_actor, verified: false, issue? }`. `observed_actor`
+  is the resolved caller.
+- `summary`: `[Heads up, varmistamaton] <text>`, at most 300 characters.
+- The server never creates an `ask-operator` from a heads-up. For an
+  operator-class heads-up the client posts a separate `ask-operator`.
+- The delta never returns a heads-up (see below). The session's own hook
+  delivers it locally. The board lists it in recent events with the labelled
+  summary; the board leaves `explanation` out of the payload.
+
 ### GET /events/delta
 
 Returns the events after the caller's cursor that concern it:
@@ -496,8 +548,33 @@ Returns the events after the caller's cursor that concern it:
 - events whose `repo` is the actor's repo, or whose `issue` is the actor's
   issue (the presence row, or the issue in `worktree:<issue>`);
 - events whose `resource` is a lease the actor holds now;
-- every `deploy` and `ask-operator` event;
-- never the actor's own events.
+- every `deploy` event;
+- `ask-operator` events by the rule below (RK9-647);
+- never the actor's own events;
+- never a `headsup` event, to any actor (RK9-647).
+
+`ask-operator` visibility (RK9-647). An `ask-operator` is an operator-class
+question. If every agent session got every question, an agent could decide
+another actor's question and bypass the approval gate.
+
+- Kinds `cc` and `operator` get every `ask-operator`.
+- Every other kind (`agent_run`, `worktree`, `headless`, `orch`, `remote`,
+  `rk9claude`, `grok`) gets an `ask-operator` only when one of these holds:
+  - The caller is the author. For an `agent_run` this includes another run
+    of the same agent, so a later run sees the question of an earlier one.
+    The caller's own events are still never echoed.
+  - The event is an answer by a `cc` or `operator` actor: its
+    `ref_event_id` (`reply_to`) points at a question whose author is the
+    caller, by the rule above. A reply by any other kind is not delivered,
+    so no agent or unverified actor can push a forged approval. An answer
+    whose question the retention has already pruned is not delivered either.
+- No other actor's question reaches the delta, not even when the repo or
+  issue matches. The board still lists every event.
+- Cost, without a migration: "same agent" is a primary-key lookup in
+  `heartbeat_runs` for each candidate row (the agent_run actor ref holds the
+  run id). "Answer to my question" is a semi-join on `ref_event_id` against
+  the company's `ask-operator` rows (`rk9_coord_events_company_type_idx`),
+  which the retention keeps at 90 days.
 
 Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
 `issue` as extra filters for a caller whose presence row has none yet.
