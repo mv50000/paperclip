@@ -396,6 +396,11 @@ vi.mock("../services/rk9-coord-leases.js", () => ({
   startRk9CoordLeaseSweeper: vi.fn(() => () => {}),
 }));
 
+// RK9 Custom (RK9-629): the stall escalator imports rk9-coord-journal.ts the same way.
+vi.mock("../services/rk9-coord-stall-escalator.js", () => ({
+  startRk9CoordStallEscalator: vi.fn(() => () => {}),
+}));
+
 vi.mock("../services/question-response-delivery.js", () => ({
   questionResponseDeliveryService: vi.fn(() => ({
     sweepPending: vi.fn(async () => ({
