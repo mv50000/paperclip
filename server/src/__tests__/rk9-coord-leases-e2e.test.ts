@@ -1,12 +1,14 @@
 // RK9 Custom (RK9-627): coord lease engine routes against real Postgres:
 // atomic acquire, FIFO queue under 20 parallel acquires, renew/release with
 // fencing, adopt, break, hard-gate trust, company scope and the exact rk9 CLI
-// bodies. Contract: docs/implementation-notes/coord-leases.md.
+// bodies. RK9-648: queue leave, wait=false refresh, released-lease fencing,
+// claim window cap, hard-gate TTL cap and the kind-first order.
+// Contract: docs/implementation-notes/coord-leases.md.
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { and, asc, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agents,
@@ -577,4 +579,177 @@ if (!support.supported) {
     expect(race.body.queue).toHaveLength(19);
     expect(race.body.held).toBe(true);
   });
+  // --- RK9 Custom (RK9-648): lease engine follow-ups ---
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function waiterRow(resource: string, actorRef: string) {
+    const [row] = await db
+      .select({ waiter: rk9CoordLeaseWaiters })
+      .from(rk9CoordLeaseWaiters)
+      .innerJoin(rk9CoordActors, eq(rk9CoordActors.id, rk9CoordLeaseWaiters.actorId))
+      .where(
+        and(
+          eq(rk9CoordLeaseWaiters.companyId, companyId),
+          eq(rk9CoordLeaseWaiters.resource, resource),
+          eq(rk9CoordActors.actorRef, actorRef),
+        ),
+      );
+    return row?.waiter ?? null;
+  }
+
+  it("lets a waiter leave the queue idempotently without touching the lease (RK9-648)", async () => {
+    const res = "prod:leave-app";
+    const app = appFor(boardKey());
+    const held = await acquire(cc("lv-h"), { resource: res, ttl_s: 600 });
+    await acquire(cc("lv-1"), { resource: res, ttl_s: 600, wait: true });
+    await acquire(cc("lv-2"), { resource: res, ttl_s: 600, wait: true });
+    const leave = await request(app).post(`${base()}/leave`).set("X-RK9-Actor", cc("lv-1")).send({ resource: res });
+    expect(leave.status).toBe(200);
+    expect(leave.body).toEqual({ left: true, resource: res });
+    expect(await waiterRow(res, cc("lv-1"))).toBeNull();
+    // The next waiter moves up; the holder keeps its lease.
+    const poll = await acquire(cc("lv-2"), { resource: res, ttl_s: 600, wait: true });
+    expect(poll.body).toMatchObject({ queued: true, position: 1, holder: cc("lv-h") });
+    const events = await leaseEvents(res);
+    expect(events.map((e) => (e.payload as { subtype: string }).subtype)).toEqual(["grant", "queue", "queue", "dequeue"]);
+    expect(events[3]!.payload).toMatchObject({ actor: cc("lv-1"), dequeue_reason: "left" });
+    expect(await leaseActivity(res)).toHaveLength(4);
+    // A second leave, a caller that never queued and an unknown actor: 200 left:false, nothing written.
+    for (const who of [cc("lv-1"), cc("lv-h"), cc("lv-never-seen")]) {
+      const again = await request(app).post(`${base()}/leave`).set("X-RK9-Actor", who).send({ resource: res });
+      expect(again.status, who).toBe(200);
+      expect(again.body).toEqual({ left: false, resource: res });
+    }
+    expect(await leaseEvents(res)).toHaveLength(4);
+    const [lease] = await db.select().from(rk9CoordLeases).where(eq(rk9CoordLeases.id, held.body.lease_id));
+    expect(lease!.releasedAt).toBeNull();
+    // An agent key cannot dequeue a sibling run's hard-gate waiter (the same trust rule as acquire).
+    const byKey = await request(appFor(agent("agent_key")))
+      .post(`${base()}/leave`)
+      .set("X-RK9-Actor", `agent_run:${runId}`)
+      .send({ resource: res });
+    expect(byKey.status).toBe(403);
+    expect(byKey.body.code).toBe("rk9_coord_lease_run_jwt_required");
+    // Bad bodies and resources.
+    const noBody = await request(app).post(`${base()}/leave`).set("X-RK9-Actor", cc("lv-2")).send({});
+    expect(noBody.status).toBe(400);
+    const badRes = await request(app).post(`${base()}/leave`).set("X-RK9-Actor", cc("lv-2")).send({ resource: "deploy:x" });
+    expect(badRes.status).toBe(422);
+    expect(badRes.body.code).toBe("rk9_coord_lease_resource_invalid");
+    // Company scope: the other company's queue is not this one.
+    const other = await request(appFor(boardKey(otherCompanyId)))
+      .post(`${base(otherCompanyId)}/leave`)
+      .set("X-RK9-Actor", cc("lv-2"))
+      .send({ resource: res });
+    expect(other.body.left).toBe(false);
+    expect(await waiterRow(res, cc("lv-2"))).not.toBeNull();
+  });
+
+  it("refreshes a queued caller's liveness on a wait=false poll (RK9-648 R1)", async () => {
+    const res = "repo:poll-nowait@main";
+    await acquire(cc("pn-h"), { resource: res, ttl_s: 600 });
+    await acquire(cc("pn-w"), { resource: res, ttl_s: 600, wait: true });
+    await db
+      .update(rk9CoordLeaseWaiters)
+      .set({ expiresAt: sql`now() + interval '5 seconds'` })
+      .where(eq(rk9CoordLeaseWaiters.id, (await waiterRow(res, cc("pn-w")))!.id));
+    const before = (await waiterRow(res, cc("pn-w")))!.expiresAt!.getTime();
+    const poll = await acquire(cc("pn-w"), { resource: res, ttl_s: 600, wait: false });
+    expect(poll.status).toBe(200);
+    expect(poll.body).toMatchObject({ granted: false, queued: true, position: 1 });
+    const after = (await waiterRow(res, cc("pn-w")))!.expiresAt!.getTime();
+    expect(after).toBeGreaterThan(before + 60_000);
+    expect(await subtypes(res)).toEqual(["grant", "queue"]);
+  });
+
+  it("answers 409 to a mismatched fencing token on an already released lease (RK9-648 R2)", async () => {
+    const res = "prod:r2-app";
+    const app = appFor(boardKey());
+    const got = await acquire(cc("r2"), { resource: res, ttl_s: 600 });
+    const url = `${base()}/${got.body.lease_id}/release`;
+    const ok = await request(app).post(url).set("X-RK9-Actor", cc("r2")).send({ resource: res, fencing_token: got.body.fencing_token });
+    expect(ok.status).toBe(200);
+    const wrong = await request(app).post(url).set("X-RK9-Actor", cc("r2")).send({ resource: res, fencing_token: got.body.fencing_token + 1 });
+    expect(wrong.status).toBe(409);
+    expect(wrong.body).toMatchObject({ code: "rk9_coord_lease_stale", release_reason: "released" });
+    const replay = await request(app).post(url).set("X-RK9-Actor", cc("r2")).send({ resource: res, fencing_token: got.body.fencing_token });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ released: false, noop: true });
+    expect(await subtypes(res)).toEqual(["grant", "release"]);
+  });
+
+  it("caps the claim window of a promoted lease apart from a long dead-holder grace (RK9-648 R3)", async () => {
+    vi.stubEnv("RK9_COORD_LEASE_DEAD_GRACE_S", "86400");
+    const res = "repo:claim-cap@main";
+    const app = appFor(boardKey());
+    const got = await acquire(cc("cw-h"), { resource: res, ttl_s: 7200 });
+    await acquire(cc("cw-w"), { resource: res, ttl_s: 7200, wait: true });
+    const rel = await request(app).post(`${base()}/${got.body.lease_id}/release`).set("X-RK9-Actor", cc("cw-h")).send({ fencing_token: got.body.fencing_token });
+    expect(rel.status).toBe(200);
+    const [promoted] = await db
+      .select()
+      .from(rk9CoordLeases)
+      .where(and(eq(rk9CoordLeases.companyId, companyId), eq(rk9CoordLeases.resource, res), sql`${rk9CoordLeases.releasedAt} is null`));
+    const windowS = (promoted!.expiresAt.getTime() - promoted!.acquiredAt.getTime()) / 1000;
+    expect(windowS).toBe(300);
+    vi.stubEnv("RK9_COORD_LEASE_CLAIM_WINDOW_S", "60");
+    await request(app).post(`${base()}/${promoted!.id}/release`).set("X-RK9-Actor", cc("cw-w")).send({ fencing_token: promoted!.fencingToken });
+    const again = await acquire(cc("cw-x"), { resource: res, ttl_s: 7200 });
+    await acquire(cc("cw-y"), { resource: res, ttl_s: 7200, wait: true });
+    await request(app).post(`${base()}/${again.body.lease_id}/release`).set("X-RK9-Actor", cc("cw-x")).send({ fencing_token: again.body.fencing_token });
+    const [second] = await db
+      .select()
+      .from(rk9CoordLeases)
+      .where(and(eq(rk9CoordLeases.companyId, companyId), eq(rk9CoordLeases.resource, res), sql`${rk9CoordLeases.releasedAt} is null`));
+    expect((second!.expiresAt.getTime() - second!.acquiredAt.getTime()) / 1000).toBe(60);
+  });
+
+  it("clamps a hard-gate TTL to the cap on acquire and renew, never a soft one (RK9-648)", async () => {
+    const app = appFor(boardKey());
+    const capMs = 21_600 * 1000;
+    const hard = await acquire(cc("cap-h"), { resource: "migrate:cap-db", ttl_s: 86_400 });
+    expect(hard.status).toBe(200);
+    expect(new Date(hard.body.expires_at).getTime() - Date.now()).toBeLessThanOrEqual(capMs + 5_000);
+    expect(new Date(hard.body.expires_at).getTime() - Date.now()).toBeGreaterThan(capMs - 60_000);
+    const renewed = await request(app)
+      .post(`${base()}/${hard.body.lease_id}/renew`)
+      .set("X-RK9-Actor", cc("cap-h"))
+      .send({ fencing_token: hard.body.fencing_token, ttl_s: 86_400 });
+    expect(renewed.status).toBe(200);
+    expect(new Date(renewed.body.expires_at).getTime() - Date.now()).toBeLessThanOrEqual(capMs + 5_000);
+    const soft = await acquire(cc("cap-s"), { resource: "vault:rk9/areas/cap.md", ttl_s: 86_400 });
+    expect(new Date(soft.body.expires_at).getTime() - Date.now()).toBeGreaterThan(86_000 * 1000);
+    // The cap is configurable (never below 1 h); a short hard-gate request is never lengthened.
+    vi.stubEnv("RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S", "60");
+    const host = await acquire(cc("cap-n"), { resource: "host:cap-node", ttl_s: 86_400 });
+    expect(new Date(host.body.expires_at).getTime() - Date.now()).toBeLessThanOrEqual(3_600_000 + 5_000);
+    const short = await acquire(cc("cap-p"), { resource: "prod:cap-short", ttl_s: 120 });
+    expect(new Date(short.body.expires_at).getTime() - Date.now()).toBeLessThanOrEqual(125_000);
+  });
+
+  it("checks the grok kind before the body, the reason and the lease id (RK9-648)", async () => {
+    const grokToken: Rk9CoordTokenPrincipal = { tokenId: "t-grok-648", companyId, principalKind: "service", principalName: "grok" };
+    const grokApp = appFor(none, grokToken);
+    const asGrok = (path: string, body: Record<string, unknown>) =>
+      request(grokApp).post(`${base()}${path}`).set("X-RK9-Actor", "grok").send(body);
+    const missing = randomUUID();
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [`/${missing}/renew`, { fencing_token: 1, ttl_s: 600 }],
+      [`/${missing}/release`, { fencing_token: 1 }],
+      [`/${missing}/renew`, {}],
+      ["/break", { resource: "prod:x", reason: "" }],
+      ["/break", { resource: "deploy:x", reason: "r" }],
+      ["/acquire", { resource: "deploy:x" }],
+      ["/leave", { resource: "prod:x" }],
+      ["/leave", {}],
+    ];
+    for (const [path, body] of cases) {
+      const res = await asGrok(path, body);
+      expect(res.status, `${path} ${JSON.stringify(body)}`).toBe(403);
+      expect(res.body.code).toBe("rk9_coord_lease_kind_not_allowed");
+    }
+  });
+  // --- /RK9 Custom ---
 });

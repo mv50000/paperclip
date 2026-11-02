@@ -458,6 +458,8 @@ vi.mock("../auth/better-auth.js", () => ({
 import { startServer } from "../index.ts";
 import { reconcileSafeNativeReplacements } from "../services/native-runtime/native-safe-replacement.js";
 import { EXECUTION_RECONCILIATION_INTERVAL_MS } from "../services/execution-control-deadline.js";
+// RK9 Custom (RK9-648): the mocked lease sweeper, to assert that startup registers it.
+import { startRk9CoordLeaseSweeper } from "../services/rk9-coord-leases.js";
 
 describe("startServer feedback export wiring", () => {
   beforeEach(() => {
@@ -574,6 +576,12 @@ describe("startServer feedback export wiring", () => {
       storageService: { id: "storage-service" },
       serverPort: 3210,
     });
+  });
+
+  // RK9 Custom (RK9-648): removing the sweeper registration in index.ts must fail a test.
+  it("starts the rk9 coord lease sweeper once at startup", async () => {
+    await startServer();
+    expect(vi.mocked(startRk9CoordLeaseSweeper)).toHaveBeenCalledTimes(1);
   });
 
   it("never invokes the retired review detector at startup or on periodic recovery", async () => {

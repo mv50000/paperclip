@@ -7,6 +7,7 @@
 //   POST /leases/:id/renew     { fencing_token, ttl_s }
 //   POST /leases/:id/release   { resource, fencing_token, client_event_id }
 //   POST /leases/break         { resource, reason, lease_id? }
+//   POST /leases/leave         { resource }   (RK9-648: leave the wait queue)
 // Unknown keys (e.g. the CLI's client_event_id) are stripped, not rejected.
 //
 // The resource is a plain string here on purpose: the service checks the
@@ -117,6 +118,13 @@ export const breakRk9CoordLeaseSchema = z.object({
   lease_id: z.string().uuid().optional(),
 });
 export type BreakRk9CoordLease = z.infer<typeof breakRk9CoordLeaseSchema>;
+
+/**
+ * POST /leases/leave (RK9-648): the caller leaves the wait queue of a resource
+ * (`rk9 lease wait` on Ctrl-C or timeout). Idempotent: not queued is 200 `left:false`.
+ */
+export const leaveRk9CoordLeaseQueueSchema = z.object({ resource: resourceSchema });
+export type LeaveRk9CoordLeaseQueue = z.infer<typeof leaveRk9CoordLeaseQueueSchema>;
 
 /** POST /leases/validate: is this fencing token the current one for the resource? */
 export const validateRk9CoordLeaseSchema = z.object({

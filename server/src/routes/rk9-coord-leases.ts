@@ -8,16 +8,20 @@
 //   POST /:leaseId/release   { resource, fencing_token }       -> 200, idempotent; 409 = lost
 //   POST /break              { resource, reason, lease_id? }   -> operator/rk9claude for a live holder;
 //                                                                 409 rk9_coord_lease_changed (RK9-629)
+//   POST /leave              { resource }                      -> { left }: leave the wait queue (RK9-648)
 //   POST /validate           { resource, fencing_token }       -> 200 valid; 409 stale
 //   GET  /                   ?prefix=&holder=&resource=        -> { leases: [...] }
 //   GET  /status             ?resource=                        -> one resource
 // A missing lease is 404 `rk9_coord_lease_not_found` (the CLI dead-letters a
-// spooled release only on that code).
-import { Router, type Request, type Response } from "express";
+// spooled release only on that code). A denied actor kind (grok) gets 403
+// `rk9_coord_lease_kind_not_allowed` on every mutation before any body or
+// lease check (RK9-648), so it learns nothing about bodies or lease ids.
+import { Router, type NextFunction, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   acquireRk9CoordLeaseSchema,
   breakRk9CoordLeaseSchema,
+  leaveRk9CoordLeaseQueueSchema,
   releaseRk9CoordLeaseSchema,
   renewRk9CoordLeaseSchema,
   rk9CoordLeaseListQuerySchema,
@@ -25,6 +29,7 @@ import {
   validateRk9CoordLeaseSchema,
   type AcquireRk9CoordLease,
   type BreakRk9CoordLease,
+  type LeaveRk9CoordLeaseQueue,
   type ReleaseRk9CoordLease,
   type RenewRk9CoordLease,
   type ValidateRk9CoordLease,
@@ -32,6 +37,7 @@ import {
 import { HttpError } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import {
+  assertRk9CoordLeaseKind,
   rk9CoordLeaseService,
   type Rk9CoordLeaseCaller,
   type Rk9CoordLeaseMutationResult,
@@ -68,11 +74,21 @@ function sendMutation(res: Response, result: Rk9CoordLeaseMutationResult, extra:
   res.json({ ...result, ...extra });
 }
 
+/** RK9-648: a denied actor kind gets 403 before the body is validated (400) or a lease is looked up (404). */
+function leaseKindGate(req: Request, _res: Response, next: NextFunction) {
+  try {
+    if (req.rk9CoordActor) assertRk9CoordLeaseKind(req.rk9CoordActor);
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 export function rk9CoordLeaseRoutes(db: Db, opts: Rk9CoordLeaseServiceOptions = {}) {
   const router = Router({ mergeParams: true });
   const leases = rk9CoordLeaseService(db, opts);
 
-  router.post("/acquire", validate(acquireRk9CoordLeaseSchema), async (req, res, next) => {
+  router.post("/acquire", leaseKindGate, validate(acquireRk9CoordLeaseSchema), async (req, res, next) => {
     try {
       const input = req.body as AcquireRk9CoordLease;
       const result = await leases.acquire(companyIdOf(req), callerOf(req), {
@@ -92,7 +108,7 @@ export function rk9CoordLeaseRoutes(db: Db, opts: Rk9CoordLeaseServiceOptions = 
     }
   });
 
-  router.post("/break", validate(breakRk9CoordLeaseSchema), async (req, res, next) => {
+  router.post("/break", leaseKindGate, validate(breakRk9CoordLeaseSchema), async (req, res, next) => {
     try {
       const input = req.body as BreakRk9CoordLease;
       res.json(
@@ -102,6 +118,15 @@ export function rk9CoordLeaseRoutes(db: Db, opts: Rk9CoordLeaseServiceOptions = 
           leaseId: input.lease_id ?? null, // RK9 Custom (RK9-629)
         }),
       );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/leave", leaseKindGate, validate(leaveRk9CoordLeaseQueueSchema), async (req, res, next) => {
+    try {
+      const input = req.body as LeaveRk9CoordLeaseQueue;
+      res.json(await leases.leaveQueue(companyIdOf(req), callerOf(req), { resource: input.resource }));
     } catch (err) {
       next(err);
     }
@@ -145,7 +170,7 @@ export function rk9CoordLeaseRoutes(db: Db, opts: Rk9CoordLeaseServiceOptions = 
     }
   });
 
-  router.post("/:leaseId/renew", validate(renewRk9CoordLeaseSchema), async (req, res, next) => {
+  router.post("/:leaseId/renew", leaseKindGate, validate(renewRk9CoordLeaseSchema), async (req, res, next) => {
     try {
       const input = req.body as RenewRk9CoordLease;
       const result = await leases.renew(companyIdOf(req), callerOf(req), leaseIdOf(req), {
@@ -158,7 +183,7 @@ export function rk9CoordLeaseRoutes(db: Db, opts: Rk9CoordLeaseServiceOptions = 
     }
   });
 
-  router.post("/:leaseId/release", validate(releaseRk9CoordLeaseSchema), async (req, res, next) => {
+  router.post("/:leaseId/release", leaseKindGate, validate(releaseRk9CoordLeaseSchema), async (req, res, next) => {
     try {
       const input = req.body as ReleaseRk9CoordLease;
       const result = await leases.release(companyIdOf(req), callerOf(req), leaseIdOf(req), {

@@ -19,10 +19,11 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
 
 | Route | Body or query | Answer |
 |---|---|---|
-| `POST /acquire` | `resource`, `ttl_s` (10..86400, default 1800), `reason`, `wait`, `mode` | `{granted:true, lease_id, fencing_token, expires_at, holder, already_held, adopted_from}`, or `{granted:false, queued:true, position, holder, holder_phase, expires_at, eta}`. With `wait=false` and a live holder: 409 `rk9_coord_lease_held` with the same holder fields and no queue entry, unless the caller is already queued (then 200 `queued:true`). |
-| `POST /:leaseId/renew` | `fencing_token`, `ttl_s` | `{expires_at}`. 409 `rk9_coord_lease_stale` when the lease is lost. |
-| `POST /:leaseId/release` | `resource`, `fencing_token` (required for a hard-gate lease, 422 `rk9_coord_lease_fencing_required` otherwise), `client_event_id` (ignored) | `{released, noop}`. A second release is 200 with `noop:true` and writes nothing. 409 when the lease was lost. |
+| `POST /acquire` | `resource`, `ttl_s` (10..86400, default 1800; a hard gate is clamped to the cap, see [TTL cap](#hard-gate-ttl-cap)), `reason`, `wait`, `mode` | `{granted:true, lease_id, fencing_token, expires_at, holder, already_held, adopted_from}`, or `{granted:false, queued:true, position, holder, holder_phase, expires_at, eta}`. With `wait=false` and a live holder: 409 `rk9_coord_lease_held` with the same holder fields and no queue entry, unless the caller is already queued (then 200 `queued:true`). |
+| `POST /:leaseId/renew` | `fencing_token`, `ttl_s` (clamped like acquire) | `{expires_at}`. 409 `rk9_coord_lease_stale` when the lease is lost. |
+| `POST /:leaseId/release` | `resource`, `fencing_token` (required for a hard-gate lease, 422 `rk9_coord_lease_fencing_required` otherwise), `client_event_id` (ignored) | `{released, noop}`. A second release is 200 with `noop:true` and writes nothing. 409 when the lease was lost, and 409 when the token is not this lease's, also after the release (RK9-648 R2). |
 | `POST /break` | `resource`, `reason` (required), `lease_id` (optional, RK9-629) | `{broken, previous_holder, release_reason, promoted}`. With `lease_id`, a different active lease is 409 `rk9_coord_lease_changed` and nothing is broken. |
+| `POST /leave` | `resource` | `{left, resource}` (RK9-648). Same kind and trust checks as acquire. The caller leaves the wait queue (`dequeue` event, `dequeue_reason: left`). Not queued: 200 `left:false`, nothing written. It never releases a lease. |
 | `POST /validate` | `resource`, `fencing_token` | 200 `{valid:true, holder, expires_at}` or 409 `rk9_coord_lease_stale` |
 | `GET /` | `prefix`, `holder`, `resource` | `{leases:[{lease_id, resource, holder, holder_kind, holder_phase, mode, expires_at, expired, queue:[{actor, position}]}]}` |
 | `GET /status` | `resource` | one row: `held`, `holder`, `holder_phase`, `expires_at`, `queue`, and the caller's `position` |
@@ -36,9 +37,13 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
   hard-gate rules guard against accidents, not against a determined local
   session.
 - `wait=false` by a caller that is already queued answers 200
-  `{queued:true, position}`. Only a `wait=true` poll refreshes the queue
-  place: without one, the sweeper removes the waiter after the grace
-  period. The rk9 CLI always waits with `wait=true`.
+  `{queued:true, position}`. Like a `wait=true` poll, it refreshes the
+  waiter's liveness (RK9-648 R1). It never enqueues a new waiter.
+- `rk9 lease wait` calls `POST /leave` on Ctrl-C, on SIGTERM and on its
+  timeout (RK9-648). An older server answers 404 there, and the CLI ignores
+  it: the sweeper then removes the waiter after the grace period. The gate
+  library splits one enforce wait into chunks; it passes `--keep-place`
+  for a chunk and calls `rk9 lease leave` when the whole wait gives up.
 - A lease id that does not exist in the company, or is not a UUID, is 404
   `rk9_coord_lease_not_found`. The CLI dead-letters a spooled release on
   that code.
@@ -60,9 +65,11 @@ Hard-gate prefixes are `prod`, `migrate` and `host`.
 
 ## Trust
 
-- Actor kind `grok` may not acquire, wait on, renew, release or break any
-  lease, of any prefix, `repo:` and `vault:` included. It gets 403
-  `rk9_coord_lease_kind_not_allowed` (RK9-633). Grok reaches the bus only
+- Actor kind `grok` may not acquire, wait on, leave, renew, release or
+  break any lease, of any prefix, `repo:` and `vault:` included. It gets
+  403 `rk9_coord_lease_kind_not_allowed` (RK9-633). Since RK9-648 the
+  route checks the kind before the body (400), the resource or reason
+  (422) and the lease id (404), so grok cannot probe which lease ids exist. Grok reaches the bus only
   through the vault-mcp proxy, which refuses lease calls itself; the server
   check is the backstop. Kind `remote` keeps the ADR rule: soft prefixes are
   allowed, hard gates are not.
@@ -103,7 +110,7 @@ and the subtype in `payload.subtype`. The activity action is
 | `adopt` | acquire takes over an expired or dead holder's lease inline; `previous_holder` and `release_reason` are in the payload |
 | `break` | operator force-release |
 | `promote` | the next live waiter gets the lease; it also gets an inbox row of kind `lease_promote` |
-| `dequeue` | a dead waiter skipped at promotion |
+| `dequeue` | a dead waiter skipped at promotion or swept (`dequeue_reason: waiter_gone`), or a waiter that left with `POST /leave` (`left`) |
 | `stuck` | the head waiter waited longer than `RK9_COORD_LEASE_STUCK_S` (default 30 min); once per lease (dedupe key `lease-stuck:<leaseId>`), for the escalation child |
 
 - Renew writes no event and no activity row. The spec marks it optional.
@@ -136,7 +143,8 @@ and the subtype in `payload.subtype`. The activity action is
   hooks, so a session inside one long tool call (a migration, a deploy)
   looks stale while it still works. A false release there would let two
   migrations run at once. A crashed holder (kill -9) keeps the lease until
-  its TTL; the `stuck` signal and the escalation path cover that case.
+  its TTL. The [TTL cap](#hard-gate-ttl-cap) bounds that time, and the
+  `stuck` signal and the escalation path cover it when someone queues.
 - **Advisory lease** (`repo`, `vault`): also released when neither the
   presence heartbeat (`last_seen_at`) nor the lease activity (acquire or
   renew) is newer than the grace period.
@@ -156,10 +164,28 @@ and the subtype in `payload.subtype`. The activity action is
   (`dequeue` event, `dequeue_reason: waiter_gone`). The `stuck` signal
   counts only waiters that still poll.
 - **Claim window:** a promoted waiter may already be gone (Ctrl-C on
-  `rk9 lease wait`). Its lease first lives for at most the grace period.
-  The holder's next acquire poll (`already_held`) extends it to the
-  requested TTL. An unclaimed promotion therefore expires after the grace
-  period, not after the full TTL.
+  `rk9 lease wait`). Its lease first lives for at most the grace period
+  and at most `RK9_COORD_LEASE_CLAIM_WINDOW_S` (default 300 s, 30..3600;
+  RK9-648 R3, because the grace can be set up to 86 400 s). The holder's
+  next acquire poll (`already_held`) extends it to the requested TTL. An
+  unclaimed promotion therefore expires after the claim window, not after
+  the full TTL.
+
+### Hard-gate TTL cap
+
+- RK9-648: a hard-gate lease (`prod`, `migrate`, `host`) gets at most
+  `RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S` (default 21 600 s = 6 h,
+  3600..86 400; the floor keeps a holder that renews every 1200 s inside
+  the cap). The cap applies to acquire, to the claim poll and to
+  renew. A larger request is clamped, not rejected: gate clients ask for up
+  to 86 400 s. The answer's `expires_at` shows the clamped time. `repo:`
+  and `vault:` keep the full 86 400 s.
+- Why: a crashed hard-gate holder keeps the lease until its TTL, and no
+  `stuck` signal fires while nobody queues.
+- A holder that needs longer renews the lease. The gate library renews at
+  `ttl/3`, at most every 1200 s (RK9-648), so it keeps a lease under any
+  allowed cap. rk9claude holds a `host:` lease for a scheduled
+  reboot for at most 6 h (RK9-656), which fits the default cap.
 
 ## Break
 
