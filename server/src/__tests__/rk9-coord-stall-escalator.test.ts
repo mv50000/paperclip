@@ -55,7 +55,7 @@ describe("stall detector: stuck lease rule", () => {
   });
 
   it("flags a live holder with waiters > stuckS and no renew or phase progress", () => {
-    expect(evaluateRk9CoordStuckLease(base(), opts)).toEqual({ stuck: true, ageS: 45 * 60, waitedS: 40 * 60 });
+    expect(evaluateRk9CoordStuckLease(base(), opts)).toEqual({ stuck: true, ageS: 45 * 60, waitedS: 40 * 60, progressAt: ago(45) });
   });
 
   it("never flags the self-resolving cases", () => {
@@ -91,6 +91,7 @@ describe("stall detector: unanswered journal events", () => {
     type: "blocker",
     actorRef: "worktree:RK9-1",
     actorKind: "worktree",
+    trust: "attributed",
     createdAt: new Date(now.getTime() - 40 * MIN),
     hasFollowUp: false,
     ...over,
@@ -109,6 +110,8 @@ describe("stall detector: unanswered journal events", () => {
     expect(why({ actorRef: RK9_COORD_ESCALATOR_ACTOR, actorKind: "orch" })).toBe("author");
     expect(why({ actorRef: "rk9claude", actorKind: "rk9claude" })).toBe("author");
     expect(why({ actorRef: "operator", actorKind: "operator" })).toBe("author");
+    // Unverified authors (remote hosts, Grok) never reach the operator's chat.
+    expect(why({ actorRef: "grok", actorKind: "grok", trust: "unverified" })).toBe("author");
     expect(why({ hasFollowUp: true })).toBe("follow_up");
     expect(why({ createdAt: new Date(now.getTime() - 10 * MIN) })).toBe("young");
     expect(why({ createdAt: new Date(now.getTime() - 2 * 86_400_000) })).toBe("old");
@@ -132,6 +135,7 @@ describe("stall escalation message and config", () => {
     waiterRefs: ["worktree:RK9-633", "cc:paperclip-01:def"],
     waitedS: 52 * 60,
     ageS: 47 * 60,
+    progressAt: null,
     ...over,
   });
 
@@ -168,6 +172,16 @@ describe("stall escalation message and config", () => {
     expect(resolveRk9CoordEscalatorConfig({ RK9_COORD_ESCALATE_MODE: "enforec" } as NodeJS.ProcessEnv).mode).toBe("shadow");
     expect(resolveRk9CoordEscalatorConfig({ RK9_COORD_STUCK_S: "900" } as NodeJS.ProcessEnv).stuckS).toBe(900);
     expect(resolveRk9CoordEscalatorConfig({ RK9_COORD_LEASE_STUCK_S: "1200" } as NodeJS.ProcessEnv).stuckS).toBe(1200);
+    // Settings that would silently switch escalation off are clamped.
+    expect(
+      resolveRk9CoordEscalatorConfig({ RK9_COORD_ESCALATE_RECHECK_S: "7200", RK9_COORD_ESCALATE_DEDUPE_S: "3600" } as NodeJS.ProcessEnv)
+        .recheckS,
+    ).toBe(1800);
+    expect(
+      resolveRk9CoordEscalatorConfig({ RK9_COORD_STUCK_S: "86400", RK9_COORD_ESCALATE_LOOKBACK_S: "3600" } as NodeJS.ProcessEnv)
+        .lookbackS,
+    ).toBe(172_800);
+    expect(formatRk9CoordEscalationMessage(candidate(), 900)).toContain('--reason "stuck >15 min"');
   });
 });
 
@@ -374,6 +388,27 @@ if (!support.supported) {
     expect(await ledger(`lease:${leaseId}#%`)).toHaveLength(0);
   });
 
+  it("starts a new round (nudge, then recheck) when the holder progresses and stalls again", async () => {
+    const T = new Date("2026-03-20T10:00:00Z");
+    const { leaseId } = await stuckLease("prod:round", T);
+    expect(await tick(T)).toMatchObject({ nudged: 1 });
+    // The holder renews at T+5 and then stalls again for stuckS.
+    await db.update(rk9CoordLeases).set({ renewedAt: at(T, 5) }).where(eq(rk9CoordLeases.id, leaseId));
+    expect(await tick(at(T, 34))).toMatchObject({ nudged: 0, escalated: 0 });
+    // T+36: stuck again. The old nudge predates the progress: a new nudge, no escalation yet.
+    expect(await tick(at(T, 36))).toMatchObject({ nudged: 1, escalated: 0 });
+    expect(await ledger(`nudge:lease:${leaseId}#%`)).toHaveLength(2);
+    expect(await tick(at(T, 40))).toMatchObject({ waiting: 1, escalated: 0 });
+    expect(await tick(at(T, 47))).toMatchObject({ escalated: 1 });
+    // Delivered: no repeat after the dedupe window while nothing changes.
+    expect(await tick(at(T, 47 + 7 * 60))).toMatchObject({ nudged: 0, escalated: 0, deduped: 1 });
+    // Progress after the escalation and a new stall: a new round, a new escalation.
+    await db.update(rk9CoordLeases).set({ renewedAt: at(T, 8 * 60) }).where(eq(rk9CoordLeases.id, leaseId));
+    expect(await tick(at(T, 8 * 60 + 31))).toMatchObject({ nudged: 1 });
+    expect(await tick(at(T, 8 * 60 + 42))).toMatchObject({ escalated: 1 });
+    expect((await ledger(`lease:${leaseId}#%`)).map((row) => row.episodeKey)).toEqual([`lease:${leaseId}#1`, `lease:${leaseId}#2`]);
+  });
+
   it("applies the daily cap, counts a failed send, never retries it, and allows a new escalation after the window", async () => {
     const T = new Date("2026-04-05T10:00:00Z");
     const jams = [
@@ -395,13 +430,18 @@ if (!support.supported) {
     expect(await tick(at(T, 20), cfg)).toMatchObject({ escalated: 0, suppressed: 0, nudged: 0 });
     expect(await tick(at(T, 120), cfg)).toMatchObject({ escalated: 0, suppressed: 0, nudged: 0 });
 
-    // After the dedupe window (6 h) and the cap window (24 h), a jam that
-    // still persists gets a new nudge and a new escalation, failed one included.
-    expect(await tick(at(T, 25 * 60), cfg)).toMatchObject({ nudged: 3 });
-    expect(await tick(at(T, 25 * 60 + 11), cfg)).toMatchObject({ escalated: 2, suppressed: 1 });
+    // After the dedupe window (6 h) and the cap window (24 h): the failed and
+    // the suppressed jam (never seen by the operator) get a new round; the
+    // delivered one is not repeated while the jam is unchanged.
+    expect(await tick(at(T, 25 * 60), cfg)).toMatchObject({ nudged: 2 });
+    expect(await tick(at(T, 25 * 60 + 11), cfg)).toMatchObject({ escalated: 2, suppressed: 0 });
+    const keysOf = async (leaseId: string) => (await ledger(`lease:${leaseId}#%`)).map((row) => row.episodeKey);
     const failedJam = jams.find(({ leaseId }) => reserved[0]!.episodeKey.startsWith(`lease:${leaseId}#`))!;
-    const again = await ledger(`lease:${failedJam.leaseId}#%`);
-    expect(again.map((row) => row.episodeKey)).toEqual([`lease:${failedJam.leaseId}#1`, `lease:${failedJam.leaseId}#2`]);
+    const suppressedJam = jams.find(({ leaseId }) => suppressed.episodeKey.startsWith(`lease:${leaseId}#`))!;
+    const deliveredJam = jams.find((jam) => jam !== failedJam && jam !== suppressedJam)!;
+    expect(await keysOf(failedJam.leaseId)).toEqual([`lease:${failedJam.leaseId}#1`, `lease:${failedJam.leaseId}#2`]);
+    expect(await keysOf(suppressedJam.leaseId)).toEqual([`lease:${suppressedJam.leaseId}#1`, `lease:${suppressedJam.leaseId}#2`]);
+    expect(await keysOf(deliveredJam.leaseId)).toEqual([`lease:${deliveredJam.leaseId}#1`]);
   });
 
   it("shadow mode writes shadow rows and events with mode=shadow, and counts its own cap", async () => {
@@ -454,26 +494,48 @@ if (!support.supported) {
     const byRk9claude = await insertEvent({ actorRef: "rk9claude", actorKind: "rk9claude", issue: "RKT-5", summary: "alert" });
     const viaHeadsup = await insertEvent({ issue: "RKT-6", summary: "stuck too" });
     await insertEvent({ type: "headsup", actorRef: "cc:paperclip-01:x", actorKind: "cc", issue: "RKT-6", summary: "heads up", createdAt: at(T, -20) });
+    // The asker's own decision on the issue does not answer its question.
+    const ownDecision = await insertEvent({
+      type: "ask-operator",
+      actorRef: "cc:paperclip-01:asker2",
+      actorKind: "cc",
+      issue: "RKT-7",
+      summary: "[normal] which db?",
+    });
+    await insertEvent({ type: "decision", actorRef: "cc:paperclip-01:asker2", actorKind: "cc", issue: "RKT-7", summary: "picked one", createdAt: at(T, -30) });
+    // An unverified actor cannot silence a blocker, and an unverified author is not escalated.
+    const grokReply = await insertEvent({ issue: "RKT-8", summary: "stuck 8" });
+    await insertEvent({ type: "handoff", actorRef: "grok", actorKind: "grok", trust: "unverified", issue: "RKT-8", summary: "x", createdAt: at(T, -30) });
+    const byRemote = await insertEvent({ actorRef: "remote:mv-laptop:a", actorKind: "remote", trust: "unverified", issue: "RKT-9", summary: "r" });
 
-    expect(await tick(T)).toMatchObject({ nudged: 3 });
+    expect(await tick(T)).toMatchObject({ nudged: 5 });
     const toAuthor = await db.select().from(rk9CoordInbox).where(eq(rk9CoordInbox.toActorId, authorId));
-    expect(toAuthor.map((row) => row.kind)).toEqual(["stall_nudge", "stall_nudge"]);
+    // blocker, viaHeadsup and grokReply are by worktree:RKT-1.
+    expect(toAuthor.map((row) => row.kind)).toEqual(["stall_nudge", "stall_nudge", "stall_nudge"]);
     // The ask-operator author has no actor row: the nudge goes to its issue.
     const toIssue = await db.select().from(rk9CoordInbox).where(eq(rk9CoordInbox.toIssue, "RKT-2"));
     expect(toIssue).toHaveLength(1);
 
-    expect(await tick(at(T, 11))).toMatchObject({ escalated: 3 });
+    expect(await tick(at(T, 11))).toMatchObject({ escalated: 5 });
     const blockerEvents = await escalatedEvents(`event:${blocker}`);
     expect(blockerEvents).toHaveLength(1);
     expect(blockerEvents[0]).toMatchObject({ refEventId: blocker, issue: "RKT-1" });
     expect(blockerEvents[0]!.payload).toMatchObject({ reason: "blocker_unanswered", breakable: false, source_event_id: blocker, lease_id: null });
-    expect((await escalatedEvents(`event:${ask}`))[0]!.payload).toMatchObject({ reason: "ask_operator_unanswered" });
+    const [askEvent] = await escalatedEvents(`event:${ask}`);
+    expect(askEvent!.payload).toMatchObject({ reason: "ask_operator_unanswered" });
+    // The question text reaches only rk9claude and the operator: no issue, repo or resource routing.
+    expect(askEvent).toMatchObject({ issue: null, repo: null, resource: null });
+    expect(await escalatedEvents(`event:${ownDecision}`)).toHaveLength(1);
+    expect(await escalatedEvents(`event:${grokReply}`)).toHaveLength(1);
+    expect(await ledger(`%event:${byRemote}#%`)).toHaveLength(0);
     expect(await escalatedEvents(`event:${viaHeadsup}`)).toHaveLength(1);
     for (const id of [answered, sameIssue, byRk9claude]) {
       expect(await ledger(`%event:${id}#%`)).toHaveLength(0);
     }
-    // The escalator's own events are no follow-up and are never escalated themselves.
+    // The escalator's own events are no follow-up and are never escalated themselves;
+    // a delivered event escalation is not repeated after the dedupe window.
     expect(await tick(at(T, 30))).toMatchObject({ escalated: 0, nudged: 0 });
+    expect(await tick(at(T, 7 * 60))).toMatchObject({ escalated: 0, nudged: 0 });
   });
 
   describe("routes", () => {
@@ -587,6 +649,17 @@ if (!support.supported) {
       expect(board.status).toBe(200);
       expect(board.body.escalations_attention).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: row!.id, status: "failed", resource: "prod:route-failed" })]),
+      );
+
+      // A capped (suppressed) escalation is on the board too.
+      const cappedJam = await stuckLease("prod:route-capped", T);
+      await tick(T, { dayMax: 0 });
+      await tick(at(T, 11), { dayMax: 0 });
+      const [capped] = await ledger(`lease:${cappedJam.leaseId}#%`);
+      expect(capped).toMatchObject({ status: "suppressed", error: "daily_cap" });
+      const board2 = await request(appFor(boardKey())).get(`${coord}/board`);
+      expect(board2.body.escalations_attention).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: capped!.id, status: "suppressed", error: "daily_cap" })]),
       );
 
       const shadowJam = await stuckLease("prod:route-shadow", T);

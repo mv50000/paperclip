@@ -33,9 +33,13 @@
 //   - over the cap the escalation becomes a `suppressed` row (error
 //     daily_cap) and writes no journal event;
 //   - dedupe: after an escalation row (any status) the same base key waits
-//     RK9_COORD_ESCALATE_DEDUPE_S (default 6 h) before a new nudge. A jam that
-//     still persists after that window escalates again, so a failed or
-//     suppressed escalation does not silence it for good.
+//     RK9_COORD_ESCALATE_DEDUPE_S (default 6 h). After that window a jam
+//     escalates again only when the last escalation never reached the
+//     operator (failed or suppressed), or when the holder made progress after
+//     it and stalled again (a new episode). A delivered escalation is never
+//     repeated for an unchanged jam, so open events cannot fill the cap;
+//   - a nudge is valid for one round only: progress after it, or an
+//     escalation after it, needs a new nudge and a new recheck.
 // Modes (RK9_COORD_ESCALATE_MODE): off | shadow (default) | enforce. Shadow
 // writes `shadow` rows and `escalated` events with payload.mode=shadow;
 // rk9claude only logs those. Nudges run in both modes.
@@ -74,7 +78,11 @@ export const RK9_COORD_ESCALATE_DEDUPE_S_DEFAULT = 6 * 3_600;
 export const RK9_COORD_ESCALATE_DAY_MAX_DEFAULT = 6;
 export const RK9_COORD_ESCALATE_LOOKBACK_S_DEFAULT = 86_400;
 export const RK9_COORD_ESCALATE_INTERVAL_MS_DEFAULT = 60_000;
-/** Event authors whose blockers already reach the operator another way. */
+/**
+ * Event authors whose blockers already reach the operator another way.
+ * Unverified authors (remote hosts, Grok) are skipped by trust: their text
+ * must not reach the operator's chat or use the cap.
+ */
 const SKIP_EVENT_AUTHOR_KINDS = ["operator", "rk9claude"];
 const CANDIDATE_LIMIT = 500;
 const WAITER_REFS_MAX = 5;
@@ -113,13 +121,23 @@ export function resolveRk9CoordEscalateMode(env: NodeJS.ProcessEnv = process.env
 export function resolveRk9CoordEscalatorConfig(env: NodeJS.ProcessEnv = process.env): Rk9CoordEscalatorConfig {
   // RK9_COORD_STUCK_S (spec name); the lease engine's RK9_COORD_LEASE_STUCK_S is the fallback.
   const stuckS = intEnv(env.RK9_COORD_STUCK_S ?? env.RK9_COORD_LEASE_STUCK_S, RK9_COORD_STUCK_S_DEFAULT, 60, 7 * 86_400);
+  const dedupeS = intEnv(env.RK9_COORD_ESCALATE_DEDUPE_S, RK9_COORD_ESCALATE_DEDUPE_S_DEFAULT, 600, 7 * 86_400);
   return {
     mode: resolveRk9CoordEscalateMode(env),
     stuckS,
-    recheckS: intEnv(env.RK9_COORD_ESCALATE_RECHECK_S, RK9_COORD_ESCALATE_RECHECK_S_DEFAULT, 30, 86_400),
-    dedupeS: intEnv(env.RK9_COORD_ESCALATE_DEDUPE_S, RK9_COORD_ESCALATE_DEDUPE_S_DEFAULT, 600, 7 * 86_400),
+    // The recheck must end well inside the dedupe window, or a nudge would
+    // expire before its recheck and nothing would ever escalate.
+    recheckS: Math.min(
+      intEnv(env.RK9_COORD_ESCALATE_RECHECK_S, RK9_COORD_ESCALATE_RECHECK_S_DEFAULT, 30, 86_400),
+      Math.floor(dedupeS / 2),
+    ),
+    dedupeS,
     dayMax: intEnv(env.RK9_COORD_ESCALATE_DAY_MAX, RK9_COORD_ESCALATE_DAY_MAX_DEFAULT, 0, 100),
-    lookbackS: intEnv(env.RK9_COORD_ESCALATE_LOOKBACK_S, RK9_COORD_ESCALATE_LOOKBACK_S_DEFAULT, 3_600, 30 * 86_400),
+    // An event must stay in the lookback past its threshold.
+    lookbackS: Math.max(
+      intEnv(env.RK9_COORD_ESCALATE_LOOKBACK_S, RK9_COORD_ESCALATE_LOOKBACK_S_DEFAULT, 3_600, 30 * 86_400),
+      2 * stuckS,
+    ),
     graceS: resolveRk9CoordLeaseDeadGraceS(env),
     intervalMs: intEnv(env.RK9_COORD_ESCALATE_INTERVAL_MS, RK9_COORD_ESCALATE_INTERVAL_MS_DEFAULT, 1_000, 3_600_000),
   };
@@ -139,7 +157,7 @@ export interface Rk9CoordStuckLeaseFacts {
 }
 
 export type Rk9CoordStuckLeaseVerdict =
-  | { stuck: true; ageS: number; waitedS: number }
+  | { stuck: true; ageS: number; waitedS: number; progressAt: Date }
   | { stuck: false; why: "expired" | "expiring" | "holder_dead" | "no_waiters" | "waiting_short" | "progress" };
 
 const secondsBetween = (later: Date, earlier: Date) => Math.max(0, Math.floor((later.getTime() - earlier.getTime()) / 1000));
@@ -174,13 +192,14 @@ export function evaluateRk9CoordStuckLease(
     facts.holder.phaseAt && facts.holder.phaseAt.getTime() > lastActivityAt.getTime() ? facts.holder.phaseAt : lastActivityAt;
   const ageS = secondsBetween(now, progressAt);
   if (ageS < opts.stuckS) return { stuck: false, why: "progress" };
-  return { stuck: true, ageS, waitedS };
+  return { stuck: true, ageS, waitedS, progressAt };
 }
 
 export interface Rk9CoordJournalAskFacts {
   type: string;
   actorRef: string;
   actorKind: string;
+  trust: string;
   createdAt: Date;
   hasFollowUp: boolean;
 }
@@ -195,7 +214,11 @@ export function evaluateRk9CoordUnansweredEvent(
   opts: { now: Date; stuckS: number; lookbackS: number },
 ): Rk9CoordUnansweredVerdict {
   if (facts.type !== "ask-operator" && facts.type !== "blocker") return { unanswered: false, why: "type" };
-  if (facts.actorRef === RK9_COORD_ESCALATOR_ACTOR || SKIP_EVENT_AUTHOR_KINDS.includes(facts.actorKind)) {
+  if (
+    facts.actorRef === RK9_COORD_ESCALATOR_ACTOR ||
+    SKIP_EVENT_AUTHOR_KINDS.includes(facts.actorKind) ||
+    facts.trust === "unverified"
+  ) {
     return { unanswered: false, why: "author" };
   }
   if (facts.hasFollowUp) return { unanswered: false, why: "follow_up" };
@@ -232,14 +255,16 @@ export interface Rk9CoordStallCandidate {
   waiterRefs: string[];
   waitedS: number | null;
   ageS: number;
+  /** Last holder progress (lease jams); null for event jams. */
+  progressAt: Date | null;
 }
 
 const minutes = (seconds: number) => `${Math.max(1, Math.round(seconds / 60))} min`;
 const oneLine = (text: string | null | undefined, max: number) => toRk9CoordLine(text ?? null, max);
 
 /** `rk9 lease break` one-liner for the message (only an operator session or rk9claude may run it). */
-export function rk9CoordBreakCommand(resource: string): string {
-  return `rk9 lease break ${resource} --reason "stuck >30 min"`;
+export function rk9CoordBreakCommand(resource: string, stuckS: number = RK9_COORD_STUCK_S_DEFAULT): string {
+  return `rk9 lease break ${resource} --reason "stuck >${minutes(stuckS)}"`;
 }
 
 /**
@@ -247,7 +272,10 @@ export function rk9CoordBreakCommand(resource: string): string {
  * client-written field goes through the coord redaction and is one-lined and
  * shortened; no fencing token, prompt text or secret is ever included.
  */
-export function formatRk9CoordEscalationMessage(candidate: Rk9CoordStallCandidate): string {
+export function formatRk9CoordEscalationMessage(
+  candidate: Rk9CoordStallCandidate,
+  stuckS: number = RK9_COORD_STUCK_S_DEFAULT,
+): string {
   const holder = candidate.holder;
   const who = [holder.kind, holder.host ? `host ${holder.host}` : null, holder.issue ? `issue ${holder.issue}` : null]
     .filter(Boolean)
@@ -263,7 +291,7 @@ export function formatRk9CoordEscalationMessage(candidate: Rk9CoordStallCandidat
     lines.push(
       `Waiting: ${candidate.waiters} (oldest ${minutes(candidate.waitedS ?? 0)})${refs ? `: ${refs}` : ""}${candidate.waiters > candidate.waiterRefs.length ? ", …" : ""}`,
     );
-    lines.push(`Break: tap the button, or from an operator session: ${rk9CoordBreakCommand(resource)}`);
+    lines.push(`Break: tap the button, or from an operator session: ${rk9CoordBreakCommand(resource, stuckS)}`);
   } else {
     const label = candidate.reason === "ask_operator_unanswered" ? "ask-operator" : "blocker";
     const target = oneLine(candidate.issue ?? candidate.resource, 100) ?? `journal #${candidate.sourceEventId}`;
@@ -420,6 +448,7 @@ async function leaseCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
       waiterRefs,
       waitedS: verdict.waitedS,
       ageS: verdict.ageS,
+      progressAt: verdict.progressAt,
     });
   }
   return out;
@@ -428,19 +457,29 @@ async function leaseCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
 async function eventCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfig): Promise<Rk9CoordStallCandidate[]> {
   const cutoff = new Date(now.getTime() - config.stuckS * 1000);
   const lookback = new Date(now.getTime() - config.lookbackS * 1000);
-  // A follow-up: a later event of the same company, not by the escalator and
-  // not an unverified heads-up, that answers it (reply_to) or concerns the
-  // same issue or resource.
+  // A follow-up: a later event of the same company by a non-unverified
+  // actor, other than the escalator, a heads-up or an automatic lease event,
+  // that either answers the event (reply_to / ref_event_id) or concerns the
+  // same issue or resource. For an ask-operator, the asker's own events on
+  // the issue count only when they close it (`done`): a question is not
+  // answered by its asker posting a phase or a decision. For a blocker, any
+  // later event of the author on the issue shows that the work moved.
   const followUp = sql`exists (
     select 1 from ${rk9CoordEvents} f
     where f.company_id = ${rk9CoordEvents.companyId}
       and f.id > ${rk9CoordEvents.id}
       and f.actor_ref <> ${RK9_COORD_ESCALATOR_ACTOR}
-      and f.type <> 'headsup'
+      and f.type not in ('headsup', 'lease', 'escalated')
+      and f.trust <> 'unverified'
       and (
         f.ref_event_id = ${rk9CoordEvents.id}
-        or (${rk9CoordEvents.issue} is not null and f.issue = ${rk9CoordEvents.issue})
-        or (${rk9CoordEvents.resource} is not null and f.resource = ${rk9CoordEvents.resource})
+        or (
+          (${rk9CoordEvents.type} = 'blocker' or f.actor_ref <> ${rk9CoordEvents.actorRef} or f.type = 'done')
+          and (
+            (${rk9CoordEvents.issue} is not null and f.issue = ${rk9CoordEvents.issue})
+            or (${rk9CoordEvents.resource} is not null and f.resource = ${rk9CoordEvents.resource})
+          )
+        )
       )
   )`;
   const rows = await db
@@ -450,6 +489,7 @@ async function eventCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
       type: rk9CoordEvents.type,
       actorRef: rk9CoordEvents.actorRef,
       actorKind: rk9CoordEvents.actorKind,
+      trust: rk9CoordEvents.trust,
       issue: rk9CoordEvents.issue,
       resource: rk9CoordEvents.resource,
       summary: rk9CoordEvents.summary,
@@ -476,6 +516,7 @@ async function eventCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
         type: row.type,
         actorRef: row.actorRef,
         actorKind: row.actorKind,
+        trust: row.trust,
         createdAt: new Date(row.createdAt!),
         hasFollowUp: row.hasFollowUp === true,
       },
@@ -498,9 +539,49 @@ async function eventCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
       waiterRefs: [],
       waitedS: null,
       ageS: verdict.ageS,
+      progressAt: null,
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------- rounds
+
+/**
+ * May the jam escalate again after `last`? Never inside the dedupe window.
+ * After it: only when `last` never reached the operator (failed, suppressed),
+ * or when the holder made progress after it and stalled again.
+ */
+export function rk9CoordMayEscalateAgain(
+  last: Pick<LedgerRow, "status" | "reservedAt"> | null,
+  candidate: Pick<Rk9CoordStallCandidate, "progressAt">,
+  now: Date,
+  dedupeS: number,
+): boolean {
+  if (!last) return true;
+  if (now.getTime() - last.reservedAt.getTime() < dedupeS * 1000) return false;
+  if (last.status === "failed" || last.status === "suppressed") return true;
+  return candidate.progressAt !== null && candidate.progressAt.getTime() > last.reservedAt.getTime();
+}
+
+/**
+ * Does `nudge` still cover this round? Not when it is older than the dedupe
+ * window, older than the holder's last progress, or not newer than the last
+ * escalation: each of those starts a new round with a new nudge and recheck.
+ */
+export function rk9CoordNudgeCoversRound(
+  nudge: Pick<LedgerRow, "reservedAt"> | null,
+  last: Pick<LedgerRow, "reservedAt"> | null,
+  candidate: Pick<Rk9CoordStallCandidate, "progressAt">,
+  now: Date,
+  dedupeS: number,
+): boolean {
+  if (!nudge) return false;
+  const at = nudge.reservedAt.getTime();
+  if (now.getTime() - at >= dedupeS * 1000) return false;
+  if (candidate.progressAt && at < candidate.progressAt.getTime()) return false;
+  if (last && at <= last.reservedAt.getTime()) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------- stages
@@ -509,6 +590,15 @@ async function writeNudge(db: Db, candidate: Rk9CoordStallCandidate, now: Date, 
   const publications: ActivityPublication[] = [];
   const body = nudgeBody(candidate, config.recheckS);
   const written = await db.transaction(async (tx) => {
+    // One nudge per round even with two servers: serialize on the jam and
+    // re-check the ledger under the lock.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`rk9_coord_escalations:nudge:${candidate.companyId}:${candidate.baseKey}`}, 0))`,
+    );
+    const last = await latestRow(tx, candidate.companyId, candidate.baseKey);
+    if (!rk9CoordMayEscalateAgain(last, candidate, now, config.dedupeS)) return false;
+    const current = await latestRow(tx, candidate.companyId, `nudge:${candidate.baseKey}`);
+    if (rk9CoordNudgeCoversRound(current, last, candidate, now, config.dedupeS)) return false;
     const key = await nextKey(tx, candidate.companyId, `nudge:${candidate.baseKey}`);
     const [row] = await tx
       .insert(rk9CoordEscalations)
@@ -593,7 +683,10 @@ async function escalate(
     // One cap and one reservation order across every server and company.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${CAP_LOCK_KEY}, 0))`);
     const last = await latestRow(tx, candidate.companyId, candidate.baseKey);
-    if (last && now.getTime() - last.reservedAt.getTime() < config.dedupeS * 1000) return null;
+    if (!rk9CoordMayEscalateAgain(last, candidate, now, config.dedupeS)) return null;
+    const nudge = await latestRow(tx, candidate.companyId, `nudge:${candidate.baseKey}`);
+    if (!rk9CoordNudgeCoversRound(nudge, last, candidate, now, config.dedupeS)) return null;
+    if (now.getTime() - nudge!.reservedAt.getTime() < config.recheckS * 1000) return null;
     const [used] = await tx
       .select({ n: sql<number>`count(*)::int` })
       .from(rk9CoordEscalations)
@@ -609,7 +702,7 @@ async function escalate(
     const exceeded = usedCount >= config.dayMax;
     const status: Rk9CoordEscalationStatus = exceeded ? "suppressed" : mode === "shadow" ? "shadow" : "reserved";
     const key = await nextKey(tx, candidate.companyId, candidate.baseKey);
-    const message = formatRk9CoordEscalationMessage(candidate);
+    const message = formatRk9CoordEscalationMessage(candidate, config.stuckS);
     const [row] = await tx
       .insert(rk9CoordEscalations)
       .values({
@@ -651,9 +744,15 @@ async function escalate(
         cap: { limit: config.dayMax, used: usedCount + 1, exceeded: false },
         message,
         source_event_id: candidate.sourceEventId,
-        break_command: candidate.reason === "lease_stuck" && candidate.resource ? rk9CoordBreakCommand(candidate.resource) : null,
+        break_command:
+          candidate.reason === "lease_stuck" && candidate.resource ? rk9CoordBreakCommand(candidate.resource, config.stuckS) : null,
       };
       const subject = candidate.resource ?? candidate.issue ?? `#${candidate.sourceEventId}`;
+      // An ask-operator is visible only to its asker and the operator (RK9-647
+      // delta rule). Its escalation carries the question text, so it gets no
+      // issue, repo or resource routing: only rk9claude and the operator see
+      // type `escalated` without them.
+      const routed = candidate.reason !== "ask_operator_unanswered";
       const [event] = await tx
         .insert(rk9CoordEvents)
         .values({
@@ -662,9 +761,9 @@ async function escalate(
           actorRef: RK9_COORD_ESCALATOR_ACTOR,
           actorKind: "orch",
           trust: "verified",
-          issue: candidate.issue,
-          repo: parsed?.repo && parsed.repo.length <= 200 ? parsed.repo : null,
-          resource: candidate.resource,
+          issue: routed ? candidate.issue : null,
+          repo: routed && parsed?.repo && parsed.repo.length <= 200 ? parsed.repo : null,
+          resource: routed ? candidate.resource : null,
           summary:
             oneLine(`escalated to operator (${mode}): ${candidate.reason} ${subject}, ${minutes(candidate.ageS)}`, 300) ??
             "escalated to operator",
@@ -754,17 +853,16 @@ export async function runRk9CoordStallTick(db: Db, opts: Rk9CoordStallTickOption
   for (const candidate of candidates) {
     try {
       const last = await latestRow(db, candidate.companyId, candidate.baseKey);
-      if (last && now.getTime() - last.reservedAt.getTime() < config.dedupeS * 1000) {
+      if (!rk9CoordMayEscalateAgain(last, candidate, now, config.dedupeS)) {
         result.deduped += 1;
         continue;
       }
       const nudge = await latestRow(db, candidate.companyId, `nudge:${candidate.baseKey}`);
-      const nudgeAgeMs = nudge ? now.getTime() - nudge.reservedAt.getTime() : Number.POSITIVE_INFINITY;
-      if (nudgeAgeMs >= config.dedupeS * 1000) {
+      if (!rk9CoordNudgeCoversRound(nudge, last, candidate, now, config.dedupeS)) {
         if (await writeNudge(db, candidate, now, config)) result.nudged += 1;
         continue;
       }
-      if (nudgeAgeMs < config.recheckS * 1000) {
+      if (now.getTime() - nudge!.reservedAt.getTime() < config.recheckS * 1000) {
         result.waiting += 1;
         continue;
       }
@@ -880,8 +978,9 @@ export function rk9CoordEscalationService(db: Db) {
   }
 
   /**
-   * Escalations that need a look on the board: failed sends, and reserved
-   * rows that rk9claude has not acked within recheckS, from the last 7 days.
+   * Escalations that need a look on the board, from the last 7 days: failed
+   * sends, suppressed ones (daily cap: rk9claude never saw them), and reserved
+   * rows that rk9claude has not acked within recheckS.
    */
   async function attention(companyId: string, now: Date = new Date(), recheckS = RK9_COORD_ESCALATE_RECHECK_S_DEFAULT) {
     const rows = await db
@@ -892,7 +991,7 @@ export function rk9CoordEscalationService(db: Db) {
           eq(rk9CoordEscalations.companyId, companyId),
           ne(rk9CoordEscalations.reason, RK9_COORD_NUDGE_REASON),
           sql`${rk9CoordEscalations.reservedAt} > ${isoSql(new Date(now.getTime() - 7 * 86_400_000))}`,
-          sql`(${rk9CoordEscalations.status} = 'failed' or (${rk9CoordEscalations.status} = 'reserved' and ${rk9CoordEscalations.reservedAt} <= ${isoSql(new Date(now.getTime() - recheckS * 1000))}))`,
+          sql`(${rk9CoordEscalations.status} in ('failed', 'suppressed') or (${rk9CoordEscalations.status} = 'reserved' and ${rk9CoordEscalations.reservedAt} <= ${isoSql(new Date(now.getTime() - recheckS * 1000))}))`,
         ),
       )
       .orderBy(desc(rk9CoordEscalations.reservedAt))
@@ -905,6 +1004,7 @@ export function rk9CoordEscalationService(db: Db) {
         resource: view.resource,
         issue: view.issue,
         status: row.status === "reserved" ? "unacked" : view.status,
+        error: row.status === "suppressed" ? row.error : null,
         reserved_at: view.reserved_at,
       };
     });
