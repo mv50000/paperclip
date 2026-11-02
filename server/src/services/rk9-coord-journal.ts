@@ -48,7 +48,7 @@ export const rk9CoordDecisionVaultedKey = (decisionId: number) => `decision-vaul
 export const RK9_COORD_LINE_MAX = 400;
 export const RK9_COORD_LINE_TAIL = "rk9 board";
 /** Event types every actor sees, whatever its repo or issue. */
-export const RK9_COORD_GLOBAL_EVENT_TYPES = ["deploy", "ask-operator"] as const;
+export const RK9_COORD_GLOBAL_EVENT_TYPES = ["deploy", "ask-operator", "break-glass"] as const;
 /**
  * RK9-647: an `ask-operator` is an operator-class question. These actor kinds
  * get every one in their delta. Any other kind gets only its own questions
@@ -72,13 +72,21 @@ export const RK9_COORD_HEADSUP_SUMMARY_PREFIX = "[Heads up, varmistamaton]";
  */
 export const RK9_COORD_GROK_EVENT_TYPES = ["blocker", "handoff", "ask-operator"] as const;
 
+/** RK9-647 (from RK9-632): the only actor kinds that may post a break-glass record. */
+export const RK9_COORD_BREAK_GLASS_KINDS = ["cc", "operator", "rk9claude"] as const;
+
 export function assertRk9CoordEventKindAllowed(actor: Pick<Rk9CoordResolvedActor, "kind">, type: unknown) {
-  if (actor.kind !== "grok") return;
-  if (typeof type === "string" && (RK9_COORD_GROK_EVENT_TYPES as readonly string[]).includes(type)) return;
-  throw new HttpError(403, "This actor kind may not post this event type", {
-    code: "rk9_coord_event_kind_not_allowed",
-    allowed: [...RK9_COORD_GROK_EVENT_TYPES],
-  });
+  const deny = (allowedTypes?: readonly string[]) => {
+    throw new HttpError(403, "This actor kind may not post this event type", {
+      code: "rk9_coord_event_kind_not_allowed",
+      ...(allowedTypes ? { allowed: [...allowedTypes] } : {}),
+    });
+  };
+  if (actor.kind === "grok") {
+    if (typeof type === "string" && (RK9_COORD_GROK_EVENT_TYPES as readonly string[]).includes(type)) return;
+    deny(RK9_COORD_GROK_EVENT_TYPES);
+  }
+  if (type === "break-glass" && !(RK9_COORD_BREAK_GLASS_KINDS as readonly string[]).includes(actor.kind)) deny();
 }
 
 export function rk9CoordSeesAllAskOperator(kind: string): boolean {
@@ -263,6 +271,8 @@ interface BuiltEvent {
   refEventId: number | null;
   /** Producer dedupe key, stored in `dedupe_key` (unique per company and type). */
   dedupeKey?: string | null;
+  /** Lease resource the event concerns, stored in `resource`. */
+  resource?: string | null;
 }
 
 /** Per-type payload and one-line summary; every free-text field is redacted and capped. */
@@ -353,6 +363,16 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
         vaultPath: null,
         refEventId: null,
         dedupeKey: input.observation_key,
+      };
+    }
+    case "break-glass": {
+      const reason = requiredLine(input.reason, 1000);
+      return {
+        summary: `BREAK-GLASS ${input.gate} ${input.resource}: ${reason}`,
+        payload: { resource: input.resource, gate: input.gate, reason },
+        vaultPath: null,
+        refEventId: null,
+        resource: input.resource,
       };
     }
   }
@@ -474,6 +494,7 @@ export function rk9CoordJournalService(db: Db) {
       app: input.type === "deploy" ? input.app : undefined,
       session_id: input.type === "headsup" ? input.session_id : undefined,
       class_rule: input.type === "headsup" ? input.class_rule : undefined,
+      resource: input.type === "break-glass" ? input.resource : undefined,
     });
     let issue = ("issue" in input ? input.issue : undefined) ?? null;
     let repo = input.repo ?? null;
@@ -525,6 +546,7 @@ export function rk9CoordJournalService(db: Db) {
         refEventId: built.refEventId,
         vaultPath: built.vaultPath,
         dedupeKey: built.dedupeKey ?? null,
+        resource: built.resource ?? null,
         occurredAt: input.occurred_at ? new Date(input.occurred_at) : null,
       })
       .onConflictDoNothing()
