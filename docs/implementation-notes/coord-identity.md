@@ -50,6 +50,9 @@ It freezes the names that every later child of the epic uses.
    **`operator` exists only behind a signed-in instance-admin session**
    (trust `verified`). This is the condition of the operator's approval
    (2026-11-01). AI sessions always act as their own kind.
+   When `RK9_COORD_OPERATOR_USER_IDS` (comma list of user ids) is set, only
+   those users' sessions resolve to `operator` (RK9-638). The server logs
+   `rk9_coord_operator_pin_unset` at startup while the pin is unset.
 3. Only an instance-admin board key may call coord routes. When
    `RK9_COORD_BOARD_KEY_IDS` is set, the key id must also be on that list
    (recommended: the id of the operator key the paperclip-01 sessions use).
@@ -167,7 +170,7 @@ rk9claude | grok | operator`.
 | remote | tailnet host name | host coord token | CLI heartbeat, TTL | unverified | token host |
 | rk9claude | the rk9claude service | `rk9claude` service token | service heartbeat, TTL | verified | `rk9claude` |
 | grok | Grok behind vault-mcp | `grok` service token, held only by vault-mcp | TTL from the last request | unverified | `grok` |
-| operator | the human operator | signed-in instance-admin session only; board key + `X-RK9-Actor: operator` is 403 | none: always reachable through Telegram | verified | none (null) |
+| operator | the human operator | signed-in instance-admin session only, on `RK9_COORD_OPERATOR_USER_IDS` when set; board key + `X-RK9-Actor: operator` is 403 | none: always reachable through Telegram | verified | none (null) |
 
 Local `cc`, `worktree`, `headless` and `orch` actors are **attributed, not
 authenticated per session**. They all share the board key. The server can
@@ -192,6 +195,30 @@ optional key-id pin.
   token proves the host, not which session on it.
 - Q5 still applies: rk9claude emergency actions are never blocked by
   `host:<node>`. They are logged only.
+- **Operator pin (RK9-638).** Without `RK9_COORD_OPERATOR_USER_IDS`, the
+  server trusts every instance-admin session as `operator`. Instance admin
+  is not a fixed set: a holder of an instance-admin board key, including an
+  AI session, can promote another user
+  (`POST /api/admin/users/:userId/promote-instance-admin`). That user would
+  then sign in as `operator` / `verified`. Set the pin to the operator's own
+  user id to close this path. A session whose user is not on the pin gets
+  403 (`rk9_coord_operator_not_allowed`) on coord routes and on coord-token
+  management.
+- **Setting the pin.** Variable `RK9_COORD_OPERATOR_USER_IDS` in the server
+  env, a comma-separated list of user ids (`user.id`, the better-auth text
+  id), for example `RK9_COORD_OPERATOR_USER_IDS=<operator-user-id>`.
+  Spaces around ids and empty items are ignored; ids match exactly (case
+  sensitive). An unset or empty value keeps the pre-RK9-638 behaviour and
+  logs one startup warning. The server reads it at startup, so a change needs
+  a restart. Find the id with SQL
+  (`select id, email from "user" where email = '<operator email>';`) or with
+  the instance-admin API `GET /api/admin/users?query=<email>` (field `id`).
+- **Limit of the pin.** `operator` stays one literal actor id. If the pin
+  lists several users, the coord journal, leases and presence cannot tell
+  them apart. The session user id is not in the actor id, so keep the pin
+  to one user. The pin does not protect against a stolen session cookie of
+  the pinned user, and it does not gate board keys:
+  `RK9_COORD_BOARD_KEY_IDS` does that.
 
 ## Resolution rules
 
@@ -224,7 +251,9 @@ route, including sibling sub-routers. It applies these rules in order.
      the derived id is 403 (`rk9_coord_actor_spoof`). A missing key scope is
      rejected (fail closed).
    - **Session:** only an instance admin, always `operator` (verified). Any
-     other claim is 403. This is the only way to act as `operator`.
+     other claim is 403. This is the only way to act as `operator`. When
+     `RK9_COORD_OPERATOR_USER_IDS` is set, the session user id must be on
+     that list, otherwise 403 (`rk9_coord_operator_not_allowed`), RK9-638.
    - **Board key:** the key's user must be an instance admin, and the key id
      must be on `RK9_COORD_BOARD_KEY_IDS` when that is set (403 otherwise).
      Kinds `cc`, `worktree`, `headless` and `orch`. `operator` is 403
@@ -249,6 +278,7 @@ Error codes in the JSON `code` field:
 | `rk9_coord_actor_required` | 400 | mutation without an actor id |
 | `rk9_coord_untrusted_principal` | 401 / 403 | anonymous, local implicit, non-admin session or board key, or unknown source |
 | `rk9_coord_board_key_not_allowed` | 403 | board key not on `RK9_COORD_BOARD_KEY_IDS` |
+| `rk9_coord_operator_not_allowed` | 403 | instance-admin session whose user is not on `RK9_COORD_OPERATOR_USER_IDS` (RK9-638, additive) |
 | `rk9_coord_scoped_key` | 403 | task-bridge or skill-test agent key |
 | `rk9_coord_actor_spoof` | 403 | claim differs from the derived actor |
 | `rk9_coord_kind_not_allowed` | 403 | this credential cannot act as that kind |
@@ -374,8 +404,9 @@ Conditions for the remote-access child:
   `POST .../coord-tokens/:tokenId/{rotate,revoke}`
   (`server/src/routes/rk9-coord-tokens.ts`). They sit outside the coord
   prefix, so the guard keeps every coord token out of them. Only a signed-in
-  instance-admin session or an instance-admin board key (on
-  `RK9_COORD_BOARD_KEY_IDS` when set) may call them. The command
+  instance-admin session (on `RK9_COORD_OPERATOR_USER_IDS` when set,
+  RK9-638) or an instance-admin board key (on `RK9_COORD_BOARD_KEY_IDS` when
+  set) may call them. The command
   `server/scripts/rk9-coord-token.mjs` reads the board key from
   `PAPERCLIP_API_KEY` and writes a new token only to its `--out` env file
   (mode 0600). Service: `server/src/services/rk9-coord-tokens.ts`. Bearer

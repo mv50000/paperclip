@@ -23,7 +23,10 @@
 //    every local session shares the key. `operator` through the board key is
 //    403: the operator actor exists only behind a signed-in instance-admin
 //    session (condition of the operator's ADR approval, 2026-11-01).
-// 4. A signed-in instance admin is `operator` (verified).
+// 4. A signed-in instance admin is `operator` (verified). When
+//    RK9_COORD_OPERATOR_USER_IDS is set, the session user id must be on that
+//    list (RK9-638): promoting another user to instance admin does not make
+//    that user the operator.
 // 5. A coord-token principal (set by RK9-623's auth hook on
 //    `req.rk9CoordPrincipal`) is bound to one company and one host or service;
 //    the claim's host must be that host. A read without a claim defaults to
@@ -90,6 +93,12 @@ export interface Rk9CoordActorOptions {
    * board key. Defaults to RK9_COORD_BOARD_KEY_IDS.
    */
   boardKeyIds?: readonly string[] | null;
+  /**
+   * User ids whose signed-in instance-admin session resolves to `operator`.
+   * Null or empty = any instance-admin session. Defaults to
+   * RK9_COORD_OPERATOR_USER_IDS. RK9-638.
+   */
+  operatorUserIds?: readonly string[] | null;
   /** Run lookup; defaults to heartbeat_runs. Injected in tests. */
   findAgentRun?: (runId: string) => Promise<Rk9CoordAgentRun | null>;
 }
@@ -109,12 +118,33 @@ export function resolveRk9CoordBoardHost(env: NodeJS.ProcessEnv = process.env): 
   return configured || RK9_COORD_BOARD_HOST_DEFAULT;
 }
 
-export function resolveRk9CoordBoardKeyIds(env: NodeJS.ProcessEnv = process.env): string[] | null {
-  const ids = (env.RK9_COORD_BOARD_KEY_IDS ?? "")
+function parseIdList(raw: string | undefined): string[] | null {
+  const ids = (raw ?? "")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
   return ids.length > 0 ? ids : null;
+}
+
+export function resolveRk9CoordBoardKeyIds(env: NodeJS.ProcessEnv = process.env): string[] | null {
+  return parseIdList(env.RK9_COORD_BOARD_KEY_IDS);
+}
+
+/** RK9-638: user ids pinned to the `operator` actor; null when unset. */
+export function resolveRk9CoordOperatorUserIds(env: NodeJS.ProcessEnv = process.env): string[] | null {
+  return parseIdList(env.RK9_COORD_OPERATOR_USER_IDS);
+}
+
+/**
+ * RK9-638: true when this session user may be the operator. With no pin, any
+ * instance admin may (the pre-RK9-638 behaviour, warned at startup).
+ */
+export function rk9CoordOperatorUserAllowed(
+  userId: string | null | undefined,
+  operatorUserIds: readonly string[] | null | undefined,
+): boolean {
+  if (!operatorUserIds || operatorUserIds.length === 0) return true;
+  return typeof userId === "string" && userId.length > 0 && operatorUserIds.includes(userId);
 }
 
 function parseClaim(raw: string | undefined): Rk9CoordParsedActorId | null {
@@ -142,6 +172,8 @@ export interface ResolveRk9CoordActorInput {
   boardHost: string;
   /** Allowed board-key ids; null = any instance-admin board key. */
   boardKeyIds?: readonly string[] | null;
+  /** Operator user-id pin; null = any instance-admin session. RK9-638. */
+  operatorUserIds?: readonly string[] | null;
   findAgentRun: (runId: string) => Promise<Rk9CoordAgentRun | null>;
 }
 
@@ -207,6 +239,11 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
     if (actor.source === "session") {
       if (!actor.isInstanceAdmin) {
         throw coordError(403, "rk9_coord_untrusted_principal", "Only the instance operator may call coord routes from a session");
+      }
+      // RK9-638: an instance admin is not automatically the operator. When
+      // the pin is set, only the pinned users' sessions are `operator`.
+      if (!rk9CoordOperatorUserAllowed(actor.userId, input.operatorUserIds)) {
+        throw coordError(403, "rk9_coord_operator_not_allowed", "This user is not a configured coord operator");
       }
       if (claim && claim.kind !== "operator") {
         throw coordError(403, "rk9_coord_actor_spoof", "A signed-in session is always the operator actor");
@@ -315,6 +352,14 @@ export function rk9CoordActorMiddleware(db: Db, opts: Rk9CoordActorOptions = {})
       "RK9_COORD_BOARD_KEY_IDS is unset: every instance-admin board key may act as a local coord actor",
     );
   }
+  const operatorUserIds =
+    opts.operatorUserIds === undefined ? resolveRk9CoordOperatorUserIds() : opts.operatorUserIds;
+  if (!operatorUserIds || operatorUserIds.length === 0) {
+    logger.warn(
+      { event: "rk9_coord_operator_pin_unset" },
+      "RK9_COORD_OPERATOR_USER_IDS is unset: every instance-admin session resolves to the coord operator",
+    );
+  }
   const findAgentRun = opts.findAgentRun ?? defaultFindAgentRun(db);
   return async (req, _res, next) => {
     try {
@@ -337,6 +382,7 @@ export function rk9CoordActorMiddleware(db: Db, opts: Rk9CoordActorOptions = {})
         actorHeader: req.header(RK9_COORD_ACTOR_HEADER) ?? undefined,
         boardHost,
         boardKeyIds,
+        operatorUserIds,
         findAgentRun,
       });
       next();

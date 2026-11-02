@@ -8,6 +8,8 @@
 // coord token here: a coord token can never mint, rotate or revoke tokens.
 // Only the operator may manage tokens: a signed-in instance-admin session or
 // an instance-admin board key (on RK9_COORD_BOARD_KEY_IDS when that is set).
+// A session must also be on RK9_COORD_OPERATOR_USER_IDS when that is set
+// (RK9-638), the same pin that decides who is the coord `operator`.
 // The local_trusted implicit board is refused (RK9-616: being local never
 // grants authority on the coord bus).
 //
@@ -24,7 +26,11 @@ import {
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { validate } from "../middleware/validate.js";
-import { resolveRk9CoordBoardKeyIds } from "../middleware/rk9-coord-actor.js";
+import {
+  resolveRk9CoordBoardKeyIds,
+  resolveRk9CoordOperatorUserIds,
+  rk9CoordOperatorUserAllowed,
+} from "../middleware/rk9-coord-actor.js";
 import { logActivity } from "../services/activity-log.js";
 import { rk9CoordTokenService, type Rk9CoordTokenView } from "../services/rk9-coord-tokens.js";
 import { assertCompanyAccess } from "./authz.js";
@@ -32,6 +38,8 @@ import { assertCompanyAccess } from "./authz.js";
 export interface Rk9CoordTokenRouteOptions {
   /** Board-key ids allowed to manage tokens; null = any instance-admin key. */
   boardKeyIds?: readonly string[] | null;
+  /** Session user ids allowed to manage tokens; null = any instance admin. RK9-638. */
+  operatorUserIds?: readonly string[] | null;
 }
 
 function tokenError(status: number, code: string, message: string) {
@@ -51,6 +59,8 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
   const router = Router();
   const tokens = rk9CoordTokenService(db);
   const boardKeyIds = opts.boardKeyIds === undefined ? resolveRk9CoordBoardKeyIds() : opts.boardKeyIds;
+  const operatorUserIds =
+    opts.operatorUserIds === undefined ? resolveRk9CoordOperatorUserIds() : opts.operatorUserIds;
 
   /** Operator-only gate; returns the company id and the acting user id. */
   function authorize(req: Request): { companyId: string; userId: string } {
@@ -72,6 +82,9 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
       (!actor.keyId || !boardKeyIds.includes(actor.keyId))
     ) {
       throw tokenError(403, "rk9_coord_board_key_not_allowed", "This board key may not manage coord tokens");
+    }
+    if (actor.source === "session" && !rk9CoordOperatorUserAllowed(actor.userId, operatorUserIds)) {
+      throw tokenError(403, "rk9_coord_operator_not_allowed", "This user is not a configured coord operator");
     }
     assertCompanyAccess(req, companyId);
     return { companyId, userId: actor.userId };

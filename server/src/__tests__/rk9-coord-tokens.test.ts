@@ -273,14 +273,18 @@ if (!support.supported) {
   };
 
   /** Management routes with an injected board actor (board-key auth is upstream's). */
-  function manageApp(actor: Actor, boardKeyIds: readonly string[] | null = null) {
+  function manageApp(
+    actor: Actor,
+    boardKeyIds: readonly string[] | null = null,
+    operatorUserIds: readonly string[] | null = null,
+  ) {
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
       req.actor = actor;
       next();
     });
-    app.use("/api", rk9CoordTokenRoutes(db, { boardKeyIds }));
+    app.use("/api", rk9CoordTokenRoutes(db, { boardKeyIds, operatorUserIds }));
     app.use(errorHandler);
     return app;
   }
@@ -443,6 +447,22 @@ if (!support.supported) {
       .post(path)
       .send(body);
     expect(session.status).toBe(201);
+  });
+
+  it("pins session token management to RK9_COORD_OPERATOR_USER_IDS when set (RK9-638)", async () => {
+    const body = { principalKind: "host", principalName: "pin-host" };
+    const path = `/api/companies/${companyId}/rk9/coord-tokens`;
+    const session: Actor = { ...operatorKey, source: "session", keyId: undefined, sessionId: "s" };
+    const pinned = await request(manageApp(session, null, ["operator-user"])).get(path);
+    expect(pinned.status).toBe(200);
+    const promoted = await request(manageApp({ ...session, userId: "promoted-admin" }, null, ["operator-user"]))
+      .post(path)
+      .send(body);
+    expect(promoted.status).toBe(403);
+    expect(promoted.body.code).toBe("rk9_coord_operator_not_allowed");
+    // The user pin does not gate board keys; RK9_COORD_BOARD_KEY_IDS does.
+    const key = await request(manageApp({ ...operatorKey, userId: "promoted-admin" }, null, ["operator-user"])).get(path);
+    expect(key.status).toBe(200);
   });
 
   it("validates the principal before storing anything", async () => {
