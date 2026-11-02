@@ -15,7 +15,7 @@
 //
 // The journal has no UPDATE or DELETE path here; the DB trigger rejects both.
 // Contract: docs/implementation-notes/coord-bus.md.
-import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
@@ -94,6 +94,10 @@ export function rk9CoordSeesAllAskOperator(kind: string): boolean {
 }
 /** A new cursor starts this far back, so a fresh session is not flooded. */
 export const RK9_COORD_NEW_CURSOR_LOOKBACK_MS = 24 * 3600 * 1000;
+/** RK9-650: the delta also follows issues the caller handed off in this window. */
+export const RK9_COORD_HANDOFF_FOLLOW_WINDOW_MS = 24 * 3600 * 1000;
+/** RK9-650: at most this many handed-off issues are followed (newest handoff first). */
+export const RK9_COORD_HANDOFF_FOLLOW_MAX = 50;
 const DEFAULT_DELTA_LIMIT = 20;
 const MAX_DELTA_LIMIT = 100;
 const DEFAULT_PRESENCE_TTL_S = 300;
@@ -708,6 +712,26 @@ export function rk9CoordJournalService(db: Db) {
       if (actor.kind === "rk9claude" || actor.kind === "operator") concerns.push(eq(rk9CoordEvents.type, "escalated"));
       if (repos.length > 0) concerns.push(inArray(rk9CoordEvents.repo, repos));
       if (issues.length > 0) concerns.push(inArray(rk9CoordEvents.issue, issues));
+      // RK9-650: the /implement parent has no ticket of its own. Follow the
+      // issues it handed off (done, blocker, ... written by pcp-wait as
+      // worktree:<ID>) so those events reach its prompt delta.
+      const handoffs = alias(rk9CoordEvents, "handoffs");
+      const handedOff = tx
+        .select({ issue: handoffs.issue })
+        .from(handoffs)
+        .where(
+          and(
+            eq(handoffs.companyId, companyId),
+            eq(handoffs.type, "handoff"),
+            eq(handoffs.actorRef, actor.actorId),
+            isNotNull(handoffs.issue),
+            gte(handoffs.createdAt, new Date(now.getTime() - RK9_COORD_HANDOFF_FOLLOW_WINDOW_MS)),
+          ),
+        )
+        .groupBy(handoffs.issue)
+        .orderBy(desc(sql`max(${handoffs.id})`))
+        .limit(RK9_COORD_HANDOFF_FOLLOW_MAX);
+      concerns.push(inArray(rk9CoordEvents.issue, handedOff));
       if (resources.length > 0) {
         concerns.push(and(isNotNull(rk9CoordEvents.resource), inArray(rk9CoordEvents.resource, resources))!);
       }
