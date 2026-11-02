@@ -34,6 +34,10 @@ import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "./rk9-coord-text.js
 export const RK9_COORD_SUMMARY_MAX = 300;
 /** Cap for each free-text payload field. */
 export const RK9_COORD_PAYLOAD_TEXT_MAX = 500;
+/** Cap for a decision's rationale (`rk9 decision --why`, RK9-631: why <= 2000). */
+export const RK9_COORD_RATIONALE_MAX = 2000;
+/** dedupe_key of the one decision-vaulted event per decision (RK9-631). */
+export const rk9CoordDecisionVaultedKey = (decisionId: number) => `decision-vaulted:${decisionId}`;
 /** Hook line budget: ~100 tokens. */
 export const RK9_COORD_LINE_MAX = 400;
 export const RK9_COORD_LINE_TAIL = "rk9 board";
@@ -214,6 +218,7 @@ interface BuiltEvent {
   payload: Record<string, unknown>;
   vaultPath: string | null;
   refEventId: number | null;
+  dedupeKey?: string | null;
 }
 
 /** Per-type payload and one-line summary; every free-text field is redacted and capped. */
@@ -221,7 +226,7 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
   switch (input.type) {
     case "decision": {
       const title = requiredLine(input.title);
-      const payload: Record<string, unknown> = { title, rationale: requiredLine(input.rationale, 1000) };
+      const payload: Record<string, unknown> = { title, rationale: requiredLine(input.rationale, RK9_COORD_RATIONALE_MAX) };
       if (input.vault_note) payload.vault_note = input.vault_note;
       return { summary: title, payload, vaultPath: input.vault_note ?? null, refEventId: null };
     }
@@ -274,7 +279,26 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
         refEventId: input.reply_to ?? null,
       };
     }
+    case "decision-vaulted": {
+      const pushed = input.pushed !== false;
+      return {
+        summary: `#${input.ref_event_id} -> ${input.vault_path} @${input.commit.slice(0, 7)}${pushed ? "" : " (push pending)"}`,
+        payload: { ref_event_id: input.ref_event_id, vault_path: input.vault_path, commit: input.commit, pushed },
+        vaultPath: input.vault_path,
+        refEventId: input.ref_event_id,
+        dedupeKey: rk9CoordDecisionVaultedKey(input.ref_event_id),
+      };
+    }
   }
+}
+
+/**
+ * Who may close a decision's vault write (RK9-631): the decision's own actor,
+ * or a caller whose journal rows are not `unverified`. A remote host token or
+ * Grok cannot mark someone else's decision as vaulted.
+ */
+export function rk9CoordMayVaultDecision(actor: Rk9CoordResolvedActor, decisionActorRef: string): boolean {
+  return actor.actorId === decisionActorRef || rk9CoordJournalTrust(actor) !== "unverified";
 }
 
 export interface Rk9CoordDelta {
@@ -372,6 +396,38 @@ export function rk9CoordJournalService(db: Db) {
       vault_note: input.type === "decision" ? input.vault_note : undefined,
       app: input.type === "deploy" ? input.app : undefined,
     });
+    let issue = ("issue" in input ? input.issue : undefined) ?? null;
+    let repo = input.repo ?? null;
+    if (input.type === "decision-vaulted") {
+      // The follow-up must name a stored decision of this company, with the same vault note.
+      const [decision] = await db
+        .select()
+        .from(rk9CoordEvents)
+        .where(
+          and(
+            eq(rk9CoordEvents.companyId, companyId),
+            eq(rk9CoordEvents.id, input.ref_event_id),
+            eq(rk9CoordEvents.type, "decision"),
+          ),
+        )
+        .limit(1);
+      if (!decision) {
+        throw new HttpError(404, "No decision event with that id", { code: "rk9_coord_event_not_found" });
+      }
+      if (decision.vaultPath !== input.vault_path) {
+        throw new HttpError(409, "vault_path differs from the decision's vault note", {
+          code: "rk9_coord_vault_path_mismatch",
+        });
+      }
+      if (!rk9CoordMayVaultDecision(actor, decision.actorRef)) {
+        throw new HttpError(403, "Only the decision's actor or a trusted caller may mark it vaulted", {
+          code: "rk9_coord_vault_owner_required",
+        });
+      }
+      // Route the follow-up to the same readers as the decision.
+      issue ??= decision.issue;
+      repo ??= decision.repo;
+    }
     const built = buildRk9CoordEvent(input, actor.actorId);
     const summary = toRk9CoordLine(built.summary, RK9_COORD_SUMMARY_MAX) ?? input.type;
     const inserted = await db
@@ -382,13 +438,14 @@ export function rk9CoordJournalService(db: Db) {
         actorRef: actor.actorId,
         actorKind: actor.kind,
         trust: rk9CoordJournalTrust(actor),
-        issue: input.issue ?? null,
-        repo: input.repo ?? null,
+        issue,
+        repo,
         summary,
         payload: built.payload,
         clientEventId: input.client_event_id ?? null,
         refEventId: built.refEventId,
         vaultPath: built.vaultPath,
+        dedupeKey: built.dedupeKey ?? null,
         occurredAt: input.occurred_at ? new Date(input.occurred_at) : null,
       })
       .onConflictDoNothing()
@@ -407,6 +464,21 @@ export function rk9CoordJournalService(db: Db) {
           code: "rk9_coord_client_event_conflict",
         });
       }
+      if (existing) return { event: rk9CoordEventView(existing), duplicate: true };
+    }
+    // decision-vaulted: one per decision. A second retry gets the stored row.
+    if (built.dedupeKey) {
+      const [existing] = await db
+        .select()
+        .from(rk9CoordEvents)
+        .where(
+          and(
+            eq(rk9CoordEvents.companyId, companyId),
+            eq(rk9CoordEvents.type, input.type),
+            eq(rk9CoordEvents.dedupeKey, built.dedupeKey),
+          ),
+        )
+        .limit(1);
       if (existing) return { event: rk9CoordEventView(existing), duplicate: true };
     }
     throw new Error("rk9 coord event insert conflicted without a client_event_id");
@@ -670,6 +742,35 @@ export function rk9CoordJournalService(db: Db) {
     };
   }
 
-  return { append, delta, board };
+  /**
+   * Decisions written with a vault note that have no decision-vaulted
+   * follow-up yet (RK9-631, `rk9 decision --retry`). Oldest first. An
+   * unverified caller (remote host token, Grok) sees only its own decisions,
+   * the same rule as the follow-up write.
+   */
+  async function vaultPending(
+    companyId: string,
+    actor: Rk9CoordResolvedActor,
+    opts: { id?: number; limit?: number } = {},
+  ): Promise<Rk9CoordEventView[]> {
+    const conditions: SQL[] = [
+      eq(rk9CoordEvents.companyId, companyId),
+      eq(rk9CoordEvents.type, "decision"),
+      isNotNull(rk9CoordEvents.vaultPath),
+      // The dedupe key of the follow-up hits rk9_coord_events_dedupe_uq.
+      sql`not exists (select 1 from rk9_coord_events v where v.company_id = ${rk9CoordEvents.companyId} and v.type = 'decision-vaulted' and v.dedupe_key = 'decision-vaulted:' || ${rk9CoordEvents.id}::text)`,
+    ];
+    if (opts.id !== undefined) conditions.push(eq(rk9CoordEvents.id, opts.id));
+    if (rk9CoordJournalTrust(actor) === "unverified") conditions.push(eq(rk9CoordEvents.actorRef, actor.actorId));
+    const rows = await db
+      .select()
+      .from(rk9CoordEvents)
+      .where(and(...conditions))
+      .orderBy(rk9CoordEvents.id)
+      .limit(Math.min(Math.max(opts.limit ?? 20, 1), 100));
+    return rows.map(rk9CoordEventView);
+  }
+
+  return { append, delta, board, vaultPending };
 }
 // --- /RK9 Custom ---

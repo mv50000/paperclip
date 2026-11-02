@@ -4,6 +4,7 @@
 // behind the coord actor middleware (company scope, RK9-616, actor claim).
 //   POST /        append one typed event (zod discriminated union)
 //   GET  /delta   events after the caller's cursor; ?peek=1, ?fmt=line
+//   GET  /vault-pending  decisions whose vault note is not written yet (RK9-631)
 // The journal is append-only: there is deliberately no PATCH, PUT or DELETE
 // route; those methods fall through to the coord 404 handler.
 import { Router, type Request } from "express";
@@ -11,6 +12,7 @@ import type { Db } from "@paperclipai/db";
 import {
   appendRk9CoordEventSchema,
   rk9CoordDeltaQuerySchema,
+  rk9CoordVaultPendingQuerySchema,
   type AppendRk9CoordEvent,
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
@@ -109,6 +111,20 @@ export function rk9CoordEventRoutes(db: Db) {
         return;
       }
       res.json(delta);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // RK9-631: `rk9 decision --retry` lists the decisions it still has to vault.
+  router.get("/vault-pending", async (req, res, next) => {
+    try {
+      const companyId = companyIdOf(req);
+      const query = rk9CoordVaultPendingQuerySchema.parse(req.query);
+      const actor = requireRk9CoordActor(req);
+      const events = await journal.vaultPending(companyId, actor, { id: query.id, limit: query.limit });
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ events });
     } catch (err) {
       next(err);
     }
