@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
 import { withTransientWriteRetry } from "./transient-write-retry.js";
+// --- RK9 Custom (RK9-635) ---
+import { withRk9MigrationLock } from "./rk9-migration-lock.js";
+// --- end RK9 Custom ---
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
@@ -824,7 +827,21 @@ export type MigrationHistoryReconcileResult = {
   remainingMigrations: string[];
 };
 
+// --- RK9 Custom (RK9-635): the journal repair writes migration rows, so it runs under the same
+// advisory lock as applyPendingMigrations. The locked internals call the Unlocked variant (a second
+// lock request from another connection would wait on the lock this process already holds).
 export async function reconcilePendingMigrationHistory(
+  url: string,
+): Promise<MigrationHistoryReconcileResult> {
+  const state = await inspectMigrations(url);
+  if (state.status !== "needsMigrations" || state.reason !== "pending-migrations") {
+    return { repairedMigrations: [], remainingMigrations: [] };
+  }
+  return await withRk9MigrationLock(url, () => reconcilePendingMigrationHistoryUnlocked(url));
+}
+// --- end RK9 Custom ---
+
+async function reconcilePendingMigrationHistoryUnlocked(
   url: string,
 ): Promise<MigrationHistoryReconcileResult> {
   const state = await inspectMigrations(url);
@@ -1007,7 +1024,17 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
   }
 }
 
+// --- RK9 Custom (RK9-635): serialize every migration path with a Postgres advisory lock ---
+// An up-to-date schema returns without the lock, so a start after another process finished
+// migrating never waits. Otherwise the run waits (bounded) for the lock and re-inspects under it.
 export async function applyPendingMigrations(url: string): Promise<void> {
+  const state = await inspectMigrations(url);
+  if (state.status === "upToDate") return;
+  await withRk9MigrationLock(url, () => applyPendingMigrationsUnlocked(url));
+}
+// --- end RK9 Custom ---
+
+async function applyPendingMigrationsUnlocked(url: string): Promise<void> {
   const initialState = await inspectMigrations(url);
   if (initialState.status === "upToDate") return;
 
@@ -1023,7 +1050,7 @@ export async function applyPendingMigrations(url: string): Promise<void> {
     let bootstrappedState = await inspectMigrations(url);
     if (bootstrappedState.status === "upToDate") return;
     if (bootstrappedState.reason === "pending-migrations") {
-      const repair = await reconcilePendingMigrationHistory(url);
+      const repair = await reconcilePendingMigrationHistoryUnlocked(url);
       if (repair.repairedMigrations.length > 0) {
         bootstrappedState = await inspectMigrations(url);
       }
@@ -1047,7 +1074,7 @@ export async function applyPendingMigrations(url: string): Promise<void> {
   let state = await inspectMigrations(url);
   if (state.status === "upToDate") return;
 
-  const repair = await reconcilePendingMigrationHistory(url);
+  const repair = await reconcilePendingMigrationHistoryUnlocked(url);
   if (repair.repairedMigrations.length > 0) {
     state = await inspectMigrations(url);
     if (state.status === "upToDate") return;
