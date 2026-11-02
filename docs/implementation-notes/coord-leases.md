@@ -22,7 +22,7 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
 | `POST /acquire` | `resource`, `ttl_s` (10..86400, default 1800), `reason`, `wait`, `mode` | `{granted:true, lease_id, fencing_token, expires_at, holder, already_held, adopted_from}`, or `{granted:false, queued:true, position, holder, holder_phase, expires_at, eta}`. With `wait=false` and a live holder: 409 `rk9_coord_lease_held` with the same holder fields and no queue entry, unless the caller is already queued (then 200 `queued:true`). |
 | `POST /:leaseId/renew` | `fencing_token`, `ttl_s` | `{expires_at}`. 409 `rk9_coord_lease_stale` when the lease is lost. |
 | `POST /:leaseId/release` | `resource`, `fencing_token` (required for a hard-gate lease, 422 `rk9_coord_lease_fencing_required` otherwise), `client_event_id` (ignored) | `{released, noop}`. A second release is 200 with `noop:true` and writes nothing. 409 when the lease was lost. |
-| `POST /break` | `resource`, `reason` (required) | `{broken, previous_holder, release_reason, promoted}` |
+| `POST /break` | `resource`, `reason` (required), `lease_id` (optional, RK9-629) | `{broken, previous_holder, release_reason, promoted}`. With `lease_id`, a different active lease is 409 `rk9_coord_lease_changed` and nothing is broken. |
 | `POST /validate` | `resource`, `fencing_token` | 200 `{valid:true, holder, expires_at}` or 409 `rk9_coord_lease_stale` |
 | `GET /` | `prefix`, `holder`, `resource` | `{leases:[{lease_id, resource, holder, holder_kind, holder_phase, mode, expires_at, expired, queue:[{actor, position}]}]}` |
 | `GET /status` | `resource` | one row: `held`, `holder`, `holder_phase`, `expires_at`, `queue`, and the caller's `position` |
@@ -179,6 +179,7 @@ The parent decided on 2026-11-02:
 - The operator's low-effort path is the Telegram escalation after 30 min
   (the `stuck` event), with a break action through rk9claude. That belongs
   to the escalation child.
+  It is documented in `coord-stall-escalator.md` (RK9-629).
 
 ## Sweeper
 

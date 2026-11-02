@@ -1039,3 +1039,5 @@ export * from "./rk9-coord.js";
 export * from "./rk9-coord-journal.js";
 // RK9 Custom (RK9-627): coord lease bodies
 export * from "./rk9-coord-leases.js";
+// RK9 Custom (RK9-629): coord stall escalation report and ack bodies
+export * from "./rk9-coord-escalations.js";

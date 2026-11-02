@@ -185,8 +185,9 @@ characters starting with `rk9_coord_`; `scope` is `coord`; `label` at most
   enforce`), `status` (`reserved | sent | failed | suppressed | shadow`),
   `event_id` (the journal row, no FK), `message` (at most 1000),
   `channel_message_id`, `error`, `reserved_at`, `sent_at`.
-- The daily cap (6/day, RK9-629) counts rows by (`company_id`,
-  `reserved_at`). A failed send still counts.
+- The daily cap (6/day, RK9-629) counts escalation rows by `reserved_at`
+  over every company (one operator chat), without the holder-nudge rows. A
+  failed send still counts. Details: `coord-stall-escalator.md`.
 
 ### Indexes and the delta query
 

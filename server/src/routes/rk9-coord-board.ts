@@ -8,10 +8,13 @@ import type { Db } from "@paperclipai/db";
 import { rk9CoordBoardQuerySchema } from "@paperclipai/shared";
 import { rk9CoordJournalService, rk9CoordJournalTrust } from "../services/rk9-coord-journal.js";
 import { companyIdOf } from "./rk9-coord-events.js";
+// RK9 Custom (RK9-629): failed and unacked escalations on the board
+import { resolveRk9CoordEscalatorConfig, rk9CoordEscalationService } from "../services/rk9-coord-stall-escalator.js";
 
 export function rk9CoordBoardRoutes(db: Db) {
   const router = Router({ mergeParams: true });
   const journal = rk9CoordJournalService(db);
+  const escalations = rk9CoordEscalationService(db);
 
   router.get("/", async (req, res, next) => {
     try {
@@ -20,8 +23,14 @@ export function rk9CoordBoardRoutes(db: Db) {
       // Remote hosts and Grok read as unverified (no message bodies).
       const viewerTrust = req.rk9CoordActor ? rk9CoordJournalTrust(req.rk9CoordActor) : "attributed";
       const board = await journal.board(companyIdOf(req), { viewerTrust, eventLimit: query.events });
+      // RK9-629: a failed or unacked escalation never vanishes silently.
+      const escalationsAttention = await escalations.attention(
+        companyIdOf(req),
+        new Date(),
+        resolveRk9CoordEscalatorConfig().recheckS,
+      );
       res.setHeader("Cache-Control", "no-store");
-      res.json(board);
+      res.json({ ...board, escalations_attention: escalationsAttention });
     } catch (err) {
       next(err);
     }
