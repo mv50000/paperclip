@@ -59,6 +59,14 @@ import { toRk9CoordLine } from "./rk9-coord-text.js";
 export const RK9_COORD_LEASE_HEARTBEAT_S_DEFAULT = 60;
 export const RK9_COORD_LEASE_SWEEP_INTERVAL_MS_DEFAULT = 30_000;
 export const RK9_COORD_LEASE_STUCK_S_DEFAULT = 1_800;
+/** RK9-648 R3: the claim window of a promoted lease, capped apart from the dead-holder grace. */
+export const RK9_COORD_LEASE_CLAIM_WINDOW_S_DEFAULT = 300;
+/**
+ * RK9-648: the largest TTL of a hard-gate lease (prod, migrate, host). A larger
+ * request is clamped, never rejected (gate clients ask for up to 86 400 s and
+ * renew the lease). A crashed hard-gate holder is released only by its TTL.
+ */
+export const RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S_DEFAULT = 21_600;
 /** heartbeat_runs statuses after which a run never runs again. `interrupted` can resume. */
 export const RK9_COORD_TERMINAL_RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
 export const RK9_COORD_DEAD_RELEASE_REASONS = [
@@ -101,6 +109,25 @@ export function resolveRk9CoordLeaseDeadGraceS(env: NodeJS.ProcessEnv = process.
 
 export function resolveRk9CoordLeaseStuckS(env: NodeJS.ProcessEnv = process.env): number {
   return intEnv(env.RK9_COORD_LEASE_STUCK_S, RK9_COORD_LEASE_STUCK_S_DEFAULT, 60, 7 * 86_400);
+}
+
+/** RK9_COORD_LEASE_CLAIM_WINDOW_S, default 300 s, 30..3600 (RK9-648 R3). */
+export function resolveRk9CoordLeaseClaimWindowS(env: NodeJS.ProcessEnv = process.env): number {
+  return intEnv(env.RK9_COORD_LEASE_CLAIM_WINDOW_S, RK9_COORD_LEASE_CLAIM_WINDOW_S_DEFAULT, 30, 3_600);
+}
+
+/** RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S, default 21 600 s (6 h), 600..86 400 (RK9-648). */
+export function resolveRk9CoordLeaseHardGateTtlMaxS(env: NodeJS.ProcessEnv = process.env): number {
+  return intEnv(env.RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S, RK9_COORD_LEASE_HARD_GATE_TTL_MAX_S_DEFAULT, 600, 86_400);
+}
+
+/** The TTL a lease of `resource` gets: a hard-gate request above the cap is clamped to it. */
+export function rk9CoordLeaseEffectiveTtlS(
+  resource: Pick<Rk9CoordLeaseResource, "hardGate">,
+  requestedS: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return resource.hardGate ? Math.min(requestedS, resolveRk9CoordLeaseHardGateTtlMaxS(env)) : requestedS;
 }
 
 export function resolveRk9CoordLeaseSweepIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -231,6 +258,8 @@ interface Ctx {
   companyId: string;
   now: Date;
   graceS: number;
+  /** Claim window of a promoted lease (RK9-648 R3). */
+  claimWindowS: number;
   author: EventAuthor;
   publications: ActivityPublication[];
   /** Sweeper counter: dead waiters dequeued in this transaction. */
@@ -616,9 +645,10 @@ async function promoteNext(
       resource,
       holderActorId: waiter.actorId,
       // Claim window: a promoted waiter may have gone (Ctrl-C on `rk9 lease
-      // wait`). The lease first lives for at most the grace period; the
+      // wait`). The lease first lives for at most the grace period and the
+      // claim window cap (RK9-648 R3: the grace can be up to 86 400 s); the
       // holder's next acquire poll (already_held) extends it to its TTL.
-      ttlS: Math.min(waiter.requestedTtlSeconds ?? RK9_COORD_LEASE_TTL_DEFAULT_S, ctx.graceS),
+      ttlS: Math.min(waiter.requestedTtlSeconds ?? RK9_COORD_LEASE_TTL_DEFAULT_S, ctx.graceS, ctx.claimWindowS),
       reason: waiter.reason,
       mode: waiter.mode,
     });
@@ -705,7 +735,15 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     const result = await db.transaction(async (tx) => {
       if (resource) await lockResource(tx, companyId, resource);
       const now = await dbNow(tx);
-      return run({ tx, companyId, now, graceS: resolveRk9CoordLeaseDeadGraceS(env), author, publications });
+      return run({
+        tx,
+        companyId,
+        now,
+        graceS: resolveRk9CoordLeaseDeadGraceS(env),
+        claimWindowS: resolveRk9CoordLeaseClaimWindowS(env),
+        author,
+        publications,
+      });
     });
     for (const publication of publications) publishActivity(publication);
     return result;
@@ -768,10 +806,11 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     caller: Rk9CoordLeaseCaller,
     input: { resource: string; ttlS?: number; reason?: string | null; wait?: boolean; mode?: Rk9CoordLeaseMode },
   ): Promise<Rk9CoordLeaseAcquireResult> {
+    assertRk9CoordLeaseKind(caller.actor);
     const parsed = requireResource(input.resource);
     assertRk9CoordLeaseTrust(caller.actor, parsed);
     const self = await ensureRk9CoordActorRow(db, companyId, caller.actor, caller.agentId ?? null);
-    const ttlS = input.ttlS ?? RK9_COORD_LEASE_TTL_DEFAULT_S;
+    const ttlS = rk9CoordLeaseEffectiveTtlS(parsed, input.ttlS ?? RK9_COORD_LEASE_TTL_DEFAULT_S, env);
     const reason = toRk9CoordLine(input.reason ?? null, 300);
     const mode = input.mode ?? "enforce";
     const wait = input.wait === true;
@@ -862,8 +901,21 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
       // A live holder that is not the caller.
       if (!wait) {
         const view = await notGranted(ctx, active, holder, self.id, false);
-        // Already in the queue from an earlier wait: say so (no 409, place kept).
-        return view.position !== null ? { ...view, queued: true } : view;
+        if (view.position === null) return view;
+        // Already in the queue from an earlier wait: say so (no 409, place
+        // kept). RK9-648 R1: like a wait=true poll, it refreshes the waiter's
+        // liveness, so a caller that polls with wait=false is not dequeued.
+        await ctx.tx
+          .update(rk9CoordLeaseWaiters)
+          .set({ expiresAt: addSeconds(ctx.now, ctx.graceS) })
+          .where(
+            and(
+              eq(rk9CoordLeaseWaiters.companyId, companyId),
+              eq(rk9CoordLeaseWaiters.resource, resource),
+              eq(rk9CoordLeaseWaiters.actorId, self.id),
+            ),
+          );
+        return { ...view, queued: true };
       }
       const [waiter] = await ctx.tx
         .insert(rk9CoordLeaseWaiters)
@@ -955,6 +1007,8 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     leaseId: string,
     input: { fencingToken: number; ttlS?: number },
   ): Promise<Rk9CoordLeaseMutationResult> {
+    // Kind first (RK9-648): a denied kind learns nothing about which lease ids exist.
+    assertRk9CoordLeaseKind(caller.actor);
     const { lease: found, parsed, selfId } = await loadOwnLease(companyId, caller, leaseId);
     return inTx(companyId, authorFor(caller), found.resource, async (ctx) => {
       const { lease, fencingMismatch } = await lockedOwnLease(ctx, caller, leaseId, selfId, parsed, input.fencingToken);
@@ -965,7 +1019,7 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
         await expireStale(ctx, lease, caller.actor.actorId);
         return { ok: false, code: "rk9_coord_lease_stale", lease_id: lease.id, resource: lease.resource, release_reason: "ttl_expired" };
       }
-      const expiresAt = addSeconds(ctx.now, input.ttlS ?? RK9_COORD_LEASE_TTL_DEFAULT_S);
+      const expiresAt = addSeconds(ctx.now, rk9CoordLeaseEffectiveTtlS(parsed, input.ttlS ?? RK9_COORD_LEASE_TTL_DEFAULT_S, env));
       await ctx.tx
         .update(rk9CoordLeases)
         .set({ expiresAt, renewedAt: ctx.now })
@@ -985,10 +1039,13 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     leaseId: string,
     input: { fencingToken?: number | null },
   ): Promise<Rk9CoordLeaseMutationResult> {
+    assertRk9CoordLeaseKind(caller.actor);
     const { lease: found, parsed, selfId } = await loadOwnLease(companyId, caller, leaseId);
     return inTx(companyId, authorFor(caller), found.resource, async (ctx) => {
       const { lease, fencingMismatch } = await lockedOwnLease(ctx, caller, leaseId, selfId, parsed, input.fencingToken);
-      if (lease.releasedAt && lease.releaseReason === "released") {
+      // A replay of the holder's own release is a no-op; a token that is not
+      // this lease's (RK9-648 R2) is 409 even after the release.
+      if (lease.releasedAt && lease.releaseReason === "released" && !fencingMismatch) {
         return { ok: true, lease_id: lease.id, resource: lease.resource, expires_at: null, noop: true, release_reason: "released" };
       }
       // Hard gate: an ACCIDENT guard (a stale local lease record, a wrong id),
@@ -1027,6 +1084,7 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     caller: Rk9CoordLeaseCaller,
     input: { resource: string; reason: string; leaseId?: string | null },
   ) {
+    assertRk9CoordLeaseKind(caller.actor); // RK9-648: before the resource and reason checks
     const parsed = requireResource(input.resource);
     const reason = toRk9CoordLine(input.reason, 300);
     if (!reason) throw coordError(422, "rk9_coord_lease_break_reason_required", "break needs a non-empty reason");
@@ -1076,6 +1134,47 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
         release_reason: releaseReason,
         promoted: promoted ? { holder: promoted.holder.actorRef, lease_id: promoted.lease.id } : null,
       };
+    });
+  }
+
+  /**
+   * POST /leases/leave (RK9-648): the caller leaves the wait queue of
+   * `resource`, for `rk9 lease wait` on Ctrl-C or timeout. Without it an
+   * abandoned waiter stays until the grace period ends (sweeper step 2b).
+   * Idempotent: a caller that is not queued gets `left:false` and nothing is
+   * written. It never touches a lease, also not one promoted to the caller
+   * that the caller has not claimed yet: that one expires after the claim
+   * window. The leave is journaled as `dequeue` (dequeue_reason `left`).
+   */
+  async function leaveQueue(companyId: string, caller: Rk9CoordLeaseCaller, input: { resource: string }) {
+    assertRk9CoordLeaseKind(caller.actor);
+    const parsed = requireResource(input.resource);
+    const [self] = await db
+      .select({ id: rk9CoordActors.id })
+      .from(rk9CoordActors)
+      .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.actorRef, caller.actor.actorId)))
+      .limit(1);
+    if (!self) return { left: false, resource: parsed.resource };
+    return inTx(companyId, authorFor(caller), parsed.resource, async (ctx) => {
+      const removed = await ctx.tx
+        .delete(rk9CoordLeaseWaiters)
+        .where(
+          and(
+            eq(rk9CoordLeaseWaiters.companyId, companyId),
+            eq(rk9CoordLeaseWaiters.resource, parsed.resource),
+            eq(rk9CoordLeaseWaiters.actorId, self.id),
+          ),
+        )
+        .returning({ id: rk9CoordLeaseWaiters.id });
+      if (removed.length === 0) return { left: false, resource: parsed.resource };
+      await transition(ctx, {
+        subtype: "dequeue",
+        resource: parsed.resource,
+        leaseId: null,
+        summary: `dequeue ${parsed.resource}: ${caller.actor.actorId} (left)`,
+        payload: { actor: caller.actor.actorId, dequeue_reason: "left" },
+      });
+      return { left: true, resource: parsed.resource };
     });
   }
 
@@ -1168,7 +1267,7 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
     };
   }
 
-  return { acquire, renew, release, breakLease, validateToken, list, status };
+  return { acquire, renew, release, breakLease, leaveQueue, validateToken, list, status };
 }
 
 // ---------------------------------------------------------------- sweeper
@@ -1195,6 +1294,7 @@ export async function sweepRk9CoordLeases(
 ): Promise<Rk9CoordLeaseSweepResult> {
   const env = opts.env ?? process.env;
   const graceS = resolveRk9CoordLeaseDeadGraceS(env);
+  const claimWindowS = resolveRk9CoordLeaseClaimWindowS(env);
   const stuckS = resolveRk9CoordLeaseStuckS(env);
   const result: Rk9CoordLeaseSweepResult = { expired: 0, deadReleased: 0, promoted: 0, dequeued: 0, stuck: 0, skipped: 0 };
 
@@ -1207,7 +1307,7 @@ export async function sweepRk9CoordLeases(
         return;
       }
       const now = await dbNow(tx);
-      await run({ tx, companyId, now, graceS, author: SWEEPER_AUTHOR, publications, stats });
+      await run({ tx, companyId, now, graceS, claimWindowS, author: SWEEPER_AUTHOR, publications, stats });
     });
     // Counted only after the commit: a rolled-back transaction changed nothing.
     result.dequeued += stats.dequeued;
