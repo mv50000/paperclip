@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
 import { withTransientWriteRetry } from "./transient-write-retry.js";
+// --- RK9 Custom (RK9-635) ---
+import { withRk9MigrationLock } from "./rk9-migration-lock.js";
+// --- end RK9 Custom ---
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
@@ -1007,7 +1010,17 @@ export async function inspectMigrations(url: string): Promise<MigrationState> {
   }
 }
 
+// --- RK9 Custom (RK9-635): serialize every migration path with a Postgres advisory lock ---
+// An up-to-date schema returns without the lock, so a start after another process finished
+// migrating never waits. Otherwise the run waits (bounded) for the lock and re-inspects under it.
 export async function applyPendingMigrations(url: string): Promise<void> {
+  const state = await inspectMigrations(url);
+  if (state.status === "upToDate") return;
+  await withRk9MigrationLock(url, () => applyPendingMigrationsUnlocked(url));
+}
+// --- end RK9 Custom ---
+
+async function applyPendingMigrationsUnlocked(url: string): Promise<void> {
   const initialState = await inspectMigrations(url);
   if (initialState.status === "upToDate") return;
 
