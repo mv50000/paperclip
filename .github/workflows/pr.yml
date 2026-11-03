@@ -238,6 +238,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # --- RK9 Custom (RK9-709) --- The issue visibility inventory
+      # (server/src/__tests__/nosto-private-issue-visibility-rk9.test.ts) diffs
+      # FORK_BASE_COMMIT against HEAD. The checkout is shallow, so fetch only that
+      # one commit instead of the full history. Keep the SHA in sync with the test;
+      # the test fails in CI when the commit is missing.
+      - name: Fetch fork base commit for the issue visibility inventory
+        run: git fetch --no-tags --depth=1 origin dffc2b3ca1b9e88fa21cb17493083e682dffd1ca
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
