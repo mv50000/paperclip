@@ -157,7 +157,9 @@ export interface Rk9CoordActorRow {
   endedAt: Date | null;
 }
 
-const actorRowColumns = {
+// A function, not a constant: a module-load read of the table breaks tests
+// that mock @paperclipai/db without it (server-startup tests import presence).
+const actorRowColumns = () => ({
   id: rk9CoordActors.id,
   actorRef: rk9CoordActors.actorRef,
   kind: rk9CoordActors.kind,
@@ -166,7 +168,7 @@ const actorRowColumns = {
   repo: rk9CoordActors.repo,
   lastSeenAt: rk9CoordActors.lastSeenAt,
   endedAt: rk9CoordActors.endedAt,
-};
+});
 
 export async function findRk9CoordActorRow(
   db: Db,
@@ -174,7 +176,7 @@ export async function findRk9CoordActorRow(
   actorRef: string,
 ): Promise<Rk9CoordActorRow | null> {
   const [row] = await db
-    .select(actorRowColumns)
+    .select(actorRowColumns())
     .from(rk9CoordActors)
     .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.actorRef, actorRef)))
     .limit(1);
