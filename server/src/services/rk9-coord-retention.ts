@@ -4,17 +4,24 @@
 // - events: 90 days; `decision` and `decision-vaulted`: 366 days (>= 1 year);
 // - ended actors: 7 days after ended_at (cascades to their cursors, inbox
 //   rows, leases and waiters);
-// - delivered inbox rows and expired undelivered ones: 30 days;
+// - never-ended actors (RK9-641): a stub that never registered (no
+//   presence marker: rows from ensureRk9CoordActorRow, agent_run stubs) 7
+//   days after its last activity, any other actor 30 days after it. Last
+//   activity is the later of last_seen_at and the cursor's updated_at. An
+//   actor that holds an unexpired lease is kept;
+// - delivered inbox rows and expired undelivered ones: 30 days; undelivered
+//   rows without expires_at: 30 days after created_at (RK9-641);
 // - released leases: 30 days.
 //
 // The journal trigger rejects every DELETE unless the transaction sets
 // `rk9.coord_events_prune = 'on'` (SET LOCAL via set_config(..., true)). This
 // prune is the only code that sets it. Deletes run in id batches, so no
 // transaction holds many locks, and a re-run over pruned data deletes nothing.
-import { and, inArray, isNotNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { rk9CoordActors, rk9CoordEvents, rk9CoordInbox, rk9CoordLeases } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
+import { RK9_COORD_REGISTERED_MARKER } from "./rk9-coord-presence.js";
 
 const DAY_MS = 24 * 3600 * 1000;
 const BATCH = 5_000;
@@ -25,6 +32,10 @@ export const RK9_COORD_RETENTION = {
   // 366 days: at least one calendar year, also across a leap day.
   decisionDays: 366,
   endedActorDays: 7,
+  /** Never-ended actor without a presence registration (a stub), after its last activity. */
+  stubActorDays: 7,
+  /** Never-ended registered actor (crashed session), after its last activity. */
+  staleActorDays: 30,
   inboxDays: 30,
   releasedLeaseDays: 30,
 } as const;
@@ -94,6 +105,33 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
     return rows.length;
   });
 
+  // RK9-641: never-ended rows (stubs, crashed sessions) would stay forever.
+  const stubCutoff = before(RK9_COORD_RETENTION.stubActorDays).toISOString();
+  const staleCutoff = before(RK9_COORD_RETENTION.staleActorDays).toISOString();
+  const nowIso = now.toISOString();
+  const staleActors = await batched(async () => {
+    const result = await db.execute<{ id: string }>(sql`
+      delete from rk9_coord_actors
+      where id in (
+        select a.id
+        from rk9_coord_actors a
+        left join rk9_coord_cursors c on c.company_id = a.company_id and c.actor_id = a.id
+        where a.ended_at is null
+          and greatest(a.last_seen_at, coalesce(c.updated_at, a.last_seen_at)) < case
+            when (a.metadata ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null then ${stubCutoff}::timestamptz
+            else ${staleCutoff}::timestamptz
+          end
+          and not exists (
+            select 1 from rk9_coord_leases l
+            where l.holder_actor_id = a.id and l.released_at is null and l.expires_at > ${nowIso}::timestamptz
+          )
+        limit ${BATCH}
+      )
+      returning id
+    `);
+    return (Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])).length;
+  });
+
   const inboxCutoff = before(RK9_COORD_RETENTION.inboxDays);
   const inbox = await batched(async () => {
     const rows = await db
@@ -108,6 +146,11 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
               or(
                 and(isNotNull(rk9CoordInbox.deliveredAt), lt(rk9CoordInbox.deliveredAt, inboxCutoff)),
                 and(isNotNull(rk9CoordInbox.expiresAt), lt(rk9CoordInbox.expiresAt, inboxCutoff)),
+                and(
+                  isNull(rk9CoordInbox.deliveredAt),
+                  isNull(rk9CoordInbox.expiresAt),
+                  lt(rk9CoordInbox.createdAt, inboxCutoff),
+                ),
               ),
             )
             .orderBy(rk9CoordInbox.id)
@@ -136,7 +179,7 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
     return rows.length;
   });
 
-  const result = { events, actors, inbox, leases };
+  const result = { events, actors: actors + staleActors, inbox, leases };
   if (events + actors + inbox + leases > 0) logger.info(result, "pruned rk9 coord bus rows");
   return result;
 }

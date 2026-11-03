@@ -13,6 +13,7 @@ import {
   heartbeatRuns,
   createDb,
   rk9CoordActors,
+  rk9CoordCursors,
   rk9CoordEvents,
   rk9CoordInbox,
   rk9CoordLeases,
@@ -941,6 +942,43 @@ if (!support.supported) {
     const remote = await request(appFor(none, hostToken(cid))).get(`${base(cid)}/board`);
     expect(remote.status).toBe(200);
     expect(remote.body.inbox[0].body).toBeNull();
+  });
+
+  it("prunes never-ended stubs and stale actors by last activity, and old undelivered inbox rows (RK9-641)", async () => {
+    const cid = await newCompany();
+    const now = new Date();
+    const daysAgo = (days: number) => new Date(now.getTime() - days * 24 * 3600 * 1000);
+    const registered = { presence_registered_at: "nonce" };
+    const rows = await db
+      .insert(rk9CoordActors)
+      .values([
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-old", trust: "attributed", lastSeenAt: daysAgo(8) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-new", trust: "attributed", lastSeenAt: daysAgo(2) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-cursor", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:reg-8d", trust: "attributed", lastSeenAt: daysAgo(8), metadata: registered },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:reg-31d", trust: "attributed", lastSeenAt: daysAgo(31), metadata: registered },
+      ])
+      .returning({ id: rk9CoordActors.id, ref: rk9CoordActors.actorRef });
+    const id = (ref: string) => rows.find((row) => row.ref === ref)!.id;
+    // A delta call 1 day ago keeps the stub: its cursor moved.
+    await db.insert(rk9CoordCursors).values({ companyId: cid, actorId: id("cc:h:stub-cursor"), lastEventId: 0, updatedAt: daysAgo(1) });
+    await db.insert(rk9CoordLeases).values({
+      companyId: cid,
+      resource: "prod:rkp",
+      holderActorId: id("cc:h:stub-lease"),
+      expiresAt: new Date(now.getTime() + 600_000),
+    });
+    await db.insert(rk9CoordInbox).values([
+      { companyId: cid, toName: "x", fromActorRef: "orch:live", body: "pending-old", createdAt: daysAgo(31) },
+      { companyId: cid, toName: "x", fromActorRef: "orch:live", body: "pending-new", createdAt: daysAgo(29) },
+    ]);
+
+    await pruneRk9Coord(db, { now });
+    const left = await db.select({ ref: rk9CoordActors.actorRef }).from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
+    expect(left.map((row) => row.ref).sort()).toEqual(["cc:h:reg-8d", "cc:h:stub-cursor", "cc:h:stub-lease", "cc:h:stub-new"]);
+    const inbox = await db.select({ body: rk9CoordInbox.body }).from(rk9CoordInbox).where(eq(rk9CoordInbox.companyId, cid));
+    expect(inbox.map((row) => row.body)).toEqual(["pending-new"]);
   });
 
   it("prunes old events, ended actors and old inbox rows idempotently and keeps decisions a year", async () => {

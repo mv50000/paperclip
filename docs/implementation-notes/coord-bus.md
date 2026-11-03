@@ -242,17 +242,31 @@ FK, so an actor delete does not scan the referencing tables.
 RK9-626 implements the retention job in
 `server/src/services/rk9-coord-retention.ts` (`pruneRk9Coord`). The server
 runs it on startup and every 6 hours. The periods below are the ones it uses.
-Escalations and revoked tokens are not pruned yet.
+Escalations and revoked tokens are not pruned yet (RK9-641 made the table
+below say so too).
 
 | Data | Keep | How |
 |---|---|---|
 | Events | 90 days | prune transaction with `SET LOCAL rk9.coord_events_prune = 'on'` |
 | `decision` and `decision-vaulted` events | 366 days (at least 1 year) | excluded from the 90-day prune |
 | Ended actors | 7 days after `ended_at` | DELETE (cascades to their leases, waiters, cursors, inbox) |
+| Never-registered actors (stubs, RK9-641) | 7 days after the last activity | DELETE, as above |
+| Registered actors that never ended (crashed sessions, RK9-641) | 30 days after the last activity | DELETE, as above |
 | Released leases | 30 days | DELETE |
 | Delivered or expired inbox rows | 30 days | DELETE |
-| Escalations | 1 year | DELETE |
+| Undelivered inbox rows without `expires_at` (RK9-641) | 30 days after `created_at` | DELETE |
+| Escalations | kept | not pruned yet; the daily cap needs only the last day |
 | Revoked tokens | kept | audit trail; `rotated_from_token_id` chains stay intact |
+
+A stub is an actor row without the presence marker
+`metadata.presence_registered_at`: the row that a non-peek delta, an inbox
+claim or another coord route inserts for an actor that never sent
+`PUT /actors/me` (agent runs, remote hosts). The last activity is the later
+of `last_seen_at` and the cursor's `updated_at`, so an actor that only
+reads the delta stays while its cursor moves. An actor that holds an
+unreleased, unexpired lease is never pruned this way. This bounds the
+growth from remote host tokens that mint new `cc:<host>:<random>` ids: each
+such id costs one actor row and one cursor row for at most 7 days.
 
 The prune deletes in batches of 5,000 by `id`. It does not wait for old
 cursors: an actor whose cursor points at a pruned event simply continues
