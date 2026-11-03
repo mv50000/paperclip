@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isUniqueViolation } from "../db-errors.js";
+import { isForeignKeyViolation, isUniqueViolation } from "../db-errors.js";
 
 const CONSTRAINT = "issues_open_routine_execution_uq";
 
@@ -47,5 +47,29 @@ describe("isUniqueViolation", () => {
     const looped: { cause?: unknown } = {};
     looped.cause = looped;
     expect(isUniqueViolation(looped, CONSTRAINT)).toBe(false);
+  });
+});
+
+// RK9 Custom (RK9-684): the constraint filter of the coord lease prune retry.
+describe("isForeignKeyViolation", () => {
+  const ACTOR_FK = /_rk9_coord_actors_id_fk\b/;
+
+  it("matches any foreign key violation without a filter", () => {
+    expect(isForeignKeyViolation({ cause: { code: "23503" } })).toBe(true);
+    expect(isForeignKeyViolation({ cause: { code: "23505" } })).toBe(false);
+  });
+
+  it("matches the filter on the constraint name or the driver message", () => {
+    const name = "rk9_coord_leases_holder_actor_id_rk9_coord_actors_id_fk";
+    expect(isForeignKeyViolation({ cause: { code: "23503", constraint_name: name } }, ACTOR_FK)).toBe(true);
+    expect(isForeignKeyViolation({ cause: { code: "23503", constraint: name } }, ACTOR_FK)).toBe(true);
+    expect(
+      isForeignKeyViolation({ cause: { code: "23503", message: `violates foreign key constraint "${name}"` } }, ACTOR_FK),
+    ).toBe(true);
+  });
+
+  it("ignores a foreign key violation on another constraint", () => {
+    const name = "rk9_coord_leases_company_id_companies_id_fk";
+    expect(isForeignKeyViolation({ cause: { code: "23503", constraint_name: name, message: name } }, ACTOR_FK)).toBe(false);
   });
 });

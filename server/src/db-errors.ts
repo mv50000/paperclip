@@ -41,11 +41,24 @@ export function isUniqueViolation(error: unknown, constraintName?: string): bool
  * that carries the code is reachable only through `cause`. This helper walks
  * the `cause` chain, the same way `isUniqueViolation` does.
  */
-export function isForeignKeyViolation(error: unknown): boolean {
+export function isForeignKeyViolation(error: unknown, constraintPattern?: RegExp): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current && typeof current === "object"; depth += 1) {
-    const candidate = current as { code?: unknown; cause?: unknown };
-    if (candidate.code === FOREIGN_KEY_VIOLATION) return true;
+    const candidate = current as {
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (candidate.code === FOREIGN_KEY_VIOLATION) {
+      // RK9 Custom (RK9-684): an optional constraint-name filter, read the same
+      // way as in isUniqueViolation (driver field, else the driver message).
+      if (!constraintPattern) return true;
+      const constraint = candidate.constraint ?? candidate.constraint_name;
+      if (typeof constraint === "string" && constraintPattern.test(constraint)) return true;
+      if (typeof candidate.message === "string" && constraintPattern.test(candidate.message)) return true;
+    }
     current = candidate.cause;
   }
   return false;

@@ -17,8 +17,9 @@
 //    route. The recall route itself binds the company to the token.
 import type { Request, RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
-import { unauthorized } from "../errors.js";
-import { isRk9CoordBearer, rk9CoordTokenService } from "../services/rk9-coord-tokens.js";
+import { forbidden, unauthorized } from "../errors.js";
+import { isRk9CoordBearer, rk9CoordBoardHostNames, rk9CoordTokenService } from "../services/rk9-coord-tokens.js";
+import { logger } from "./logger.js";
 import { rk9CoordPrincipalScope, type Rk9CoordTokenPrincipal } from "./rk9-coord-actor.js";
 
 export type Rk9CoordTokenResolver = (token: string) => Promise<Rk9CoordTokenPrincipal | null>;
@@ -44,6 +45,22 @@ export async function resolveRk9CoordBearer(
   req.actor = { type: "none", source: "none" };
   if (!principal) {
     return { handled: true, error: unauthorized("Invalid, revoked or expired coord token") };
+  }
+  // RK9-684 item 4: a host token named after the board host (or its short
+  // alias) is refused at use time too. Issue and rotate refuse such a name
+  // since RK9-676 and RK9-673; a token issued before that still resolves
+  // until the operator revokes it.
+  if (principal.principalKind === "host" && rk9CoordBoardHostNames().includes(principal.principalName.trim().toLowerCase())) {
+    logger.warn(
+      { event: "rk9_coord_token_board_host_refused", tokenId: principal.tokenId, companyId: principal.companyId },
+      "A host token named after the board host was refused; revoke it",
+    );
+    return {
+      handled: true,
+      error: forbidden("The board host uses the board key, not a host token; revoke this token", {
+        code: "rk9_coord_token_board_host",
+      }),
+    };
   }
   req.rk9CoordPrincipal = principal;
   return { handled: true };

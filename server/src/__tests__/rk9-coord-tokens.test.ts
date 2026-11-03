@@ -44,6 +44,10 @@ const OTHER = "22222222-2222-4222-8222-222222222222";
 const HOST_TOKEN = generateRk9CoordToken();
 const SERVICE_TOKEN = generateRk9CoordToken();
 const RECALL_TOKEN = generateRk9CoordToken();
+// RK9-684 item 4: host tokens issued for the board host before RK9-676/RK9-673 refused that name.
+const BOARD_HOST_TOKEN = generateRk9CoordToken();
+const BOARD_ALIAS_TOKEN = generateRk9CoordToken();
+const BOARD_RECALL_TOKEN = generateRk9CoordToken();
 
 const principals: Record<string, Rk9CoordTokenPrincipal> = {
   [HOST_TOKEN]: { tokenId: "t-host", companyId: RK9, principalKind: "host", principalName: "mv-laptop" },
@@ -53,6 +57,16 @@ const principals: Record<string, Rk9CoordTokenPrincipal> = {
     companyId: RK9,
     principalKind: "host",
     principalName: "mv-laptop",
+    scope: "recall",
+    recallAll: false,
+  },
+  [BOARD_HOST_TOKEN]: { tokenId: "t-board", companyId: RK9, principalKind: "host", principalName: "paperclip-01" },
+  [BOARD_ALIAS_TOKEN]: { tokenId: "t-alias", companyId: RK9, principalKind: "host", principalName: " Paperclip " },
+  [BOARD_RECALL_TOKEN]: {
+    tokenId: "t-board-recall",
+    companyId: RK9,
+    principalKind: "host",
+    principalName: "paperclip-01",
     scope: "recall",
     recallAll: false,
   },
@@ -153,6 +167,28 @@ describe("coord token bearer resolution", () => {
       expect(res.status).toBe(401);
     },
   );
+
+  it.each([
+    ["the board host", BOARD_HOST_TOKEN],
+    ["the board host's short alias", BOARD_ALIAS_TOKEN],
+  ])("refuses a host token named after %s at use time (RK9-684 item 4)", async (_name, token) => {
+    const { app } = makeApp();
+    for (const path of [whoami(), `/api/companies/${RK9}/issues`]) {
+      const res = await request(app).get(path).set("Authorization", bearer(token));
+      expect(res.status, path).toBe(403);
+      expect(res.body.code, path).toBe("rk9_coord_token_board_host");
+    }
+  });
+
+  it("refuses a recall token named after the board host too (RK9-684 item 4)", async () => {
+    const { app } = makeApp();
+    const res = await request(app)
+      .post(`/api/companies/${RK9}/knowledge/recall`)
+      .set("Authorization", bearer(BOARD_RECALL_TOKEN))
+      .send({ query: "x" });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("rk9_coord_token_board_host");
+  });
 
   it("never keeps the implicit local board for a valid coord token in local_trusted mode", async () => {
     const { app } = makeApp("local_trusted");
