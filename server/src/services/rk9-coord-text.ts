@@ -40,7 +40,12 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   "|((token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]\\s*" +
   // RK9-684 item 1: `token: Bearer <value>` hides the value, not only the
   // word; any number of auth words (`token: Bearer Bearer <value>`).
-  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?(?:(?:bearer|basic)\\s+)*[^\\s\"',;]{6,}";
+  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?(?:(?:bearer|basic)\\s+)*" +
+  // RK9-684 verifier round 2: the value may not itself start with a keyword
+  // that has a full value of its own (`credentials:\n  password: <value>`);
+  // the scan then takes that keyword. A short tail (`password=secret:abc`)
+  // stays one match.
+  "(?!(?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|pw)[\"']?\\s*[=:]|pass[\"']?\\s*=)\\s*[\"']?[^\\s\"',;]{6})[^\\s\"',;]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
 
@@ -298,6 +303,9 @@ const WHITESPACE_RX = /\s+/g;
 let cachedSource: string | undefined;
 let cachedRx: RegExp | null = null;
 let cachedAlternatives: RegExp[] | null = null;
+let cachedLegacy: RegExp | null | undefined;
+/** The auth-word group of the keyword value (RK9-684 item 1). */
+const AUTH_WORDS_GROUP = String.raw`(?:(?:bearer|basic)\s+)*`;
 
 /**
  * The top-level alternatives of a pattern source. RK9-684 item 10: a `(`,
@@ -351,7 +359,30 @@ export function rk9CoordSecretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
   }
   cachedSource = source;
   cachedAlternatives = null;
+  cachedLegacy = undefined;
   return cachedRx;
+}
+
+/**
+ * The active pattern without the auth-word group of the keyword value
+ * (RK9-684 verifier round 2), or null when the pattern has no such group.
+ * With the group, `token: Bearer my_basic <credential>` takes `my_basic` as
+ * the value, and no scan starts at `basic` again. The form without the group
+ * ends the value at `Bearer`, as before RK9-684, so `basic <credential>`
+ * still matches the auth alternative.
+ */
+function rk9CoordSecretLegacyRx(env: NodeJS.ProcessEnv): RegExp | null {
+  const rx = rk9CoordSecretRx(env);
+  if (cachedLegacy !== undefined) return cachedLegacy;
+  cachedLegacy = null;
+  if (rx.source.includes(AUTH_WORDS_GROUP)) {
+    try {
+      cachedLegacy = new RegExp(rx.source.split(AUTH_WORDS_GROUP).join(""), "gi");
+    } catch {
+      // Covered by the full regex scan.
+    }
+  }
+  return cachedLegacy;
 }
 
 /**
@@ -452,8 +483,11 @@ function redactMatches(kind: RedactKind, view: string, env: NodeJS.ProcessEnv, s
     if (sequential) return out;
     // RK9-684 verifier round 1: the plain regex scan (a JWT pick can end
     // inside what the regex alone matches), each alternative alone, every
-    // JWT run and the prefix rule without its keyword stop.
+    // JWT run and the prefix rule without its keyword stop. Round 2: the
+    // pattern without the auth-word group, as one regex.
     addAll(rx);
+    const legacy = rk9CoordSecretLegacyRx(env);
+    if (legacy) for (const [start, end] of rk9CoordPatternMatches(legacy, view)) add(start, end);
     for (const alternative of rk9CoordSecretAlternatives(env)) addAll(alternative);
     for (const [start, end] of rk9CoordJwtSpans(view)) add(start, end);
     addAll(PREFIX_FULL_RX);

@@ -561,6 +561,10 @@ model is called.
   leftmost-first pass a match can end inside the next secret: the keyword
   value `//u:bearer` in `password://u:bearer <value>` takes the word that
   the auth alternative needs, and a JWT pick can end inside a PEM header.
+  Round 2: (2) also runs the pattern without the auth-word group of the
+  keyword value, as one regex. With the group, the value in `token: Bearer
+  my_basic <credential>` is `my_basic`, and no scan starts at `basic`
+  again; without it the value ends at `Bearer`, as before RK9-684.
 - **The prefix value stops before a keyword (RK9-684, RK9-690).** The
   prefix branch (`ghp_`, `pcp_<x>_`, `qmk_`, `sk-`, `sk_live_`, `whsec_`,
   ...) stops before a keyword and its separator (`=` or `:`; `pass` with
@@ -574,7 +578,11 @@ model is called.
 - **`token: Bearer <value>` (RK9-684 item 1).** The keyword value may start
   with any number of `Bearer` or `Basic` words and whitespace
   (`token: Bearer Bearer <value>` too, verifier round 1), in the pattern
-  string and in the wider keyword rule. Before, the keyword match ended after `Bearer` and the
+  string and in the wider keyword rule. Verifier round 2: in the pattern
+  string the value may not itself start with a keyword that has a full
+  value of its own (`credentials:\n  password: <value>`, `pass=secret:
+  <value>`); the scan then takes the inner keyword. A short tail
+  (`password=secret:abc`) stays one match. Before, the keyword match ended after `Bearer` and the
   value stayed visible (a single leftmost-first pass never tried the
   bearer branch inside it).
 - **One keyword value no longer eats the next keyword (RK9-684).** In the
@@ -605,8 +613,9 @@ model is called.
   `reasoning`, `total`, `tokens`, ...; the list is `COUNTER_WORDS` in
   `rk9-coord-text.ts`), so `tokens={abcdef: 1}` is redacted. A string
   value, any other key or a digit in a key under
-  `tokens` is redacted, and so is any bracketed value under `password`,
-  `secret` or `api_key` and any array.
+  `tokens` is redacted, and so is any array and any other bracketed value
+  under `password`, `secret` or `api_key` (a counter-flag map stays, see
+  above).
 - **Shared keyword set (RK9-678, operator decision 3.11.2026).** The
   default pattern, the wider keyword rule and the client pattern in
   `rk9-sessions.sh` also know `passphrase`, `private_key`, `credentials`
@@ -634,6 +643,15 @@ model is called.
     (`usage` is not a token-count word), and an upper-case status tag before
     a 6+ character word (`["PASS", "completed"]`, `["PW", "review"]`).
     RK9-684 adds `["first-pass", "<a word that is not a known word>"]`.
+  - Item 5 (operator decision) is the one place where the filter shows
+    more than origin/master: `password: {"cached": true}` stays visible
+    (before: `password: [redacted]`), and so does a counter key of up to 5
+    letters (`{"hunte": true}`). The values are only `true`, `false` or
+    `null`, so only a short key name can show.
+  - Verifier round 2, Low: a prefix value that stops before a keyword with
+    a bracketed value can leave a tail (`whsec_secretapi_key=>apikey:
+    {passphrase}xyz` shows `xyz`; before, the whole text went). Contrived:
+    a random token never holds a keyword with a separator.
   - A lease acquire that loses its actor row to the prune twice answers 503
     `rk9_coord_lease_retry`; the error handler reports any 5xx as a crash,
     so a rare race shows in the crash log.

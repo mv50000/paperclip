@@ -128,7 +128,9 @@ the machine name `paperclip` to `paperclip-01`, so such a token would post
 unmarked as the board host. RK9-684 (item 4): the bearer resolution refuses
 such a host token at use time too, on every route and in every scope: 403
 `rk9_coord_token_board_host`, and the log event
-`rk9_coord_token_board_host_refused` names the token id to revoke.
+`rk9_coord_token_board_host_refused` names the token id to revoke. Known
+limit: when `RK9_COORD_BOARD_HOST` holds an FQDN, the bare host name is not
+refused (issue and rotate behave the same); keep the setting a bare host name.
 
 ### Actor kinds and actor_id grammar
 

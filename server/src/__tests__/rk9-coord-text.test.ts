@@ -631,6 +631,26 @@ describe("RK9-684 redaction follow-ups", () => {
     for (const part of parts) expect(toRk9CoordLine(input, 500, env)).not.toContain(part);
   });
 
+  // Verifier round 2: an auth word inside a keyword value, and a keyword value that is itself a keyword.
+  const basicCred = ["dXNlcjpzZWNy", "ZXQxMjM="].join("");
+  it.each([
+    [`token: Bearer my_basic ${basicCred}`, [basicCred]],
+    [`token: Bearer x_Bearer ${auth}`, [auth]],
+    ["credentials:\n  password: S3cr3tPass!", ["S3cr3tPass!"]],
+    ["pass=secret: abcdefgh12", ["abcdefgh12"]],
+  ])("verifier round 2: %j hides every secret part", (input, parts) => {
+    for (const out of [redactRk9CoordText(input, env), toRk9CoordLine(input, 500, env)]) {
+      for (const part of parts) expect(out).not.toContain(part);
+    }
+  });
+
+  it("verifier round 2: the pattern string alone stops a value that is itself a keyword", () => {
+    const rx = new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi");
+    expect("credentials:\n  password: S3cr3tPass!".replace(rx, "[redacted]")).toBe("credentials:\n  [redacted]");
+    // A short tail after the inner keyword stays one match.
+    expect("password=secret:abc".replace(rx, "[redacted]")).toBe("[redacted]");
+  });
+
   it("verifier round 1: an identifier with a stopped keyword value still has a secret (H1)", () => {
     expect(rk9CoordIdentifierHasSecret("secrets=abctoken->ABCDEFGH", env)).toBe(true);
   });
