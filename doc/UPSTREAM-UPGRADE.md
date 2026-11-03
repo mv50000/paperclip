@@ -28,9 +28,11 @@ Custom-migraatiot käyttävät **9000-sarjaa** (`9NNN_rk9_<feature>.sql`):
 | 0126 (slot) | `email_messages`-jako, päivityspolku: forkin taulu → `rk9_email_messages` ennen upstreamin 0272:ta (RK9-317) |
 | 9012   | Outreach: lähettäjien vastausreittien backfill |
 | 9013   | Outreach: hyväksytyn sisällön tiiviste `approved_content_hash` (RK9-475) |
+| 9014   | Ajojen taint-merkinnät (`rk9_run_taints`, RK9-319) |
+| 9015   | Coord bus: kaikki `rk9_coord_*`-taulut (epic RK9-620) |
 
-Seuraava vapaa numero: **9014** (tarkistettu 2026-10-10: `packages/db/src/migrations/`
-ei sisällä 9014+-tiedostoja).
+Seuraava vapaa numero: **9016** (tarkistettu 2026-11-03: `packages/db/src/migrations/`
+ei sisällä 9016+-tiedostoja). Uusi fork-migraatio noudattaa lukko-odotuksen kattoa, ks. "Lukko-odotuksen katto" alla.
 
 ### `email_messages`-törmäys (RK9-317, porras 916.1)
 
@@ -452,6 +454,19 @@ Poistumiskoodi 1, jos jokin assert kaatuu.
 sha256:tta tiedostoon `packages/db/src/fork-migration-hashes.json`. `client.ts` tunnistaa ajetut migraatiot
 tiedoston hashilla, joten muutettu 9xxx-tiedosto ajettaisiin prodia vasten uudelleen. Älä muokkaa 9xxx-tiedostoa;
 uusi tiedosto lisätään kirjoittamalla sen hash pinnaustiedostoon. Testi: `migration-dry-run-lib.test.ts`.
+
+**Lukko-odotuksen katto (`lock_timeout`, RK9-639).** Olemassa olevalla kannalla migraatioajuri (`runInTransaction`
+tiedostossa `packages/db/src/client.ts`) ajaa jokaisen tiedoston omana transaktionaan, ja lukot pysyvät commitiin asti.
+Tyhjällä kannalla drizzlen `migratePg` ajaa kaikki journalin migraatiot yhtenä transaktiona. FK upstream-tauluun
+(`companies`, `agents`, `issues` ...) ottaa kohdetaulusta SHARE ROW EXCLUSIVE -lukon, ja `ALTER TABLE` ottaa ACCESS EXCLUSIVE
+-lukon. Jos pitkä transaktio pitää kohdetaulua, migraatio jää jonoon, ja jonossa oleva lukko estää kaikki muut kirjoitukset
+tauluun. Päätös: jokainen uusi fork-migraatio (9016+), joka lisää FK:n upstream-tauluun tai muuttaa upstream-taulua, alkaa
+rivillä `SET LOCAL lock_timeout = '5s';` ja sen perässä `--> statement-breakpoint`. Olemassa olevalla kannalla `SET LOCAL`
+päättyy tiedoston transaktioon. Tyhjällä kannalla katto jää voimaan myös myöhempiin migraatioihin samassa ajossa; se on
+harmitonta, koska tyhjää kantaa ei kukaan muu lukitse. Aikakatkaisu kaataa migraation ja käynnistyksen; systemd käynnistää palvelun
+uudelleen, ja seuraava yritys ajaa migraation alusta. Pelkkiä uusia `rk9_*`-tauluja luova migraatio ei tarvitse katkoa, ellei se
+viittaa upstream-tauluun. Vanhoja 9xxx-tiedostoja ei muuteta (hash-pinnaus): 9015 jää ilman katkoa, mikä on sama malli kuin
+upstreamin migraatioissa.
 
 ### Koemergen tulokset 26.9.2026
 

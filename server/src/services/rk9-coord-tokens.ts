@@ -12,6 +12,11 @@
 //   hash is compared again with timingSafeEqual.
 // - Rotate: one transaction revokes the old row and inserts the new one with
 //   rotated_from_token_id. There is no overlap window.
+// - Audit (RK9-639): issue, rotate and revoke take an optional `audit`
+//   callback that runs inside the same transaction as the token write. If the
+//   audit row cannot be written, the token write rolls back too: the caller
+//   never loses a plaintext it was not shown, and a rotate never revokes the
+//   old token without a replacement.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -25,6 +30,16 @@ export const RK9_COORD_TOKEN_PATTERN = /^rk9_coord_[A-Za-z0-9_-]{43}$/;
 const DISPLAY_PREFIX_LENGTH = RK9_COORD_TOKEN_PREFIX.length + 4;
 
 export type Rk9CoordTokenRecord = typeof rk9CoordTokens.$inferSelect;
+
+/**
+ * A rotate that inherits the old expiry, and an explicit expiry, must leave
+ * the new token at least this long to live. Otherwise the call mints a token
+ * that is dead before the host has installed it.
+ */
+export const RK9_COORD_TOKEN_MIN_LIFETIME_MS = 60_000;
+
+/** Runs inside the token write's transaction; a throw rolls the write back. */
+export type Rk9CoordTokenAudit<T> = (tx: Db, result: T) => Promise<void>;
 
 /** Metadata view of a token row: never includes the hash. */
 export interface Rk9CoordTokenView {
@@ -56,6 +71,10 @@ export interface Rk9CoordTokenIssueResult {
   /** Plaintext token: show it once, never store or log it. */
   token: string;
   record: Rk9CoordTokenView;
+}
+
+export interface Rk9CoordTokenRotateResult extends Rk9CoordTokenIssueResult {
+  revoked: Rk9CoordTokenView;
 }
 
 export function generateRk9CoordToken(): string {
@@ -137,23 +156,30 @@ export function rk9CoordTokenService(db: Db) {
     };
   }
 
-  async function issue(input: IssueRk9CoordTokenInput): Promise<Rk9CoordTokenIssueResult> {
+  async function issue(
+    input: IssueRk9CoordTokenInput,
+    audit?: Rk9CoordTokenAudit<Rk9CoordTokenIssueResult>,
+  ): Promise<Rk9CoordTokenIssueResult> {
     const token = generateRk9CoordToken();
     try {
-      const [row] = await db
-        .insert(rk9CoordTokens)
-        .values({
-          companyId: input.companyId,
-          principalKind: input.principalKind,
-          principalName: input.principalName,
-          tokenHash: hashRk9CoordToken(token),
-          tokenPrefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
-          label: input.label ?? null,
-          expiresAt: input.expiresAt ?? null,
-          createdByUserId: input.createdByUserId ?? null,
-        })
-        .returning();
-      return { token, record: rk9CoordTokenView(row!) };
+      return await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(rk9CoordTokens)
+          .values({
+            companyId: input.companyId,
+            principalKind: input.principalKind,
+            principalName: input.principalName,
+            tokenHash: hashRk9CoordToken(token),
+            tokenPrefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
+            label: input.label ?? null,
+            expiresAt: input.expiresAt ?? null,
+            createdByUserId: input.createdByUserId ?? null,
+          })
+          .returning();
+        const result = { token, record: rk9CoordTokenView(row!) };
+        if (audit) await audit(tx as unknown as Db, result);
+        return result;
+      });
     } catch (err) {
       if (isUniqueViolation(err, ACTIVE_PRINCIPAL_UQ)) {
         throw conflict("This host or service already has an active coord token; rotate or revoke it", {
@@ -170,7 +196,7 @@ export function rk9CoordTokenService(db: Db) {
     label?: string | null;
     expiresAt?: Date | null;
     createdByUserId?: string | null;
-  }): Promise<Rk9CoordTokenIssueResult & { revoked: Rk9CoordTokenView }> {
+  }, audit?: Rk9CoordTokenAudit<Rk9CoordTokenRotateResult>): Promise<Rk9CoordTokenRotateResult> {
     const token = generateRk9CoordToken();
     return db.transaction(async (tx) => {
       const [old] = await tx
@@ -186,12 +212,22 @@ export function rk9CoordTokenService(db: Db) {
         .for("update")
         .limit(1);
       if (!old) throw notFound("No active coord token with this id", { code: "rk9_coord_token_not_found" });
-      // An inherited expiry that has already passed would mint a dead token
-      // and take the active-principal slot: ask for an explicit expiry.
-      if (input.expiresAt === undefined && old.expiresAt && old.expiresAt.getTime() <= Date.now()) {
-        throw unprocessable("The token has expired; pass expiresAt (or null for no expiry) to rotate it", {
-          code: "rk9_coord_token_expiry_past",
-        });
+      // An inherited expiry that has passed, or that leaves less than the
+      // minimum lifetime, would mint a (nearly) dead token and take the
+      // active-principal slot: ask for an explicit expiry.
+      if (input.expiresAt === undefined && old.expiresAt) {
+        const remainingMs = old.expiresAt.getTime() - Date.now();
+        if (remainingMs <= 0) {
+          throw unprocessable("The token has expired; pass expiresAt (or null for no expiry) to rotate it", {
+            code: "rk9_coord_token_expiry_past",
+          });
+        }
+        if (remainingMs < RK9_COORD_TOKEN_MIN_LIFETIME_MS) {
+          throw unprocessable(
+            "The token expires in less than 60 s; pass expiresAt (or null for no expiry) to rotate it",
+            { code: "rk9_coord_token_expiry_too_soon" },
+          );
+        }
       }
       const [revoked] = await tx
         .update(rk9CoordTokens)
@@ -212,24 +248,33 @@ export function rk9CoordTokenService(db: Db) {
           rotatedFromTokenId: old.id,
         })
         .returning();
-      return { token, record: rk9CoordTokenView(row!), revoked: rk9CoordTokenView(revoked!) };
+      const result = { token, record: rk9CoordTokenView(row!), revoked: rk9CoordTokenView(revoked!) };
+      if (audit) await audit(tx as unknown as Db, result);
+      return result;
     });
   }
 
-  async function revoke(input: { companyId: string; tokenId: string }): Promise<Rk9CoordTokenView> {
-    const [row] = await db
-      .update(rk9CoordTokens)
-      .set({ revokedAt: new Date() })
-      .where(
-        and(
-          eq(rk9CoordTokens.id, input.tokenId),
-          eq(rk9CoordTokens.companyId, input.companyId),
-          isNull(rk9CoordTokens.revokedAt),
-        ),
-      )
-      .returning();
-    if (!row) throw notFound("No active coord token with this id", { code: "rk9_coord_token_not_found" });
-    return rk9CoordTokenView(row);
+  async function revoke(
+    input: { companyId: string; tokenId: string },
+    audit?: Rk9CoordTokenAudit<Rk9CoordTokenView>,
+  ): Promise<Rk9CoordTokenView> {
+    return db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(rk9CoordTokens)
+        .set({ revokedAt: new Date() })
+        .where(
+          and(
+            eq(rk9CoordTokens.id, input.tokenId),
+            eq(rk9CoordTokens.companyId, input.companyId),
+            isNull(rk9CoordTokens.revokedAt),
+          ),
+        )
+        .returning();
+      if (!row) throw notFound("No active coord token with this id", { code: "rk9_coord_token_not_found" });
+      const record = rk9CoordTokenView(row);
+      if (audit) await audit(tx as unknown as Db, record);
+      return record;
+    });
   }
 
   async function list(companyId: string): Promise<Rk9CoordTokenView[]> {

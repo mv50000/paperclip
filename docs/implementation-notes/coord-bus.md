@@ -150,6 +150,28 @@ Two DELETE paths are allowed:
 
 State changes are follow-up events, never an UPDATE.
 
+**Threat model of append-only (RK9-639).** The trigger guards the journal
+against application bugs, not against a hostile database client. These gaps
+are known and accepted (the list shows the main ones, it is not a proof):
+
+- The prune exemption is not privileged. `rk9.coord_events_prune` is a
+  custom setting, and any session of the application role can set it with
+  `SET LOCAL` (or `set_config(..., true)`) before a DELETE.
+- `TRUNCATE` does not fire row triggers, so the trigger never sees it. The
+  application role owns the table and may truncate it.
+- The trigger allows every DELETE with `pg_trigger_depth() > 1`, so a
+  trigger on another table can delete journal rows.
+- The table owner can `DISABLE TRIGGER` or drop the trigger.
+
+A client with the application credentials can therefore delete or truncate
+journal rows. The credentials are the trust boundary: the server runs the
+migrations and the prune on its own `DATABASE_URL`, so both use one role. A real
+privilege boundary needs a separate database role, for example a prune role
+that alone may delete (via a `SECURITY DEFINER` function, with the
+exemption checking `current_user`) and an application role without
+`DELETE` and `TRUNCATE` on `rk9_coord_events`. That is a new 9xxx migration
+plus a second connection secret, so it waits for an operator decision.
+
 #### rk9_coord_cursors
 
 - PK (`company_id`, `actor_id`), `last_event_id` bigint (default 0), cascade
@@ -235,6 +257,10 @@ Escalations and revoked tokens are not pruned yet.
 The prune deletes in batches of 5,000 by `id`. It does not wait for old
 cursors: an actor whose cursor points at a pruned event simply continues
 with the oldest remaining one. A re-run over pruned data deletes nothing.
+
+The prune runs as the application role. Its exemption from the append-only
+trigger is a transaction-local setting that any application session can set,
+so it is not a privilege; see "Threat model of append-only" above (RK9-639).
 
 ### ask-operator interface
 
