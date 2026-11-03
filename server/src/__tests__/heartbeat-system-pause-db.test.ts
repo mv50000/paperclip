@@ -81,7 +81,7 @@ describeEmbeddedPostgres("heartbeatService system pause fallback (no systemPause
     // Lock the producer side: the 409 message must keep that prefix after the 1023 port.
     await expect(onDemand).rejects.toMatchObject({
       status: 409,
-      message: expect.stringMatching(/^System paused: db-test pause$/),
+      message: expect.stringMatching(/^System paused/),
     });
 
     const timer = await heartbeat.wakeup(agentId, {

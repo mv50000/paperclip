@@ -128,6 +128,8 @@ describeEmbeddedPostgres("RK9-319 taint hook on the real claim path (RK9-708)", 
       .select({ status: heartbeatRuns.status, startedAt: heartbeatRuns.startedAt })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId));
+    // The drain gives up silently; require that the run really finished.
+    expect(run?.status).toBe("succeeded");
     return run;
   }
 
@@ -138,7 +140,7 @@ describeEmbeddedPostgres("RK9-319 taint hook on the real claim path (RK9-708)", 
 
     // The run really went through claimQueuedRun (left the queue and started).
     expect(run?.startedAt).not.toBeNull();
-    expect(mockAdapterExecute).toHaveBeenCalled();
+    expect(mockAdapterExecute).toHaveBeenCalledWith(expect.objectContaining({ runId }));
     expect(taintAtAdapterStart.get(runId)).toBe(true);
 
     const [taint] = await db.select().from(rk9RunTaints).where(eq(rk9RunTaints.runId, runId));
@@ -151,6 +153,7 @@ describeEmbeddedPostgres("RK9-319 taint hook on the real claim path (RK9-708)", 
     const run = await claimThroughHeartbeat(runId);
 
     expect(run?.startedAt).not.toBeNull();
+    expect(mockAdapterExecute).toHaveBeenCalledWith(expect.objectContaining({ runId }));
     expect(taintAtAdapterStart.get(runId)).toBe(false);
     expect(await db.select().from(rk9RunTaints).where(eq(rk9RunTaints.runId, runId))).toEqual([]);
   });
