@@ -76,6 +76,13 @@ describeEmbeddedPostgres("heartbeatService system pause fallback (no systemPause
       requestedByActorType: "user",
     });
     await expect(onDemand).rejects.toSatisfy(isSystemPausedConflict);
+    // RK9-708: recovery/service.ts and routes/issues.ts swallow this conflict through
+    // isSystemPausedConflict, which matches the message prefix "System paused".
+    // Lock the producer side: the 409 message must keep that prefix after the 1023 port.
+    await expect(onDemand).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/^System paused/),
+    });
 
     const timer = await heartbeat.wakeup(agentId, {
       source: "timer",
