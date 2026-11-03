@@ -29,6 +29,7 @@ import {
 } from "@paperclipai/db";
 import {
   parseRk9CoordActorId,
+  RK9_COORD_DECISION_NOTE_PATTERN,
   type AppendRk9CoordEvent,
   type Rk9CoordTrust,
 } from "@paperclipai/shared";
@@ -476,12 +477,28 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
 }
 
 /**
+ * RK9-646: the host whose decisions an unverified caller may close besides
+ * its own. Only a host token (`cc` or `remote` actor, host bound to the
+ * token, not claimed) has one; Grok and other services have none.
+ */
+export function rk9CoordVaultOwnerHost(actor: Rk9CoordResolvedActor): string | null {
+  if (actor.principal !== "coord_token" || (actor.kind !== "cc" && actor.kind !== "remote")) return null;
+  return actor.host || null;
+}
+
+/**
  * Who may close a decision's vault write (RK9-631): the decision's own actor,
- * or a caller whose journal rows are not `unverified`. A remote host token or
- * Grok cannot mark someone else's decision as vaulted.
+ * a caller whose journal rows are not `unverified`, or (RK9-646) a host token
+ * of the host the decision was written on (`cc:<host>:*` or `remote:<host>`),
+ * so a retry from a new session on the same host works. A remote host token
+ * or Grok cannot mark another host's decision as vaulted.
  */
 export function rk9CoordMayVaultDecision(actor: Rk9CoordResolvedActor, decisionActorRef: string): boolean {
-  return actor.actorId === decisionActorRef || rk9CoordJournalTrust(actor) !== "unverified";
+  if (actor.actorId === decisionActorRef || rk9CoordJournalTrust(actor) !== "unverified") return true;
+  const host = rk9CoordVaultOwnerHost(actor);
+  if (!host) return false;
+  const parsed = parseRk9CoordActorId(decisionActorRef);
+  return parsed !== null && (parsed.kind === "cc" || parsed.kind === "remote") && parsed.host === host;
 }
 
 /** Board view of an event: a heads-up shows its summary, not its explanation. */
@@ -621,17 +638,21 @@ export function rk9CoordJournalService(db: Db) {
           ),
         )
         .limit(1);
+      // RK9-646: the owner check runs first. An unverified caller gets the
+      // same 403 for a missing event as for another actor's one, so the
+      // 404/409 answers are no existence oracle for it.
+      const ownerDenied = () =>
+        new HttpError(403, "Only the decision's actor, its host or a trusted caller may mark it vaulted", {
+          code: "rk9_coord_vault_owner_required",
+        });
       if (!decision) {
+        if (rk9CoordJournalTrust(actor) === "unverified") throw ownerDenied();
         throw new HttpError(404, "No decision event with that id", { code: "rk9_coord_event_not_found" });
       }
+      if (!rk9CoordMayVaultDecision(actor, decision.actorRef)) throw ownerDenied();
       if (decision.vaultPath !== input.vault_path) {
         throw new HttpError(409, "vault_path differs from the decision's vault note", {
           code: "rk9_coord_vault_path_mismatch",
-        });
-      }
-      if (!rk9CoordMayVaultDecision(actor, decision.actorRef)) {
-        throw new HttpError(403, "Only the decision's actor or a trusted caller may mark it vaulted", {
-          code: "rk9_coord_vault_owner_required",
         });
       }
       // Route the follow-up to the same readers as the decision.
@@ -1040,30 +1061,52 @@ export function rk9CoordJournalService(db: Db) {
   /**
    * Decisions written with a vault note that have no decision-vaulted
    * follow-up yet (RK9-631, `rk9 decision --retry`). Oldest first. An
-   * unverified caller (remote host token, Grok) sees only its own decisions,
+   * unverified caller (remote host token, Grok) sees only the decisions it
+   * may close (its own, and for a host token those of its host, RK9-646),
    * the same rule as the follow-up write.
+   * RK9-646: a legacy row whose vault_path is not an rk9/ decision note can
+   * never be closed (decision-vaulted refuses the path), so it is left out.
+   * `after` pages: only ids above it; `nextAfter` is the last id of a full
+   * page, else null.
    */
   async function vaultPending(
     companyId: string,
     actor: Rk9CoordResolvedActor,
-    opts: { id?: number; limit?: number } = {},
-  ): Promise<Rk9CoordEventView[]> {
+    opts: { id?: number; limit?: number; after?: number } = {},
+  ): Promise<{ events: Rk9CoordEventView[]; nextAfter: number | null }> {
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
     const conditions: SQL[] = [
       eq(rk9CoordEvents.companyId, companyId),
       eq(rk9CoordEvents.type, "decision"),
       isNotNull(rk9CoordEvents.vaultPath),
+      sql`${rk9CoordEvents.vaultPath} ~ ${RK9_COORD_DECISION_NOTE_PATTERN.source}`,
       // The dedupe key of the follow-up hits rk9_coord_events_dedupe_uq.
       sql`not exists (select 1 from rk9_coord_events v where v.company_id = ${rk9CoordEvents.companyId} and v.type = 'decision-vaulted' and v.dedupe_key = 'decision-vaulted:' || ${rk9CoordEvents.id}::text)`,
     ];
     if (opts.id !== undefined) conditions.push(eq(rk9CoordEvents.id, opts.id));
-    if (rk9CoordJournalTrust(actor) === "unverified") conditions.push(eq(rk9CoordEvents.actorRef, actor.actorId));
+    if (opts.after !== undefined) conditions.push(gt(rk9CoordEvents.id, opts.after));
+    if (rk9CoordJournalTrust(actor) === "unverified") {
+      const host = rk9CoordVaultOwnerHost(actor);
+      // The host comes from the token, never from the request; split_part
+      // compares it literally (no LIKE wildcard in a host label).
+      conditions.push(
+        host
+          ? or(
+              eq(rk9CoordEvents.actorRef, actor.actorId),
+              eq(rk9CoordEvents.actorRef, `remote:${host}`),
+              sql`(split_part(${rk9CoordEvents.actorRef}, ':', 1) = 'cc' and split_part(${rk9CoordEvents.actorRef}, ':', 2) = ${host})`,
+            )!
+          : eq(rk9CoordEvents.actorRef, actor.actorId),
+      );
+    }
     const rows = await db
       .select()
       .from(rk9CoordEvents)
       .where(and(...conditions))
       .orderBy(rk9CoordEvents.id)
-      .limit(Math.min(Math.max(opts.limit ?? 20, 1), 100));
-    return rows.map(rk9CoordEventView);
+      .limit(limit);
+    const nextAfter = rows.length === limit ? rows[rows.length - 1]!.id : null;
+    return { events: rows.map(rk9CoordEventView), nextAfter };
   }
 
   return { append, delta, board, vaultPending };

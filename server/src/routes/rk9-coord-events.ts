@@ -4,7 +4,7 @@
 // behind the coord actor middleware (company scope, RK9-616, actor claim).
 //   POST /        append one typed event (zod discriminated union)
 //   GET  /delta   events after the caller's cursor; ?peek=1, ?fmt=line
-//   GET  /vault-pending  decisions whose vault note is not written yet (RK9-631)
+//   GET  /vault-pending  decisions whose vault note is not written yet (RK9-631); ?after pages (RK9-646)
 // The journal is append-only: there is deliberately no PATCH, PUT or DELETE
 // route; those methods fall through to the coord 404 handler.
 import { Router, type Request } from "express";
@@ -131,9 +131,14 @@ export function rk9CoordEventRoutes(db: Db) {
       const companyId = companyIdOf(req);
       const query = rk9CoordVaultPendingQuerySchema.parse(req.query);
       const actor = requireRk9CoordActor(req);
-      const events = await journal.vaultPending(companyId, actor, { id: query.id, limit: query.limit });
+      const { events, nextAfter } = await journal.vaultPending(companyId, actor, {
+        id: query.id,
+        limit: query.limit,
+        after: query.after,
+      });
       res.setHeader("Cache-Control", "no-store");
-      res.json({ events });
+      // RK9-646: next_after pages a full answer (?after=<next_after>); null = no more.
+      res.json({ events, next_after: nextAfter });
     } catch (err) {
       next(err);
     }
