@@ -22,6 +22,8 @@
 //   service holds at most one active token per scope. `recallAll` is an
 //   operator opt-in on a recall token: the recall route then honours
 //   scope:"all" for it. Rotate keeps the scope and the flag.
+// - RK9-674: a recall token is for a host principal only (422 on issue and
+//   rotate for a service); the recall route refuses a service principal too.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -151,6 +153,20 @@ function assertNotBoardHost(principalKind: string, principalName: string) {
   }
 }
 
+/**
+ * RK9-674: a recall token is for a host only. The provisioning script issues
+ * recall tokens for hosts, and a service (rk9claude, grok) recalls with the
+ * host token of the machine it runs on. Applies to issue and rotate (an old
+ * service recall token can only be revoked); the recall route refuses one too.
+ */
+function assertRecallHostOnly(principalKind: string, scope: string) {
+  if (scope === "recall" && principalKind !== "host") {
+    throw unprocessable("A recall token is issued for a host only; use the host token of the machine", {
+      code: "rk9_coord_token_recall_host_only",
+    });
+  }
+}
+
 export function rk9CoordTokenService(db: Db) {
   /**
    * Resolve a bearer to its principal. Returns null for a malformed, unknown,
@@ -195,6 +211,7 @@ export function rk9CoordTokenService(db: Db) {
       });
     }
     assertNotBoardHost(input.principalKind, input.principalName);
+    assertRecallHostOnly(input.principalKind, scope);
     const token = generateRk9CoordToken();
     try {
       return await db.transaction(async (tx) => {
@@ -250,6 +267,7 @@ export function rk9CoordTokenService(db: Db) {
         .limit(1);
       if (!old) throw notFound("No active coord token with this id", { code: "rk9_coord_token_not_found" });
       assertNotBoardHost(old.principalKind, old.principalName);
+      assertRecallHostOnly(old.principalKind, old.scope);
       // An inherited expiry that has passed, or that leaves less than the
       // minimum lifetime, would mint a (nearly) dead token and take the
       // active-principal slot: ask for an explicit expiry.

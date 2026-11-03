@@ -722,6 +722,50 @@ if (!support.supported) {
     expect(revoke.status).toBeLessThan(300);
   });
 
+  // RK9 Custom (RK9-674 item 3): a recall token is for a host only.
+  it("refuses a recall token for a service on issue, rotate and the recall route", async () => {
+    mockRecallKnowledge.mockReset();
+    mockRecallKnowledge.mockResolvedValue({ snippets: [], collections: ["rk9"], timedOut: false });
+    const app = manageApp(operatorKey);
+    const issued = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "service", principalName: "rk9claude", scope: "recall" });
+    expect(issued.status).toBe(422);
+    expect(issued.body.code).toBe("rk9_coord_token_recall_host_only");
+    expect(issued.body).not.toHaveProperty("token");
+    // A coord token for the same service is still fine.
+    const coord = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "service", principalName: "rk9claude" });
+    expect(coord.status).toBe(201);
+
+    // An old service recall row (issued before RK9-674) cannot be rotated or used, only revoked.
+    const oldToken = generateRk9CoordToken();
+    const [old] = await db
+      .insert(rk9CoordTokens)
+      .values({
+        companyId,
+        principalKind: "service",
+        principalName: "grok",
+        tokenHash: hashRk9CoordToken(oldToken),
+        tokenPrefix: oldToken.slice(0, 14),
+        scope: "recall",
+      })
+      .returning();
+    const rotate = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${old!.id}/rotate`).send({});
+    expect(rotate.status).toBe(422);
+    expect(rotate.body.code).toBe("rk9_coord_token_recall_host_only");
+    const recalled = await request(liveApp())
+      .post(`/api/companies/${companyId}/knowledge/recall`)
+      .set("Authorization", bearer(oldToken))
+      .send({ query: "x" });
+    expect(recalled.status).toBe(403);
+    expect(recalled.body.code).toBe("rk9_recall_token_host_only");
+    expect(mockRecallKnowledge).not.toHaveBeenCalled();
+    const revoke = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${old!.id}/revoke`).send({});
+    expect(revoke.status).toBeLessThan(300);
+  });
+
   it("does not rotate or revoke another company's token", async () => {
     const service = rk9CoordTokenService(db);
     const { record } = await service.issue({ companyId: otherCompanyId, principalKind: "host", principalName: "pve-01" });
