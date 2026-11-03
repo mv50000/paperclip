@@ -72,7 +72,6 @@
     "@paperclipai/shared": "workspace:*",
     "@paperclipai/skills-catalog": "workspace:*",
     "@photon-ai/advanced-imessage": "2.1.0",
-    "@slack/web-api": "^7.15.1",
     "@vercel/connect": "0.6.1",
     "acorn": "8.18.0",
     "acpx": "0.13.1",

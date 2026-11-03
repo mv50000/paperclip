@@ -119,7 +119,7 @@ describe("github webhook routes", () => {
   });
 
   describe("event filtering", () => {
-    it("processes non-pull_request events without auto-close (router only)", async () => {
+    it("processes non-pull_request events without auto-close", async () => {
       const app = await createApp();
       const body = JSON.stringify({ action: "completed" });
       await request(app)
@@ -130,9 +130,7 @@ describe("github webhook routes", () => {
         .send(body)
         .expect(200)
         .expect((res) => {
-          expect(res.body.processed).toBe(true);
-          expect(res.body.companyId).toBeNull();
-          expect(res.body.slackDispatched).toBe(0);
+          expect(res.body).toEqual({ processed: true });
         });
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
@@ -149,8 +147,7 @@ describe("github webhook routes", () => {
         .send(body)
         .expect(200)
         .expect((res) => {
-          expect(res.body.processed).toBe(true);
-          expect(res.body.slackDispatched).toBe(0);
+          expect(res.body).toEqual({ processed: true });
         });
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
@@ -167,8 +164,7 @@ describe("github webhook routes", () => {
         .send(body)
         .expect(200)
         .expect((res) => {
-          expect(res.body.processed).toBe(true);
-          expect(res.body.slackDispatched).toBe(0);
+          expect(res.body).toEqual({ processed: true });
         });
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });

@@ -5,7 +5,6 @@ import type { Db } from "@paperclipai/db";
 import { issues, issueWorkProducts } from "@paperclipai/db";
 import { issueService, logActivity } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
-import { createGithubRouter } from "../services/slack/github-router.js";
 
 const ISSUE_IDENTIFIER_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
 
@@ -36,7 +35,6 @@ interface PullRequestPayload {
 
 export function githubWebhookRoutes(db: Db) {
   const router = Router();
-  const githubRouter = createGithubRouter(db);
 
   router.post("/github/webhooks", async (req: Request, res: Response) => {
     const secret = process.env.GITHUB_WEBHOOK_SECRET;
@@ -65,24 +63,13 @@ export function githubWebhookRoutes(db: Db) {
     const action = typeof payloadAny.action === "string" ? payloadAny.action : "";
     logger.info({ delivery: deliveryId, event, action }, "github webhook received");
 
-    let routerResult: Awaited<ReturnType<typeof githubRouter.handle>> = { companyId: null, dispatched: 0 };
-    try {
-      routerResult = await githubRouter.handle({ event, payload: payloadAny, deliveryId });
-    } catch (err) {
-      logger.warn({ err, delivery: deliveryId, event, action }, "github router handle failed");
-    }
-
     const isMergedPr =
       event === "pull_request" &&
       action === "closed" &&
       (payloadAny.pull_request as { merged?: boolean } | undefined)?.merged === true;
 
     if (!isMergedPr) {
-      res.status(200).json({
-        processed: true,
-        slackDispatched: routerResult.dispatched,
-        companyId: routerResult.companyId,
-      });
+      res.status(200).json({ processed: true });
       return;
     }
 
@@ -195,8 +182,6 @@ export function githubWebhookRoutes(db: Db) {
       processed: true,
       closedIssueCount: closedIssueIds.length,
       closedIssueIds,
-      slackDispatched: routerResult.dispatched,
-      companyId: routerResult.companyId,
     });
   });
 

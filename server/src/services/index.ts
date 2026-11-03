@@ -212,11 +212,6 @@ export { reconcilePersistedRuntimeServicesOnStartup, restartDesiredRuntimeServic
 export { createStorageServiceFromConfig, getStorageService } from "../storage/index.js";
 
 // --- RK9 Custom ---
-export {
-  startSlackEventForwarder,
-  createSlackClientService,
-  createChannelResolver,
-} from "./slack/index.js";
 export { riskRegistryService } from "./risk-registry.js";
 export { riskIncidentService } from "./risk-incidents.js";
 export { riskMonitorService } from "./risk-monitors.js";

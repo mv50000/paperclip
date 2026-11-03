@@ -139,7 +139,6 @@ import { outreachPrometheusMetricsRoutes, outreachDigestRoutes } from "./routes/
 import { unsubscribeRoutes } from "./routes/unsubscribe.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
 import { sesInboundRoutes } from "./routes/ses-inbound.js";
-import { slackInteractionsRoutes } from "./routes/slack-interactions.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { injectCloudUiSnippet } from "./cloud-ui-snippet.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
@@ -506,8 +505,7 @@ export async function createApp(
     decisionServiceOptions: DecisionServiceOptions;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
-    // --- RK9 Custom: Slack, system pause, outreach options ---
-    slackSigningSecret?: string;
+    // --- RK9 Custom: system pause, outreach options ---
     systemPause?: SystemPauseService;
     outreachSenderApiKey?: string;
     outreachUnsubscribeBaseUrl?: string;
@@ -1007,7 +1005,6 @@ export async function createApp(
   api.use(outreachDigestRoutes(db, { apiKey: opts.outreachMetricsApiKey }));
   api.use(resendInboundRoutes(db));
   api.use(sesInboundRoutes(db));
-  api.use(slackInteractionsRoutes(db, { signingSecret: opts.slackSigningSecret }));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,

@@ -303,7 +303,7 @@ Mergessä: ota upstreamin `npx paperclipai`-muoto myös forkin hotspot-skilleihi
 (`skills/paperclip/SKILL.md`, `skills/paperclip-dev/SKILL.md`). Älä palauta `pnpm paperclipai`
 -muotoa konfliktinratkaisussa.
 
-Forkin omat webhook-reitit (github-webhooks, resend-inbound, ses-inbound, slack-interactions,
+Forkin omat webhook-reitit (github-webhooks, resend-inbound, ses-inbound,
 outreach-inbound, unsubscribe) eivät tuota CLI-ohjeita, joten #11400 ei muuta niitä.
 `private-hostname-guard.ts` kuitenkin muuttuu. Aja siksi portaan jälkeen reittitestit (lista
 alla) ja savutesti `scripts/upgrade-smoke.sh` `paperclip.rk9.fi`-hostnimellä.
@@ -490,7 +490,6 @@ Forkin reittien tarkistus #12776:ta vasten:
 | `github-webhooks.ts` | HMAC `GITHUB_WEBHOOK_SECRET` | `github-webhook-routes.test.ts` | Ei ulkoista fetchiä |
 | `resend-inbound.ts` | Svix, yrityskohtainen salaisuus | `resend-inbound-route.test.ts` (uusi, reititin yksinään), `email-svix-verify.test.ts` | Tarkistus lukee raakatavut: globaali body parser tämän reitin edellä rikkoo sen. Uusi testi ei kata `app.ts`:n mount-järjestystä, joten aja lisäksi savutestin Resend-tarkistus. |
 | `ses-inbound.ts` | SNS-allekirjoitus, sertifikaatti vain `sns.*.amazonaws.com` | `email-ses-inbound-route.test.ts` | `SubscribeURL` haetaan vasta allekirjoituksen jälkeen. Harkitse sen reitittämistä `remote-fetch.ts`:n kautta. |
-| `slack-interactions.ts` | Slack v0 -allekirjoitus, 5 min ikkuna | `slack-signature-verify.test.ts`, `slack-interactions.test.ts` | Ei muutosta |
 | `outreach-inbound.ts` | HMAC `OUTREACH_INBOUND_HMAC_SECRET`, 5 min ikkuna | `outreach-inbound-verify.test.ts`, `outreach-inbound-route.test.ts` | Ei muutosta |
 | `unsubscribe.ts` | tokeni, ei oraakkelia | `outreach-unsubscribe-route.test.ts` | Julkinen GET, ei saa jäädä board-guardin tai hostname-guardin taakse |
 

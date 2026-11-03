@@ -1,7 +1,7 @@
 #!/bin/bash
-# io-watch.sh — continuously sample nvme0n1 IO-pressure and post Slack alerts to
-# #all-rk9 ONLY on SUSTAINED latency pressure (confirmed edge + hysteresis recovery),
-# plus a throttled reminder while sustained.
+# io-watch.sh — continuously sample nvme0n1 IO-pressure and log alert lines ONLY on
+# SUSTAINED latency pressure (confirmed edge + hysteresis recovery), plus a throttled
+# reminder while sustained. Slack posting was removed in RK9-697: alerts go to $LOG only.
 #
 # Tuning history:
 #  - 2026-05-23 disk fill (85%) drove nvme0n1 w_await to 5690ms / util 87%, queueing
@@ -14,13 +14,11 @@
 #    declaring recovery (hysteresis). util + aqu are kept in the message text as
 #    context, NOT as triggers (util~100% on NVMe is normal throughput, not latency).
 #
-# Run by the paperclip-io-watch.service systemd unit (User=paperclip), which supplies
-# DATABASE_URL + PAPERCLIP_SECRETS_MASTER_KEY_FILE for the Slack helper. Every sample
-# is logged to $LOG; only confirmed edge events hit Slack.
+# Run by the paperclip-io-watch.service systemd unit (User=paperclip). Every sample
+# is logged to $LOG; confirmed edge events add an "ALERT:" line.
 set -u
 DEV=nvme0n1
 LOG=${IO_WATCH_LOG:-/var/lib/paperclip/io-watch.log}
-SERVER_DIR=${PAPERCLIP_SERVER_DIR:-/opt/paperclip/server}
 WARN_AWAIT=${IO_WATCH_WARN_AWAIT:-200}   # ms — r_await OR w_await above this = pressure
 SAMPLE=${IO_WATCH_SAMPLE:-15}            # s between samples
 WARN_CONSEC=${IO_WATCH_WARN_CONSEC:-4}   # consecutive pressure samples before alerting (~60s)
@@ -28,9 +26,8 @@ OK_CONSEC=${IO_WATCH_OK_CONSEC:-3}       # consecutive OK samples before recover
 REMIND=${IO_WATCH_REMIND:-1800}          # s between reminders while sustained WARN
 HOST=$(hostname -s 2>/dev/null || echo paperclip-01)
 
-post_slack() {  # $1 = message text — fire-and-forget so sampling never blocks
-  ( cd "$SERVER_DIR" && pnpm tsx scripts/io-watch-alert.ts "$1" \
-      >>"$LOG.slack" 2>&1 ) &
+log_alert() {  # $1 = message text
+  echo "$(date '+%F %T')  ALERT: $1" >>"$LOG"
 }
 
 echo "# io-watch alkoi $(date -Is) — kynnys await>${WARN_AWAIT}ms, vahvistus ${WARN_CONSEC} näytettä, recovery ${OK_CONSEC} näytettä, näyte ${SAMPLE}s (PID $$)" >>"$LOG"
@@ -64,20 +61,20 @@ while true; do
   if [ "$state" = OK ]; then
     if [ "$pressure" = 1 ] && [ "$warn_streak" -ge "$WARN_CONSEC" ]; then
       state=WARN; last_alert=$now; flag="  <<< WARN (vahvistettu)"
-      post_slack "$msg"
-      echo "$(date '+%F %T')  -> SLACK (uusi WARN, ${warn_streak} näytettä)" >>"$LOG"
+      log_alert "$msg"
+      echo "$(date '+%F %T')  -> HÄLYTYS (uusi WARN, ${warn_streak} näytettä)" >>"$LOG"
     elif [ "$pressure" = 1 ]; then
       flag="  <<< paine (${warn_streak}/${WARN_CONSEC}, ei vielä hälytystä)"
     fi
   else  # state=WARN
     if [ "$pressure" = 0 ] && [ "$ok_streak" -ge "$OK_CONSEC" ]; then
       state=OK; warn_streak=0
-      post_slack "🟢 $HOST levy-IO palautui normaaliksi: $DEV w_await=${w_await}ms r_await=${r_await}ms util=${util}%"
-      echo "$(date '+%F %T')  -> SLACK (palautui, ${ok_streak} OK-näytettä)" >>"$LOG"
+      log_alert "🟢 $HOST levy-IO palautui normaaliksi: $DEV w_await=${w_await}ms r_await=${r_await}ms util=${util}%"
+      echo "$(date '+%F %T')  -> HÄLYTYS (palautui, ${ok_streak} OK-näytettä)" >>"$LOG"
     elif [ "$pressure" = 1 ] && [ $((now - last_alert)) -ge "$REMIND" ]; then
       last_alert=$now; flag="  <<< WARN (jatkuu)"
-      post_slack "⏳ (jatkuu) $msg"
-      echo "$(date '+%F %T')  -> SLACK (muistutus)" >>"$LOG"
+      log_alert "⏳ (jatkuu) $msg"
+      echo "$(date '+%F %T')  -> HÄLYTYS (muistutus)" >>"$LOG"
     elif [ "$pressure" = 1 ]; then
       flag="  <<< WARN (jatkuu)"
     else
