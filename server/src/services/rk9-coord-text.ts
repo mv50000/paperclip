@@ -243,8 +243,11 @@ export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = proces
   // RK9-676. Redaction works on ranges of the original text, so no step can
   // un-redact what another step found:
   // 1. the sequential replace of RK9-641 (pattern, coord tokens, keyword
-  //    rule, each over the previous output), emulated exactly: the result
-  //    is never weaker than before;
+  //    rule, each over the previous output). The JWT branch runs as a
+  //    separate scan, so a match that started inside a JWT run can end
+  //    elsewhere; the one known case shows only PEM header words
+  //    (`eyJ<8>.x bearer abcdefgh-----BEGIN RSA PRIVATE KEY-----` keeps
+  //    `RSA PRIVATE KEY-----`), no secret bytes;
   // 2. plus every pattern on the original text: one match can no longer eat
   //    the start of the next secret (`AKIA...xrk9_coord_<token>`);
   // 3. plus up to 3 more rounds over the combined output, which add only new

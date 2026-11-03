@@ -513,12 +513,17 @@ model is called.
   RK9-676 the redaction marks ranges of the original text and writes one
   `[redacted]` per merged range. The ranges are the union of (1) the
   sequential replace of RK9-641 (pattern, coord tokens, keyword rule, each
-  over the previous output), emulated exactly, so the result is never
-  weaker than before; (2) every pattern on the original text, so one match
+  over the previous output), emulated over ranges; (2) every pattern on the original text, so one match
   cannot eat the start of the next secret (`AKIA...xrk9_coord_<token>` kept
   `_coord_<token>`); and (3) up to three more rounds over the combined
   output that add only new coverage. A seeded differential fuzz test
-  against the sequential replace guards (1).
+  against the sequential replace guards (1), and the round-3 verifier ran
+  180 000 random strings against the origin/master module with no secret
+  byte shown. The emulation is not exact: the JWT branch runs as a separate
+  linear scan, so a leftmost-first match that master started inside a JWT
+  run can end elsewhere. The one known case
+  (`eyJ<8 chars>.x bearer abcdefgh-----BEGIN RSA PRIVATE KEY-----`) shows
+  `RSA PRIVATE KEY-----`, header words only, not key material.
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
