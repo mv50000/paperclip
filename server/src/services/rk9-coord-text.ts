@@ -22,15 +22,56 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   "(gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)[A-Za-z0-9_-]{6,}" +
   "|AKIA[0-9A-Z]{12,}" +
   "|AIza[0-9A-Za-z_-]{20,}" +
-  // RK9-676: the lookbehind keeps `eyJeyJ...` without a dot linear (a JWT
-  // starts at a token boundary); without it each `eyJ` rescanned the rest.
-  "|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9._-]+" +
+  // RK9-676: not compiled as a regex on the server; see RK9_COORD_JWT_BRANCH.
+  "|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9._-]+" +
   "|-----BEGIN [A-Z ]*PRIVATE KEY-----" +
   "|://[^ /:@]+:[^ /@]+@" +
   "|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}" +
   "|((token|secret|password|passwd|api[_-]?key|apikey)[\"']?\\s*[=:]\\s*)[\"']?[^\\s\"',;]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
+
+/**
+ * The JWT branch of the default pattern (RK9_SESSIONS_SECRET_RX). The server
+ * does not run it as a regex (RK9-676, parent decision): on `eyJeyJ...`
+ * without a dot every `eyJ` rescanned the rest of the text (quadratic). The
+ * pattern string keeps it, so it stays identical to the bash default, and
+ * rk9CoordSecretRx() drops exactly this alternative before compiling.
+ * rk9CoordJwtSpans() finds the same matches in linear time, glued prefixes
+ * included (`id-<JWE>`, `aeyJ...`).
+ */
+export const RK9_COORD_JWT_BRANCH = "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9._-]+";
+const JWT_RUN_RX = /[A-Za-z0-9_.-]+/g;
+const ALNUM_RX = /[A-Za-z0-9]/;
+
+/**
+ * The spans the JWT branch (`gi`) would match: in each maximal run of
+ * `[A-Za-z0-9_.-]` that has a dot, the first `eyJ` (any case) with 8 or more
+ * characters before the next dot, and at least one character after that
+ * dot, starts a match that runs to the end of the run. One pass over the
+ * run: `eyJ` occurrences and the next-dot pointer only move forward.
+ * `wordStart`: only an `eyJ` that does not follow a letter or digit counts
+ * (the identifier check's word-start rule).
+ */
+export function rk9CoordJwtSpans(text: string, wordStart = false): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const run of text.matchAll(JWT_RUN_RX)) {
+    const value = run[0];
+    if (!value.includes(".")) continue;
+    const lower = value.toLowerCase();
+    let dot = -1;
+    for (let at = lower.indexOf("eyj"); at >= 0; at = lower.indexOf("eyj", at + 1)) {
+      if (dot < at) dot = value.indexOf(".", at);
+      if (dot < 0) break;
+      if (dot - (at + 3) < 8 || dot === value.length - 1) continue;
+      if (wordStart && run.index + at > 0 && ALNUM_RX.test(text[run.index + at - 1]!)) continue;
+      spans.push([run.index + at, run.index + value.length]);
+      break;
+    }
+  }
+  return spans;
+}
+
 
 /** Coord tokens are always redacted, whatever the env pattern says. */
 const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
@@ -154,18 +195,44 @@ const WHITESPACE_RX = /\s+/g;
 let cachedSource: string | undefined;
 let cachedRx: RegExp | null = null;
 
-/** The active secret pattern (RK9_SESSIONS_SECRET_RX or the default), case-insensitive. */
+/** Drop the JWT alternative (matched by rk9CoordJwtSpans instead). */
+function withoutJwtBranch(source: string): string {
+  const parts = source.split("|");
+  // Only a top-level alternative that is exactly the branch; a pattern with
+  // the branch inside a group keeps it (an operator override, rare).
+  const kept: string[] = [];
+  let depth = 0;
+  let piece: string[] = [];
+  for (const part of parts) {
+    piece.push(part);
+    for (let i = 0; i < part.length; i += 1) {
+      const ch = part[i];
+      if (ch === "\\") i += 1;
+      else if (ch === "(") depth += 1;
+      else if (ch === ")") depth -= 1;
+    }
+    if (depth === 0) {
+      const alternative = piece.join("|");
+      if (alternative !== RK9_COORD_JWT_BRANCH) kept.push(alternative);
+      piece = [];
+    }
+  }
+  if (piece.length > 0) kept.push(piece.join("|"));
+  return kept.length > 0 ? kept.join("|") : "(?!)";
+}
+
+/** The active secret pattern (RK9_SESSIONS_SECRET_RX or the default), case-insensitive, without the JWT branch. */
 export function rk9CoordSecretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
   const source = env.RK9_SESSIONS_SECRET_RX?.trim() || RK9_COORD_SECRET_RX_DEFAULT;
   if (cachedRx && cachedSource === source) return cachedRx;
   try {
-    cachedRx = new RegExp(source, "gi");
+    cachedRx = new RegExp(withoutJwtBranch(source), "gi");
   } catch (err) {
     logger.warn(
       { event: "rk9_coord_secret_rx_invalid", err: err instanceof Error ? err.message : String(err) },
       "RK9_SESSIONS_SECRET_RX is not a valid JS RegExp; using the built-in default",
     );
-    cachedRx = new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi");
+    cachedRx = new RegExp(withoutJwtBranch(RK9_COORD_SECRET_RX_DEFAULT), "gi");
   }
   cachedSource = source;
   return cachedRx;
@@ -173,51 +240,135 @@ export function rk9CoordSecretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
 
 /** Replace every secret-looking match with `[redacted]`; the rest of the text stays. */
 export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = process.env): string {
-  // RK9-676: every pattern matches the same text and overlapping matches
-  // merge into one `[redacted]`. Applied one after another, a pattern could
-  // eat the start of the next secret and leave its tail unrecognised
-  // (`AKIA...xrk9_coord_<token>` kept `_coord_<token>`, `Bearer
-  // <value>_token%3D<secret>` kept `%3D<secret>`). A second pass sees the
-  // markers, as the sequential replace did (`token: [redacted]` goes whole).
-  let current = text;
-  for (let pass = 0; pass < 3; pass += 1) {
-    const next = redactRk9CoordSpans(current, env);
-    if (next === current) break;
-    current = next;
+  // RK9-676. Redaction works on ranges of the original text, so no step can
+  // un-redact what another step found:
+  // 1. the sequential replace of RK9-641 (pattern, coord tokens, keyword
+  //    rule, each over the previous output), emulated exactly: the result
+  //    is never weaker than before;
+  // 2. plus every pattern on the original text: one match can no longer eat
+  //    the start of the next secret (`AKIA...xrk9_coord_<token>`);
+  // 3. plus up to 3 more rounds over the combined output, which add only new
+  //    coverage (`token: [redacted]<tail>` goes whole).
+  let sequential: Rk9Range[] = [];
+  for (const kind of REDACT_KINDS) sequential = sequential.concat(redactPass(text, sequential, kind, env, true));
+  const original = REDACT_KINDS.flatMap((kind) => redactMatches(kind, text, env, false));
+  let ranges = mergeRk9Ranges([...sequential, ...original]);
+  for (let round = 0; round < 3; round += 1) {
+    let grew = false;
+    for (const kind of REDACT_KINDS) {
+      const added = redactPass(text, ranges, kind, env, false).filter((range) => !isCovered(ranges, range));
+      if (added.length > 0) {
+        ranges = mergeRk9Ranges([...ranges, ...added]);
+        grew = true;
+      }
+    }
+    if (!grew) break;
   }
-  return current;
+  return redactedView(text, ranges).view;
 }
 
-function redactRk9CoordSpans(text: string, env: NodeJS.ProcessEnv): string {
-  const spans: Array<[number, number]> = [];
-  for (const pattern of [rk9CoordSecretRx(env), COORD_TOKEN_RX]) {
-    for (const match of text.matchAll(pattern)) {
-      if (match[0].length > 0) spans.push([match.index, match.index + match[0].length]);
+type Rk9Range = [number, number];
+type RedactKind = "pattern" | "coord" | "keyword";
+const REDACT_KINDS: RedactKind[] = ["pattern", "coord", "keyword"];
+
+/** Matches of one step on `view`, as view ranges. Zero-length matches only when `keepEmpty`. */
+function redactMatches(kind: RedactKind, view: string, env: NodeJS.ProcessEnv, keepEmpty: boolean): Rk9Range[] {
+  const out: Rk9Range[] = [];
+  const add = (start: number, end: number) => {
+    if (end > start || keepEmpty) out.push([start, end]);
+  };
+  if (kind === "keyword") {
+    KEYWORD_RX.lastIndex = 0;
+    for (const match of view.matchAll(KEYWORD_RX)) {
+      const bracket = match[2];
+      if (bracket !== undefined && COUNTER_KEYWORD_RX.test(match[1]!) && isRk9CoordCounterMap(bracket)) continue;
+      add(match.index, match.index + match[0].length);
     }
+    return out;
   }
-  for (const match of text.matchAll(KEYWORD_RX)) {
-    const bracket = match[2];
-    if (bracket !== undefined && COUNTER_KEYWORD_RX.test(match[1]!) && isRk9CoordCounterMap(bracket)) continue;
-    spans.push([match.index, match.index + match[0].length]);
-  }
-  if (spans.length === 0) return text;
-  spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
-  let out = "";
-  let cursor = 0;
-  let open: [number, number] | null = null;
-  for (const span of spans) {
-    if (open && span[0] < open[1]) {
-      open[1] = Math.max(open[1], span[1]);
+  const rx = kind === "pattern" ? rk9CoordSecretRx(env) : COORD_TOKEN_RX;
+  // matchAll copies lastIndex from the shared RegExp: start at 0.
+  rx.lastIndex = 0;
+  for (const match of view.matchAll(rx)) add(match.index, match.index + match[0].length);
+  if (kind === "pattern") for (const [start, end] of rk9CoordJwtSpans(view)) add(start, end);
+  return out;
+}
+
+/** Overlapping ranges merge; touching ones stay apart (two markers, as the replace wrote them). */
+function mergeRk9Ranges(ranges: Rk9Range[]): Rk9Range[] {
+  const sorted = ranges.map(([start, end]): Rk9Range => [start, end]).sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const out: Rk9Range[] = [];
+  for (const range of sorted) {
+    const last = out[out.length - 1];
+    if (last && (range[0] < last[1] || range[0] === last[0])) {
+      last[1] = Math.max(last[1], range[1]);
       continue;
     }
-    if (open) {
-      out += text.slice(cursor, open[0]) + RK9_COORD_REDACTED;
-      cursor = open[1];
-    }
-    open = [span[0], span[1]];
+    out.push(range);
   }
-  out += text.slice(cursor, open![0]) + RK9_COORD_REDACTED + text.slice(open![1]);
   return out;
+}
+
+function isCovered(ranges: Rk9Range[], [start, end]: Rk9Range): boolean {
+  return ranges.some(([from, to]) => from <= start && end <= to && to > from);
+}
+
+interface Rk9ViewSegment {
+  viewStart: number;
+  viewEnd: number;
+  origStart: number;
+  origEnd: number;
+  marker: boolean;
+}
+
+/** The text with each merged range replaced by `[redacted]`, and where each view part comes from. */
+function redactedView(text: string, ranges: Rk9Range[]) {
+  const segments: Rk9ViewSegment[] = [];
+  let view = "";
+  let cursor = 0;
+  const push = (piece: string, origStart: number, origEnd: number, marker: boolean) => {
+    if (piece.length === 0) return;
+    segments.push({ viewStart: view.length, viewEnd: view.length + piece.length, origStart, origEnd, marker });
+    view += piece;
+  };
+  for (const [start, end] of mergeRk9Ranges(ranges)) {
+    push(text.slice(cursor, start), cursor, start, false);
+    push(RK9_COORD_REDACTED, start, end, true);
+    cursor = end;
+  }
+  push(text.slice(cursor), cursor, text.length, false);
+  return { view, segments };
+}
+
+/** One redaction step over the current output, mapped back to original ranges. */
+function redactPass(text: string, ranges: Rk9Range[], kind: RedactKind, env: NodeJS.ProcessEnv, keepEmpty: boolean): Rk9Range[] {
+  const { view, segments } = redactedView(text, ranges);
+  const segmentAt = (index: number): Rk9ViewSegment | undefined => {
+    let low = 0;
+    let high = segments.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const segment = segments[mid]!;
+      if (index < segment.viewStart) high = mid - 1;
+      else if (index >= segment.viewEnd) low = mid + 1;
+      else return segment;
+    }
+    return undefined;
+  };
+  const toOriginal = (index: number, side: "start" | "end"): number => {
+    if (side === "end") {
+      if (index === 0) return 0;
+      const segment = segmentAt(index - 1);
+      if (!segment) return text.length;
+      return segment.marker ? segment.origEnd : segment.origStart + (index - segment.viewStart);
+    }
+    const segment = segmentAt(index);
+    if (!segment) return text.length;
+    return segment.marker ? segment.origStart : segment.origStart + (index - segment.viewStart);
+  };
+  return redactMatches(kind, view, env, keepEmpty).map(([start, end]): Rk9Range =>
+    end === start ? [toOriginal(start, "start"), toOriginal(start, "start")] : [toOriginal(start, "start"), toOriginal(end, "end")],
+  );
 }
 
 /**
@@ -372,6 +523,7 @@ export function rk9CoordIdentifierHasSecret(text: string, env: NodeJS.ProcessEnv
     for (const pattern of [rk9CoordSecretRx(env), ...ALWAYS_RX]) {
       if (identifierRx(pattern).test(form)) return true;
     }
+    if (rk9CoordJwtSpans(form, true).length > 0) return true;
   }
   return GLUED_AUTH_RX.test(text);
 }

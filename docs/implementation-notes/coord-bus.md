@@ -509,12 +509,16 @@ model is called.
 - The pattern is the `RK9_SESSIONS_SECRET_RX` default of `rk9-sessions.sh`
   (RK9-549). The env var overrides it on the server too. An invalid value
   falls back to the default. `rk9_coord_` tokens are always redacted.
-- Matches become `[redacted]`. Whitespace collapses to one space. All
-  patterns match the same text and overlapping matches merge into one
-  `[redacted]` (RK9-676): applied one after another, a pattern ate the start
-  of the next secret and left its tail (`AKIA...xrk9_coord_<token>` kept
-  `_coord_<token>`). A second pass then sees the markers
-  (`token: [redacted]` goes whole).
+- Matches become `[redacted]`. Whitespace collapses to one space. Since
+  RK9-676 the redaction marks ranges of the original text and writes one
+  `[redacted]` per merged range. The ranges are the union of (1) the
+  sequential replace of RK9-641 (pattern, coord tokens, keyword rule, each
+  over the previous output), emulated exactly, so the result is never
+  weaker than before; (2) every pattern on the original text, so one match
+  cannot eat the start of the next secret (`AKIA...xrk9_coord_<token>` kept
+  `_coord_<token>`); and (3) up to three more rounds over the combined
+  output that add only new coverage. A seeded differential fuzz test
+  against the sequential replace guards (1).
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
@@ -580,13 +584,23 @@ model is called.
   (`deploy ok token=... done` -> `deploy ok [redacted] done`). The server
   does not count `[redacted]` markers (a literal marker in the text could
   fool such a count).
-- **JWT and linear time (RK9-676).** The JWT branch of the default pattern
-  has a lookbehind, `(?<![A-Za-z0-9_-])eyJ...`: a JWT starts at a token
-  boundary, and `eyJeyJ...` without a dot no longer rescans the rest of the
-  text at every `eyJ` (a 4 KB value took ~7 ms per check, 0.14 ms now). The
-  same lookbehind is in the claude-config copies (`rk9-sessions.sh`, `rk9`,
-  the gate scripts, vault-mcp and grok-mcp); Python `re` and JS both accept
-  it. The presence metadata check probes each ancestor key once with a
+- **JWT and linear time (RK9-676, parent decision).** The JWT branch
+  `eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+` stays in the pattern string, so
+  it is identical to the bash default, but the server does not compile it:
+  on `eyJeyJ...` without a dot every `eyJ` rescanned the rest of the text
+  (quadratic; a 4 KB value took ~7 ms per check). `rk9CoordJwtSpans` finds
+  the same matches in one pass: in each maximal run of `[A-Za-z0-9_.-]`
+  with a dot, the first `eyJ` (any case) with 8+ characters before the next
+  dot and at least one character after it starts a match to the end of the
+  run. Glued prefixes stay covered (`id-<JWE>`, `aeyJ...`). A seeded corpus
+  test checks that the spans equal the old regex's, and 100 KB of `eyJ`
+  takes well under 50 ms. Only an exact top-level JWT alternative is
+  dropped from the compiled pattern; an `RK9_SESSIONS_SECRET_RX` override
+  with another JWT form runs as written. **Client difference:** the
+  claude-config copies (`rk9-sessions.sh`, `rk9`, `pcp-headsup.sh`, the gate
+  scripts, vault-mcp and grok-mcp) keep the regex form. They see short
+  lines (session names, phases, hook text), where the quadratic case costs
+  little; a port of the scan is follow-up work. The presence metadata check probes each ancestor key once with a
   short stand-in value and checks `key: value` only for keys that can start
   a secret (`token: ...`), instead of every ancestor with the full value.
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
