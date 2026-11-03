@@ -34,6 +34,7 @@ import {
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
+import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "./rk9-coord-text.js";
 
 /** DB CHECK: summary is 1..300 characters. */
@@ -109,6 +110,28 @@ export function rk9CoordPresenceTtlSeconds(env: NodeJS.ProcessEnv = process.env)
 }
 
 /**
+ * Stub rate limit (RK9-641, parent decision 3.11.2026): at most this many
+ * new stub actor rows per company and host per rolling hour. A stub is the
+ * row ensureRk9CoordActorRow inserts for an actor id that never registered
+ * through PUT /actors/me. The count covers every actor row the host created
+ * in the hour, registered or not, so registering a stub does not free budget.
+ * PUT /actors/me itself is not limited here. Normal use stays far below it: a host creates one
+ * stub per new session, worktree or headless run that reads the delta or
+ * the inbox before registering (an /implement wave on paperclip-01 starts
+ * about 20). A remote token that mints random `cc:<host>:<random>` ids hits
+ * it and gets 429 `rk9_coord_stub_rate_limited`. Agent runs (server-verified
+ * running runs) and actors without a host are not limited.
+ * RK9_COORD_STUB_RATE_PER_HOUR overrides it; 0 turns the limit off.
+ */
+export const RK9_COORD_STUB_RATE_PER_HOUR_DEFAULT = 120;
+
+export function rk9CoordStubRatePerHour(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number.parseInt(env.RK9_COORD_STUB_RATE_PER_HOUR ?? "", 10);
+  if (!Number.isFinite(value) || value < 0) return RK9_COORD_STUB_RATE_PER_HOUR_DEFAULT;
+  return Math.min(value, 100_000);
+}
+
+/**
  * Trust stored on a journal row. The child spec's "verified=false" maps to
  * `unverified`: every remote host (coord host token, also its `cc` claims) and
  * Grok rows are unverified whatever the client sends. rk9claude's service
@@ -157,36 +180,106 @@ export async function findRk9CoordActorRow(
   return row ?? null;
 }
 
+/** activity_log author fields for a coord write (RK9-641). */
+export interface Rk9CoordActivityActor {
+  actorType: "agent" | "user" | "system";
+  actorId: string;
+  agentId: string | null;
+  runId: string | null;
+  agentApiKeyId?: string | null;
+}
+
+/** Fallback author when the route gives none: the agent behind an agent_run, else the coord actor. */
+function defaultActivityActor(actor: Rk9CoordResolvedActor, agentId: string | null): Rk9CoordActivityActor {
+  if (actor.kind === "agent_run" && agentId) {
+    const runId = parseRk9CoordActorId(actor.actorId)?.ref ?? null;
+    return { actorType: "agent", actorId: agentId, agentId, runId };
+  }
+  return { actorType: "system", actorId: actor.actorId, agentId: null, runId: null };
+}
+
 /**
  * The caller's actor row. The presence API (RK9-625) owns the row; when it
  * does not exist yet, insert a minimal stub with ON CONFLICT DO NOTHING (never
  * an UPDATE, and metadata stays `{}` so presence can detect its own first
- * registration).
+ * registration). A stub insert writes one `rk9.coord.actor_stub_created`
+ * activity row in the same transaction (RK9-641); a conflict writes none.
  */
 export async function ensureRk9CoordActorRow(
   db: Db,
   companyId: string,
   actor: Rk9CoordResolvedActor,
   agentId: string | null = null,
+  activityActor: Rk9CoordActivityActor | null = null,
 ): Promise<Rk9CoordActorRow> {
   const existing = await findRk9CoordActorRow(db, companyId, actor.actorId);
   if (existing) return existing;
   const parsed = parseRk9CoordActorId(actor.actorId);
   const runId = actor.kind === "agent_run" ? parsed?.ref ?? null : null;
-  await db
-    .insert(rk9CoordActors)
-    .values({
-      companyId,
-      kind: actor.kind,
-      actorRef: actor.actorId,
-      host: actor.host,
-      externalId: parsed?.ref ?? null,
-      trust: actor.trust,
-      agentId: actor.kind === "agent_run" ? agentId : null,
-      runId,
-      issue: actor.kind === "worktree" ? parsed?.ref ?? null : null,
-    })
-    .onConflictDoNothing();
+  const publications: ActivityPublication[] = [];
+  await db.transaction(async (tx) => {
+    const limit = rk9CoordStubRatePerHour();
+    if (limit > 0 && actor.host && actor.kind !== "agent_run") {
+      // Serialize stub inserts per company and host, so concurrent calls
+      // cannot all pass the count (transaction-scoped advisory lock).
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`rk9_coord_stub:${companyId}:${actor.host}`}))`);
+      const since = new Date(Date.now() - 3600 * 1000);
+      const [recent] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(rk9CoordActors)
+        .where(
+          and(
+            eq(rk9CoordActors.companyId, companyId),
+            eq(rk9CoordActors.host, actor.host),
+            // Registered rows count too: registering a stub must not
+            // reset the budget (verifier finding, RK9-641).
+            gt(rk9CoordActors.createdAt, since),
+          ),
+        );
+      if (Number(recent?.count ?? 0) >= limit) {
+        // A concurrent insert of the same id may have won meanwhile: reuse it.
+        const [raced] = await tx
+          .select({ id: rk9CoordActors.id })
+          .from(rk9CoordActors)
+          .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.actorRef, actor.actorId)))
+          .limit(1);
+        if (raced) return;
+        throw new HttpError(429, "Too many new coord actors from this host; register with PUT /actors/me or retry later", {
+          code: "rk9_coord_stub_rate_limited",
+          limitPerHour: limit,
+        });
+      }
+    }
+    const inserted = await tx
+      .insert(rk9CoordActors)
+      .values({
+        companyId,
+        kind: actor.kind,
+        actorRef: actor.actorId,
+        host: actor.host,
+        externalId: parsed?.ref ?? null,
+        trust: actor.trust,
+        agentId: actor.kind === "agent_run" ? agentId : null,
+        runId,
+        issue: actor.kind === "worktree" ? parsed?.ref ?? null : null,
+      })
+      .onConflictDoNothing()
+      .returning({ id: rk9CoordActors.id });
+    if (!inserted[0]) return;
+    await logActivity(
+      tx as unknown as Db,
+      {
+        companyId,
+        ...(activityActor ?? defaultActivityActor(actor, agentId)),
+        action: "rk9.coord.actor_stub_created",
+        entityType: "rk9_coord_actor",
+        entityId: inserted[0].id,
+        details: { actor: actor.actorId, kind: actor.kind, host: actor.host, trust: actor.trust },
+      },
+      publications,
+    );
+  });
+  for (const publication of publications) publishActivity(publication);
   const row = await findRk9CoordActorRow(db, companyId, actor.actorId);
   if (!row) throw new Error("rk9 coord actor row missing after insert");
   return row;
@@ -419,6 +512,12 @@ export interface Rk9CoordDeltaOptions {
   issue?: string | null;
   agentId?: string | null;
   now?: Date;
+  /**
+   * activity_log author for the stub insert. The cursor move itself writes
+   * no activity row (RK9-641 decision): it is read bookkeeping that runs on
+   * every hook prompt, and the cursor row holds its own updated_at.
+   */
+  activityActor?: Rk9CoordActivityActor | null;
 }
 
 function shortActor(ref: string): string {
@@ -485,10 +584,17 @@ export function formatRk9CoordDeltaLine(
 }
 
 export function rk9CoordJournalService(db: Db) {
+  /**
+   * Append one event. The `rk9.coord.event_appended` activity row is written
+   * in the insert's transaction (RK9-641): a failed log rolls the insert
+   * back, so a client retry cannot get `duplicate: true` for an unlogged
+   * event. A duplicate writes no row.
+   */
   async function append(
     companyId: string,
     actor: Rk9CoordResolvedActor,
     input: AppendRk9CoordEvent,
+    opts: { activityActor?: Rk9CoordActivityActor | null; agentId?: string | null } = {},
   ): Promise<{ event: Rk9CoordEventView; duplicate: boolean }> {
     assertRk9CoordEventKindAllowed(actor, input.type);
     assertRk9CoordNoSecretFields({
@@ -534,27 +640,47 @@ export function rk9CoordJournalService(db: Db) {
     }
     const built = buildRk9CoordEvent(input, actor.actorId);
     const summary = toRk9CoordLine(built.summary, RK9_COORD_SUMMARY_MAX) ?? input.type;
-    const inserted = await db
-      .insert(rk9CoordEvents)
-      .values({
-        companyId,
-        type: input.type,
-        actorRef: actor.actorId,
-        actorKind: actor.kind,
-        trust: rk9CoordJournalTrust(actor, input.type),
-        issue,
-        repo,
-        summary,
-        payload: built.payload,
-        clientEventId: input.client_event_id ?? null,
-        refEventId: built.refEventId,
-        vaultPath: built.vaultPath,
-        dedupeKey: built.dedupeKey ?? null,
-        resource: built.resource ?? null,
-        occurredAt: input.occurred_at ? new Date(input.occurred_at) : null,
-      })
-      .onConflictDoNothing()
-      .returning();
+    const publications: ActivityPublication[] = [];
+    const inserted = await db.transaction(async (tx) => {
+      const rows = await tx
+        .insert(rk9CoordEvents)
+        .values({
+          companyId,
+          type: input.type,
+          actorRef: actor.actorId,
+          actorKind: actor.kind,
+          trust: rk9CoordJournalTrust(actor, input.type),
+          issue,
+          repo,
+          summary,
+          payload: built.payload,
+          clientEventId: input.client_event_id ?? null,
+          refEventId: built.refEventId,
+          vaultPath: built.vaultPath,
+          dedupeKey: built.dedupeKey ?? null,
+          resource: built.resource ?? null,
+          occurredAt: input.occurred_at ? new Date(input.occurred_at) : null,
+        })
+        .onConflictDoNothing()
+        .returning();
+      const row = rows[0];
+      if (row) {
+        await logActivity(
+          tx as unknown as Db,
+          {
+            companyId,
+            ...(opts.activityActor ?? defaultActivityActor(actor, opts.agentId ?? null)),
+            action: "rk9.coord.event_appended",
+            entityType: "rk9_coord_event",
+            entityId: String(row.id),
+            details: { type: row.type, actor: row.actorRef, issue: row.issue, trust: row.trust },
+          },
+          publications,
+        );
+      }
+      return rows;
+    });
+    for (const publication of publications) publishActivity(publication);
     if (inserted[0]) return { event: rk9CoordEventView(inserted[0]), duplicate: false };
     // Spool replay: the client event id is already stored.
     if (input.client_event_id) {
@@ -616,7 +742,7 @@ export function rk9CoordJournalService(db: Db) {
           repo: null,
           actorRef: actor.actorId,
         }
-      : await ensureRk9CoordActorRow(db, companyId, actor, opts.agentId ?? null);
+      : await ensureRk9CoordActorRow(db, companyId, actor, opts.agentId ?? null, opts.activityActor ?? null);
     const now = opts.now ?? new Date();
 
     return db.transaction(async (tx) => {
@@ -747,11 +873,16 @@ export function rk9CoordJournalService(db: Db) {
         or(...concerns),
       );
 
-      const [counts] = await tx
-        .select({ total: sql<number>`count(*)::int` })
+      // Count and rows in one statement (RK9-641): `count(*) over ()` is
+      // computed before LIMIT on the same snapshot as the rows, so `total`
+      // and `more` always agree with the returned events.
+      const rows = await tx
+        .select({ event: rk9CoordEvents, total: sql<number>`(count(*) over ())::int` })
         .from(rk9CoordEvents)
-        .where(matching);
-      const total = Number(counts?.total ?? 0);
+        .where(matching)
+        .orderBy(desc(rk9CoordEvents.id))
+        .limit(limit);
+      const total = Number(rows[0]?.total ?? 0);
 
       // Every non-peek call touches updated_at, also when nothing is new:
       // retention (RK9-641) reads it as the actor's last activity.
@@ -763,13 +894,7 @@ export function rk9CoordJournalService(db: Db) {
       }
       if (total === 0) return null;
 
-      const rows = await tx
-        .select()
-        .from(rk9CoordEvents)
-        .where(matching)
-        .orderBy(desc(rk9CoordEvents.id))
-        .limit(limit);
-      const events = rows.reverse().map(rk9CoordEventView);
+      const events = rows.reverse().map((row) => rk9CoordEventView(row.event));
       return {
         events,
         total,

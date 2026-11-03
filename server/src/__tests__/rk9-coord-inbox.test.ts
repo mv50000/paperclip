@@ -223,6 +223,83 @@ if (!support.supported) {
     expect(after).toHaveLength(before.length);
   });
 
+  it("writes issue.comment_added for the agent-message comment, like the comment route (RK9-641)", async () => {
+    const res = await send("worktree:RKI-1", { to: "tuki", body: "comment side effects", issue: "RKI-77" });
+    expect(res.status).toBe(201);
+    const rows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.comment_added")));
+    const row = rows.find((candidate) => (candidate.details as { commentId?: string }).commentId === res.body.comment_id);
+    expect(row).toMatchObject({ entityType: "issue", entityId: issueId, actorType: "user", actorId: "operator-user" });
+    expect(row!.details).toMatchObject({ identifier: "RKI-77", coordInbox: true });
+  });
+
+  it("lets only local or verified actors claim name- and issue-addressed rows (RK9-641)", async () => {
+    const remote: Rk9CoordResolvedActor = {
+      kind: "remote",
+      actorId: "remote:mv-laptop",
+      host: "mv-laptop",
+      trust: "unverified",
+      principal: "coord_token",
+    };
+    const ccRemoteSession: Rk9CoordResolvedActor = {
+      kind: "cc",
+      actorId: "cc:mv-laptop:sess-9",
+      host: "mv-laptop",
+      trust: "attributed",
+      principal: "coord_token",
+    };
+    const run: Rk9CoordResolvedActor = {
+      kind: "agent_run",
+      actorId: `agent_run:${runId}`,
+      host: null,
+      trust: "verified",
+      principal: "agent_jwt",
+    };
+    const local = worktree("RKI-91");
+    const cid = otherCompanyId;
+    // Presence would let these actors set name and issue; the test sets them directly.
+    for (const [actor, name, issue] of [
+      [remote, "victim-session", "RKI-91"],
+      [ccRemoteSession, "victim-session", "RKI-91"],
+      [run, "Tuki", "RKI-91"],
+    ] as const) {
+      await db.insert(rk9CoordActors).values({
+        companyId: cid,
+        kind: actor.kind,
+        actorRef: actor.actorId,
+        host: actor.host,
+        trust: actor.trust,
+        name,
+        issue,
+      });
+    }
+    // The other company: an actor named Tuki there must not shadow the agent of `companyId`.
+    const inbox = rk9CoordInboxService(db);
+    const sender = { actor: worktree("RKI-1"), paperclip: { type: "user" as const, userId: "operator-user" } };
+    await inbox.send(cid, sender, { to: "victim-session", body: "for the local session" });
+    await inbox.send(cid, sender, { to: "RKI-91", body: "for the issue" });
+    await inbox.send(cid, sender, { to: "remote:mv-laptop", body: "for the remote host" });
+    const token = { actor: remote, paperclip: { type: "coord_token" as const } };
+    await inbox.send(cid, token, { to: "Tuki", body: "token to an agent name" });
+
+    const remoteGot = await inbox.claim(cid, remote);
+    expect(remoteGot.map((message) => message.body)).toEqual(["for the remote host"]);
+    expect(await inbox.claim(cid, ccRemoteSession)).toEqual([]);
+    // Item 6: the agent run named Tuki does not get the token's name-addressed row.
+    expect(await inbox.claim(cid, run)).toEqual([]);
+    const localGot = await inbox.claim(cid, local);
+    expect(localGot.map((message) => message.body)).toEqual(["for the issue"]);
+    const claimedRows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, cid), eq(activityLog.action, "rk9.coord.inbox_claimed")));
+    const forRemote = claimedRows.filter((row) => (row.details as { actor?: string }).actor === "remote:mv-laptop");
+    expect(forRemote).toHaveLength(1);
+    expect(forRemote[0]!.details).toMatchObject({ count: 1 });
+  });
+
   it("addresses a Paperclip agent by name with an explicit issue, and rejects one without", async () => {
     const ok = await send("worktree:RKI-1", { to: "tuki", body: "by name", issue: "RKI-77" });
     expect(ok.status).toBe(201);
