@@ -31,6 +31,7 @@ import {
   generateRk9CoordToken,
   hashRk9CoordToken,
   RK9_COORD_TOKEN_PATTERN,
+  rk9CoordBoardHostNames,
   rk9CoordTokenService,
 } from "../services/rk9-coord-tokens.js";
 import {
@@ -784,7 +785,8 @@ if (!support.supported) {
   // RK9 Custom (RK9-676 item 9): no host token for the board host.
   it("refuses to issue or rotate a host token named after the board host", async () => {
     const app = manageApp(operatorKey);
-    for (const principalName of ["paperclip-01"]) {
+    // RK9-673: the short alias `paperclip` too (the client maps it to paperclip-01).
+    for (const principalName of ["paperclip-01", "paperclip"]) {
       const res = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens`).send({ principalKind: "host", principalName });
       expect(res.status, principalName).toBe(422);
       expect(res.body.code, principalName).toBe("rk9_coord_token_board_host");
@@ -850,6 +852,12 @@ if (!support.supported) {
     expect(mockRecallKnowledge).not.toHaveBeenCalled();
     const revoke = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${old!.id}/revoke`).send({});
     expect(revoke.status).toBeLessThan(300);
+  });
+
+  it("names the board host and its short alias only (RK9-673)", () => {
+    expect(rk9CoordBoardHostNames("paperclip-01")).toEqual(["paperclip-01", "paperclip"]);
+    expect(rk9CoordBoardHostNames("pve")).toEqual(["pve"]);
+    expect(rk9CoordBoardHostNames("paperclip-01")).not.toContain("paperclip-02");
   });
 
   it("does not rotate or revoke another company's token", async () => {
