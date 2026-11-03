@@ -47,6 +47,10 @@ export function knowledgeRoutes(db: Db) {
         if (rk9CoordPrincipalScope(coordPrincipal) !== "recall") {
           throw new HttpError(403, "This token is not a recall-scope token", { code: "rk9_coord_token_scope_forbidden" });
         }
+        // RK9-674: recall tokens are host-only; an old service recall row is refused here too.
+        if (coordPrincipal.principalKind !== "host") {
+          throw new HttpError(403, "A recall token must belong to a host", { code: "rk9_recall_token_host_only" });
+        }
         if (coordPrincipal.companyId !== companyId) {
           throw new HttpError(403, "The recall token is bound to another company", { code: "rk9_coord_wrong_company" });
         }

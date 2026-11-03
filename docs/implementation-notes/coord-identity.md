@@ -488,8 +488,11 @@ paperclip-01.
   (401, fails closed). Provisioning deletes the legacy board-key files on the
   hosts, so after such a rollback remote recall stops until the server is on
   RK9-653 again. Roll forward rather than back, or reinstate a board-key file.
-- A `service` principal may also get a recall token (operator-only); the
-  provisioning script issues recall tokens for hosts only.
+- **Host only (RK9-674):** a recall token belongs to a `host` principal.
+  Issue and rotate answer 422 `rk9_coord_token_recall_host_only` for a
+  `service`, and the recall route refuses a service recall row from before
+  RK9-674 with 403 `rk9_recall_token_host_only` (it can only be revoked). A
+  service such as rk9claude recalls with the host token of its machine.
 - **`scope: "all"` (operator mode):** decided explicitly.
   - An instance-admin caller (session or board key) keeps it, as before.
   - A recall token gets it only when its `recall_all` flag is on. The flag
