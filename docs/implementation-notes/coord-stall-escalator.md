@@ -49,7 +49,9 @@ resource, by an author who may follow it up (RK9-657 and
   key). Its event must be a `reply_to` of the ask, or concern the ask's issue
   or resource. The asker (or another run of the same agent) closes its own
   question only with a `done` of the question's issue; its phase or decision
-  does not answer it.
+  does not answer it. This is intended (RK9-689, parent decision 3.11.2026
+  on the operator's delegation): a done issue makes its question moot. A
+  `done` by a sibling run of the same agent closes the question too.
 - **blocker:** the author itself (any later event on the issue or resource,
   or a `reply_to`: the work moved; also another run of the same agent), or
   an operator-side actor as above.
@@ -193,7 +195,7 @@ fencing token or prompt text.
 
 | Route | Who | Answer |
 |---|---|---|
-| `GET /escalations?status=&limit=&nudges=` | any coord caller in the company | `{mode, config:{stuck_s, recheck_s, dedupe_s, day_max}, escalations:[…]}`, newest first. Nudge rows only with `nudges=true`. An unverified caller (remote host, Grok) gets no `message` or `error`. |
+| `GET /escalations?status=&limit=&nudges=` | any coord caller in the company | `{mode, config:{stuck_s, recheck_s, dedupe_s, day_max}, escalations:[…]}`, newest first. Nudge rows only with `nudges=true`. An unverified caller (remote host, Grok) gets no `message` or `error`. An `agent_run`, `grok`, `worktree` or `headless` caller gets an `ask_operator_unanswered` row without `message`, `error`, `resource` and `issue` (RK9-657, RK9-689); an `orch` claim reads it in full. |
 | `POST /escalations/:id/ack` `{status: sent\|failed, channel_message_id?, error?}` | kinds `rk9claude` and `operator` | 200 the row. 403 `rk9_coord_escalation_ack_forbidden`, 404 `rk9_coord_escalation_not_found`, 409 `rk9_coord_escalation_not_reserved` (already acked, or a shadow or suppressed row). Writes an activity row. |
 | `POST /leases/break` `{resource, reason, lease_id?}` | kinds `operator` and `rk9claude` for a live holder (RK9-627) | `lease_id` is new and optional. A different active lease on the resource is 409 `rk9_coord_lease_changed`, and nothing is broken. A late button tap therefore cannot break a new holder. |
 

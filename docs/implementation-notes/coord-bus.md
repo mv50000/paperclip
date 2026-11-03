@@ -1049,12 +1049,31 @@ to, created_at }] }`, or 204 when nothing is pending. `name` and
 The full view for an explicit `rk9 board`. Hook paths never call it. It
 returns live actors, active leases with holder phase and FIFO queue, the
 newest events (`?events=`, default 20) and the pending inbox. Unverified
-viewers (remote hosts, Grok) get the inbox without message bodies.
+viewers (remote hosts, Grok) get the inbox without message bodies. An
+`agent_run` viewer (attributed or verified) reads the `body` and `kind` of a message only
+when it is addressed to its own actor id (its actor row, or the id held as a
+name: the claim rule of GET /inbox/me). Other messages show only `id`,
+`from`, `to` and the times; `body` and `kind` are null (RK9-689, parent
+decision 3.11.2026).
 
 `ask-operator` on the board (RK9-657, operator decision 3.11.2026, refined
-by the parent): an `agent_run` or `grok` viewer, and any other viewer whose
-journal trust is `unverified` (a remote host token, also its `cc:<host>`
-claims), sees that an issue has an open question, but not its text. Such a
+by the parent): an `agent_run`, `grok`, `worktree` or `headless` viewer, and
+any other viewer whose journal trust is `unverified` (a remote host token,
+also its `cc:<host>` claims), sees that an issue has an open question, but
+not its text. RK9-689 (parent decision 3.11.2026) added `worktree` and
+`headless` claims on the board key: they now see on the board only their own
+questions, the same as their delta. An `orch` claim keeps every question,
+because the orchestrator answers questions on the operator's delegation
+(RK9_COORD_BOARD_ASK_HIDDEN_KINDS).
+
+**Not an access boundary; the board key sees everything.** The hiding for
+`worktree` and `headless` is context hygiene (parent decision 3.11.2026):
+such a session does not get other actors' questions into its context. This
+saves tokens and keeps the session on its own task. A session that holds the
+board key can leave out `X-RK9-Actor` (the operator's own view), claim
+`orch:` or `cc:paperclip-01:`, or read the database, and see every question.
+The real access boundary applies only to `agent_run`, `grok` and unverified
+readers. Do not add complexity to make the board-key rule an access boundary. Such a
 viewer gets an `ask-operator` row (also an answer) with only `id`, `type`,
 `issue`, `actor`, `actor_kind` and the times, and `summary` is the fixed
 text `[ask-operator]`. The `escalated` row of an unanswered question keeps
@@ -1075,9 +1094,30 @@ match would let grok or another agent read the operator side's questions
 (RK9-657 verifier). The operator's other events on the issue (`decision`,
 `done`, phase) are never hidden.
 
-`GET /escalations` follows the same rule: for an `agent_run`, `grok` or
-unverified viewer, the `message` and `error` of an
-`ask_operator_unanswered` row are null.
+`GET /escalations` follows the same rule: for an `agent_run`, `grok`,
+`worktree`, `headless` or unverified viewer, the `message`, `error`,
+`resource` and `issue` of an `ask_operator_unanswered` row are null
+(`resource` and `issue` since RK9-689). Unlike the board, `GET /escalations`
+has no asker exception: an asker does not read its own question's
+escalation text there. `GET /board` still shows that escalation to the
+asker, so this is documented, not changed (RK9-689, Low 4).
+
+### Tunnetut rajat (RK9-689)
+
+- The board's `escalations_attention` list (failed, suppressed and unacked
+  escalations) shows `resource` and `issue` of an `ask_operator_unanswered`
+  row to every viewer. It never shows the question text. The hidden event
+  view of the board shows the same `issue`, but not the `resource`. The
+  hidden `escalated` row's summary also names the resource
+  (`ask_operator_unanswered <resource>, N min`). These are identifiers, not
+  question text.
+- `GET /escalations?nudges=true` shows the nudge row of a hidden ask with
+  its `resource`, `issue` and message (the message names the issue). The
+  decision left rows other than the ask escalation unchanged.
+- The inbox rule for `agent_run` covers the board only. `worktree` and
+  `headless` claims still read every inbox body on the board: the parent
+  decision limited the rule to agent runs. No code path puts question text
+  into an inbox message today; an operator's free-text reply could.
 
 ## Lease engine (RK9-627)
 

@@ -1555,6 +1555,9 @@ if (!support.supported) {
       request(appFor(none, { tokenId: "t-gv", companyId: cid, principalKind: "service", principalName: "grok" })).get(`${base(cid)}/board`),
       request(appFor(none, hostToken(cid))).get(`${base(cid)}/board`),
       request(appFor(none, hostToken(cid))).get(`${base(cid)}/board`).set("X-RK9-Actor", "cc:mv-laptop:viewer"),
+      // RK9-689: worktree and headless claims on the board key see only their own questions.
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "worktree:RKV-2"),
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "headless:RKV-2-run"),
     ];
     for (const res of await Promise.all(restricted)) {
       const view = await boardOf(res);
@@ -1569,7 +1572,9 @@ if (!support.supported) {
     const full = [
       request(appFor(boardKey([cid]))).get(`${base(cid)}/board`),
       request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "cc:paperclip-01:viewer"),
-      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "worktree:RKV-2"),
+      // RK9-689: orch answers questions on the operator's delegation; the asker reads its own.
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "orch:rk9-orchestrator"),
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "worktree:RKV-1"),
       request(operatorSession(cid)).get(`${base(cid)}/board`),
       request(appFor(none, { tokenId: "t-rv", companyId: cid, principalKind: "service", principalName: "rk9claude" })).get(`${base(cid)}/board`),
     ];
@@ -1675,6 +1680,58 @@ if (!support.supported) {
     for (const prober of [request(grokApp), request(app(runB!))]) {
       const res = await prober.get(`${base(cid)}/board`);
       expect(JSON.stringify(res.body)).not.toContain("omega");
+    }
+  });
+
+  it("gives a headless claim only its own questions and an agent run only its own inbox bodies on the board (RK9-689)", async () => {
+    const cid = await newCompany();
+    const { runs, app } = await agentRunFixture(cid, ["Inbox Viewer", "Other Agent"]);
+    const [run, otherRun] = runs;
+    const runRef = `agent_run:${run!.id}`;
+    const mine = await post(cid, "headless:run-h1", { type: "ask-operator", question: "ship kappa?", urgency: "normal", issue: "RKH-1" });
+    const theirs = await post(cid, "worktree:RKH-2", { type: "ask-operator", question: "drop lambda?", urgency: "normal", issue: "RKH-2" });
+    expect([mine.status, theirs.status]).toEqual([201, 201]);
+    const headless = await request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "headless:run-h1");
+    expect(headless.status).toBe(200);
+    const summaries = (headless.body.events as Array<{ type: string; summary: string }>)
+      .filter((event) => event.type === "ask-operator")
+      .map((event) => event.summary);
+    expect(summaries).toEqual(["[ask-operator]", "[normal] ship kappa?"]);
+    expect(JSON.stringify(headless.body)).not.toContain("lambda");
+
+    // Low 3: an agent run reads the body of a message to its own actor id
+    // (actor row or the id held as a name), not of the others.
+    const [row] = await db
+      .insert(rk9CoordActors)
+      .values({ companyId: cid, kind: "agent_run", actorRef: runRef, trust: "attributed" })
+      .returning();
+    await db.insert(rk9CoordInbox).values([
+      { companyId: cid, toActorId: row!.id, fromActorRef: "operator", body: "to the row" },
+      { companyId: cid, toName: runRef, fromActorRef: "operator", body: "to the id", kind: "reply" },
+      { companyId: cid, toIssue: "RKH-2", fromActorRef: "operator", body: "hidden mu for RKH-2", kind: "reply" },
+      { companyId: cid, toName: `agent_run:${otherRun!.id}`, fromActorRef: "operator", body: "nu for the other run" },
+    ]);
+    const res = await request(app(run!)).get(`${base(cid)}/board`);
+    expect(res.status).toBe(200);
+    const inbox = res.body.inbox as Array<Record<string, unknown>>;
+    expect(inbox.map((message) => message.body)).toEqual(["to the row", "to the id", null, null]);
+    expect(inbox.map((message) => message.kind)).toEqual(["message", "reply", null, null]);
+    expect(inbox[2]).toMatchObject({ to: "RKH-2", from: "operator" });
+    expect(inbox[2]!.id).toEqual(expect.any(Number));
+    expect(inbox[2]!.created_at).toEqual(expect.any(String));
+    expect(JSON.stringify(res.body)).not.toContain("mu for");
+    // The operator's key and a worktree claim keep every body.
+    for (const reader of [
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`),
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "worktree:RKH-9"),
+    ]) {
+      const full = await reader;
+      expect((full.body.inbox as Array<{ body: string }>).map((message) => message.body)).toEqual([
+        "to the row",
+        "to the id",
+        "hidden mu for RKH-2",
+        "nu for the other run",
+      ]);
     }
   });
 

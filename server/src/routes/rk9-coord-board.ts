@@ -27,7 +27,8 @@ export function rk9CoordBoardRoutes(db: Db) {
       // A board-key read without a claim is the operator's own key: full view.
       // Remote hosts and Grok read as unverified (no message bodies).
       const viewerTrust = req.rk9CoordActor ? rk9CoordJournalTrust(req.rk9CoordActor) : "attributed";
-      // RK9-657: agent_run, grok and unverified viewers get no ask-operator payload.
+      // RK9-657, RK9-689: agent_run, grok, worktree, headless and unverified
+      // viewers get no ask-operator payload of another actor; orch gets all.
       const askOperatorPayloads = rk9CoordBoardShowsAskOperatorPayload(req.rk9CoordActor);
       // The asker still reads its own questions and their answers.
       const viewer = req.rk9CoordActor
@@ -40,6 +41,8 @@ export function rk9CoordBoardRoutes(db: Db) {
         viewerTrust,
         askOperatorPayloads,
         viewer,
+        // RK9-689: an agent run reads only inbox messages addressed to it.
+        inboxBodiesOnlyFor: req.rk9CoordActor?.kind === "agent_run" ? req.rk9CoordActor.actorId : null,
         eventLimit: query.events,
       });
       // RK9-629: a failed or unacked escalation never vanishes silently.

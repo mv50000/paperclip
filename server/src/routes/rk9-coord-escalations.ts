@@ -48,7 +48,9 @@ export function rk9CoordEscalationRoutes(db: Db, env: NodeJS.ProcessEnv = proces
         limit: query.limit,
         nudges: query.nudges === "true",
         withText: viewerTrust !== "unverified",
-        // RK9-657: the board's ask-operator rule; agent_run and grok get no question text.
+        // RK9-657, RK9-689: the board's ask-operator rule; agent_run, grok,
+        // worktree, headless and unverified viewers get no question text,
+        // resource or issue of an ask escalation.
         askText: rk9CoordBoardShowsAskOperatorPayload(req.rk9CoordActor),
       });
       res.setHeader("Cache-Control", "no-store");
