@@ -69,3 +69,6 @@ b51112798f1794776adf837982be58d231d5ac3d:ui/src/pages/apps/gateways/ConnectClien
 889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-github-private-attachment-authority.md:generic-api-key:107
 889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-chat-queue-and-webhook-repair.md:discord-api-token:3585
 889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-chat-queue-and-webhook-repair.md:generic-api-key:6669
+# Upstream skills/paperclip cases.md: example idempotencyKey values in request samples, not secrets.
+36fe1572eacbf22b3f64bd129e444c9ca945b286:skills/paperclip/references/cases.md:generic-api-key:171
+36fe1572eacbf22b3f64bd129e444c9ca945b286:skills/paperclip/references/cases.md:generic-api-key:220
