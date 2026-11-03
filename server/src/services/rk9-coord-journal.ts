@@ -31,6 +31,7 @@ import {
 } from "@paperclipai/db";
 import {
   parseRk9CoordActorId,
+  RK9_COORD_ACTOR_ID_PATTERNS,
   RK9_COORD_DECISION_NOTE_PATTERN,
   type AppendRk9CoordEvent,
   type Rk9CoordTrust,
@@ -1283,13 +1284,16 @@ export function rk9CoordJournalService(db: Db) {
     if (rk9CoordJournalTrust(actor) === "unverified") {
       const host = rk9CoordVaultOwnerHost(actor);
       // The host comes from the token, never from the request; split_part
-      // compares it literally (no LIKE wildcard in a host label).
+      // compares it literally (no LIKE wildcard in a host label). RK9-683: the
+      // cc branch also needs the strict actor-id grammar, so the list matches
+      // rk9CoordMayVaultDecision (a legacy `cc:<host>:<bad-session>` row would
+      // be listed but refused on close).
       conditions.push(
         host
           ? or(
               eq(rk9CoordEvents.actorRef, actor.actorId),
               eq(rk9CoordEvents.actorRef, `remote:${host}`),
-              sql`(split_part(${rk9CoordEvents.actorRef}, ':', 1) = 'cc' and split_part(${rk9CoordEvents.actorRef}, ':', 2) = ${host})`,
+              sql`(split_part(${rk9CoordEvents.actorRef}, ':', 1) = 'cc' and split_part(${rk9CoordEvents.actorRef}, ':', 2) = ${host} and ${rk9CoordEvents.actorRef} ~ ${RK9_COORD_ACTOR_ID_PATTERNS.cc.source})`,
             )!
           : eq(rk9CoordEvents.actorRef, actor.actorId),
       );
