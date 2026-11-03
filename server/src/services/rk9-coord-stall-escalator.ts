@@ -13,7 +13,10 @@
 //                            for stuckS;
 //   ask_operator_unanswered  an ask-operator or blocker journal event with no
 //   blocker_unanswered       follow-up event (reply_to, same issue or same
-//                            resource) for stuckS.
+//                            resource) for stuckS. RK9-657: only an
+//                            operator-side actor answers an ask-operator; a
+//                            blocker also follows up by its author
+//                            (eventCandidates).
 //
 // Stages per jam ("episode", base key `lease:<leaseId>` or `event:<id>`):
 //   1. nudge: an inbox message to the holder (or the event's author) and a
@@ -62,7 +65,7 @@ import { parseRk9CoordLeaseResource, type AckRk9CoordEscalation, type Rk9CoordEs
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { rk9CoordActorIssue } from "./rk9-coord-journal.js";
+import { RK9_COORD_AGENT_RUN_REF_RX as AGENT_RUN_REF_RX, RK9_COORD_ASK_OPERATOR_ANSWER_KINDS, rk9CoordActorIssue } from "./rk9-coord-journal.js";
 import { resolveRk9CoordLeaseDeadGraceS, rk9CoordLeaseActorVerdict } from "./rk9-coord-leases.js";
 import { toRk9CoordLine } from "./rk9-coord-text.js";
 
@@ -477,10 +480,41 @@ async function eventCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
   // A follow-up: a later event of the same company by a non-unverified
   // actor, other than the escalator, a heads-up or an automatic lease event,
   // that either answers the event (reply_to / ref_event_id) or concerns the
-  // same issue or resource. For an ask-operator, the asker's own events on
-  // the issue count only when they close it (`done`): a question is not
-  // answered by its asker posting a phase or a decision. For a blocker, any
-  // later event of the author on the issue shows that the work moved.
+  // same issue or resource, AND whose author may follow it up (RK9-657,
+  // RK9-662, operator decision 3.11.2026):
+  // - ask-operator: only an operator-side actor answers
+  //   (RK9_COORD_ASK_OPERATOR_ANSWER_KINDS: `operator`, or a `cc` that is not
+  //   unverified, i.e. a paperclip-01 session on the board key), and not the
+  //   asker itself. The asker (or another run of the same agent) closes its
+  //   own question only with a `done` of the question's issue. A host-token
+  //   `cc:<host>`, `agent_run`, `grok`, `remote` and `rk9claude` never answer.
+  // - blocker: the author itself (any later event: the work moved; also
+  //   another run of the same agent) or an operator-side actor.
+  // So another actor's events on a shared issue (rk9claude's alert blockers
+  // and their `done` on its ops issue, RK9-677) answer and mute nothing.
+  const answerer = sql`(f.actor_kind in (${sql.join(
+    RK9_COORD_ASK_OPERATOR_ANSWER_KINDS.map((kind) => sql`${kind}`),
+    sql`, `,
+  )}) and f.trust <> 'unverified')`;
+  // The author, or another run of the same agent (a primary-key lookup per
+  // side; the CASE keeps the uuid cast off refs that are not agent_run ids).
+  const sameAuthor = sql`(
+    f.actor_ref = ${rk9CoordEvents.actorRef}
+    or (
+      f.actor_kind = 'agent_run' and ${rk9CoordEvents.actorKind} = 'agent_run'
+      and exists (
+        select 1 from ${heartbeatRuns} r1
+        join ${heartbeatRuns} r2 on r2.agent_id = r1.agent_id and r2.company_id = r1.company_id
+        where r1.company_id = ${rk9CoordEvents.companyId}
+          and r1.id = case when ${rk9CoordEvents.actorRef} ~ ${AGENT_RUN_REF_RX} then substring(${rk9CoordEvents.actorRef} from 11)::uuid end
+          and r2.id = case when f.actor_ref ~ ${AGENT_RUN_REF_RX} then substring(f.actor_ref from 11)::uuid end
+      )
+    )
+  )`;
+  const sameSubject = sql`(
+    (${rk9CoordEvents.issue} is not null and f.issue = ${rk9CoordEvents.issue})
+    or (${rk9CoordEvents.resource} is not null and f.resource = ${rk9CoordEvents.resource})
+  )`;
   const followUp = sql`exists (
     select 1 from ${rk9CoordEvents} f
     where f.company_id = ${rk9CoordEvents.companyId}
@@ -489,13 +523,17 @@ async function eventCandidates(db: Db, now: Date, config: Rk9CoordEscalatorConfi
       and f.type not in ('headsup', 'lease', 'escalated')
       and f.trust <> 'unverified'
       and (
-        f.ref_event_id = ${rk9CoordEvents.id}
-        or (
-          (${rk9CoordEvents.type} = 'blocker' or f.actor_ref <> ${rk9CoordEvents.actorRef} or f.type = 'done')
+        (
+          ${rk9CoordEvents.type} = 'ask-operator'
           and (
-            (${rk9CoordEvents.issue} is not null and f.issue = ${rk9CoordEvents.issue})
-            or (${rk9CoordEvents.resource} is not null and f.resource = ${rk9CoordEvents.resource})
+            (${answerer} and not ${sameAuthor} and (f.ref_event_id = ${rk9CoordEvents.id} or ${sameSubject}))
+            or (f.type = 'done' and ${rk9CoordEvents.issue} is not null and f.issue = ${rk9CoordEvents.issue} and ${sameAuthor})
           )
+        )
+        or (
+          ${rk9CoordEvents.type} = 'blocker'
+          and (${answerer} or ${sameAuthor})
+          and (f.ref_event_id = ${rk9CoordEvents.id} or ${sameSubject})
         )
       )
   )`;

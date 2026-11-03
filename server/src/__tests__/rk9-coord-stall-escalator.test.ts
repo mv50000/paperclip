@@ -12,8 +12,10 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
+  agents,
   companies,
   createDb,
+  heartbeatRuns,
   rk9CoordActors,
   rk9CoordEscalations,
   rk9CoordEvents,
@@ -566,6 +568,98 @@ if (!support.supported) {
     // a delivered event escalation is not repeated after the dedupe window.
     expect(await tick(at(T, 30))).toMatchObject({ escalated: 0, nudged: 0 });
     expect(await tick(at(T, 7 * 60))).toMatchObject({ escalated: 0, nudged: 0 });
+  });
+
+  it("counts only operator-side answers and the author's own progress; a shared issue mutes nothing (RK9-657, RK9-662, RK9-677)", async () => {
+    const T = new Date("2026-07-10T10:00:00Z");
+    const [agentA, agentB] = await db
+      .insert(agents)
+      .values(
+        ["Stall A", "Stall B"].map((name) => ({
+          companyId,
+          name,
+          role: "engineer",
+          status: "active",
+          adapterType: "process",
+          adapterConfig: {},
+          runtimeConfig: {},
+        })),
+      )
+      .returning();
+    const [runA1, runA2, runB1] = await db
+      .insert(heartbeatRuns)
+      .values([
+        { companyId, agentId: agentA!.id, status: "running" },
+        { companyId, agentId: agentA!.id, status: "succeeded" },
+        { companyId, agentId: agentB!.id, status: "running" },
+      ])
+      .returning();
+    const runRef = (run: { id: string }) => `agent_run:${run.id}`;
+    const insertEvent = async (values: Partial<typeof rk9CoordEvents.$inferInsert>) => {
+      const [row] = await db
+        .insert(rk9CoordEvents)
+        .values({
+          companyId,
+          type: "blocker",
+          actorRef: "worktree:RKU-0",
+          actorKind: "worktree",
+          trust: "attributed",
+          summary: "blocked",
+          payload: {},
+          createdAt: at(T, -40),
+          ...values,
+        })
+        .returning({ id: rk9CoordEvents.id });
+      return row!.id;
+    };
+    const later = { createdAt: at(T, -30) };
+    const ask = (issue: string, over: Partial<typeof rk9CoordEvents.$inferInsert> = {}) =>
+      insertEvent({ type: "ask-operator", issue, summary: `[normal] ${issue}?`, ...over });
+    const hostCc = { actorRef: "cc:mv-laptop:s1", actorKind: "cc", trust: "unverified" };
+    const boardCc = { actorRef: "cc:paperclip-01:s1", actorKind: "cc", trust: "attributed" };
+    const rk9claude = { actorRef: "rk9claude", actorKind: "rk9claude", trust: "verified" };
+    const otherRun = { actorRef: runRef(runB1!), actorKind: "agent_run", trust: "verified" };
+
+    // ask-operator
+    const hostCcReply = await ask("RKU-1");
+    await insertEvent({ type: "ask-operator", ...hostCc, summary: "[low] yes", refEventId: hostCcReply, ...later });
+    const agentReply = await ask("RKU-2");
+    await insertEvent({ type: "ask-operator", ...otherRun, summary: "[low] yes", refEventId: agentReply, ...later });
+    const boardCcReply = await ask("RKU-3");
+    await insertEvent({ type: "ask-operator", ...boardCc, summary: "[low] yes", refEventId: boardCcReply, ...later });
+    const operatorOnIssue = await ask("RKU-4");
+    await insertEvent({ type: "decision", actorRef: "operator", actorKind: "operator", issue: "RKU-4", summary: "go", ...later });
+    const sharedAsk = await ask("RKU-5");
+    await insertEvent({ ...rk9claude, issue: "RKU-5", summary: "alert", ...later });
+    await insertEvent({ type: "done", ...rk9claude, issue: "RKU-5", summary: "RKU-5 done", ...later });
+    const askerDone = await ask("RKU-6", { actorRef: runRef(runA1!), actorKind: "agent_run", trust: "verified" });
+    await insertEvent({ type: "done", actorRef: runRef(runA2!), actorKind: "agent_run", trust: "verified", issue: "RKU-6", summary: "done", ...later });
+    const otherDone = await ask("RKU-7");
+    await insertEvent({ type: "done", ...otherRun, issue: "RKU-7", summary: "RKU-7 done", ...later });
+    // The asker's own reply_to or phase does not answer its question.
+    const selfReply = await ask("RKU-13");
+    await insertEvent({ type: "ask-operator", summary: "[low] still?", refEventId: selfReply, ...later });
+    // blocker
+    const sharedBlocker = await insertEvent({ issue: "RKU-8", summary: "waits" });
+    await insertEvent({ ...rk9claude, issue: "RKU-8", summary: "alert", ...later });
+    await insertEvent({ type: "done", ...rk9claude, issue: "RKU-8", summary: "RKU-8 done", ...later });
+    const siblingRun = await insertEvent({ actorRef: runRef(runA1!), actorKind: "agent_run", trust: "verified", issue: "RKU-9" });
+    await insertEvent({ type: "handoff", actorRef: runRef(runA2!), actorKind: "agent_run", trust: "verified", issue: "RKU-9", summary: "moved", ...later });
+    const otherAgent = await insertEvent({ actorRef: runRef(runA1!), actorKind: "agent_run", trust: "verified", issue: "RKU-10" });
+    await insertEvent({ type: "handoff", ...otherRun, issue: "RKU-10", summary: "not mine", ...later });
+    const boardCcOnBlocker = await insertEvent({ issue: "RKU-11" });
+    await insertEvent({ type: "handoff", ...boardCc, issue: "RKU-11", summary: "unblocked", ...later });
+    const ownProgress = await insertEvent({ issue: "RKU-12" });
+    await insertEvent({ type: "handoff", issue: "RKU-12", summary: "moved on", ...later });
+
+    await tick(T);
+    const nudged = async (id: number) => (await ledger(`%event:${id}#%`)).length > 0;
+    for (const [name, id] of Object.entries({ hostCcReply, agentReply, sharedAsk, otherDone, selfReply, sharedBlocker, otherAgent })) {
+      expect(await nudged(id), `${name} stays unanswered`).toBe(true);
+    }
+    for (const [name, id] of Object.entries({ boardCcReply, operatorOnIssue, askerDone, siblingRun, boardCcOnBlocker, ownProgress })) {
+      expect(await nudged(id), `${name} is answered`).toBe(false);
+    }
   });
 
   describe("routes", () => {

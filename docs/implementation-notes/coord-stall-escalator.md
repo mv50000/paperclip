@@ -41,13 +41,28 @@ needed. The server makes no model calls.
 
 A follow-up is a later event of the same company that answers the event
 (`ref_event_id`, the `reply_to` of ask-operator) or concerns the same issue or
-resource. These events do not count:
+resource, by an author who may follow it up (RK9-657 and
+[RK9-662](/RK9/issues/RK9-662), operator decision 3.11.2026):
+
+- **ask-operator:** only an operator-side actor answers: kind `operator`, or
+  a `cc` row that is not `unverified` (a paperclip-01 session on the board
+  key). Its event must be a `reply_to` of the ask, or concern the ask's issue
+  or resource. The asker (or another run of the same agent) closes its own
+  question only with a `done` of the question's issue; its phase or decision
+  does not answer it.
+- **blocker:** the author itself (any later event on the issue or resource,
+  or a `reply_to`: the work moved; also another run of the same agent), or
+  an operator-side actor as above.
+
+These events never count:
 
 - a `headsup`, an automatic `lease` event, or the escalator's own events;
-- any event by an unverified actor (remote host, Grok);
-- for an ask-operator, an event of the asker itself on the issue, unless it
-  is `done`. The asker's own phase or decision does not answer its question.
-  For a blocker, any later event of its author on the issue counts.
+- any event by an unverified actor (remote host, a `cc:<host>` claim through
+  a host coord token, Grok);
+- any event by another actor that is not operator-side: an `agent_run`,
+  `worktree`, `headless`, `orch` or `rk9claude` event on the same issue. So
+  rk9claude's alert blockers and their `done` on a shared ops issue (RK9-677)
+  answer and mute no other actor's ask-operator or blocker.
 
 These cases never produce a nudge or an escalation:
 

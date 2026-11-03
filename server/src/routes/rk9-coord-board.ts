@@ -6,7 +6,11 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { rk9CoordBoardQuerySchema } from "@paperclipai/shared";
-import { rk9CoordJournalService, rk9CoordJournalTrust } from "../services/rk9-coord-journal.js";
+import {
+  rk9CoordBoardShowsAskOperatorPayload,
+  rk9CoordJournalService,
+  rk9CoordJournalTrust,
+} from "../services/rk9-coord-journal.js";
 import { companyIdOf } from "./rk9-coord-events.js";
 import { logger } from "../middleware/logger.js";
 // RK9 Custom (RK9-629): failed and unacked escalations on the board
@@ -23,7 +27,9 @@ export function rk9CoordBoardRoutes(db: Db) {
       // A board-key read without a claim is the operator's own key: full view.
       // Remote hosts and Grok read as unverified (no message bodies).
       const viewerTrust = req.rk9CoordActor ? rk9CoordJournalTrust(req.rk9CoordActor) : "attributed";
-      const board = await journal.board(companyIdOf(req), { viewerTrust, eventLimit: query.events });
+      // RK9-657: agent_run, grok and unverified viewers get no ask-operator payload.
+      const askOperatorPayloads = rk9CoordBoardShowsAskOperatorPayload(req.rk9CoordActor);
+      const board = await journal.board(companyIdOf(req), { viewerTrust, askOperatorPayloads, eventLimit: query.events });
       // RK9-629: a failed or unacked escalation never vanishes silently.
       // Fail-open: the board still answers when the escalation query fails.
       const escalationsAttention = await escalations

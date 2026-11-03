@@ -1,7 +1,8 @@
 // --- RK9 Custom (RK9-626): coord bus retention ---
 //
 // Periods (coord-bus.md "Retention"):
-// - events: 90 days; `decision` and `decision-vaulted`: 366 days (>= 1 year);
+// - events: 90 days; `decision`, `decision-vaulted` and (RK9-657)
+//   `break-glass`: 366 days (>= 1 year);
 // - ended actors: 7 days after ended_at (cascades to their cursors, inbox
 //   rows, leases and waiters);
 // - never-ended actors (RK9-641): a stub that never registered (no
@@ -44,7 +45,12 @@ export const RK9_COORD_RETENTION = {
   releasedLeaseDays: 30,
 } as const;
 
-const LONG_LIVED_EVENT_TYPES = ["decision", "decision-vaulted"];
+/**
+ * Kept RK9_COORD_RETENTION.decisionDays. RK9-657 (operator decision
+ * 3.11.2026): a break-glass record is an audit trail of a bypassed gate and
+ * lives as long as a decision.
+ */
+export const LONG_LIVED_EVENT_TYPES = ["decision", "decision-vaulted", "break-glass"];
 
 export interface Rk9CoordPruneResult {
   events: number;

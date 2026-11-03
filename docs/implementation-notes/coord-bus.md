@@ -251,7 +251,7 @@ below say so too).
 | Data | Keep | How |
 |---|---|---|
 | Events | 90 days | prune transaction with `SET LOCAL rk9.coord_events_prune = 'on'` |
-| `decision` and `decision-vaulted` events | 366 days (at least 1 year) | excluded from the 90-day prune |
+| `decision`, `decision-vaulted` and `break-glass` events (break-glass since RK9-657) | 366 days (at least 1 year) | excluded from the 90-day prune |
 | Ended actors | 7 days after `ended_at` | DELETE (cascades to their leases, waiters, cursors, inbox) |
 | Never-registered actors (stubs, RK9-641) | 7 days after the last activity | DELETE, as above |
 | Registered actors that never ended (crashed sessions, RK9-641) | 30 days after the last activity | DELETE, as above |
@@ -806,6 +806,8 @@ A record that someone bypassed a gate (from [RK9-632](/RK9/issues/RK9-632)).
   shows it like any other record, so readers check `trust`.
 - It is a record only and changes no lease state. An operator lease break
   stays `POST /leases/break`.
+- Retention keeps it 366 days, as a decision (RK9-657): it is the audit
+  trail of a bypassed gate.
 - The delta shows it to every actor, like `deploy`.
 
 ### GET /events/delta
@@ -830,11 +832,17 @@ another actor's question and bypass the approval gate.
   - The caller is the author. For an `agent_run` this includes another run
     of the same agent, so a later run sees the question of an earlier one.
     The caller's own events are still never echoed.
-  - The event is an answer by a `cc` or `operator` actor: its
+  - The event is an answer by an operator-side actor: its
     `ref_event_id` (`reply_to`) points at a question whose author is the
-    caller, by the rule above. A reply by any other kind is not delivered,
-    so no agent or unverified actor can push a forged approval. An answer
-    whose question the retention has already pruned is not delivered either.
+    caller, by the rule above. Operator-side is kind `operator`, or a `cc`
+    row that is not `unverified`: a paperclip-01 session on the board key
+    (RK9-657, operator decision 3.11.2026). A `cc:<host>` claim through a
+    host coord token is stored `unverified` and does not answer. A reply by
+    any other kind is not delivered, so no agent or unverified actor can
+    push a forged approval. An answer whose question the retention has
+    already pruned is not delivered either (known gap, kept by decision:
+    the question and its answer are both 90-day rows, so this needs an
+    answer more than 90 days after the question).
 - No other actor's question reaches the delta, not even when the repo or
   issue matches. The board still lists every event.
 - Cost, without a migration: "same agent" is a primary-key lookup in
@@ -1011,6 +1019,19 @@ The full view for an explicit `rk9 board`. Hook paths never call it. It
 returns live actors, active leases with holder phase and FIFO queue, the
 newest events (`?events=`, default 20) and the pending inbox. Unverified
 viewers (remote hosts, Grok) get the inbox without message bodies.
+
+`ask-operator` on the board (RK9-657, operator decision 3.11.2026, refined
+by the parent): an `agent_run` or `grok` viewer, and any other viewer whose
+journal trust is `unverified` (a remote host token, also its `cc:<host>`
+claims), sees that an issue has an open question, but not its text. Such a
+viewer gets an `ask-operator` row (also an answer) with only `id`, `type`,
+`issue`, `actor`, `actor_kind` and the times, and `summary` is the fixed
+text `[ask-operator]`. The `escalated` row of an unanswered question keeps
+its summary (it names no question text) and loses its payload. In both,
+`payload` is `{}`, `trust`, `repo`, `resource`, `ref_event_id`, `vault_path`
+and `client_event_id` are null, and `payload_hidden` is `true`. The operator,
+paperclip-01 sessions on the board key and other attributed viewers get the
+full row. The delta already gives an agent no other actor's question.
 
 ## Lease engine (RK9-627)
 
