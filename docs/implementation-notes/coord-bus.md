@@ -1062,10 +1062,16 @@ not its text. RK9-689 (parent decision 3.11.2026) added `worktree` and
 `headless` claims on the board key: they now see on the board only their own
 questions, the same as their delta. An `orch` claim keeps every question,
 because the orchestrator answers questions on the operator's delegation
-(RK9_COORD_BOARD_ASK_HIDDEN_KINDS). This filters what an honest client
-sees; it is not an access boundary. A session that holds the board key can
-leave out `X-RK9-Actor` (the operator's own view) or claim `orch:` or
-`cc:paperclip-01:` and read every question. Such a
+(RK9_COORD_BOARD_ASK_HIDDEN_KINDS).
+
+**Not an access boundary; the board key sees everything.** The hiding for
+`worktree` and `headless` is context hygiene (parent decision 3.11.2026):
+such a session does not get other actors' questions into its context. This
+saves tokens and keeps the session on its own task. A session that holds the
+board key can leave out `X-RK9-Actor` (the operator's own view), claim
+`orch:` or `cc:paperclip-01:`, or read the database, and see every question.
+The real access boundary applies only to `agent_run`, `grok` and unverified
+readers. Do not add complexity to make the board-key rule an access boundary. Such a
 viewer gets an `ask-operator` row (also an answer) with only `id`, `type`,
 `issue`, `actor`, `actor_kind` and the times, and `summary` is the fixed
 text `[ask-operator]`. The `escalated` row of an unanswered question keeps
