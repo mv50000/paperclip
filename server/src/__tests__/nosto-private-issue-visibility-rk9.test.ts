@@ -9,7 +9,8 @@
 // The upstream baseline is upstream code that the fork does not own; a lift that changes it fails
 // here too, and the RK9-701 step then re-classifies the files and moves FORK_BASE_COMMIT to the new
 // upstream base. The check works per file: one filtered query hides the file from the scan.
-// The git cross-check needs history; a shallow CI checkout skips it, so it runs on full clones only.
+// The git cross-check needs the FORK_BASE_COMMIT tree. CI fetches that one commit (pr.yml, RK9-709)
+// and the check must run there; only a local clone without the commit skips it.
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -22,13 +23,44 @@ const repoRoot = path.resolve(root, "../..");
 /** Last upstream commit before the fork's own server files (RK9-693 merge base). */
 const FORK_BASE_COMMIT = "dffc2b3ca1";
 
-const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt/;
+const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt|hidden_at/;
 const QUERY_CALL = String.raw`\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*`;
 
-/** True when the file queries the `issues` table, also through an import alias (`issues as issueRows`). */
+/** Drops // and /* *\/ comments but keeps string and template literals, so a comment neither adds nor hides a query. */
+function stripComments(src: string): string {
+  return src.replace(
+    /("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
+    (match, literal: string | undefined) => literal ?? (match.startsWith("/*") ? match.replace(/[^\n]/g, " ") : ""),
+  );
+}
+
+/**
+ * True when the (comment-free) source queries the `issues` table. Recognised forms:
+ * - query-builder calls `from(issues`, `join(issues`, `update(issues`, ... also through an import alias
+ *   (`issues as issueRows`) and a drizzle alias (`const x = alias(issues, "x")` then `.from(x)`)
+ * - the relational query API: `db.query.issues.findMany(...)`
+ * - an `sql` template that interpolates the table: `${issues}`
+ * - plain SQL text: `from issues`, `join "issues"`, `update issues`, `insert into issues`
+ * Known limits: prose in a string ("cannot update issues") counts as a query, and the comment
+ * stripper does not parse regex literals or nested template literals.
+ */
 function queriesIssues(src: string): boolean {
-  const names = ["issues", ...Array.from(src.matchAll(/\bissues\s+as\s+(\w+)/g), (match) => match[1])];
-  return names.some((name) => new RegExp(`${QUERY_CALL}${name}\\b`).test(src));
+  const code = stripComments(src);
+  const tables = ["issues", ...Array.from(code.matchAll(/\bissues\s+as\s+(\w+)/g), (match) => match[1])];
+  const aliases = tables.flatMap((table) =>
+    Array.from(code.matchAll(new RegExp(String.raw`\b(\w+)\s*=\s*alias\(\s*${table}\s*,`, "g")), (match) => match[1]),
+  );
+  return (
+    [...tables, ...aliases].some((name) => new RegExp(`${QUERY_CALL}${name}\\b`).test(code)) ||
+    /\bquery\s*\.\s*issues\s*\./.test(code) ||
+    /\$\{\s*issues\s*\}/.test(code) ||
+    /\b(?:from|join|update|into)\s+"?issues"?(?![\w.])/i.test(code)
+  );
+}
+
+/** True when the file queries `issues` and no code (comments excluded) applies the visibility condition. */
+function lacksVisibilityFilter(src: string): boolean {
+  return queriesIssues(src) && !VISIBILITY_FILTER.test(stripComments(src));
 }
 
 /** Fork-only files that read or write `issues` with no visibleIssueCondition/hiddenAt filter. */
@@ -83,6 +115,7 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/feedback.ts",
   "services/github-operation-credentials.ts",
   "services/issue-approvals.ts",
+  "services/issue-creation-origin.ts",
   "services/issue-continuation-summary.ts",
   "services/issue-prefix.ts",
   "services/issue-references.ts",
@@ -142,7 +175,7 @@ function scanUnfilteredIssueQueries(): string[] {
         if (name !== "__tests__" && name !== "node_modules") walk(full);
       } else if (name.endsWith(".ts") && !name.endsWith(".test.ts")) {
         const src = readFileSync(full, "utf8");
-        if (queriesIssues(src) && !VISIBILITY_FILTER.test(src)) {
+        if (lacksVisibilityFilter(src)) {
           hits.push(path.relative(root, full).split(path.sep).join("/"));
         }
       }
@@ -168,6 +201,8 @@ function forkAddedFiles(): Set<string> | null {
 }
 
 const forkAdded = forkAddedFiles();
+/** pr.yml fetches FORK_BASE_COMMIT and sets this flag, so a missing commit there is a CI break, not a skip. */
+const requireGitHistory = process.env.RK9_REQUIRE_FORK_BASE === "1";
 
 describe("issue visibility inventory (RK9-693, RK9-707)", () => {
   it("classifies every file that queries issues without the visibility condition", () => {
@@ -183,11 +218,51 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
       expect(existsSync(file), rel).toBe(true);
       const src = readFileSync(file, "utf8");
       // When a file gains the filter, drop it from its list (and activate the leak case for fork files).
-      expect(queriesIssues(src) && !VISIBILITY_FILTER.test(src), rel).toBe(true);
+      expect(lacksVisibilityFilter(src), rel).toBe(true);
     }
   });
 
-  it.skipIf(forkAdded === null)("matches the fork list against the files git shows as fork-added", () => {
+  it("recognises every query form and ignores comments (RK9-709)", () => {
+    const imports = `import { issues } from "@paperclipai/db";\n`;
+    const detected = {
+      builderFrom: `${imports}db.select().from(issues);`,
+      builderJoin: `${imports}db.select().from(agents).leftJoin(issues, eq(a, b));`,
+      importAlias: `import { issues as issueRows } from "@paperclipai/db";\ndb.update(issueRows).set({});`,
+      drizzleAlias: `${imports}const parent = alias(issues, "parent");\ndb.select().from(parent);`,
+      drizzleAliasOfImportAlias: `import { issues as issueRows } from "@paperclipai/db";\nconst p = alias(issueRows, "p");\ndb.select().from(p);`,
+      relationalQuery: `db.query.issues.findMany({ where: eq(a, b) });`,
+      sqlInterpolation: `${imports}db.execute(sql\`SELECT id FROM \${issues} WHERE x = 1\`);`,
+      sqlText: `db.execute(sql.raw("select id from issues where company_id = $1"));`,
+      sqlTextQuoted: `db.execute(sql\`UPDATE "issues" SET status = 'done'\`);`,
+      sqlTextInsert: `db.execute(sql\`insert into issues (id) values (1)\`);`,
+    };
+    for (const [form, src] of Object.entries(detected)) {
+      expect(lacksVisibilityFilter(src), form).toBe(true);
+    }
+    const notDetected = {
+      columnOnly: `${imports}const id = issues.id;`,
+      commentedQuery: `${imports}// db.select().from(issues)\n/* select * from issues */`,
+      columnInSql: `${imports}sql\`\${issues.id} = 1\``,
+    };
+    for (const [form, src] of Object.entries(notDetected)) {
+      expect(queriesIssues(src), form).toBe(false);
+    }
+    // A comment that names the filter no longer hides an unfiltered query.
+    expect(lacksVisibilityFilter(`${imports}// TODO hiddenAt\ndb.select().from(issues);`)).toBe(true);
+    expect(lacksVisibilityFilter(`${imports}db.select().from(issues).where(isNull(issues.hiddenAt));`)).toBe(false);
+    expect(lacksVisibilityFilter(`db.execute(sql\`select id from issues where hidden_at is null\`);`)).toBe(false);
+  });
+
+  it("fetches FORK_BASE_COMMIT in the CI test job (RK9-709)", () => {
+    const workflow = readFileSync(path.join(repoRoot, ".github/workflows/pr.yml"), "utf8");
+    const fetched = workflow.match(/git fetch --no-tags --depth=1 origin ([0-9a-f]{40})/)?.[1];
+    expect(fetched?.startsWith(FORK_BASE_COMMIT), `pr.yml fetches ${fetched}`).toBe(true);
+    expect(workflow).toContain('RK9_REQUIRE_FORK_BASE: "1"');
+  });
+
+  it.skipIf(forkAdded === null && !requireGitHistory)("matches the fork list against the files git shows as fork-added", () => {
+    // With the pr.yml flag set, a null here means the FORK_BASE_COMMIT fetch step is missing or broken.
+    expect(forkAdded, `git history for ${FORK_BASE_COMMIT} is missing`).not.toBeNull();
     const added = forkAdded!;
     const forkHits = scanUnfilteredIssueQueries().filter((file) => added.has(file));
     expect(forkHits).toEqual([...FORK_FILES_WITHOUT_VISIBILITY_FILTER].sort());
