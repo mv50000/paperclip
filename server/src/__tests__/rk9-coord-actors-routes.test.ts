@@ -37,7 +37,7 @@ import {
 function rk9673ClientVariant(): string {
   const steps: Array<[string, string]> = [
     ["|qmk_|sk-|", "|qmk_|(?<![A-Za-z0-9_])sk-|"],
-    ["[A-Za-z0-9_-]{6,}|AKIA", "[A-Za-z0-9_-]{6,}|sk-(?=[A-Za-z_-]{0,64}[0-9])[A-Za-z0-9_-]{20,}|AKIA"],
+    ["[A-Za-z0-9_-]{6,}|AKIA", "[A-Za-z0-9_-]{6,}|sk-(?=[A-Za-z_-]{0,64}[0-9])(?:(?!token|secret|passw|api[_-]?key|apikey)[A-Za-z0-9_-]){20,}|AKIA"],
     [
       "|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}",
       "|(bearer|basic)\\s+(?=[A-Za-z]{0,19}[0-9._~+/=-]|[A-Za-z]{20})[A-Za-z0-9._~+/=-]{8,}" +
@@ -64,7 +64,8 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     expect(line).toBeDefined();
     const quoted = line!.slice(line!.indexOf(":-'") + 3, line!.lastIndexOf("'}"));
     // RK9-673: claude-config loosened the client copy (sk- word boundary, bearer/basic value needs a
-    // non-letter or 20+ letters, plus a 20+ sk- key with a digit and quoted Authorization forms). The
+    // non-letter or 20+ letters, plus a 20+ sk- key with a digit that stops before a keyword, and quoted
+    // Authorization forms). The
     // server copy stays stricter on purpose. Either the old client copy or exactly this variant passes.
     expect([RK9_COORD_SECRET_RX_DEFAULT, rk9673ClientVariant()]).toContain(quoted.replaceAll(`'"'"'`, "'"));
   });
