@@ -253,7 +253,9 @@ route, including sibling sub-routers. It applies these rules in order.
 3. Company access: `assertCompanyAccess` for board and agent callers.
    For a coord token, the token's `company_id` must equal `:companyId` (403).
    The company check runs before the header check for every principal.
-4. A present but malformed `X-RK9-Actor` is 400 on every method.
+4. A present but malformed `X-RK9-Actor` is 400 on every method. For a
+   board caller the credential checks (instance admin, operator pin, board-key
+   pin) run first, so an unpinned admin gets 403 before the 400 (RK9-663).
 5. A mutation (any method except GET, HEAD and OPTIONS) without an actor id
    is 400 for the board key and coord tokens. Agent and session callers have
    a derived id.

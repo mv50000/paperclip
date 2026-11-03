@@ -32,7 +32,8 @@
 //    the claim's host must be that host. A read without a claim defaults to
 //    the token's own actor (remote:<host> or the service name).
 // 6. A mutation (any method other than GET/HEAD/OPTIONS) needs an actor id. A
-//    present but malformed X-RK9-Actor header is 400 on every method.
+//    present but malformed X-RK9-Actor header is 400 on every method
+//    (RK9-663: for a board caller the credential checks run first, so 403 wins).
 
 import type { Request, RequestHandler } from "express";
 import { eq } from "drizzle-orm";
@@ -210,9 +211,10 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
     return resolveTokenActor(principal, claim);
   }
 
-  const claim = parseClaim(input.actorHeader);
-
+  // RK9-663: the header is parsed after the credential pin checks of a board
+  // caller, so an unpinned admin with a malformed header gets 403, not 400.
   if (actor.type === "agent") {
+    const claim = parseClaim(input.actorHeader);
     if (actor.source !== "agent_key" && actor.source !== "agent_jwt") {
       throw coordError(403, "rk9_coord_untrusted_principal", "This agent credential cannot call coord routes");
     }
@@ -258,6 +260,7 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
       if (!rk9CoordOperatorUserAllowed(actor.userId, input.operatorUserIds)) {
         throw coordError(403, "rk9_coord_operator_not_allowed", "This user is not a configured coord operator");
       }
+      const claim = parseClaim(input.actorHeader);
       if (claim && claim.kind !== "operator") {
         throw coordError(403, "rk9_coord_actor_spoof", "A signed-in session is always the operator actor");
       }
@@ -274,6 +277,7 @@ export async function resolveRk9CoordActor(input: ResolveRk9CoordActorInput): Pr
       if (allowed && allowed.length > 0 && (!actor.keyId || !allowed.includes(actor.keyId))) {
         throw coordError(403, "rk9_coord_board_key_not_allowed", "This board key is not allowed on coord routes");
       }
+      const claim = parseClaim(input.actorHeader);
       requireClaimOnMutation(claim, method);
       if (!claim) return null;
       if (claim.kind === "operator") {
@@ -379,7 +383,7 @@ export function rk9CoordActorMiddleware(db: Db, opts: Rk9CoordActorOptions = {})
     // user pin alone does not close the promotion path.
     logger.warn(
       { event: "rk9_coord_operator_pin_without_board_key_pin" },
-      "RK9_COORD_OPERATOR_USER_IDS is set but RK9_COORD_BOARD_KEY_IDS is not: any instance admin can still mint a board key and manage coord tokens; set both",
+      "RK9_COORD_OPERATOR_USER_IDS is set but RK9_COORD_BOARD_KEY_IDS is not: any instance admin can still mint a board key, manage coord tokens and act as cc, worktree, headless or orch on coord routes; set both",
     );
   }
   const findAgentRun = opts.findAgentRun ?? defaultFindAgentRun(db);
