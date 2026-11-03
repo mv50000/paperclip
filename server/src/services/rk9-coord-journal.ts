@@ -753,7 +753,9 @@ export function rk9CoordJournalService(db: Db) {
         .where(matching);
       const total = Number(counts?.total ?? 0);
 
-      if (!peek && newCursor > cursor) {
+      // Every non-peek call touches updated_at, also when nothing is new:
+      // retention (RK9-641) reads it as the actor's last activity.
+      if (!peek) {
         await tx
           .update(rk9CoordCursors)
           .set({ lastEventId: newCursor, updatedAt: now })

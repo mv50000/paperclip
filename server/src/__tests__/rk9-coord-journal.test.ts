@@ -13,8 +13,10 @@ import {
   heartbeatRuns,
   createDb,
   rk9CoordActors,
+  rk9CoordCursors,
   rk9CoordEvents,
   rk9CoordInbox,
+  rk9CoordLeaseWaiters,
   rk9CoordLeases,
 } from "@paperclipai/db";
 import { appendRk9CoordEventSchema } from "@paperclipai/shared";
@@ -941,6 +943,107 @@ if (!support.supported) {
     const remote = await request(appFor(none, hostToken(cid))).get(`${base(cid)}/board`);
     expect(remote.status).toBe(200);
     expect(remote.body.inbox[0].body).toBeNull();
+  });
+
+  it("touches the cursor on every non-peek delta, also an empty one (RK9-641)", async () => {
+    const cid = await newCompany();
+    const actor = "worktree:RKT-1";
+    const delta = (query = "") =>
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta${query}`).set("X-RK9-Actor", actor);
+    expect((await delta()).status).toBe(204);
+    const [row] = await db.select({ id: rk9CoordActors.id }).from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, actor));
+    const old = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+    await db.update(rk9CoordCursors).set({ updatedAt: old }).where(eq(rk9CoordCursors.actorId, row!.id));
+    // A peek does not touch it.
+    expect((await delta("?peek=1")).status).toBe(204);
+    const [peeked] = await db.select().from(rk9CoordCursors).where(eq(rk9CoordCursors.actorId, row!.id));
+    expect(peeked!.updatedAt.getTime()).toBe(old.getTime());
+    expect((await delta()).status).toBe(204);
+    const [touched] = await db.select().from(rk9CoordCursors).where(eq(rk9CoordCursors.actorId, row!.id));
+    expect(touched!.updatedAt.getTime()).toBeGreaterThan(old.getTime());
+  });
+
+  it("prunes never-ended stubs and stale actors by last activity, and old undelivered inbox rows (RK9-641)", async () => {
+    const cid = await newCompany();
+    const now = new Date();
+    const daysAgo = (days: number) => new Date(now.getTime() - days * 24 * 3600 * 1000);
+    const registered = { presence_registered_at: "nonce" };
+    const rows = await db
+      .insert(rk9CoordActors)
+      .values([
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-old", trust: "attributed", lastSeenAt: daysAgo(8) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-new", trust: "attributed", lastSeenAt: daysAgo(2) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-cursor", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:reg-8d", trust: "attributed", lastSeenAt: daysAgo(8), metadata: registered },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:reg-31d", trust: "attributed", lastSeenAt: daysAgo(31), metadata: registered },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-mail", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-waiter", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-expired-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-claimed", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-old-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
+      ])
+      .returning({ id: rk9CoordActors.id, ref: rk9CoordActors.actorRef });
+    const id = (ref: string) => rows.find((row) => row.ref === ref)!.id;
+    // A delta call 1 day ago keeps the stub: its cursor moved.
+    await db.insert(rk9CoordCursors).values({ companyId: cid, actorId: id("cc:h:stub-cursor"), lastEventId: 0, updatedAt: daysAgo(1) });
+    await db.insert(rk9CoordLeases).values({
+      companyId: cid,
+      resource: "prod:rkp",
+      holderActorId: id("cc:h:stub-lease"),
+      expiresAt: new Date(now.getTime() + 600_000),
+    });
+    // An expired but unreleased lease (the sweeper has not journaled it yet),
+    // and a lease released 20 days ago (old activity: pruned).
+    await db.insert(rk9CoordLeases).values([
+      {
+        companyId: cid,
+        resource: "prod:rkq",
+        holderActorId: id("cc:h:stub-expired-lease"),
+        acquiredAt: daysAgo(20),
+        expiresAt: daysAgo(19),
+      },
+      {
+        companyId: cid,
+        resource: "prod:rkr",
+        holderActorId: id("cc:h:stub-old-lease"),
+        acquiredAt: daysAgo(21),
+        expiresAt: daysAgo(20),
+        releasedAt: daysAgo(20),
+        releaseReason: "released",
+      },
+    ]);
+    await db.insert(rk9CoordLeaseWaiters).values({ companyId: cid, resource: "prod:rkp", actorId: id("cc:h:stub-waiter") });
+    await db.insert(rk9CoordInbox).values([
+      { companyId: cid, toName: "x", fromActorRef: "orch:live", body: "pending-old", createdAt: daysAgo(31) },
+      { companyId: cid, toName: "x", fromActorRef: "orch:live", body: "pending-new", createdAt: daysAgo(29) },
+      // A message to a not-live actor keeps the actor (and itself).
+      { companyId: cid, toActorId: id("cc:h:stub-mail"), fromActorRef: "orch:live", body: "for-stub", createdAt: daysAgo(1) },
+      // A claim 1 day ago is activity.
+      {
+        companyId: cid,
+        toName: "y",
+        fromActorRef: "orch:live",
+        body: "claimed",
+        deliveredAt: daysAgo(1),
+        deliveredToActorId: id("cc:h:stub-claimed"),
+      },
+    ]);
+
+    await pruneRk9Coord(db, { now });
+    const left = await db.select({ ref: rk9CoordActors.actorRef }).from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
+    expect(left.map((row) => row.ref).sort()).toEqual([
+      "cc:h:reg-8d",
+      "cc:h:stub-claimed",
+      "cc:h:stub-cursor",
+      "cc:h:stub-expired-lease",
+      "cc:h:stub-lease",
+      "cc:h:stub-mail",
+      "cc:h:stub-new",
+      "cc:h:stub-waiter",
+    ]);
+    const inbox = await db.select({ body: rk9CoordInbox.body }).from(rk9CoordInbox).where(eq(rk9CoordInbox.companyId, cid));
+    expect(inbox.map((row) => row.body).sort()).toEqual(["claimed", "for-stub", "pending-new"]);
   });
 
   it("prunes old events, ended actors and old inbox rows idempotently and keeps decisions a year", async () => {
