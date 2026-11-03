@@ -50,7 +50,7 @@ export const RK9_COORD_RETENTION = {
  * 3.11.2026): a break-glass record is an audit trail of a bypassed gate and
  * lives as long as a decision.
  */
-export const LONG_LIVED_EVENT_TYPES = ["decision", "decision-vaulted", "break-glass"];
+export const LONG_LIVED_EVENT_TYPES: readonly string[] = Object.freeze(["decision", "decision-vaulted", "break-glass"]);
 
 export interface Rk9CoordPruneResult {
   events: number;
@@ -77,8 +77,8 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
   const decisionCutoff = before(RK9_COORD_RETENTION.decisionDays);
 
   const expiredEvents: SQL = or(
-    and(notInArray(rk9CoordEvents.type, LONG_LIVED_EVENT_TYPES), lt(rk9CoordEvents.createdAt, eventCutoff)),
-    and(inArray(rk9CoordEvents.type, LONG_LIVED_EVENT_TYPES), lt(rk9CoordEvents.createdAt, decisionCutoff)),
+    and(notInArray(rk9CoordEvents.type, [...LONG_LIVED_EVENT_TYPES]), lt(rk9CoordEvents.createdAt, eventCutoff)),
+    and(inArray(rk9CoordEvents.type, [...LONG_LIVED_EVENT_TYPES]), lt(rk9CoordEvents.createdAt, decisionCutoff)),
   )!;
   const events = await batched(() =>
     db.transaction(async (tx) => {

@@ -1465,6 +1465,38 @@ if (!support.supported) {
     ]);
   });
 
+  it("gives a host-token cc claim only its own questions and their answers in the delta (RK9-657)", async () => {
+    const cid = await newCompany();
+    const hostCc = "cc:mv-laptop:sess-d";
+    const hostApp = () => appFor(none, hostToken(cid));
+    const hostDelta = () => request(hostApp()).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", hostCc);
+    const boardCc = "cc:paperclip-01:sess-d";
+    const boardDelta = () => request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", boardCc);
+    expect((await hostDelta()).status).toBe(204);
+    expect((await boardDelta()).status).toBe(204);
+    const other = await post(cid, "worktree:RKD-1", { type: "ask-operator", question: "other kappa?", urgency: "low" });
+    expect(other.status).toBe(201);
+    const mine = await request(hostApp())
+      .post(`${base(cid)}/events`)
+      .set("X-RK9-Actor", hostCc)
+      .send({ type: "ask-operator", question: "my lambda?", urgency: "low" });
+    expect(mine.status).toBe(201);
+    expect(
+      (await request(operatorSession(cid)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "yes lambda", urgency: "low", reply_to: mine.body.event.id })).status,
+    ).toBe(201);
+    const host = await hostDelta();
+    expect(host.status).toBe(200);
+    expect(host.body.events.map((event: { summary: string }) => event.summary)).toEqual(["[low] yes lambda"]);
+    expect(JSON.stringify(host.body)).not.toContain("kappa");
+    // A board-key cc on paperclip-01 still gets every question.
+    const board = await boardDelta();
+    expect(board.body.events.map((event: { summary: string }) => event.summary)).toEqual([
+      "[low] other kappa?",
+      "[low] my lambda?",
+      "[low] yes lambda",
+    ]);
+  });
+
   it("hides ask-operator text on the board from agent runs, grok and unverified viewers (RK9-657)", async () => {
     const cid = await newCompany();
     const { runs, app } = await agentRunFixture(cid, ["Viewer"]);
@@ -1601,13 +1633,14 @@ if (!support.supported) {
       (res.body.events as Array<{ type: string; summary: string; payload: Record<string, unknown> }>)
         .filter((event) => event.type === "ask-operator" || event.type === "escalated")
         .map((event) => (event.type === "escalated" ? `escalated:${JSON.stringify(event.payload)}` : event.summary));
+    // An operator-side ask that is only on the same issue is no answer: hidden.
     for (const asker of [request(app(runA!)), request(appA2)]) {
       const res = await asker.get(`${base(cid)}/board`);
       expect(res.status).toBe(200);
       expect(asks(res)).toEqual([
         `escalated:${JSON.stringify({ reason: "ask_operator_unanswered", message: "What: [high] may I drop table zeta?" })}`,
         "[ask-operator]",
-        "[low] zeta stays on RKW-1",
+        "[ask-operator]",
         "[low] no, keep zeta",
         "[high] may I drop table zeta?",
       ]);
@@ -1623,6 +1656,25 @@ if (!support.supported) {
       expect(JSON.stringify(res.body)).not.toContain("zeta");
       expect(asks(res).filter((summary) => !summary.startsWith("escalated:"))).toEqual([own, ...hiddenTail]);
       expect(asks(res).find((summary) => summary.startsWith("escalated:"))).toBe("escalated:{}");
+    }
+    // Picking the issue of an operator-side question does not reveal it (RK9-657 verifier).
+    const ccQuestion = await post(cid, "cc:paperclip-01:sess-z", {
+      type: "ask-operator",
+      question: "rotate omega credentials?",
+      urgency: "high",
+      issue: "RKW-2",
+    });
+    expect(ccQuestion.status).toBe(201);
+    const grokApp = appFor(none, { tokenId: "t-gw2", companyId: cid, principalKind: "service", principalName: "grok" });
+    expect(
+      (await request(grokApp).post(`${base(cid)}/events`).set("X-RK9-Actor", "grok").send({ type: "ask-operator", question: "probe", urgency: "low", issue: "RKW-2" })).status,
+    ).toBe(201);
+    expect(
+      (await request(app(runB!)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "probe b", urgency: "low", issue: "RKW-2" })).status,
+    ).toBe(201);
+    for (const prober of [request(grokApp), request(app(runB!))]) {
+      const res = await prober.get(`${base(cid)}/board`);
+      expect(JSON.stringify(res.body)).not.toContain("omega");
     }
   });
 

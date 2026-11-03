@@ -1036,7 +1036,14 @@ export function rk9CoordEscalationService(db: Db) {
   /** The shadow report: newest ledger rows of the company. */
   async function list(
     companyId: string,
-    opts: { status?: Rk9CoordEscalationStatus; limit?: number; nudges?: boolean; withText: boolean },
+    opts: {
+      status?: Rk9CoordEscalationStatus;
+      limit?: number;
+      nudges?: boolean;
+      withText: boolean;
+      /** RK9-657: false hides message and error of ask_operator_unanswered rows (the question text). Default true. */
+      askText?: boolean;
+    },
   ) {
     const rows = await db
       .select()
@@ -1050,7 +1057,11 @@ export function rk9CoordEscalationService(db: Db) {
       )
       .orderBy(desc(rk9CoordEscalations.reservedAt))
       .limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
-    return rows.map((row) => escalationView(row, { withText: opts.withText }));
+    return rows.map((row) =>
+      escalationView(row, {
+        withText: opts.withText && (opts.askText !== false || row.reason !== "ask_operator_unanswered"),
+      }),
+    );
   }
 
   /**

@@ -133,8 +133,15 @@ export function assertRk9CoordEventKindAllowed(actor: Pick<Rk9CoordResolvedActor
   if (type === "break-glass" && !(RK9_COORD_BREAK_GLASS_KINDS as readonly string[]).includes(actor.kind)) deny();
 }
 
-export function rk9CoordSeesAllAskOperator(kind: string): boolean {
-  return (RK9_COORD_ASK_OPERATOR_DELTA_KINDS as readonly string[]).includes(kind);
+/**
+ * Does this actor get every ask-operator in its delta? Kinds `cc` and
+ * `operator`, and (RK9-657) not when the actor's journal trust is
+ * `unverified`: a `cc:<host>` claim through a host coord token gets only its
+ * own questions and their answers, as on the board.
+ */
+export function rk9CoordSeesAllAskOperator(actor: Rk9CoordResolvedActor): boolean {
+  if (!(RK9_COORD_ASK_OPERATOR_DELTA_KINDS as readonly string[]).includes(actor.kind)) return false;
+  return rk9CoordJournalTrust(actor) !== "unverified";
 }
 /** A new cursor starts this far back, so a fresh session is not flooded. */
 export const RK9_COORD_NEW_CURSOR_LOOKBACK_MS = 24 * 3600 * 1000;
@@ -948,7 +955,7 @@ export function rk9CoordJournalService(db: Db) {
       const agentId = actor.kind === "agent_run" ? opts.agentId ?? null : null;
       const mine = (ref: AnyColumn): SQL => rk9CoordMineSql(ref, companyId, actor.actorId, agentId);
       let askOperatorVisible: SQL | undefined;
-      if (!rk9CoordSeesAllAskOperator(actor.kind)) {
+      if (!rk9CoordSeesAllAskOperator(actor)) {
         const asked = alias(rk9CoordEvents, "asked");
         const myQuestions = tx
           .select({ id: asked.id })
@@ -1199,9 +1206,13 @@ export function rk9CoordJournalService(db: Db) {
    * a restricted board viewer still reads in full: its own questions (also of
    * a sibling run of the same agent), the answers to them (an operator-side
    * actor, RK9_COORD_ASK_OPERATOR_ANSWER_KINDS and not unverified, whose
-   * reply_to points at one of them or whose event is on the issue of one of
-   * them) and the escalation of one of them. Every other ask-operator row
-   * stays hidden.
+   * reply_to points at one of them, the delta's rule) and the escalation of
+   * one of them. Every other ask-operator row stays hidden. An operator-side
+   * ask-operator that is only on the same issue is NOT shown: any actor can
+   * pick the issue of its own question, so that match would let grok or
+   * another agent read the operator side's questions on any issue (RK9-657
+   * verifier). The operator's other events on the issue (decision, done,
+   * phase) are never hidden.
    */
   async function askerVisibleRows(
     companyId: string,
@@ -1215,39 +1226,29 @@ export function rk9CoordJournalService(db: Db) {
     const answerer = (row: EventRow) =>
       (RK9_COORD_ASK_OPERATOR_ANSWER_KINDS as readonly string[]).includes(row.actorKind) && row.trust !== "unverified";
     const ids = new Set<number>();
-    const issues = new Set<string>();
     for (const row of candidates) {
       if (row.type === "ask-operator") ids.add(row.id);
       if (row.refEventId !== null) ids.add(row.refEventId);
-      if (row.type === "ask-operator" && answerer(row) && row.issue) issues.add(row.issue);
     }
-    const scope: SQL[] = [inArray(rk9CoordEvents.id, [...ids])];
-    if (issues.size > 0) scope.push(inArray(rk9CoordEvents.issue, [...issues]));
     const mineRows = await db
-      .select({ id: rk9CoordEvents.id, issue: rk9CoordEvents.issue })
+      .select({ id: rk9CoordEvents.id })
       .from(rk9CoordEvents)
       .where(
         and(
           eq(rk9CoordEvents.companyId, companyId),
           eq(rk9CoordEvents.type, "ask-operator"),
           rk9CoordMineSql(rk9CoordEvents.actorRef, companyId, viewer.actorId, viewer.agentId),
-          or(...scope),
+          inArray(rk9CoordEvents.id, [...ids]),
         ),
       );
     const mineIds = new Set(mineRows.map((row) => row.id));
-    const mineIssues = new Set(mineRows.map((row) => row.issue).filter((issue): issue is string => Boolean(issue)));
     for (const row of candidates) {
       if (row.type === "escalated") {
         if (row.refEventId !== null && mineIds.has(row.refEventId)) visible.add(row.id);
         continue;
       }
       if (mineIds.has(row.id)) visible.add(row.id);
-      else if (
-        answerer(row) &&
-        ((row.refEventId !== null && mineIds.has(row.refEventId)) || (row.issue !== null && mineIssues.has(row.issue)))
-      ) {
-        visible.add(row.id);
-      }
+      else if (answerer(row) && row.refEventId !== null && mineIds.has(row.refEventId)) visible.add(row.id);
     }
     return visible;
   }

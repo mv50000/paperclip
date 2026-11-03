@@ -826,7 +826,9 @@ Returns the events after the caller's cursor that concern it:
 question. If every agent session got every question, an agent could decide
 another actor's question and bypass the approval gate.
 
-- Kinds `cc` and `operator` get every `ask-operator`.
+- Kinds `cc` and `operator` get every `ask-operator`, unless the caller's
+  journal trust is `unverified` (RK9-657): a `cc:<host>` claim through a
+  host coord token follows the rule for other kinds below.
 - Every other kind (`agent_run`, `worktree`, `headless`, `orch`, `remote`,
   `rk9claude`, `grok`) gets an `ask-operator` only when one of these holds:
   - The caller is the author. For an `agent_run` this includes another run
@@ -1036,9 +1038,17 @@ full row. The delta already gives an agent no other actor's question.
 The hiding is for other readers only. A restricted viewer still reads in
 full its own questions (for an `agent_run` also those of another run of the
 same agent), the answers to them (an operator-side `ask-operator` whose
-`reply_to` points at one of them, or that is on the issue of one of them)
-and the `escalated` row of one of them. Otherwise an agent would not get
-the answer to its question.
+`reply_to` points at one of them, the delta's rule) and the `escalated` row
+of one of them. Otherwise an agent would not get the answer to its
+question. An operator-side `ask-operator` that is only on the same issue
+stays hidden: any actor can pick the issue of its own question, so that
+match would let grok or another agent read the operator side's questions
+(RK9-657 verifier). The operator's other events on the issue (`decision`,
+`done`, phase) are never hidden.
+
+`GET /escalations` follows the same rule: for an `agent_run`, `grok` or
+unverified viewer, the `message` and `error` of an
+`ask_operator_unanswered` row are null.
 
 ## Lease engine (RK9-627)
 
