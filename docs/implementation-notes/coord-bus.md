@@ -360,12 +360,18 @@ Rules:
   (`githubToken`, `DBPassword`) and between letters and digits
   (`password1`); also read it with only the non-alphanumeric splits
   (`PassWords`, `apiKeys`). The name is a credential name when a segment is
-  `token`, `secret`, `password`, `passwd` or `apikey` (plural too; `api` +
-  `key` counts as one) and the next segment is not a harmless suffix
+  `token`, `secret`, `password`, `passwd`, `apikey`, `secretkey`,
+  `privatekey` or `passphrase` (plural too; `api` + `key` and `private` +
+  `key` count as one) and the next segment is not a harmless suffix
   (`scan`, `policy`, `count`, `used`, `usage`, `limit`, `budget`, `type`,
-  `name`, `ref`, `path`, `file`, `expiry`, `ttl`, `status`, ...; not `id`,
-  because a Vault AppRole `secret_id` is a credential; the
+  `name`, `ref`, `path`, `file`, `expiry`, `ttl`, `status`, ...; the
   full list is `HARMLESS_SUFFIXES` in `server/src/routes/rk9-coord-actors.ts`).
+  `id` after `token` or `apikey` (`token_id`, `api_key_id`) names an
+  identifier (RK9-665): its value passes only when it is a lower-case
+  prefixed id (`tok_abcdef123`: 2-8 letters, `_`, up to 16 lower-case
+  alphanumerics), up to 20 digits or a lower-case UUID. Mixed case and
+  other opaque values are still 422. `secret_id` stays a full credential name, because a
+  Vault AppRole `secret_id` is the credential itself.
   So `password`, `secrets`, `github_token`, `DB_PASSWORD`, `SECRET_KEY`,
   `aws_secret_access_key`, `api_key_prod` and `secret_value` are credential
   names; `tokens_used`, `token_count`, `secret_scan`, `tokenizer`,
@@ -374,20 +380,52 @@ Rules:
   `{"password": "..."}`), each key and string value alone, every string
   leaf of 6+ characters under a credential key at any depth (arrays and
   nested objects included), `key: value` for every ancestor key of a leaf,
-  and a credential name given as a value (one word without whitespace or
-  `/` whose last segment is a credential word, or `secret`/`access`/`private`
-  + `key`, so free text such as `"rk9-642-secret-check"` does not count):
+  and a credential name given as a value. Such a name is one word without
+  whitespace or `/` (or an upper-case label of up to three words, `"DB
+  PASSWORD"`) that either ends in a credential word (the key words plus
+  `authorization`) or `api`/`secret`/`access`/`private` + `key`, or is an
+  upper-case environment variable name or a command-line flag that the key
+  rule accepts (`GITHUB_TOKEN_RW`, `API_KEY_PROD`, `PASSWORD1`,
+  `VAULT_SECRET_ID`, `--token-value`; RK9-665; not `--token-file` or
+  `--password-stdin`, whose value is not inline). So lower-case free text
+  such as `"rk9-642-secret-check"` and `"token.ts"` does not count. A bare
+  lower-case word (`"secret"`, `"tokens"`) counts, but its value passes
+  when every `_`/`-` part of it is on the known-word list `KNOWN_WORDS`
+  (`important`, `billing`, `unlimited`, `reset`, `flow`, ...; RK9-665).
+  This applies to the second item of a two-item array (`["secret",
+  "important"]`, `["password", "reset_flow"]`) and to a pair object with a
+  plural name (`{"name": "tokens", "value": "unlimited"}`), never after a
+  `=` item and never to a singular name in a pair object. Any other value
+  (`"sunshine"`, `"correct-horse-battery-staple"`) is still 422. The `id`
+  and known-word exemptions test the raw string, so an invisible character
+  voids them, and they cover only a string at that position: an object or
+  an array below the name is checked without them. The name may stand in:
   the value entry of a name/value
   pair object (`{"name": "PASSWORD", "value": "..."}`, `{"Key": ...,
   "Value": ...}`, `{"k": ..., "v": ...}`, CloudFormation `ParameterKey` /
   `ParameterValue`), the second item of a two-item array
   (`["DB_PASSWORD", "..."]`) and the item after a credential flag or a `=`
-  item (`["--password", "..."]`, `["DB_PASSWORD", "=", "..."]`). Under a credential key, a key whose value is a
+  item (`["--password", "..."]`, `["DB_PASSWORD", "=", "..."]`). The item
+  after a credential flag is a secret at any length (`["--secret", "foo"]`)
+  unless it starts with `-`; then the usual 6-character rule applies. Under a credential key, a key whose value is a
   scalar or empty is checked like a leaf (`{"password": {"<secret>":
   true}}`). **Numbers are exempt:** a JSON number is never a secret, so
   token counts (`{"max_tokens": 200000}`, `{"tokens": {"input": 1234}}`)
   are accepted; a numeric password sent as a JSON number is accepted too,
-  as a string it is 422. Nesting is capped at 16 levels, the size at 4096
+  as a string it is 422 (operator decision 3.11.2026, RK9-665: numeric JSON
+  passwords stay accepted). A count string (`"123456"`, `"1,234"`,
+  `"200k"`) that is the direct value of a token-count key counts as a
+  number too (RK9-665). A token-count key is `tokens` plus only usage
+  segments (`input`, `output`, `cache`, `total`, `prompt`, `context`,
+  `max`, ...; `TOKEN_COUNT_WORDS`; `read`, `write` and `creation` only after
+  `cache`), so `input_tokens` and `cache_read_tokens` are count keys and
+  `access_tokens`, `recovery_tokens` or `write_tokens` are not. Nothing is
+  masked inside a credential context: below a credential-named key (also a
+  glued `rootpassword` or `authtoken`), in an object that holds a
+  credential name given as a value, or inside an object or array below a
+  token key. So `{"tokens": {"name": "token", "value":
+  "83920144"}}`, `{"password": {"tokens": "83920144"}}`, `{"tokens":
+  {"password": "12345678"}}` and `{"token": "123456789"}` stay 422. Nesting is capped at 16 levels, the size at 4096
   UTF-8 bytes of JSON. `client_external_id` and the registration
   marker are server-owned keys; a client cannot set them. Control characters
   (C0, DEL, C1) in `branch`, and NUL or unpaired surrogates in `metadata`,

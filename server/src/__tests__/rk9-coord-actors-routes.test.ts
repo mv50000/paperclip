@@ -113,6 +113,28 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     expect(toRk9CoordLine(input, 140, env)).toBe(expected);
   });
 
+  // RK9-665 M1: a decoy [redacted] must not balance a secret only a matching reading finds.
+  it.each([
+    ["[re\u200bdacted] Bearer\u200bopaqueTokenValue123", "[redacted]"],
+    ["[redacted\u200c] Bearer\u200bopaqueTokenValue123", "[redacted]"],
+    ["[re\u200bdacted] [re\u200bdacted] Bearer\u200bopaqueTokenValue123 Basic\u200bdXNlcjpwYXNzd29yZA", "[redacted]"],
+    ["note [redacted] Bearer\u200bopaqueTokenValue123", "[redacted]"],
+    // L3: a tab inside a URL credential only matches the raw text
+    ["https://user:\thunter2@host", "https[redacted]host"],
+    ["clone https://user:\thunter2@host now", "clone https[redacted]host now"],
+  ])("redacts a secret behind a decoy or a raw-only match %j", (input, expected) => {
+    expect(toRk9CoordLine(input, 140, env)).toBe(expected);
+  });
+
+  it.each([
+    "working on RK9-665 tests",
+    "coding \u{1F469}\u200d\u{1F4BB} now",
+    "caf\u0065\u0301 break",
+    "already [redacted] in the text",
+  ])("keeps clean text unchanged %j", (input) => {
+    expect(toRk9CoordLine(input, 140, env)).toBe(input);
+  });
+
   it("keeps ZWJ in display text and strips it only for matching", () => {
     const dev = "coding \u{1F469}\u200d\u{1F4BB} now";
     expect(toRk9CoordLine(dev, 140, env)).toBe(dev);
@@ -128,7 +150,14 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
   });
 });
 
-// RK9-642: the RK9-625 round-5 verifier cases. Fake values only.
+// RK9-642: the RK9-625 round-5 verifier cases. Fake values only, split so
+// the gitleaks gate does not read them as real keys.
+const FAKE_HEX = "6a174c20" + "f6dea53c";
+const FAKE_LONG = FAKE_HEX + "74d26018" + "fcceff64" + "abcd1234";
+const FAKE_UUID = "6a174c20" + "-f6de-a53c-74d2-" + "6018fcceff64";
+const FAKE_TOK_ID = "tok_" + "abcdef123";
+const FAKE_OPAQUE = "abcdef" + "123456";
+
 describe("presence metadata secret check", () => {
   it.each([
     "password", "passwords", "PassWords", "secret", "secrets", "github_token", "githubToken", "DB_PASSWORD",
@@ -137,6 +166,8 @@ describe("presence metadata secret check", () => {
     "SECRET_KEY", "aws_secret_access_key", "secretAccessKey", "api_key_prod", "apiKeyProd", "GITHUB_TOKEN_RW",
     "token_prod", "password_new", "password1", "secrets_prod", "password_hash", "DBPassword", "GITHUBToken",
     "Password:", "secret_id", "VAULT_SECRET_ID", "secretId",
+    // RK9-665: one-word compounds and private + key
+    "secretkey", "SECRETKEY", "private_key", "privateKey", "passphrase", "password_id",
   ])("treats %j as a credential name", (name) => {
     expect(isRk9CoordCredentialName(name)).toBe(true);
   });
@@ -144,6 +175,8 @@ describe("presence metadata secret check", () => {
   it.each([
     "tokens_used", "token_count", "secret_scan", "tokenizer", "secretary", "password_policy", "tokensUsed", "note",
     "token_type", "secret_name", "access_token_expiry", "max_tokens_limit",
+    // RK9-665 L2: the id of a token or an API key names it, it is not the credential
+    "token_id", "last_token_id", "tokenId", "api_key_id", "private_key_path",
   ])("does not treat %j as a credential name", (name) => {
     expect(isRk9CoordCredentialName(name)).toBe(false);
   });
@@ -190,6 +223,97 @@ describe("presence metadata secret check", () => {
     // verifier round 2
     ["Vault AppRole secret_id", { vault: { role_id: "abc", secret_id: "6a174c20" + "-f6de-a53c-74d2-6018fcceff64" } }],
     ["SECRET_KEY given as a pair name", { env: [{ name: "SECRET_KEY", value: "django-insecure-abc123xyz" }] }],
+    // RK9-665 M2: value-side names where the credential word is not last
+    ["GITHUB_TOKEN_RW as a pair name", { env: [{ name: "GITHUB_TOKEN_RW", value: FAKE_HEX }] }],
+    ["API_KEY_PROD as a pair name", { env: [{ name: "API_KEY_PROD", value: FAKE_HEX }] }],
+    ["PASSWORD1 as a pair name", { env: [{ name: "PASSWORD1", value: FAKE_HEX }] }],
+    ["PASSWORD_HASH as a pair name", { env: [{ name: "PASSWORD_HASH", value: FAKE_HEX }] }],
+    ["VAULT_SECRET_ID as a pair name", { env: [{ name: "VAULT_SECRET_ID", value: FAKE_HEX }] }],
+    ["DB PASSWORD as a pair name", { env: [{ name: "DB PASSWORD", value: FAKE_HEX }] }],
+    ["SECRET_ID tuple", { a: [["SECRET_ID", FAKE_HEX]] }],
+    ["--token-value flag", { argv: ["--token-value", FAKE_HEX] }],
+    ["short value after a credential flag", { argv: ["claude", "--secret", "foo"] }],
+    ["SECRETKEY as a pair name", { env: [{ name: "SECRETKEY", value: FAKE_HEX }] }],
+    ["passphrase as a pair name", { env: [{ name: "PASSPHRASE", value: FAKE_HEX }] }],
+    ["Authorization header pair", { h: { name: "Authorization", value: FAKE_HEX } }],
+    ["private_key key", { private_key: FAKE_HEX }],
+    // Each RK9-665 exemption keeps rejecting the real secret it sits next to.
+    // L1 vocabulary exemption (bare lower-case name, lower-case word value):
+    ["upper-case name in a two-item list", { env: ["PASSWORD", "hunter2hunter2"] }],
+    ["bare name, value with digits", { tags: ["password", "hunter2hunter2"] }],
+    ["bare name, hex value", { tags: ["secret", FAKE_HEX] }],
+    ["bare name, mixed-case value", { tags: ["secret", "AbCdEfGhIjKlMn"] }],
+    ["bare name, long lower-case passphrase", { tags: ["password", "correcthorsebatterystaple"] }],
+    ["bare name in a pair object, value with digits", { env: [{ name: "password", value: "hunter2hunter2" }] }],
+    ["plural name in a pair object, hex value", { name: "tokens", value: FAKE_HEX }],
+    ["upper-case plural name in a pair object", { name: "TOKENS", value: "unlimited" }],
+    // RK9-665 verifier round 1: the word mode is a known-word list, not a shape
+    ["bare name, lower-case passphrase", { tags: ["password", "correct-horse-battery-staple"] }],
+    ["bare name, dictionary password", { tags: ["password", "sunshine"] }],
+    ["bare singular name in a pair object, lower-case value", { env: [{ name: "password", value: "hunterhunter" }] }],
+    ["bare singular name in a pair object, known word", { field: { name: "password", value: "enabled" } }],
+    ["bare name, separator, lower-case value", { argv: ["secret", "=", "hunterhunter"] }],
+    ["bare plural name, separator", { argv: ["tokens", "=", "hunterhunter"] }],
+    ["key/value pair with a bare singular name", { key: "secret", value: "abcdefghijkl" }],
+    ["object under a bare name pair", { name: "password", value: { data: "trustnoone" } }],
+    ["array under a bare name pair", { name: "password", value: ["trustnoone"] }],
+    ["secret as a key under a bare name pair", { name: "password", value: { trustnoone: true } }],
+    ["passphrase pair, lower-case value", { name: "passphrase", value: "correct-horse-battery-staple" }],
+    ["plural pair name, unknown word", { name: "tokens", value: "hunterhunter" }],
+    ["known word with a tag character", { tags: ["secret", "important\u{E0041}"] }],
+    ["unknown word with a combining mark", { tags: ["secret", "hunter\u0332hunter"] }],
+    // L2 id exemption (token_id: prefixed id, digits or UUID):
+    ["mixed-case token_id", { token_id: "s3cr3tP4" + "ssw0rdXYZ12345" }],
+    ["mixed-case api_key_id", { api_key_id: "AbC123xyz7" + "89QwE456rtY0" }],
+    ["lower-case alphanumeric token_id", { last_token_id: "abc123def" }],
+    ["array under token_ids", { token_ids: ["a1B2c3D4e5" + "F6g7H8i9J0k"] }],
+    ["object under token_id", { token_id: { inner: "a1B2c3D4e5" + "F6g7H8i9J0k" } }],
+    ["secret as a key under token_id", { token_id: { ["a1B2c3D4e5" + "F6g7H8i9J0k"]: true } }],
+    ["upper-case UUID under token_id", { token_id: FAKE_UUID.toUpperCase() }],
+    ["long opaque token_id", { token_id: FAKE_LONG }],
+    ["long opaque TOKEN_ID pair", { env: [{ name: "TOKEN_ID", value: FAKE_LONG }] }],
+    ["GitHub token under token_id", { token_id: "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789" }],
+    ["secret_id stays strict", { secret_id: FAKE_TOK_ID }],
+    // L2 count exemption (count string under a plural tokens key):
+    ["numeric string under a singular token key", { token: "123456789" }],
+    ["password under a token-count key", { tokens: { password: "12345678" } }],
+    ["opaque string under a token-count key", { tokens: FAKE_OPAQUE }],
+    ["digits and letters under a token-count key", { input_tokens: "123456abc" }],
+    ["pair name inside a token-count key", { tokens: { name: "token", value: "83920144" } }],
+    ["upper-case pair name inside a token-count key", { tokens: { name: "TOKEN", value: "83920144" } }],
+    ["label pair name inside a token-count key", { tokens: { name: "API KEY", value: "839201447" } }],
+    ["separator form inside a token-count key", { tokens: ["token", "=", "83920144"] }],
+    ["tuple inside a token-count key", { tokens: [["token", "83920144"]] }],
+    ["pair inside total_tokens", { total_tokens: { key: "token", value: "83920144" } }],
+    ["nested numeric string under a token-count key", { input_tokens: { x: "1234567890123456" } }],
+    ["count with a zero-width space", { tokens: "12345678\u200b9" }],
+    ["long number with a unit", { tokens: "1234567k" }],
+    // verifier round 2: no count masking inside a credential context
+    ["count key under a password key", { password: { tokens: "83920144" } }],
+    ["count key under a pair value", { name: "PASSWORD", value: { tokens: "83920144" } }],
+    ["count key in a credential tuple", { env: ["DB_PASSWORD", { tokens: "83920144" }] }],
+    ["count key that is also a pair value key", { name: "DB_PASSWORD", tokens_value: "83920144" }],
+    ["long grouped digits", { tokens: "123_456_789_012_345_678_901_234" }],
+    ["access_tokens is not a count key", { access_tokens: "12345678901234567890" }],
+    ["recovery_tokens is not a count key", { recovery_tokens: "12345678" }],
+    // verifier round 3: glued credential keys, pair objects, read/write
+    ["count key under rootpassword", { rootpassword: { tokens: "83920144" } }],
+    ["count key under dbpassword", { dbpassword: { input_tokens: "83920144" } }],
+    ["count key under authtoken", { authtoken: { tokens: "83920144" } }],
+    ["count key in an array under githubtoken", { githubtoken: [{ tokens: "83920144" }] }],
+    ["count key beside a pair name", { name: "DB_PASSWORD", tokens: "83920144" }],
+    ["count key beside a key name", { key: "API_KEY", input_tokens: "83920144" }],
+    ["write_tokens is not a count key", { write_tokens: "83920144" }],
+    ["read_write_tokens is not a count key", { read_write_tokens: "83920144" }],
+    ["count key after a glued name in an array", { a: ["dbpassword", { tokens: "83920144" }] }],
+    ["count key under credential", { credential: { tokens: "83920144" } }],
+    ["count key under pwd", { pwd: { tokens: "83920144" } }],
+    ["count key under a spaced pass word", { "pass word": { tokens: "83920144" } }],
+    ["count key after a glued name and a separator", { a: ["rootpassword", "=", { tokens: "83920144" }] }],
+    ["numeric password string", { password: "12345678" }],
+    // --password-stdin exemption: a flag value after a real credential flag
+    ["flag-like value after a credential flag", { argv: ["mysql", "--password", "--abcdef12"] }],
+    ["value after --password still flagged", { argv: ["mysql", "--password", "hunter2hunter2"] }],
   ])("flags %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(true);
   });
@@ -221,6 +345,26 @@ describe("presence metadata secret check", () => {
     ["commit subjects", { recent: ["fix(rk9-coord): presence metadata secret check", "feat(db): advisory lock"] }],
     ["issue title tuple", { issue: ["Fix password reset flow", "in-progress"] }],
     ["setting label", { setting: { label: "Password reset emails", value: "enabled" } }],
+    // RK9-665 L1: free-text two-item lists and labels
+    ["tag list with secret", { tags: ["secret", "important"] }],
+    ["tag list with tokens", { tags: ["tokens", "billing"] }],
+    ["changed list with password", { changed: ["password", "reset_flow"] }],
+    ["plural name in a pair object", { name: "tokens", value: "unlimited" }],
+    ["file names in a two-item list", { files: ["token.ts", "README.md"] }],
+    ["TOKEN_ID as a pair name", { env: [{ name: "TOKEN_ID", value: "tok_" + "abc123" }] }],
+    ["--token-file flag", { argv: ["--token-file", "/run/x"] }],
+    ["flag after a credential flag", { argv: ["docker", "login", "--password-stdin", "--username", "bob123"] }],
+    // RK9-665 L2: token ids and count strings
+    ["token_id", { token_id: FAKE_TOK_ID }],
+    ["last_token_id", { last_token_id: "tok_" + "abc123def" }],
+    ["numeric token_id", { token_id: "1234567890" }],
+    ["token_id as a UUID", { token_id: FAKE_UUID }],
+    ["tokens as a count string", { tokens: "123456" }],
+    ["input_tokens as a count string", { input_tokens: "1234567" }],
+    ["nested count string", { usage: { cache_read_tokens: "123456" } }],
+    ["count strings beside each other", { usage: { input_tokens: "1234567", output_tokens: "1,234" } }],
+    ["cache count keys", { usage: { cache_read_tokens: "123456", cache_creation_input_tokens: "234567" } }],
+    ["tokens_limit with a unit", { context: { tokens_used: 1234, tokens_limit: "200k" } }],
   ])("accepts %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
   });
