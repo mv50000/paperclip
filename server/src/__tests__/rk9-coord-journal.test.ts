@@ -269,6 +269,63 @@ if (!support.supported) {
     expect(activity[0]!.entityId).toBe(String(res.body.event.id));
   });
 
+  it("rolls the event back when its activity row fails, so a retry logs it once (RK9-641)", async () => {
+    const cid = await newCompany();
+    await db.execute(sql.raw(`
+      CREATE FUNCTION rk9_test_event_log_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.company_id = '${cid}' AND NEW.action = 'rk9.coord.event_appended' THEN
+          RAISE EXCEPTION 'activity log down';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER rk9_test_event_log_fail BEFORE INSERT ON activity_log
+        FOR EACH ROW EXECUTE FUNCTION rk9_test_event_log_fail();
+    `));
+    const body = { type: "blocker", issue: "RKL-1", what: "log test", client_event_id: "log-test-1" };
+    try {
+      const failed = await post(cid, "worktree:RKL-1", body);
+      expect(failed.status).toBe(500);
+      const none = await db.select().from(rk9CoordEvents).where(eq(rk9CoordEvents.companyId, cid));
+      expect(none).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`
+        DROP TRIGGER rk9_test_event_log_fail ON activity_log;
+        DROP FUNCTION rk9_test_event_log_fail();
+      `));
+    }
+    const retry = await post(cid, "worktree:RKL-1", body);
+    expect(retry.status).toBe(201);
+    expect(retry.body.duplicate).toBe(false);
+    const logged = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, cid), eq(activityLog.action, "rk9.coord.event_appended")));
+    expect(logged).toHaveLength(1);
+    const again = await post(cid, "worktree:RKL-1", body);
+    expect(again.body.duplicate).toBe(true);
+    const still = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, cid), eq(activityLog.action, "rk9.coord.event_appended")));
+    expect(still).toHaveLength(1);
+  });
+
+  it("logs one activity row per stub insert, none for the cursor move (RK9-641)", async () => {
+    const cid = await newCompany();
+    const delta = () =>
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", "worktree:RKS-1");
+    expect((await delta()).status).toBe(204);
+    await post(cid, "worktree:RKS-2", { type: "blocker", issue: "RKS-1", what: "for the delta" });
+    expect((await delta()).status).toBe(200);
+    const rows = await db.select().from(activityLog).where(eq(activityLog.companyId, cid));
+    const actions = rows.map((row) => row.action).sort();
+    expect(actions).toEqual(["rk9.coord.actor_stub_created", "rk9.coord.event_appended"]);
+    const stub = rows.find((row) => row.action === "rk9.coord.actor_stub_created")!;
+    expect(stub).toMatchObject({ entityType: "rk9_coord_actor", actorType: "user", actorId: "operator-user" });
+    expect(stub.details).toMatchObject({ actor: "worktree:RKS-1", kind: "worktree" });
+  });
+
   it("forces unverified trust for remote host rows whatever the client sends", async () => {
     const app = appFor(none, hostToken(companyId));
     const res = await request(app)

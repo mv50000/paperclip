@@ -15,6 +15,13 @@
 //   The answer carries target_live + name, so the CLI can suggest SendMessage.
 // - claim(): GET /inbox/me. One UPDATE ... WHERE id IN (SELECT ... FOR UPDATE
 //   SKIP LOCKED) RETURNING: two concurrent claimers never get the same row.
+//   Only a local (board-key) or verified actor claims rows addressed by
+//   name or issue; remote, grok and agent_run actors claim only rows
+//   addressed to their exact actor id (operator decision 2.11.2026, RK9-641).
+// - Every write logs activity_log in its own transaction (RK9-641): send
+//   (`rk9.coord.inbox_sent`), a claim that delivers rows
+//   (`rk9.coord.inbox_claimed`) and the agent-message comment
+//   (`issue.comment_added` plus `rk9.coord.message_commented`).
 //
 // Contract: docs/implementation-notes/coord-bus.md.
 import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
@@ -23,7 +30,9 @@ import { agents, heartbeatRuns, issues, rk9CoordActors, rk9CoordInbox } from "@p
 import { parseRk9CoordActorId, RK9_COORD_ISSUE_PATTERN, type SendRk9CoordInbox } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
-import { logActivity } from "./activity-log.js";
+import { logger } from "../middleware/logger.js";
+import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
+import { issueReferenceService } from "./issue-references.js";
 import { issueService } from "./issues.js";
 import { issueTreeControlService } from "./issue-tree-control.js";
 import {
@@ -33,6 +42,7 @@ import {
   isRk9CoordActorLive,
   rk9CoordActorIssue,
   rk9CoordPresenceTtlSeconds,
+  type Rk9CoordActivityActor,
   type Rk9CoordActorRow,
 } from "./rk9-coord-journal.js";
 import { toRk9CoordLine } from "./rk9-coord-text.js";
@@ -79,6 +89,19 @@ export interface Rk9CoordInboxMessage {
   target_live: boolean;
   to: string;
   created_at: string;
+}
+
+/**
+ * May this actor claim inbox rows addressed by name or issue? Only local
+ * sessions (the paperclip-01 board key) and verified actors (operator,
+ * rk9claude). Remote hosts, Grok and agent runs (even with a verified run
+ * JWT) claim only rows addressed to their exact actor id, so a remote
+ * token cannot set a session's name or issue in presence and read its
+ * messages (operator decision 2.11.2026, RK9-641 items 3 and 6).
+ */
+export function rk9CoordMayClaimByNameOrIssue(actor: Rk9CoordResolvedActor): boolean {
+  if (actor.kind === "remote" || actor.kind === "grok" || actor.kind === "agent_run") return false;
+  return actor.principal === "board_key" || actor.trust === "verified";
 }
 
 function activityActor(caller: Rk9CoordInboxCaller) {
@@ -154,7 +177,12 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
 
   async function findIssue(companyId: string, identifier: string) {
     const [row] = await db
-      .select({ id: issues.id, identifier: issues.identifier, conversationAgentId: issues.conversationAgentId })
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        conversationAgentId: issues.conversationAgentId,
+      })
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier)))
       .limit(1);
@@ -163,7 +191,12 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
 
   async function findIssueById(companyId: string, issueId: string) {
     const [row] = await db
-      .select({ id: issues.id, identifier: issues.identifier, conversationAgentId: issues.conversationAgentId })
+      .select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        conversationAgentId: issues.conversationAgentId,
+      })
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
       .limit(1);
@@ -180,7 +213,7 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
   ): Promise<Rk9CoordInboxSendResult> {
     assertMayMessageAgents(caller);
     if (caller.paperclip.type !== "user") throw new Error("unreachable");
-    let issue: { id: string; identifier: string | null; conversationAgentId: string | null } | null = null;
+    let issue: { id: string; identifier: string | null; title: string; conversationAgentId: string | null } | null = null;
     if (input.issue) {
       issue = await findIssue(companyId, input.issue);
     } else if (target.runIssueId) {
@@ -208,21 +241,59 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     const author = { userId: caller.paperclip.userId };
     // issueService.addComment does not wake the assignee: the agent sees the
     // comment on its next heartbeat. A message must not buy a heartbeat run.
-    const comment = await issueService(db).addComment(issue.id, commentBody, author);
-    await logActivity(db, {
-      companyId,
-      ...activityActor(caller),
-      action: "rk9.coord.message_commented",
-      entityType: "issue",
-      entityId: issue.id,
-      issueId: issue.id,
-      details: {
-        from: caller.actor.actorId,
-        to: target.toValue,
-        targetAgentId: target.agentId,
-        commentId: comment.id,
-      },
+    // RK9-641: the same activity row and live event as POST
+    // /issues/:id/comments (`issue.comment_added`, published after the
+    // commit) plus the coord row, in the comment's transaction, and the
+    // issue-reference index after it. External-object sync is left out: it
+    // needs the plugin worker manager of the issue routes.
+    const publications: ActivityPublication[] = [];
+    const commented = issue;
+    const comment = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const added = await issueService(txDb).addComment(commented.id, commentBody, author, undefined, txDb);
+      await logActivity(
+        txDb,
+        {
+          companyId,
+          ...activityActor(caller),
+          action: "issue.comment_added",
+          entityType: "issue",
+          entityId: commented.id,
+          details: {
+            commentId: added.id,
+            bodySnippet: added.body.slice(0, 120),
+            identifier: commented.identifier,
+            issueTitle: commented.title,
+            coordInbox: true,
+          },
+        },
+        publications,
+      );
+      await logActivity(
+        txDb,
+        {
+          companyId,
+          ...activityActor(caller),
+          action: "rk9.coord.message_commented",
+          entityType: "issue",
+          entityId: commented.id,
+          details: {
+            from: caller.actor.actorId,
+            to: target.toValue,
+            targetAgentId: target.agentId,
+            commentId: added.id,
+          },
+        },
+        publications,
+      );
+      return added;
     });
+    for (const publication of publications) publishActivity(publication);
+    try {
+      await issueReferenceService(db).syncComment(comment.id);
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, commentId: comment.id }, "rk9 coord message: could not index comment references");
+    }
     return {
       delivery: "issue_comment",
       id: null,
@@ -243,33 +314,44 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     now: Date,
   ) {
     const sender = await findRk9CoordActorRow(db, companyId, caller.actor.actorId);
-    const [row] = await db
-      .insert(rk9CoordInbox)
-      .values({
-        companyId,
-        toActorId: target.toActorId ?? null,
-        toIssue: target.toIssue ?? null,
-        toName: target.toName ?? null,
-        fromActorId: sender?.id ?? null,
-        fromActorRef: caller.actor.actorId,
-        kind: input.kind ?? "message",
-        body,
-        expiresAt: input.expires_in_s ? new Date(now.getTime() + input.expires_in_s * 1000) : null,
-      })
-      .returning({ id: rk9CoordInbox.id });
-    await logActivity(db, {
-      companyId,
-      ...activityActor(caller),
-      action: "rk9.coord.inbox_sent",
-      entityType: "rk9_coord_inbox",
-      entityId: String(row!.id),
-      details: {
-        from: caller.actor.actorId,
-        to: target.toActorId ? input.to : target.toIssue ?? target.toName ?? input.to,
-        kind: input.kind ?? "message",
-      },
+    // Insert and activity row in one transaction (RK9-641).
+    const publications: ActivityPublication[] = [];
+    const id = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const [row] = await txDb
+        .insert(rk9CoordInbox)
+        .values({
+          companyId,
+          toActorId: target.toActorId ?? null,
+          toIssue: target.toIssue ?? null,
+          toName: target.toName ?? null,
+          fromActorId: sender?.id ?? null,
+          fromActorRef: caller.actor.actorId,
+          kind: input.kind ?? "message",
+          body,
+          expiresAt: input.expires_in_s ? new Date(now.getTime() + input.expires_in_s * 1000) : null,
+        })
+        .returning({ id: rk9CoordInbox.id });
+      await logActivity(
+        txDb,
+        {
+          companyId,
+          ...activityActor(caller),
+          action: "rk9.coord.inbox_sent",
+          entityType: "rk9_coord_inbox",
+          entityId: String(row!.id),
+          details: {
+            from: caller.actor.actorId,
+            to: target.toActorId ? input.to : target.toIssue ?? target.toName ?? input.to,
+            kind: input.kind ?? "message",
+          },
+        },
+        publications,
+      );
+      return row!.id;
     });
-    return row!.id;
+    for (const publication of publications) publishActivity(publication);
+    return id;
   }
 
   async function send(
@@ -386,50 +468,82 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
   async function claim(
     companyId: string,
     actor: Rk9CoordResolvedActor,
-    opts: { agentId?: string | null } = {},
+    opts: { agentId?: string | null; activityActor?: Rk9CoordActivityActor | null } = {},
   ): Promise<Rk9CoordInboxMessage[]> {
     const now = clock();
-    const self = await ensureRk9CoordActorRow(db, companyId, actor, opts.agentId ?? null);
-    return claimForRow(companyId, self, now);
+    const self = await ensureRk9CoordActorRow(db, companyId, actor, opts.agentId ?? null, opts.activityActor ?? null);
+    return claimForRow(companyId, actor, self, now, opts.activityActor ?? null);
   }
 
-  async function claimForRow(companyId: string, self: Rk9CoordActorRow, now: Date): Promise<Rk9CoordInboxMessage[]> {
-    const issue = rk9CoordActorIssue(self);
+  async function claimForRow(
+    companyId: string,
+    actor: Rk9CoordResolvedActor,
+    self: Rk9CoordActorRow,
+    now: Date,
+    activity: Rk9CoordActivityActor | null,
+  ): Promise<Rk9CoordInboxMessage[]> {
     const at = sql`${now.toISOString()}::timestamptz`;
-    const names = [self.actorRef, ...(self.name ? [self.name] : [])];
-    const targets = [
-      sql`i.to_actor_id = ${self.id}`,
-      sql`i.to_name in (${sql.join(names.map((name) => sql`${name}`), sql`, `)})`,
-    ];
-    if (issue) targets.push(sql`i.to_issue = ${issue}`);
-    const result = await db.execute<{
-      id: string | number;
-      kind: string;
-      body: string;
-      from_actor_ref: string;
-      from_actor_id: string | null;
-      to_actor_id: string | null;
-      to_issue: string | null;
-      to_name: string | null;
-      created_at: string | Date;
-    }>(sql`
-      update rk9_coord_inbox
-      set delivered_at = ${at}, delivered_to_actor_id = ${self.id}
-      where delivered_at is null
-        and company_id = ${companyId}
-        and id in (
-          select i.id from rk9_coord_inbox i
-          where i.company_id = ${companyId}
-            and i.delivered_at is null
-            and (i.expires_at is null or i.expires_at > ${at})
-            and (${sql.join(targets, sql` or `)})
-          order by i.id
-          limit ${CLAIM_LIMIT}
-          for update skip locked
-        )
-      returning id, kind, body, from_actor_ref, from_actor_id, to_actor_id, to_issue, to_name, created_at
-    `);
-    const rows = Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? []);
+    // The exact actor id: the actor row, or a name row that holds the id
+    // (send() stores an actor id without a row as to_name).
+    const targets = [sql`i.to_actor_id = ${self.id}`, sql`i.to_name = ${self.actorRef}`];
+    if (rk9CoordMayClaimByNameOrIssue(actor)) {
+      if (self.name) targets.push(sql`i.to_name = ${self.name}`);
+      const issue = rk9CoordActorIssue(self);
+      if (issue) targets.push(sql`i.to_issue = ${issue}`);
+    }
+    const publications: ActivityPublication[] = [];
+    const result = await db.transaction(async (tx) => {
+      const txDb = tx as unknown as Db;
+      const claimedRows = await txDb.execute<{
+        id: string | number;
+        kind: string;
+        body: string;
+        from_actor_ref: string;
+        from_actor_id: string | null;
+        to_actor_id: string | null;
+        to_issue: string | null;
+        to_name: string | null;
+        created_at: string | Date;
+      }>(sql`
+        update rk9_coord_inbox
+        set delivered_at = ${at}, delivered_to_actor_id = ${self.id}
+        where delivered_at is null
+          and company_id = ${companyId}
+          and id in (
+            select i.id from rk9_coord_inbox i
+            where i.company_id = ${companyId}
+              and i.delivered_at is null
+              and (i.expires_at is null or i.expires_at > ${at})
+              and (${sql.join(targets, sql` or `)})
+            order by i.id
+            limit ${CLAIM_LIMIT}
+            for update skip locked
+          )
+        returning id, kind, body, from_actor_ref, from_actor_id, to_actor_id, to_issue, to_name, created_at
+      `);
+      const list = Array.isArray(claimedRows) ? claimedRows : ((claimedRows as { rows?: unknown[] }).rows ?? []);
+      // A claim that delivers rows changes them (delivered_at,
+      // delivered_to_actor_id): one activity row per claim call, in the
+      // same transaction (RK9-641). An empty claim writes none.
+      if (list.length > 0) {
+        const ids = (list as Array<Record<string, unknown>>).map((row) => Number(row.id)).sort((a, b) => a - b);
+        await logActivity(
+          txDb,
+          {
+            companyId,
+            ...(activity ?? { actorType: "system" as const, actorId: actor.actorId, agentId: null, runId: null }),
+            action: "rk9.coord.inbox_claimed",
+            entityType: "rk9_coord_actor",
+            entityId: self.id,
+            details: { actor: actor.actorId, count: ids.length, ids },
+          },
+          publications,
+        );
+      }
+      return list;
+    });
+    for (const publication of publications) publishActivity(publication);
+    const rows = result;
     const claimed = (rows as Array<Record<string, unknown>>).map((row) => ({
       id: Number(row.id),
       kind: String(row.kind),

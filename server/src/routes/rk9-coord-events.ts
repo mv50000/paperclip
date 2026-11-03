@@ -18,7 +18,6 @@ import {
 import { HttpError } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
-import { logActivity } from "../services/activity-log.js";
 import {
   assertRk9CoordEventKindAllowed,
   formatRk9CoordDeltaLine,
@@ -83,17 +82,11 @@ export function rk9CoordEventRoutes(db: Db) {
       const companyId = companyIdOf(req);
       const actor = requireRk9CoordActor(req);
       const input = req.body as AppendRk9CoordEvent;
-      const { event, duplicate } = await journal.append(companyId, actor, input);
-      if (!duplicate) {
-        await logActivity(db, {
-          companyId,
-          ...rk9CoordActivityActor(req, actor),
-          action: "rk9.coord.event_appended",
-          entityType: "rk9_coord_event",
-          entityId: String(event.id),
-          details: { type: event.type, actor: event.actor, issue: event.issue, trust: event.trust },
-        });
-      }
+      // The activity row is written in the insert's transaction (RK9-641).
+      const { event, duplicate } = await journal.append(companyId, actor, input, {
+        activityActor: rk9CoordActivityActor(req, actor),
+        agentId: rk9CoordCallerAgentId(req),
+      });
       res.status(duplicate ? 200 : 201).json({ event, duplicate });
     } catch (err) {
       next(err);
@@ -115,6 +108,7 @@ export function rk9CoordEventRoutes(db: Db) {
         repo: query.repo ?? null,
         issue: query.issue ?? null,
         agentId: rk9CoordCallerAgentId(req),
+        activityActor: rk9CoordActivityActor(req, actor),
       });
       res.setHeader("Cache-Control", "no-store");
       if (!delta) {

@@ -9,7 +9,12 @@ import { sendRk9CoordInboxSchema, type SendRk9CoordInbox } from "@paperclipai/sh
 import { validate } from "../middleware/validate.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { rk9CoordInboxService, type Rk9CoordInboxCaller } from "../services/rk9-coord-inbox.js";
-import { companyIdOf, rk9CoordCallerAgentId, requireRk9CoordActor } from "./rk9-coord-events.js";
+import {
+  companyIdOf,
+  rk9CoordActivityActor,
+  rk9CoordCallerAgentId,
+  requireRk9CoordActor,
+} from "./rk9-coord-events.js";
 
 function inboxCaller(req: Request, actor: Rk9CoordResolvedActor): Rk9CoordInboxCaller {
   if (req.rk9CoordPrincipal) return { actor, paperclip: { type: "coord_token" } };
@@ -47,7 +52,10 @@ export function rk9CoordInboxRoutes(db: Db) {
   router.get("/me", async (req, res, next) => {
     try {
       const actor = requireRk9CoordActor(req);
-      const messages = await inbox.claim(companyIdOf(req), actor, { agentId: rk9CoordCallerAgentId(req) });
+      const messages = await inbox.claim(companyIdOf(req), actor, {
+        agentId: rk9CoordCallerAgentId(req),
+        activityActor: rk9CoordActivityActor(req, actor),
+      });
       res.setHeader("Cache-Control", "no-store");
       if (messages.length === 0) {
         res.status(204).end();
