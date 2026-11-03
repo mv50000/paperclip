@@ -447,10 +447,12 @@ model is called.
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
-  object as the value (`"tokens": ["..."]`, `"secrets": {"db": "..."}`).
-  A bracketed value counts only when it holds a value (not a key) of 6+
-  characters that is not a number, boolean or null, so token counts
-  (`"tokens": {"input": 1234}`) stay.
+  object as the value (`"tokens": ["..."]`, `"secrets": {"db": "..."}`,
+  `secrets=(...)`). The content up to the first closing bracket goes (to
+  the end of the text when there is none). The one exception is a closed
+  JSON object of counters: every key a word without digits, every value a
+  JSON number, boolean or null (`"tokens": {"input": 1234}`), so token
+  counts stay. An array of numbers under a keyword is redacted.
 - **Known prose false positive.** A keyword, a separator and one word of 6+
   characters is redacted: `Secrets: rotated today` is stored as
   `[redacted] today`. This is deliberate (fail closed): a rule that keeps
@@ -459,7 +461,8 @@ model is called.
 - **Display form** (what is stored): C0 controls other than whitespace, DEL
   and C1 are removed; so are the soft hyphen (U+00AD), CGJ (U+034F), U+180E,
   ZWSP (U+200B), the word joiner and invisible operators (U+2060-U+2064),
-  bidi embeddings, overrides and isolates (U+202A-U+202E, U+2066-U+2069),
+  the bidi marks (U+061C, U+200E, U+200F), bidi embeddings, overrides and
+  isolates (U+202A-U+202E, U+2066-U+2069),
   the BOM, the stand-alone Hangul fillers (U+3164, U+FFA0) and the tag
   characters (U+E0000-U+E007F; a subdivision flag such as England's shows
   as a black flag). ZWNJ (U+200C), ZWJ (U+200D) and the variation selectors
@@ -469,11 +472,17 @@ model is called.
 - **Matching readings.** Invisible characters can split a secret past the
   pattern or glue a keyword to its value. The server also reads the text with
   every format character (`\p{Cf}`), combining mark (`\p{Mn}`, `\p{Me}`),
-  Hangul filler and control removed, and once with them as spaces; both
-  readings are NFKC-folded, so full-width text (`ｔｏｋｅｎ＝...`) matches
-  too. When a reading finds a secret the display text does not show, the
-  stripped reading is stored only if both readings agree and come out
-  clean; otherwise the whole field becomes `[redacted]` (fail closed).
+  Hangul filler and control removed, once with them as spaces, and in the
+  two mixed readings (controls as spaces and the rest removed, and the
+  reverse). The readings are NFKC-folded, so full-width text matches too.
+- **Fail closed.** A text that contains any control, format, combining or
+  filler character becomes `[redacted]` as a whole when any reading shows a
+  secret. Any text whose stored line still shows a secret in some reading
+  (a full-width token) becomes `[redacted]` as a whole too. Only a plain
+  text with an ordinary secret keeps the rest of the line
+  (`deploy ok token=... done` -> `deploy ok [redacted] done`). The server
+  does not count `[redacted]` markers (a literal marker in the text could
+  fool such a count).
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
   `client_event_id`, the heads-up `session_id`) are grammar-restricted. A secret-looking value there is
   422 `rk9_coord_secret_in_field`, not a silent store. A match counts only at
@@ -481,8 +490,10 @@ model is called.
   is a lookbehind in the pattern (RK9-641), so a mid-word candidate cannot
   hide a token after it (`task-runner_ghp_...` is 422), and a match that
   starts with a non-alphanumeric character counts anywhere
-  (`https://user:pw@host` is 422). The inbox `to` also rejects control and
-  format characters with 400.
+  (`https://user:pw@host` is 422). The check runs on the raw value and on
+  its matching reading, so a combining mark, a selector or a full-width
+  form cannot hide a token. The inbox `to` also rejects control and format
+  characters with 400.
 - The raw text is redacted before the collapse too, so a pattern that spans
   a tab or newline is caught.
 - Caps: `summary` 300, each payload text field 500 (`rationale` 2000, the

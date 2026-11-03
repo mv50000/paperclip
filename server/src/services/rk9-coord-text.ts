@@ -36,48 +36,39 @@ const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
  * The keyword rule, always applied on top of the env pattern, in a wider
  * form (RK9-641): singular and plural keywords (`token`, `secrets`,
  * `api_keys`, ...); `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A` as
- * the separator; and a JSON array or object as the value (`"tokens":
- * ["..."]`, `"secrets": {"db": "..."}`), whose content up to the closing
- * bracket goes. Full-width forms (`ｔｏｋｅｎ＝...`) are caught by the NFKC
- * matching reading, not here.
+ * the separator; and a bracketed value (`"tokens": ["..."]`, `"secrets":
+ * {"db": "..."}`, `secrets=(...)`), whose content up to the first closing
+ * bracket goes (to the end of the text when it has none). Full-width forms
+ * are caught by the NFKC matching reading, not here.
  */
 const KEYWORD_RX =
-  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,200}[\]})]?)|["']?[^\s"',;]{6,})/gi;
+  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
 /** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
 const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
-/** One item of a bracketed value: a quoted or bare string, and whether a `:` makes it a key. */
-const BRACKET_ITEM_RX = /"((?:[^"\\]|\\.)*)"(\s*:)?|'([^']*)'(\s*:)?|([^\s"',:[\]{}()]+)(\s*:)?/g;
-const NOT_SECRET_SCALAR_RX = /^(?:[-+]?[\d.eE+-]+|true|false|null)$/;
-
 /**
- * A bracketed value counts as a secret only when it holds a value (not a
- * key) of 6+ characters that is not a number, boolean or null: token counts
- * such as `"tokens": {"input": 1234}` stay (the RK9-642 numbers rule).
+ * The one bracketed value that stays: a closed JSON object of counters,
+ * every key a word without digits and every value a JSON number, boolean or
+ * null (`"tokens": {"input": 1234, "output": 56}`, the RK9-642 numbers rule).
+ * Arrays, parentheses, digits in a key and unclosed brackets are redacted.
  */
-function bracketHasSecretValue(content: string): boolean {
-  for (const item of content.matchAll(BRACKET_ITEM_RX)) {
-    if (item[2] ?? item[4] ?? item[6]) continue;
-    const value = item[1] ?? item[3] ?? item[5] ?? "";
-    if (value.length >= 6 && !NOT_SECRET_SCALAR_RX.test(value)) return true;
-  }
-  return false;
-}
+const COUNTER_MAP_RX =
+  /^\{\s*(?:["']?[A-Za-z_][A-Za-z_-]{0,39}["']?\s*:\s*(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)\s*(?:,\s*|(?=\})))*\}$/;
 
 /**
  * Removed from display (stored) text: soft hyphen, combining grapheme joiner,
  * Mongolian vowel separator, zero-width space, word joiner and invisible
- * operators, bidi embeddings, overrides and isolates, the BOM, the stand-alone
+ * operators, bidi marks, embeddings, overrides and isolates, the BOM, the stand-alone
  * Hangul fillers and the tag characters (ASCII smuggling).
  */
 const DISPLAY_INVISIBLE_RX =
-  /[­͏᠎​‪-‮⁠-⁤⁦-⁩ㅤﾠ﻿\u{E0000}-\u{E007F}]/gu;
+  /[\u00ad\u034f\u061c\u200e\u200f\u180e\u200b\u202a-\u202e\u2060-\u2064\u2066-\u2069\u3164\uffa0\ufeff\u{E0000}-\u{E007F}]/gu;
 /**
  * Joiners and selectors stay in display text when they stand alone or in
- * pairs (RK9-641): ZWJ builds emoji sequences (👩‍💻, ❤️‍🔥 = U+FE0F U+200D),
+ * pairs (RK9-641): ZWJ builds emoji sequences (\u{1F469}\u200d\u{1F4BB}, \u2764\ufe0f\u200d\u{1F525} = U+FE0F U+200D),
  * ZWNJ is part of Persian spelling, VS16 picks the emoji form. A run of three
  * or more is steganography (emoji smuggling), not text, and is removed.
  */
-const JOINER_RUN_RX = /[‌‍︀-️\u{E0100}-\u{E01EF}]{3,}/gu;
+const JOINER_RUN_RX = /[\u200c\u200d\ufe00-\ufe0f\u{E0100}-\u{E01EF}]{3,}/gu;
 /** C0 controls other than whitespace, DEL and C1 controls: removed. */
 // eslint-disable-next-line no-control-regex
 const CONTROL_RX = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g;
@@ -89,7 +80,7 @@ const CONTROL_RX = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g;
  * keyword or a token so that the pattern misses it.
  */
 // eslint-disable-next-line no-control-regex
-const MATCH_INVISIBLE_RX = /[\p{Cf}\p{Mn}\p{Me}ᅟᅠㅤﾠ\u0000-\u0008\u000e-\u001f\u007f-\u009f]/gu;
+const MATCH_INVISIBLE_RX = /[\p{Cf}\p{Mn}\p{Me}\u115f\u1160\u3164\uffa0\u0000-\u0008\u000e-\u001f\u007f-\u009f]/gu;
 /** Whitespace (tab, newline, Unicode spaces, line/paragraph separators). */
 const WHITESPACE_RX = /\s+/g;
 
@@ -121,7 +112,7 @@ export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = proces
     .replace(rx, RK9_COORD_REDACTED)
     .replace(COORD_TOKEN_RX, RK9_COORD_REDACTED)
     .replace(KEYWORD_RX, (match: string, _prefix: string, bracket: string | undefined) =>
-      bracket !== undefined && !bracketHasSecretValue(bracket) ? match : RK9_COORD_REDACTED,
+      bracket !== undefined && COUNTER_MAP_RX.test(bracket) ? match : RK9_COORD_REDACTED,
     );
 }
 
@@ -142,7 +133,7 @@ export function collapseRk9CoordText(text: string): string {
 /**
  * Matching form: every invisible character goes (ZWJ, ZWNJ, selectors and
  * combining marks included), then NFKC folds full-width and compatibility
- * forms (`ｔｏｋｅｎ` -> `token`). Use it to test text, not to store it.
+ * forms (`\uff54\uff4f\uff4b\uff45\uff4e` -> `token`). Use it to test text, not to store it.
  */
 export function rk9CoordMatchText(text: string): string {
   const stripped = text.replace(MATCH_INVISIBLE_RX, "");
@@ -151,7 +142,7 @@ export function rk9CoordMatchText(text: string): string {
 
 /**
  * The other matching reading: every invisible character becomes a space, so
- * `Bearer​<token>` reads `Bearer <token>` (removing it would glue the
+ * `Bearer\u200b<token>` reads `Bearer <token>` (removing it would glue the
  * keyword to the token and `\s+` would miss it).
  */
 function rk9CoordSpacedText(text: string): string {
@@ -159,15 +150,33 @@ function rk9CoordSpacedText(text: string): string {
   return spaced.normalize("NFKC").replace(MATCH_INVISIBLE_RX, " ").replace(WHITESPACE_RX, " ").trim();
 }
 
+/** Every reading a secret check looks at. */
+function rk9CoordReadings(text: string): string[] {
+  return [
+    text,
+    collapseRk9CoordText(text),
+    rk9CoordMatchText(text),
+    rk9CoordSpacedText(text),
+    // RK9-641: the two mixed readings. Controls as spaces and the other
+    // invisible characters removed (`Bearer<SOH>abcd<ZWSP>efgh...`), and the
+    // reverse.
+    rk9CoordMatchText(text.replace(CONTROL_RX, " ")),
+    rk9CoordSpacedText(text.replace(CONTROL_RX, "")),
+  ];
+}
+
+/** Any control, format, combining or filler character (the matching set). */
+const HAS_INVISIBLE_RX = new RegExp(MATCH_INVISIBLE_RX.source, "u");
+
 /**
- * True when the raw, the display or a matching form of the text contains
+ * True when any reading of the text (raw, display, matching) contains
  * anything the redaction would replace.
  */
 export function rk9CoordTextHasSecret(text: string, env: NodeJS.ProcessEnv = process.env): boolean {
   // The raw text is what a verbatim field stores (a tab inside a URL
   // credential only matches raw); the other forms defeat control-character,
   // zero-width and full-width obfuscation.
-  for (const form of [text, collapseRk9CoordText(text), rk9CoordMatchText(text), rk9CoordSpacedText(text)]) {
+  for (const form of rk9CoordReadings(text)) {
     if (redactRk9CoordText(form, env) !== form) return true;
   }
   return false;
@@ -201,17 +210,18 @@ function identifierRx(pattern: RegExp): RegExp {
  * Secret check for grammar-restricted identifiers (repo, app, names, ids).
  * `task-runner` or `kiosk-frontend` contain `sk-...` mid-word and are
  * ordinary names, while `sk-abc...`, `pcp_board_...` at the start of a part
- * or `https://user:pw@host` are not.
+ * or `https://user:pw@host` are not. The raw text and its matching reading
+ * are both checked.
  */
 export function rk9CoordIdentifierHasSecret(text: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  for (const pattern of [rk9CoordSecretRx(env), ...ALWAYS_RX]) {
-    if (identifierRx(pattern).test(text)) return true;
+  // The matching reading too (RK9-641): a combining mark, selector or
+  // full-width form must not hide a token in a verbatim field.
+  for (const form of new Set([text, rk9CoordMatchText(text)])) {
+    for (const pattern of [rk9CoordSecretRx(env), ...ALWAYS_RX]) {
+      if (identifierRx(pattern).test(form)) return true;
+    }
   }
   return false;
-}
-
-function countRedactions(text: string): number {
-  return text.split(RK9_COORD_REDACTED).length - 1;
 }
 
 /**
@@ -229,33 +239,23 @@ export function toRk9CoordLine(
   // (`[^ /@]+` matches a tab but not the space it collapses to). Then
   // collapse and redact again: JS \s misses most C0 controls, so
   // `token\x01=\x01<value>` only matches once the controls are gone.
-  const raw = redactRk9CoordText(text, env);
-  let line = redactRk9CoordText(collapseRk9CoordText(raw), env);
-  // The display form keeps single joiners and selectors (`pass‍word=...`)
-  // and removes a control or ZWSP that is the only separator
-  // (`Bearer​<token>`), so a secret can survive the redaction above.
-  // When a matching reading finds more secrets, keep the stripped reading
-  // only if both redacted readings are the same text apart from whitespace
-  // and come out clean; otherwise redact the whole field (fail closed: each
-  // reading may find a different secret). The readings start from the
-  // raw-redacted text, so a raw-only match (a tab inside a URL credential)
-  // is counted on both sides and cannot mask a second secret; the readings
-  // of the original text are counted as well.
-  const readings = [rk9CoordMatchText(raw), rk9CoordSpacedText(raw)].map((form) => redactRk9CoordText(form, env));
-  const original = [rk9CoordMatchText(text), rk9CoordSpacedText(text)].map((form) => redactRk9CoordText(form, env));
-  const found = Math.max(...[...readings, ...original].map(countRedactions));
-  if (rk9CoordTextHasSecret(line, env) || found > countRedactions(line)) {
-    const [stripped, spaced] = readings as [string, string];
-    const agree =
-      stripped.replace(/\s+/g, "") === spaced.replace(/\s+/g, "") &&
-      !rk9CoordTextHasSecret(stripped, env) &&
-      !rk9CoordTextHasSecret(spaced, env);
-    line = agree ? stripped : RK9_COORD_REDACTED;
+  let line = redactRk9CoordText(collapseRk9CoordText(redactRk9CoordText(text, env)), env);
+  // Fail closed (RK9-641, after the verifier showed that counting
+  // `[redacted]` markers can be fooled by a literal marker in the text):
+  // - a text with any control, format, combining or filler character becomes
+  //   `[redacted]` as a whole when any reading of it shows a secret. Such
+  //   characters can split a secret past the pattern or be the only separator
+  //   (`Bearer<ZWSP><token>`), and the display form keeps single joiners;
+  // - any text whose stored line still shows a secret in some reading
+  //   (full-width forms) becomes `[redacted]` too.
+  // A plain text with an ordinary secret keeps the rest of the line.
+  if ((HAS_INVISIBLE_RX.test(text) && rk9CoordTextHasSecret(text, env)) || rk9CoordTextHasSecret(line, env)) {
+    line = RK9_COORD_REDACTED;
   }
-  // A text of only invisible characters (`‍`) is empty.
+  // A text of only invisible characters (`\u200d`) is empty.
   if (line.length === 0 || rk9CoordMatchText(line).length === 0) return null;
   const points = Array.from(line);
   if (points.length <= max) return line;
-  return `${points.slice(0, Math.max(0, max - 1)).join("").trimEnd()}…`;
+  return `${points.slice(0, Math.max(0, max - 1)).join("").trimEnd()}\u2026`;
 }
 // --- /RK9 Custom ---

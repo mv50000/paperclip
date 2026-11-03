@@ -42,12 +42,12 @@ describe("identifier secret check (RK9-641 items 7, 8)", () => {
 });
 
 describe("inbox `to` field (RK9-641 item 9)", () => {
-  it.each(["a\u0000b", "name\u0085x", "na​me", "x‮y", "a\tb"])("rejects control or format characters %j", (to) => {
+  it.each(["a\u0000b", "name\u0085x", "na\u200bme", "x\u202ey", "a\tb"])("rejects control or format characters %j", (to) => {
     expect(sendRk9CoordInboxSchema.safeParse({ to, body: "hi" }).success).toBe(false);
   });
 
   it("accepts ordinary targets", () => {
-    for (const to of ["orchestrator", "RK9-641", "cc:paperclip-01:abc", "Sessio ääkköset"]) {
+    for (const to of ["orchestrator", "RK9-641", "cc:paperclip-01:abc", "Sessio \u00e4\u00e4kk\u00f6set"]) {
       expect(sendRk9CoordInboxSchema.safeParse({ to, body: "hi" }).success, to).toBe(true);
     }
   });
@@ -55,29 +55,29 @@ describe("inbox `to` field (RK9-641 item 9)", () => {
 
 describe("display text keeps joiners and selectors (RK9-641 item 10)", () => {
   it.each([
-    ["coding \u{1F469}‍\u{1F4BB} now", "coding \u{1F469}‍\u{1F4BB} now"],
-    ["love ❤️", "love ❤️"],
-    ["fire ❤️‍\u{1F525}", "fire ❤️‍\u{1F525}"],
-    ["می‌خواهم", "می‌خواهم"],
+    ["coding \u{1F469}\u200d\u{1F4BB} now", "coding \u{1F469}\u200d\u{1F4BB} now"],
+    ["love \u2764\ufe0f", "love \u2764\ufe0f"],
+    ["fire \u2764\ufe0f\u200d\u{1F525}", "fire \u2764\ufe0f\u200d\u{1F525}"],
+    ["\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"],
   ])("keeps %j", (input, expected) => {
     expect(toRk9CoordLine(input, 140, env)).toBe(expected);
   });
 
   it("removes a run of three or more joiners or selectors (smuggling)", () => {
-    expect(collapseRk9CoordText("hi\u{1F600}︁︂︃︄ there")).toBe("hi\u{1F600} there");
-    expect(collapseRk9CoordText("a‌‍‌‍b")).toBe("ab");
-    expect(collapseRk9CoordText("a​‍​‍​‍b")).toBe("ab");
+    expect(collapseRk9CoordText("hi\u{1F600}\ufe01\ufe02\ufe03\ufe04 there")).toBe("hi\u{1F600} there");
+    expect(collapseRk9CoordText("a\u200c\u200d\u200c\u200db")).toBe("ab");
+    expect(collapseRk9CoordText("a\u200b\u200d\u200b\u200d\u200b\u200db")).toBe("ab");
   });
 
   it("still removes bidi overrides, tag characters and controls", () => {
-    expect(collapseRk9CoordText("ok ‮hidden⁦ text")).toBe("ok hidden text");
+    expect(collapseRk9CoordText("ok \u202ehidden\u2066 text")).toBe("ok hidden text");
     expect(collapseRk9CoordText("x\u{E0041}\u{E0042}y")).toBe("xy");
     expect(collapseRk9CoordText("a\u0000b\u0085c")).toBe("abc");
   });
 
   it("fails closed when a single joiner splits a keyword", () => {
-    expect(toRk9CoordLine(`pass‌word=${canary} ok`, 140, env)).toBe("[redacted]");
-    expect(toRk9CoordLine(`tok️en=${canary}`, 140, env)).toBe("[redacted]");
+    expect(toRk9CoordLine(`pass\u200cword=${canary} ok`, 140, env)).toBe("[redacted]");
+    expect(toRk9CoordLine(`tok\ufe0fen=${canary}`, 140, env)).toBe("[redacted]");
   });
 });
 
@@ -90,8 +90,8 @@ describe("keyword encodings (RK9-641 item 13)", () => {
     [`api_key => ${canary}`],
     [`token%3D${canary}`],
     [`secret%3a${canary}`],
-    [`ｔｏｋｅｎ＝${canary}`],
-    [`ｐａｓｓｗｏｒｄ: ${canary}`],
+    [`\uff54\uff4f\uff4b\uff45\uff4e\uff1d${canary}`],
+    [`\uff50\uff41\uff53\uff53\uff57\uff4f\uff52\uff44: ${canary}`],
   ])("redacts %j", (input) => {
     const out = toRk9CoordLine(`note ${input} end`, 200, env)!;
     expect(out).toContain("[redacted]");
@@ -99,15 +99,16 @@ describe("keyword encodings (RK9-641 item 13)", () => {
     expect(rk9CoordTextHasSecret(input, env)).toBe(true);
   });
 
-  it("keeps a bracketed value of numbers, keys or short words (token counts)", () => {
-    for (const ok of [`"tokens": {"input": 1234, "output": 56}`, `"tokens": [1234, 5678]`]) {
+  it("keeps a closed counter object of numbers (token counts); arrays are redacted", () => {
+    expect(rk9CoordTextHasSecret(`"tokens": [1234, 5678]`, env)).toBe(true);
+    for (const ok of [`"tokens": {"input": 1234, "output": 56}`, `{"tokens":{"cache_read":0,"ok":true}}`]) {
       expect(rk9CoordTextHasSecret(ok, env), ok).toBe(false);
     }
   });
 
   it("keeps other full-width text when it has no secret", () => {
-    expect(toRk9CoordLine("ｔｅｓｔ ok", 140, env)).toBe("ｔｅｓｔ ok");
-    expect(rk9CoordMatchText("ｔｏｋｅｎ")).toBe("token");
+    expect(toRk9CoordLine("\uff54\uff45\uff53\uff54 ok", 140, env)).toBe("\uff54\uff45\uff53\uff54 ok");
+    expect(rk9CoordMatchText("\uff54\uff4f\uff4b\uff45\uff4e")).toBe("token");
   });
 
   it("documents the prose false positive (item 14): a keyword, a colon and a word", () => {
@@ -118,13 +119,65 @@ describe("keyword encodings (RK9-641 item 13)", () => {
 
 describe("toRk9CoordLine edge cases (RK9-641)", () => {
   it("does not let a raw-only match mask a second, hidden secret", () => {
-    const text = `ssh://u:pa\tss@h Bearer​${canary}xyz`;
+    const text = `ssh://u:pa\tss@h Bearer\u200b${canary}xyz`;
     const out = toRk9CoordLine(text, 200, env)!;
     expect(out).not.toContain(canary);
   });
 
   it("caps with an ellipsis", () => {
-    expect(toRk9CoordLine("a".repeat(50), 10, env)).toBe(`${"a".repeat(9)}…`);
+    expect(toRk9CoordLine("a".repeat(50), 10, env)).toBe(`${"a".repeat(9)}\u2026`);
     expect(toRk9CoordLine("x".repeat(500), 140, env)).toHaveLength(140);
+  });
+});
+
+// RK9-641 verifier round 1 regressions. Fake values only.
+describe("verifier round 1 (RK9-641)", () => {
+  const bearer = `Bearer\u200b${canary}xyz`;
+  it.each([
+    // a literal [redacted] marker split by an invisible character
+    [`[redac\u200bted] ${bearer}`],
+    [`[redac\u200bted] basic\u2060dXNlcjpodW50ZXIy`],
+    [`[redac\u0001ted] Bearer\u0001${canary}xyz`],
+    // a control as the separator plus another invisible character inside the token
+    [`auth Bearer\u0001abcd\u200befghijkl done`],
+    [`auth Bearer\u0001abcd\u200defghijkl done`],
+    [`auth Bearer\u0001abcd\u0301efghijkl done`],
+  ])("fails closed on %j", (input) => {
+    expect(toRk9CoordLine(input, 200, env)).toBe("[redacted]");
+    expect(rk9CoordTextHasSecret(input, env)).toBe(true);
+  });
+
+  it.each([
+    ["passwords: [83749201]"],
+    ["secrets=(847291034)"],
+    ["api_keys: [3e8e1e2e5e]"],
+    ["tokens: (hunter22secret: 1)"],
+    ["tokens: [hunter22secret:]"],
+    [`"tokens": {"hunter22secret": 1}`],
+    ["tokens: [ passwords: 12345678"],
+  ])("redacts a bracketed keyword value %j", (input) => {
+    expect(rk9CoordTextHasSecret(input, env)).toBe(true);
+    expect(toRk9CoordLine(input, 200, env)).not.toMatch(/83749201|847291034|3e8e1e2e5e|hunter22secret|12345678/);
+  });
+
+  it("redacts a long bracketed secret whole, not only its first 200 characters", () => {
+    const long = "x9".repeat(160);
+    const out = toRk9CoordLine(`secrets: [${long}] end`, 500, env)!;
+    expect(out).not.toContain("x9x9");
+  });
+
+  it.each([
+    [`gh\u0301p_abcdefghijklmnop`],
+    [`ghp_abc\ufe00defghijklmnop`],
+    [`ghp_abc\u034fdefghijkl`],
+    [`ghp_abc\u3164defghijkl`],
+    [`\uff47\uff48\uff50\uff3fabcdefghijkl`],
+    [`AKIA\u0300ABCDEFGHIJKLMNOP`],
+  ])("flags an identifier that hides a token with a mark, selector or full-width form %j", (to) => {
+    expect(rk9CoordIdentifierHasSecret(to, env)).toBe(true);
+  });
+
+  it("removes bidi marks from display text", () => {
+    expect(collapseRk9CoordText("a\u200eb\u200fc\u061cd")).toBe("abcd");
   });
 });
