@@ -928,42 +928,12 @@ POST /api/companies/{companyId}/approvals
 
 Ask only when missing input materially blocks the request. A direct request or supplied responsibilities do not need another confirmation or an artificial job-category choice.
 
-Choose the input control from the answer you need: use a **text field** for a name, description, constraint, or other open answer; use choices only for an actual decision with at least two meaningful alternatives. Do not turn an open question into invented categories.
-
 Omit `addresseeUserId` for ordinary questions.
 Agent Chat uses its conversation owner automatically. On ordinary tasks, explicitly set `addresseeUserId` only when a particular person must answer, using their exact Paperclip user ID, including any prefix. The server validates that the named user can respond in the company before saving the interaction. A chat question cannot name a different user.
 Agent-directed questions instead set `addresseeAgentId` and omit `resolverPolicy`. Do not infer permissions from a title or reporting line. Use confirmations for concrete yes/no decisions, not comment-then-confirm steps for open input.
 
-**Text answer (copy this complete payload)**
-
-For an open-ended answer, render a text field using `payload.questionSet` with `answerMode: "text"`, no options, and no `customAnswer`. Send one complete `payload.questionSet` containing every text and choice question. The server generates matching `payload.questions` entries for storage and answer compatibility. Legacy choice-only payloads remain supported. If both fields are supplied, their IDs, prompts, required flags, modes, and visible options must agree. Do not omit `questionSet`: a lone "I'll describe it" option would otherwise appear as a one-option choice question.
-
-```json
-POST /api/issues/{issueId}/interactions
-{
-  "kind": "ask_user_questions",
-  "idempotencyKey": "questions:{issueId}:responsibility-text:v1",
-  "title": "Hire responsibility",
-  "resolverPolicy": "human_only",
-  "continuationPolicy": "wake_assignee",
-  "payload": {
-    "version": 1,
-    "questionSet": {
-      "schema": "paperclip.question_set.v1",
-      "questions": [{
-        "id": "responsibility",
-        "prompt": "What should the new agent be responsible for?",
-        "required": true,
-        "answerMode": "text"
-      }]
-    }
-  }
-}
-```
-
-**Multiple choice**
-
-Use `ask_user_questions` for a short question card. Use `payload.questionSet` with `answerMode: "single_select"` or `"multi_select"`, an explicit `required` flag, and options with `id` and `label`. Use `customAnswer: { "enabled": true }` to offer a written alternative. Choice questions must offer at least two distinct, meaningful choices; use the canonical text presentation above for open-ended questions. Do not send `question`/`type: "text"` or an empty options array in a `payload.questions` entry. Set `resolverPolicy: "human_only"` when the answer must come from the user.
+<!-- RK9 Custom (RK9-695): upstream documents `payload.questionSet` (text answers); this fork's server still accepts only `payload.questions` -->
+Use `ask_user_questions` for a short question card. Each question requires `id`, `prompt`, `selectionMode`, and at least one option with `id` and `label`. Do not send `question`/`type: "text"` or an empty options array. Set `resolverPolicy: "human_only"` when the answer must come from the user.
 
 ```json
 POST /api/issues/{issueId}/interactions
@@ -975,24 +945,44 @@ POST /api/issues/{issueId}/interactions
   "continuationPolicy": "wake_assignee",
   "payload": {
     "version": 1,
-    "questionSet": {
-      "schema": "paperclip.question_set.v1",
-      "questions": [{
-        "id": "responsibility",
-        "prompt": "What should the new agent be responsible for?",
-        "answerMode": "single_select",
-        "required": true,
-        "customAnswer": { "enabled": true },
-        "options": [
-          { "id": "research", "label": "Research", "description": "Find and summarize information." },
-          { "id": "writing", "label": "Writing", "description": "Draft and edit content." }
-        ]
-      }]
-    }
+    "questions": [{
+      "id": "responsibility",
+      "prompt": "What should the new agent be responsible for?",
+      "selectionMode": "single",
+      "required": true,
+      "allowOther": true,
+      "options": [
+        { "id": "research", "label": "Research", "description": "Find and summarize information." },
+        { "id": "writing", "label": "Writing", "description": "Draft and edit content." }
+      ]
+    }]
   }
 }
 ```
 
+For an open-ended answer, supply a free-text option (one option is sufficient):
+
+```json
+POST /api/issues/{issueId}/interactions
+{
+  "kind": "ask_user_questions",
+  "idempotencyKey": "questions:{issueId}:responsibility-text:v1",
+  "title": "Hire responsibility",
+  "resolverPolicy": "human_only",
+  "continuationPolicy": "wake_assignee",
+  "payload": {
+    "version": 1,
+    "questions": [{
+      "id": "responsibility",
+      "prompt": "What should the new agent be responsible for?",
+      "selectionMode": "single",
+      "required": true,
+      "options": [{ "id": "describe", "label": "I'll describe it", "freeText": true }]
+    }]
+  }
+}
+```
+<!-- /RK9 Custom -->
 
 After verifying the interaction was saved and is pending, record the waiting state:
 
