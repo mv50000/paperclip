@@ -121,7 +121,11 @@ function rejectSecrets(fields: {
  */
 const CREDENTIAL_WORDS = new Set([
   "token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passwds", "apikey", "apikeys",
+  // RK9-665: one-word compounds, like `apikey`
+  "secretkey", "secretkeys", "privatekey", "privatekeys", "passphrase", "passphrases",
 ]);
+/** Words that form one credential word with a following `key`/`keys` segment. */
+const KEY_PREFIXES = new Set(["api", "private"]);
 /**
  * A credential word followed by one of these segments names metadata about
  * a credential, not the credential: `secret_scan`, `token_count`,
@@ -134,6 +138,13 @@ const HARMLESS_SUFFIXES = new Set([
   "ref", "refs", "arn", "path", "file", "expiry", "expires", "expiration", "ttl", "length", "len",
   "rotation", "rotated", "status", "present", "required", "enabled", "provider", "source", "estimate",
 ]);
+/**
+ * Words whose `id` names the credential instead of being it (RK9-665 L2):
+ * `token_id`, `api_key_id`. Their value is still checked, but a short
+ * identifier or a UUID passes (ID_VALUE_RX). `secret_id` and `password_id`
+ * stay credential names: a Vault AppRole `secret_id` is the credential.
+ */
+const ID_WORDS = new Set(["token", "tokens", "apikey", "apikeys"]);
 
 function nameSegmentations(name: string): string[][] {
   const text = rk9CoordMatchText(name);
@@ -148,24 +159,100 @@ function nameSegmentations(name: string): string[][] {
   return [plain, split];
 }
 
+interface CredentialWord {
+  word: string;
+  /** `token_id`: the word is followed by `id`, so the name names an identifier. */
+  id: boolean;
+}
+
+/**
+ * The credential words a name contains: each credential word segment (`api`
+ * + `key` and `private` + `key` count as one word) that is not followed by a
+ * harmless suffix. Empty when the name is not a credential name.
+ */
+function credentialWordsOf(name: string): CredentialWord[] {
+  const words: CredentialWord[] = [];
+  for (const segments of nameSegmentations(name)) {
+    for (let i = 0; i < segments.length; i += 1) {
+      let next = i + 1;
+      let word = segments[i]!;
+      if (KEY_PREFIXES.has(word) && (segments[next] === "key" || segments[next] === "keys")) {
+        word = `${word}${segments[next]}`;
+        next += 1;
+      } else if (!CREDENTIAL_WORDS.has(word)) continue;
+      const suffix = segments[next];
+      if (suffix !== undefined && HARMLESS_SUFFIXES.has(suffix)) continue;
+      words.push({ word, id: (suffix === "id" || suffix === "ids") && ID_WORDS.has(word) });
+    }
+  }
+  return words;
+}
+
+/**
+ * How strictly a string under a credential name is checked (a string of 6+
+ * characters without whitespace or quotes is a secret, SECRET_VALUE_RX):
+ * - `strong`: no exemption;
+ * - `id`: the name is `token_id`-like, so an identifier shape passes
+ *   (ID_VALUE_RX: `tok_abc123`, digits, a UUID);
+ * - `word`: the name is a bare lower-case word given as a value
+ *   (`["secret", "important"]`, `{"name": "tokens", "value": "unlimited"}`),
+ *   so a value made of KNOWN_WORDS passes.
+ * The exemptions test the raw value, so an invisible character voids them.
+ * They apply only to a string directly at that position: an object or an
+ * array below an `id` or `word` name is checked in the `strong` mode.
+ * RK9-665: a real secret's shape never passes.
+ */
+type SecretMode = "none" | "id" | "word" | "strong";
+
+function combineModes(a: SecretMode, b: SecretMode): SecretMode {
+  if (a === "none") return b;
+  if (b === "none" || a === b) return a;
+  return "strong";
+}
+
+/**
+ * Identifier shapes under a `token_id`-like name: a lower-case prefix and
+ * up to 16 lower-case alphanumerics (`tok_abcdef123`), up to 20 digits, or a
+ * lower-case UUID. Mixed case never passes: 24 base62 characters are a
+ * full-strength secret.
+ */
+const ID_VALUE_RX = /^(?:[a-z]{2,8}_[a-z0-9]{1,16}|[0-9]{1,20}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+/**
+ * Known vocabulary after a bare credential word (tags, labels, settings).
+ * A value passes in the `word` mode when every `_`/`-` part is on this
+ * list, so `reset_flow` passes and `correct-horse-battery-staple` does not.
+ * Only words of 6+ letters matter: shorter values never match
+ * SECRET_VALUE_RX.
+ */
+const KNOWN_WORDS = new Set([
+  "important", "urgent", "critical", "billing", "usage", "unlimited", "limited", "enabled", "disabled",
+  "required", "optional", "default", "pending", "active", "inactive", "expired", "revoked", "rotated",
+  "rotation", "missing", "present", "invalid", "unknown", "reset", "flow", "manager", "management",
+  "handling", "storage", "scanning", "scanner", "review", "security", "config", "settings", "update",
+  "updated", "changed", "removed", "added", "refresh", "refreshed", "leaked", "exposed", "cleanup",
+]);
+
+function isKnownVocabulary(value: string): boolean {
+  if (!/^[a-z]+(?:[_-][a-z]+){0,3}$/.test(value)) return false;
+  return value.split(/[_-]/).every((part) => KNOWN_WORDS.has(part));
+}
+
+function keyMode(key: string): SecretMode {
+  const words = credentialWordsOf(key);
+  if (words.length === 0) return "none";
+  return words.every((word) => word.id) ? "id" : "strong";
+}
+
 /**
  * True when the name, without invisible characters, names a credential: a
  * credential word segment (`api` + `key` counts as one) that is not followed
  * by a harmless suffix. `password`, `SECRET_KEY`, `aws_secret_access_key`,
  * `DB_PASSWORD`, `password1`, `apiKeyProd` and `Password:` are credential
- * names; `tokens_used`, `secret_scan`, `tokenizer` and `secretary` are not.
+ * names; `tokens_used`, `secret_scan`, `tokenizer` and `secretary` are not,
+ * and `token_id` names an identifier (checked in the `id` mode).
  */
 export function isRk9CoordCredentialName(name: string): boolean {
-  for (const segments of nameSegmentations(name)) {
-    for (let i = 0; i < segments.length; i += 1) {
-      let next = i + 1;
-      if (segments[i] === "api" && (segments[next] === "key" || segments[next] === "keys")) next += 1;
-      else if (!CREDENTIAL_WORDS.has(segments[i]!)) continue;
-      const suffix = segments[next];
-      if (suffix === undefined || !HARMLESS_SUFFIXES.has(suffix)) return true;
-    }
-  }
-  return false;
+  return keyMode(name) === "strong";
 }
 
 /**
@@ -180,49 +267,218 @@ const PAIR_VALUE_KEY_RX = /^(v|val|data|content|default)$|value$/i;
 const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
 /** Separator items in an argv-style list (`["DB_PASSWORD", "=", "..."]`). */
 const ARG_SEPARATOR_RX = /^[=:]$/;
+/**
+ * Credential words that may end a credential name given as a value.
+ * `authorization` names the HTTP header (`{"name": "Authorization", ...}`).
+ */
+const VALUE_NAME_WORDS = new Set([...CREDENTIAL_WORDS, "authorization"]);
+/** Words that end a credential name together with a final `key`. */
+const VALUE_KEY_PREFIXES = new Set(["api", "secret", "access", "private"]);
+/** Upper-case environment variable names: `GITHUB_TOKEN_RW`, `PASSWORD1`. */
+const ENV_NAME_RX = /^[A-Z][A-Z0-9_]*$/;
+/** Command-line flags: `--token-value`, `--db-password=`, `-password`. */
+const FLAG_NAME_RX = /^--?[A-Za-z0-9][A-Za-z0-9_-]*[=:]?$/;
+/** A label of up to three upper-case words: `DB PASSWORD`, `API KEY`. */
+const UPPER_LABEL_RX = /^[A-Z0-9_-]+( [A-Z0-9_-]+){0,2}:?$/;
+
+/** A bare lower-case word (`"secret"`, `"tokens"`): a tag or a label, not a variable name. */
+function isBareWord(text: string): boolean {
+  return /^[a-z]+$/.test(text);
+}
 
 /**
- * A string VALUE that names a credential (`"PASSWORD"`, `"DB_PASSWORD"`,
- * `"--db-password"`, `"Password:"`, `"SECRET_KEY"`). Stricter than the key
- * rule, because values are often free text: the value must be one word
- * without whitespace or `/`, and the credential word must end it (trailing
- * punctuation allowed), or be `secret`/`access`/`private` + `key`. So
- * `"rk9-642-secret-check"`, `"src/token-refresh.ts"` and `"Fix password
- * reset flow"` are not credential names.
+ * The mode of a string VALUE that names a credential (`"PASSWORD"`,
+ * `"DB_PASSWORD"`, `"--db-password"`, `"Password:"`, `"SECRET_KEY"`), or
+ * `none`. Stricter than the key rule, because values are often free text.
+ * The value must be one word without whitespace or `/` (or an upper-case
+ * label of up to three words, `"DB PASSWORD"`), and either:
+ * - it is an upper-case environment variable name or a command-line flag and
+ *   the key rule accepts it (RK9-665 M2: `GITHUB_TOKEN_RW`, `API_KEY_PROD`,
+ *   `PASSWORD1`, `VAULT_SECRET_ID`, `--token-value`; `TOKEN_ID` in the `id`
+ *   mode; not `--token-file` or `--password-stdin`, whose value is not
+ *   inline); or
+ * - a credential word ends it (trailing punctuation allowed), or
+ *   `api`/`secret`/`access`/`private` + `key` ends it. A bare lower-case
+ *   word (`"secret"`, `"tokens"`) is in the `word` mode.
+ * So lower-case free text such as `"rk9-642-secret-check"`,
+ * `"src/token-refresh.ts"`, `"token.ts"` and `"Fix password reset flow"` is
+ * not a credential name.
  */
-function isCredentialValueName(value: unknown): value is string {
-  if (typeof value !== "string") return false;
+function valueNameMode(value: unknown): SecretMode {
+  if (typeof value !== "string") return "none";
   const text = rk9CoordMatchText(value);
-  if (text.length === 0 || text.length > 100 || /[\s/]/.test(text)) return false;
-  return nameSegmentations(text).some((segments) => {
+  if (text.length === 0 || text.length > 100 || text.includes("/")) return "none";
+  if (/\s/.test(text) && !UPPER_LABEL_RX.test(text)) return "none";
+  const segmentations = nameSegmentations(text);
+  const isFlag = FLAG_NAME_RX.test(text);
+  if (isFlag && segmentations[0]!.at(-1) === "stdin") return "none";
+  if (ENV_NAME_RX.test(text) || isFlag) {
+    const mode = keyMode(text);
+    if (mode !== "none") return mode;
+  }
+  const named = segmentations.some((segments) => {
     const last = segments.at(-1);
     const prev = segments.at(-2);
     if (last === undefined) return false;
-    if (CREDENTIAL_WORDS.has(last)) return true;
-    return (last === "key" || last === "keys") && (prev === "api" || prev === "secret" || prev === "access" || prev === "private");
+    if (VALUE_NAME_WORDS.has(last)) return true;
+    return last === "key" && prev !== undefined && VALUE_KEY_PREFIXES.has(prev);
   });
-}
-
-function isPairName(key: string, value: unknown): boolean {
-  return PAIR_NAME_KEY_RX.test(rk9CoordMatchText(key)) && isCredentialValueName(value);
+  if (!named) return "none";
+  return isBareWord(text) ? "word" : "strong";
 }
 
 /**
- * Indexes of the array items that hold a credential value: the second item
- * of a two-item `[name, value]` pair, and the item after a credential flag
- * (`--password`, `-p` is not covered) or after a `=`/`:` separator item that
- * follows a credential name.
+ * True when a string in the given mode looks like a secret. The exemptions
+ * test the raw value (RK9-665 verifier round 1): a tag character or a
+ * combining mark inside it voids them.
  */
-function credentialValueIndexes(items: unknown[]): Set<number> {
-  const out = new Set<number>();
-  const isName = isCredentialValueName;
-  if (items.length === 2 && isName(items[0])) out.add(1);
+function isSecretValue(mode: SecretMode, value: string): boolean {
+  if (mode === "none" || !SECRET_VALUE_RX.test(value)) return false;
+  if (mode === "id") return !ID_VALUE_RX.test(value);
+  if (mode === "word") return !isKnownVocabulary(value);
+  return true;
+}
+
+/** The mode for an object or array: the `id` and `word` exemptions cover a string only. */
+function structuredMode(mode: SecretMode): SecretMode {
+  return mode === "id" || mode === "word" ? "strong" : mode;
+}
+
+/** A plural credential word (`tokens`, `secrets`): a label, not one credential's name. */
+function isPluralWord(text: string): boolean {
+  return isBareWord(text) && CREDENTIAL_WORDS.has(text) && text.endsWith("s");
+}
+
+/**
+ * The array items that hold a credential value, with their mode: the second
+ * item of a two-item `[name, value]` pair, the item after a credential flag
+ * (`--password`; `-p` is not covered) and the item after a `=`/`:`
+ * separator item that follows a credential name. `flag` lists the items
+ * after a strong credential flag that are not flags themselves: they are
+ * secrets at any length (`["--secret", "foo"]`, RK9-665).
+ */
+function credentialValueIndexes(items: unknown[]): { modes: Map<number, SecretMode>; flag: Set<number> } {
+  const modes = new Map<number, SecretMode>();
+  const flag = new Set<number>();
+  const mark = (index: number, mode: SecretMode) => modes.set(index, combineModes(modes.get(index) ?? "none", mode));
+  if (items.length === 2) mark(1, valueNameMode(items[0]));
   items.forEach((item, index) => {
-    if (!isName(item)) return;
-    const separator = typeof items[index + 1] === "string" && ARG_SEPARATOR_RX.test(items[index + 1] as string);
-    if (separator) out.add(index + 2);
-    else if (item.startsWith("-")) out.add(index + 1);
+    const mode = valueNameMode(item);
+    if (mode === "none" || typeof item !== "string") return;
+    const following = items[index + 1];
+    // `name = value` is an assignment, never a tag list: no `word` exemption.
+    if (typeof following === "string" && ARG_SEPARATOR_RX.test(following)) mark(index + 2, structuredMode(mode));
+    else if (item.startsWith("-")) {
+      mark(index + 1, mode);
+      if (mode === "strong" && typeof following === "string" && !following.startsWith("-")) flag.add(index + 1);
+    }
   });
+  return { modes, flag };
+}
+
+/**
+ * A count written as a string: up to 20 digits (`123456`), digits grouped
+ * by three (`1,234`, `1 234 567`, up to seven groups), or a short number
+ * with a unit (`200k`, `1.5M`). `1234567k` is not a count.
+ */
+const COUNT_STRING_RX = /^(?:\d{1,20}|\d{1,3}(?:[, ]\d{3}){1,6}|\d{1,4}(?:\.\d{1,2})? ?[kmb])$/i;
+/**
+ * Name segments that may stand beside `tokens` in a token-count key
+ * (`input_tokens`, `cache_read_tokens`, `max_tokens`). `access_tokens` and
+ * `recovery_tokens` are not count keys.
+ */
+const TOKEN_COUNT_WORDS = new Set([
+  "tokens", "input", "output", "cache", "cached", "total", "prompt", "completion",
+  "context", "reasoning", "used", "remaining", "estimated", "num", "max",
+]);
+/**
+ * Segments allowed only right after `cache` (`cache_read_tokens`,
+ * `cache_creation_input_tokens`): a bare `write_tokens` can be a credential.
+ */
+const CACHE_COUNT_WORDS = new Set(["read", "write", "creation"]);
+
+/** A token-count key: `tokens` plus only TOKEN_COUNT_WORDS segments. */
+function isTokenCountKey(key: string): boolean {
+  const words = credentialWordsOf(key);
+  if (words.length === 0 || !words.every((word) => word.word === "tokens" && !word.id)) return false;
+  return nameSegmentations(key).some((segments) =>
+    segments.every(
+      (segment, index) =>
+        TOKEN_COUNT_WORDS.has(segment) || (CACHE_COUNT_WORDS.has(segment) && segments[index - 1] === "cache"),
+    ),
+  );
+}
+
+/**
+ * True when a key opens a credential context for masking: the segment rule,
+ * or the text pattern that walk() applies to `key: value` (it also finds a
+ * glued `rootpassword` or `authtoken`; verifier round 3).
+ */
+function isCredentialContextKey(key: string): boolean {
+  if (keyMode(key) !== "none" || rk9CoordTextHasSecret(`${key}: xxxxxxxx`)) return true;
+  return nameSegmentations(key).some((segments) => segments.some((segment) => MASK_CONTEXT_WORDS.has(segment)));
+}
+
+/**
+ * Credential-like words that are not in the key rule (the shared keyword
+ * set is a separate decision) but still stop the token-count masking below
+ * them: `{"credential": {"tokens": "83920144"}}`, `{"pwd": ...}`.
+ */
+const MASK_CONTEXT_WORDS = new Set([
+  "credential", "credentials", "cred", "creds", "pwd", "pw", "pass", "passcode", "pin", "auth", "otp", "mfa",
+]);
+
+/** The mode a name/value pair object gives its value entries. */
+function pairModeOf(entries: [string, unknown][]): SecretMode {
+  return entries.reduce<SecretMode>((acc, [key, item]) => {
+    if (!PAIR_NAME_KEY_RX.test(rk9CoordMatchText(key))) return acc;
+    const named = valueNameMode(item);
+    // A singular bare name in a pair object names one credential
+    // (`{"name": "password", "value": ...}`): no `word` exemption.
+    return combineModes(acc, named === "word" && !isPluralWord(rk9CoordMatchText(item as string)) ? "strong" : named);
+  }, "none");
+}
+
+/**
+ * A copy of the metadata in which a count string that is the direct value
+ * of a token-count key is a number (RK9-665 L2): `{"tokens": "123456"}`,
+ * `{"usage": {"input_tokens": "1234567"}}`. Nothing is masked inside a
+ * credential context (verifier rounds 1-3): below a credential-named key
+ * (segment rule or text pattern), in an object that holds a credential name
+ * given as a value, in the array position after one, or inside an object
+ * or array below a token key. So `{"tokens": {"name": "token",
+ * "value": "83920144"}}`, `{"password": {"tokens": "83920144"}}` and
+ * `{"token": "123456789"}` stay strings. The count pattern tests the raw
+ * value.
+ */
+function maskTokenCounts(value: unknown, credential: boolean, depth: number): unknown {
+  if (depth <= 0 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const { modes, flag } = credentialValueIndexes(value);
+    // A credential-looking string anywhere in the array (`["dbpassword",
+    // {...}]`, `["rootpassword", "=", {...}]`) makes every item a credential
+    // context.
+    const named = value.some((item) => typeof item === "string" && isCredentialContextKey(item));
+    return value.map((item, index) =>
+      maskTokenCounts(
+        item,
+        credential || named || (modes.get(index) ?? "none") !== "none" || flag.has(index),
+        depth - 1,
+      ),
+    );
+  }
+  const entries = Object.entries(value);
+  // A credential name in a pair object makes the whole object a credential
+  // context: `{"name": "DB_PASSWORD", "tokens": "..."}` (verifier round 3).
+  const pairCredential = pairModeOf(entries) !== "none";
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of entries) {
+    const childCredential = credential || pairCredential || isCredentialContextKey(key);
+    out[key] =
+      !credential && !pairCredential && isTokenCountKey(key) && typeof item === "string" && COUNT_STRING_RX.test(item)
+        ? 0
+        : maskTokenCounts(item, childCredential, depth - 1);
+  }
   return out;
 }
 
@@ -245,18 +501,20 @@ function credentialValueIndexes(items: unknown[]): Set<number> {
  * Numbers are never secrets (RK9-642): `{"max_tokens": 200000}` and
  * `{"tokens": {"input": 1234}}` are token counts, not credentials. A numeric
  * password sent as a JSON number is therefore accepted; send it as a string
- * and it is rejected.
+ * and it is rejected. A count string under a token key (`{"tokens":
+ * "123456"}`) counts as a number (RK9-665 L2, maskTokenCounts).
  */
-export function rk9CoordMetadataHasSecret(metadata: Record<string, unknown>): boolean {
+export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boolean {
+  if (!everyRk9CoordString(input, (text) => !rk9CoordTextHasSecret(text))) return true;
+  const metadata = maskTokenCounts(input, false, RK9_COORD_METADATA_MAX_DEPTH + 1) as Record<string, unknown>;
   const json = JSON.stringify(metadata, (_key, value: unknown) => (typeof value === "number" ? 0 : value));
   if (rk9CoordTextHasSecret(json)) return true;
-  if (!everyRk9CoordString(metadata, (text) => !rk9CoordTextHasSecret(text))) return true;
   let found = false;
-  const walk = (value: unknown, path: string[], underSecretKey: boolean, depth: number) => {
+  const walk = (value: unknown, path: string[], leafMode: SecretMode, depth: number) => {
     if (found) return;
     if (value === null || typeof value !== "object") {
       if (typeof value !== "string") return;
-      if (underSecretKey && SECRET_VALUE_RX.test(value)) {
+      if (isSecretValue(leafMode, value)) {
         found = true;
         return;
       }
@@ -268,30 +526,32 @@ export function rk9CoordMetadataHasSecret(metadata: Record<string, unknown>): bo
       found = true;
       return;
     }
+    const mode = structuredMode(leafMode);
     if (Array.isArray(value)) {
       // ["DB_PASSWORD", "<secret>"], [..., "--password", "<secret>"]: a credential name, then its value.
-      const valueIndexes = credentialValueIndexes(value);
-      value.forEach((item, index) => walk(item, path, underSecretKey || valueIndexes.has(index), depth - 1));
+      const { modes, flag } = credentialValueIndexes(value);
+      value.forEach((item, index) => {
+        if (flag.has(index) && typeof item === "string" && rk9CoordMatchText(item).length > 0) found = true;
+        walk(item, path, combineModes(mode, modes.get(index) ?? "none"), depth - 1);
+      });
       return;
     }
     const entries = Object.entries(value);
-    const namedPair = entries.some(([key, item]) => isPairName(key, item));
+    const pairMode = pairModeOf(entries);
     for (const [key, item] of entries) {
       // A key under a credential key may itself be the secret, unless it
       // labels a number (a counter map) or a non-empty branch.
       const branch = item !== null && typeof item === "object" && Object.keys(item).length > 0;
-      if (underSecretKey && typeof item !== "number" && !branch && SECRET_VALUE_RX.test(key)) {
+      if (typeof item !== "number" && !branch && isSecretValue(mode, key)) {
         found = true;
         return;
       }
-      const secretChild =
-        underSecretKey ||
-        isRk9CoordCredentialName(key) ||
-        (namedPair && PAIR_VALUE_KEY_RX.test(rk9CoordMatchText(key)));
-      walk(item, [...path, key], secretChild, depth - 1);
+      let child = combineModes(mode, keyMode(key));
+      if (PAIR_VALUE_KEY_RX.test(rk9CoordMatchText(key))) child = combineModes(child, pairMode);
+      walk(item, [...path, key], child, depth - 1);
     }
   };
-  walk(metadata, [], false, RK9_COORD_METADATA_MAX_DEPTH + 1);
+  walk(metadata, [], "none", RK9_COORD_METADATA_MAX_DEPTH + 1);
   return found;
 }
 
