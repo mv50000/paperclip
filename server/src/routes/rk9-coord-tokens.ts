@@ -15,6 +15,10 @@
 //
 // The plaintext token appears exactly once, in the 201 body of issue and
 // rotate, with Cache-Control: no-store. Activity rows carry ids and names only.
+// The activity row is written in the same transaction as the token write
+// (RK9-639): a failed audit rolls the token back, so a 500 never hides a
+// token that exists, and a rotate never revokes the old token on its own.
+// The live event is published after the commit, best effort.
 import { Router, type Request, type RequestHandler, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import {
@@ -31,8 +35,13 @@ import {
   resolveRk9CoordOperatorUserIds,
   rk9CoordOperatorUserAllowed,
 } from "../middleware/rk9-coord-actor.js";
-import { logActivity } from "../services/activity-log.js";
-import { rk9CoordTokenService, type Rk9CoordTokenView } from "../services/rk9-coord-tokens.js";
+import { logger } from "../middleware/logger.js";
+import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
+import {
+  RK9_COORD_TOKEN_MIN_LIFETIME_MS,
+  rk9CoordTokenService,
+  type Rk9CoordTokenView,
+} from "../services/rk9-coord-tokens.js";
 import { assertCompanyAccess } from "./authz.js";
 
 export interface Rk9CoordTokenRouteOptions {
@@ -49,8 +58,12 @@ function tokenError(status: number, code: string, message: string) {
 function parseExpiresAt(value: string | null | undefined): Date | null | undefined {
   if (value === undefined || value === null) return value;
   const date = new Date(value);
-  if (date.getTime() <= Date.now()) {
+  const remainingMs = date.getTime() - Date.now();
+  if (remainingMs <= 0) {
     throw tokenError(422, "rk9_coord_token_expiry_past", "expiresAt must be in the future");
+  }
+  if (remainingMs < RK9_COORD_TOKEN_MIN_LIFETIME_MS) {
+    throw tokenError(422, "rk9_coord_token_expiry_too_soon", "expiresAt must be at least 60 s in the future");
   }
   return date;
 }
@@ -112,26 +125,50 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
     return tokenId;
   }
 
+  type AuditAction = "rk9_coord.token_issued" | "rk9_coord.token_rotated" | "rk9_coord.token_revoked";
+
+  /** Writes the activity row on the token write's transaction; publishes after commit. */
   async function audit(
+    tx: Db,
+    publications: ActivityPublication[],
     companyId: string,
     userId: string,
-    action: "rk9_coord.token_issued" | "rk9_coord.token_rotated" | "rk9_coord.token_revoked",
+    action: AuditAction,
     record: Rk9CoordTokenView,
   ) {
-    await logActivity(db, {
-      companyId,
-      actorType: "user",
-      actorId: userId,
-      action,
-      entityType: "rk9_coord_token",
-      entityId: record.id,
-      details: {
-        principalKind: record.principalKind,
-        principalName: record.principalName,
-        rotatedFromTokenId: record.rotatedFromTokenId,
-        expiresAt: record.expiresAt,
+    await logActivity(
+      tx,
+      {
+        companyId,
+        actorType: "user",
+        actorId: userId,
+        action,
+        entityType: "rk9_coord_token",
+        entityId: record.id,
+        details: {
+          principalKind: record.principalKind,
+          principalName: record.principalName,
+          rotatedFromTokenId: record.rotatedFromTokenId,
+          expiresAt: record.expiresAt,
+        },
       },
-    });
+      publications,
+    );
+  }
+
+  /**
+   * The audit row has committed with the token. A failed live-event publish
+   * must not turn into a 500, or the caller would lose the plaintext of a
+   * token that exists.
+   */
+  function publishBestEffort(publications: ActivityPublication[]) {
+    for (const publication of publications) {
+      try {
+        publishActivity(publication);
+      } catch (err) {
+        logger.error({ err, companyId: publication.companyId }, "failed to publish coord token activity event");
+      }
+    }
   }
 
   function sendSecret(res: Response, body: unknown) {
@@ -151,15 +188,19 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
     async (req, res) => {
     const { companyId, userId } = auth(res);
     const body = req.body as IssueRk9CoordToken;
-    const issued = await tokens.issue({
-      companyId,
-      principalKind: body.principalKind,
-      principalName: body.principalName,
-      label: body.label ?? null,
-      expiresAt: parseExpiresAt(body.expiresAt) ?? null,
-      createdByUserId: userId,
-    });
-    await audit(companyId, userId, "rk9_coord.token_issued", issued.record);
+    const publications: ActivityPublication[] = [];
+    const issued = await tokens.issue(
+      {
+        companyId,
+        principalKind: body.principalKind,
+        principalName: body.principalName,
+        label: body.label ?? null,
+        expiresAt: parseExpiresAt(body.expiresAt) ?? null,
+        createdByUserId: userId,
+      },
+      (tx, result) => audit(tx, publications, companyId, userId, "rk9_coord.token_issued", result.record),
+    );
+    publishBestEffort(publications);
     sendSecret(res, issued);
     },
   );
@@ -172,15 +213,21 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
       const { companyId, userId } = auth(res);
       const tokenId = tokenIdParam(req);
       const body = req.body as RotateRk9CoordToken;
-      const rotated = await tokens.rotate({
-        companyId,
-        tokenId,
-        label: body.label,
-        expiresAt: parseExpiresAt(body.expiresAt),
-        createdByUserId: userId,
-      });
-      await audit(companyId, userId, "rk9_coord.token_revoked", rotated.revoked);
-      await audit(companyId, userId, "rk9_coord.token_rotated", rotated.record);
+      const publications: ActivityPublication[] = [];
+      const rotated = await tokens.rotate(
+        {
+          companyId,
+          tokenId,
+          label: body.label,
+          expiresAt: parseExpiresAt(body.expiresAt),
+          createdByUserId: userId,
+        },
+        async (tx, result) => {
+          await audit(tx, publications, companyId, userId, "rk9_coord.token_revoked", result.revoked);
+          await audit(tx, publications, companyId, userId, "rk9_coord.token_rotated", result.record);
+        },
+      );
+      publishBestEffort(publications);
       sendSecret(res, { token: rotated.token, record: rotated.record });
     },
   );
@@ -188,8 +235,11 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
   router.post("/companies/:companyId/rk9/coord-tokens/:tokenId/revoke", requireOperator, async (req, res) => {
     const { companyId, userId } = auth(res);
     const tokenId = tokenIdParam(req);
-    const record = await tokens.revoke({ companyId, tokenId });
-    await audit(companyId, userId, "rk9_coord.token_revoked", record);
+    const publications: ActivityPublication[] = [];
+    const record = await tokens.revoke({ companyId, tokenId }, (tx, revoked) =>
+      audit(tx, publications, companyId, userId, "rk9_coord.token_revoked", revoked),
+    );
+    publishBestEffort(publications);
     res.json({ record });
   });
 

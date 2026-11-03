@@ -45,9 +45,21 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+/**
+ * Flags each command accepts. A flag that does not belong to the command is a
+ * usage error, never silently ignored: `issue --no-expiry` or
+ * `revoke --expires-at` would otherwise look like they did something.
+ */
+const COMMAND_FLAGS = {
+  issue: ["host", "service", "out", "label", "expires-at", "company", "force"],
+  rotate: ["id", "out", "label", "expires-at", "no-expiry", "company", "force"],
+  revoke: ["id", "company"],
+  list: ["company"],
+};
+
 function parse(argv) {
   const [command, ...rest] = argv;
-  if (!["issue", "rotate", "revoke", "list"].includes(command ?? "")) {
+  if (!Object.hasOwn(COMMAND_FLAGS, command ?? "")) {
     throw new UsageError("command must be issue, rotate, revoke or list");
   }
   const { values } = parseArgs({
@@ -61,10 +73,15 @@ function parse(argv) {
       label: { type: "string" },
       "expires-at": { type: "string" },
       company: { type: "string" },
-      "no-expiry": { type: "boolean", default: false },
-      force: { type: "boolean", default: false },
+      "no-expiry": { type: "boolean" },
+      force: { type: "boolean" },
     },
   });
+  const allowed = COMMAND_FLAGS[command];
+  const foreign = Object.keys(values).filter((flag) => values[flag] !== undefined && !allowed.includes(flag));
+  if (foreign.length > 0) {
+    throw new UsageError(`${command} does not take ${foreign.map((flag) => `--${flag}`).join(", ")}`);
+  }
   return { command, values };
 }
 
@@ -105,17 +122,14 @@ export async function writeCoordEnvFile(target, { coordUrl, companyId, token, re
   try {
     await handle.writeFile(body, "utf8");
     await handle.sync();
-  } catch (err) {
-    await handle.close().catch(() => undefined);
-    await rm(temp, { force: true });
-    throw err;
-  }
-  await handle.close();
-  try {
+    await handle.close();
     await chmod(temp, 0o600);
     await rename(temp, target);
   } catch (err) {
-    await rm(temp, { force: true });
+    // Every failure, also a failed close, removes the temp file: it holds the
+    // token. A second close of a closed handle is harmless.
+    await handle.close().catch(() => undefined);
+    await rm(temp, { force: true }).catch(() => undefined);
     throw err;
   }
 }

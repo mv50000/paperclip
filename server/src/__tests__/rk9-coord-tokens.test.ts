@@ -6,7 +6,7 @@ import net from "node:net";
 import { randomUUID } from "node:crypto";
 import express, { Router } from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, companies, createDb, rk9CoordTokens, type Db } from "@paperclipai/db";
 import { actorMiddleware } from "../middleware/auth.js";
@@ -413,6 +413,96 @@ if (!support.supported) {
       .send({ expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
     expect(rotated.status).toBe(201);
     expect(await service.resolve(rotated.body.token)).toMatchObject({ principalName: "short-lived" });
+  });
+
+  it("refuses an expiry that leaves less than 60 s, inherited or explicit (RK9-639)", async () => {
+    const service = rk9CoordTokenService(db);
+    const { record } = await service.issue({
+      companyId,
+      principalKind: "host",
+      principalName: "nearly-dead",
+      expiresAt: new Date(Date.now() + 30_000),
+    });
+    const app = manageApp(operatorKey);
+    const inherited = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${record.id}/rotate`).send({});
+    expect(inherited.status).toBe(422);
+    expect(inherited.body.code).toBe("rk9_coord_token_expiry_too_soon");
+    const [still] = await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.id, record.id));
+    expect(still!.revokedAt).toBeNull();
+    const explicit = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens/${record.id}/rotate`)
+      .send({ expiresAt: new Date(Date.now() + 10_000).toISOString() });
+    expect(explicit.status).toBe(422);
+    expect(explicit.body.code).toBe("rk9_coord_token_expiry_too_soon");
+    const issued = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "host", principalName: "soon-host", expiresAt: new Date(Date.now() + 10_000).toISOString() });
+    expect(issued.status).toBe(422);
+    expect(issued.body.code).toBe("rk9_coord_token_expiry_too_soon");
+    const ok = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens/${record.id}/rotate`)
+      .send({ expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    expect(ok.status).toBe(201);
+  });
+
+  it("rolls the token write back when the audit row cannot be written (RK9-639)", async () => {
+    const service = rk9CoordTokenService(db);
+    const rot = await service.issue({ companyId, principalKind: "host", principalName: "audit-fail-rot" });
+    const rev = await service.issue({ companyId, principalKind: "host", principalName: "audit-fail-rev" });
+    // The activity insert fails for these principals, as a DB error would.
+    await db.execute(sql.raw(`
+      CREATE FUNCTION rk9_test_audit_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.entity_type = 'rk9_coord_token' AND NEW.details->>'principalName' LIKE 'audit-fail%' THEN
+          RAISE EXCEPTION 'audit insert failed';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER rk9_test_audit_fail_trg BEFORE INSERT ON activity_log
+        FOR EACH ROW EXECUTE FUNCTION rk9_test_audit_fail();
+    `));
+    try {
+      const app = manageApp(operatorKey);
+      const base = `/api/companies/${companyId}/rk9/coord-tokens`;
+      const active = (name: string) =>
+        db
+          .select()
+          .from(rk9CoordTokens)
+          .where(and(eq(rk9CoordTokens.principalName, name), isNull(rk9CoordTokens.revokedAt)));
+
+      // Issue: a 500 and no token row, so no token exists that the caller never saw.
+      const issued = await request(app).post(base).send({ principalKind: "host", principalName: "audit-fail-new" });
+      expect(issued.status).toBe(500);
+      expect(issued.body).not.toHaveProperty("token");
+      expect(await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.principalName, "audit-fail-new"))).toHaveLength(0);
+
+      // Rotate: the old token is not revoked and no new row exists.
+      const rotated = await request(app).post(`${base}/${rot.record.id}/rotate`).send({});
+      expect(rotated.status).toBe(500);
+      expect(rotated.body).not.toHaveProperty("token");
+      expect((await active("audit-fail-rot")).map((row) => row.id)).toEqual([rot.record.id]);
+      expect(await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.principalName, "audit-fail-rot"))).toHaveLength(1);
+      expect(await service.resolve(rot.token)).toMatchObject({ principalName: "audit-fail-rot" });
+
+      // Revoke: no unaudited revoke.
+      const revoked = await request(app).post(`${base}/${rev.record.id}/revoke`).send({});
+      expect(revoked.status).toBe(500);
+      expect((await active("audit-fail-rev")).map((row) => row.id)).toEqual([rev.record.id]);
+    } finally {
+      await db.execute(sql.raw(`
+        DROP TRIGGER IF EXISTS rk9_test_audit_fail_trg ON activity_log;
+        DROP FUNCTION IF EXISTS rk9_test_audit_fail();
+      `));
+    }
+    // Without the failure the same rotate commits the token and both audit rows together.
+    const app = manageApp(operatorKey);
+    const ok = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${rot.record.id}/rotate`).send({});
+    expect(ok.status).toBe(201);
+    const audit = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityType, "rk9_coord_token"), eq(activityLog.entityId, ok.body.record.id)));
+    expect(audit.map((row) => row.action)).toEqual(["rk9_coord.token_rotated"]);
   });
 
   it("does not rotate or revoke another company's token", async () => {

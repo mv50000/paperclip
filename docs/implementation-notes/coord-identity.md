@@ -396,6 +396,12 @@ Conditions for the remote-access child:
   only the sha256 hash and the display prefix.
 - **Rotate:** one transaction revokes the old row and inserts the new one
   with `rotated_from_token_id`. There is no overlap window.
+- **Minimum lifetime (RK9-639):** a new token must live at least 60 s. An
+  explicit `expiresAt` closer than that is 422
+  `rk9_coord_token_expiry_too_soon` (a past one stays
+  `rk9_coord_token_expiry_past`). A rotate that inherits an old expiry with
+  less than 60 s left gets the same 422 and asks for an explicit
+  `expiresAt` (or `null`).
 - **Revoke:** set `revoked_at`. The auth hook looks the hash up on every
   request without a cache, so revocation takes effect on the next request.
 - **Auth hook** (`auth.ts`, RK9-623): a bearer that starts with `rk9_coord_`
@@ -410,7 +416,12 @@ Conditions for the remote-access child:
 - **Compare:** hash lookup on the unique `token_hash` index. Where a value is
   compared in memory, use `timingSafeEqual`.
 - **Audit:** issue, rotate and revoke write `activity_log` rows. The token
-  value never appears in logs, argv, comments or the vault.
+  value never appears in logs, argv, comments or the vault. The activity row
+  is written in the same transaction as the token write (RK9-639). If the
+  audit insert fails, the token write rolls back: the caller gets 500 and no
+  token exists that it never saw, and a failed rotate leaves the old token
+  active. The live `activity.logged` event is published after the commit,
+  best effort, so a publish failure never hides a committed token.
 - **Implementation (RK9-623):** routes
   `GET|POST /api/companies/:companyId/rk9/coord-tokens` and
   `POST .../coord-tokens/:tokenId/{rotate,revoke}`
@@ -421,7 +432,10 @@ Conditions for the remote-access child:
   set) may call them. The command
   `server/scripts/rk9-coord-token.mjs` reads the board key from
   `PAPERCLIP_API_KEY` and writes a new token only to its `--out` env file
-  (mode 0600). Service: `server/src/services/rk9-coord-tokens.ts`. Bearer
+  (mode 0600). It rejects a flag that does not belong to the command (for
+  example `issue --no-expiry`, or `--expires-at` on `revoke` or `list`) with
+  exit code 2, before any API call. Every failed env-file write, also a
+  failed close of the file handle, removes the temp file. Service: `server/src/services/rk9-coord-tokens.ts`. Bearer
   hook and guard: `server/src/middleware/rk9-coord-token-auth.ts`. A
   coord-token request outside the coord prefix gets 403 with code
   `rk9_coord_token_route_forbidden`.

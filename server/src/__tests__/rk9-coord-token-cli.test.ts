@@ -140,6 +140,27 @@ describe("rk9-coord-token.mjs", () => {
     expect(JSON.parse(list.stdout)).toHaveLength(1);
   });
 
+  it("rejects a flag that does not belong to the command, before any API call (RK9-639)", async () => {
+    const before = seen.length;
+    const cases = [
+      ["issue", "--host", "mv-laptop", "--no-expiry", "--out", path.join(dir, "no-expiry.env")],
+      ["issue", "--host", "mv-laptop", "--id", TOKEN_ID, "--out", path.join(dir, "with-id.env")],
+      ["rotate", "--id", TOKEN_ID, "--host", "mv-laptop", "--out", path.join(dir, "with-host.env")],
+      ["revoke", "--id", TOKEN_ID, "--expires-at", "2030-01-01T00:00:00Z"],
+      ["revoke", "--id", TOKEN_ID, "--out", path.join(dir, "revoke.env")],
+      ["list", "--expires-at", "2030-01-01T00:00:00Z"],
+      ["list", "--force"],
+    ];
+    for (const args of cases) {
+      const res = await run(args);
+      expect(res.code, args.join(" ")).toBe(2);
+      expect(res.stderr).toContain("does not take");
+    }
+    expect(seen.length).toBe(before);
+    const kept = await run(["list", "--company", COMPANY]);
+    expect(kept.code, kept.stderr).toBe(0);
+  });
+
   it("requires the board key in the environment and --out for new tokens", async () => {
     expect((await run(["list"], { PAPERCLIP_API_KEY: "" })).code).toBe(2);
     expect((await run(["issue", "--host", "mv-laptop"])).code).toBe(2);
