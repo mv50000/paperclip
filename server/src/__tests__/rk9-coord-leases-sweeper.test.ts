@@ -370,4 +370,31 @@ if (!support.supported) {
     expect(await activityCount(res)).toBe(3);
     expect(await activeHolder(res)).toBe(cc("s1"));
   });
+  it("counts a pre-cap waiter row at the TTL cap in the ETA and never shortens a granted lease (RK9-664)", async () => {
+    const res = "prod:leftover-cap";
+    await acquire(cc("c1"), res);
+    // Rows as RK9-648 left them: a 24 h hard-gate lease and a waiter that asked for 86 400 s.
+    await db
+      .update(rk9CoordLeases)
+      .set({ expiresAt: sql`now() + interval '24 hours'` })
+      .where(and(eq(rk9CoordLeases.resource, res), sql`${rk9CoordLeases.releasedAt} is null`));
+    await acquire(cc("c2"), res, true);
+    await db.update(rk9CoordLeaseWaiters).set({ requestedTtlSeconds: 86_400 }).where(eq(rk9CoordLeaseWaiters.resource, res));
+
+    // The sweep leaves a granted lease alone (parent decision): shortening it mid-operation could let
+    // another actor into the resource. The cap applies to grant and renew only.
+    await sweepRk9CoordLeases(db, { env });
+    const [row] = await db
+      .select({ left: sql<number>`extract(epoch from ${rk9CoordLeases.expiresAt} - now())::int` })
+      .from(rk9CoordLeases)
+      .where(and(eq(rk9CoordLeases.resource, res), sql`${rk9CoordLeases.releasedAt} is null`));
+    expect(row!.left).toBeGreaterThan(86_400 - 120);
+    expect(await activeHolder(res)).toBe(cc("c1"));
+
+    // A third waiter behind c2: the ETA counts c2 at the cap, not at 86 400 s.
+    const third = await acquire(cc("c4"), res, true);
+    expect(third.body.position).toBe(2);
+    const etaS = (Date.parse(third.body.eta) - Date.parse(third.body.expires_at)) / 1000;
+    expect(etaS).toBe(21_600);
+  });
 });

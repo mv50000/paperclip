@@ -766,7 +766,17 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
       .orderBy(asc(rk9CoordLeaseWaiters.id));
     const index = waiters.findIndex((waiter) => waiter.actorId === selfActorId);
     const ahead = index >= 0 ? waiters.slice(0, index) : waiters;
-    const aheadS = ahead.reduce((sum, waiter) => sum + (waiter.ttl ?? RK9_COORD_LEASE_TTL_DEFAULT_S), 0);
+    // RK9-664: a waiter row queued before the cap existed (RK9-648) can still ask for up to 86 400 s.
+    // Clamp it here like a grant, so the ETA never counts more than the waiter can hold.
+    const parsed = parseRk9CoordLeaseResource(lease.resource);
+    const aheadS = ahead.reduce(
+      (sum, waiter) =>
+        sum +
+        (parsed
+          ? rk9CoordLeaseEffectiveTtlS(parsed, waiter.ttl ?? RK9_COORD_LEASE_TTL_DEFAULT_S, env)
+          : (waiter.ttl ?? RK9_COORD_LEASE_TTL_DEFAULT_S)),
+      0,
+    );
     const base = lease.expiresAt.getTime() > ctx.now.getTime() ? lease.expiresAt : ctx.now;
     return {
       granted: false,
