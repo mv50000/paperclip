@@ -37,7 +37,9 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
   const env = {} as NodeJS.ProcessEnv;
 
   it("matches the bash default copied from rk9-sessions.sh", async () => {
-    const script = await readFile(`${process.env.HOME}/.claude/bin/rk9-sessions.sh`, "utf8").catch(() => null);
+    // RK9-678: RK9_SESSIONS_SH points the check at a claude-config checkout.
+    const path = process.env.RK9_SESSIONS_SH || `${process.env.HOME}/.claude/bin/rk9-sessions.sh`;
+    const script = await readFile(path, "utf8").catch(() => null);
     if (!script) return; // claude-config is not on CI; the fixtures below still pin the behaviour.
     const line = script.split("\n").find((l) => l.startsWith("export RK9_SESSIONS_SECRET_RX="));
     expect(line).toBeDefined();
@@ -311,6 +313,59 @@ describe("presence metadata secret check", () => {
     ["count key under a spaced pass word", { "pass word": { tokens: "83920144" } }],
     ["count key after a glued name and a separator", { a: ["rootpassword", "=", { tokens: "83920144" }] }],
     ["numeric password string", { password: "12345678" }],
+    // RK9-678 M: a credential name, its value, then more items
+    ["three-item list", { a: ["PASSWORD", "Hunter2Hunter", "x"] }],
+    ["four-item list, name in the middle", { argv: ["deploy", "API_KEY", FAKE_HEX, "--verbose"] }],
+    ["nested three-item tuple", { env: [["DB_PASSWORD", FAKE_HEX, "prod"]] }],
+    ["tag list, bare name in the middle, unknown word", { tags: ["infra", "secret", "hunterhunter"] }],
+    ["object after a name in a long list", { a: ["PASSWORD", { v: "hunter2hunter2" }, "x"] }],
+    // RK9-678 L: a UUID under an API key id
+    ["UUID under api_key_id", { api_key_id: FAKE_UUID }],
+    ["UUID under apiKeyId", { apiKeyId: FAKE_UUID }],
+    ["UUID API_KEY_ID pair", { env: [{ name: "API_KEY_ID", value: FAKE_UUID }] }],
+    // RK9-678: the shared keyword set (pass, pw, credentials)
+    ["pw key", { pw: "hunter2hunter" }],
+    ["db_pass key", { db_pass: "hunter2hunter" }],
+    ["DB_PW key", { DB_PW: "hunter2hunter" }],
+    ["credentials key", { credentials: "hunter2hunter" }],
+    ["credential key", { credential: "hunter2hunter" }],
+    ["credentials object", { credentials: { db: "hunter2hunter" } }],
+    ["DB_PASS tuple", { env: ["DB_PASS", FAKE_HEX] }],
+    ["DB_PASS pair", { env: [{ name: "DB_PASS", value: FAKE_HEX }] }],
+    ["--pass flag, short value", { argv: ["tool", "--pass", "foo"] }],
+    ["pass= in a free-text value", { note: "user=bob pass=hunter2hunter" }],
+    ["passphrase= in a free-text value", { note: "passphrase=correcthorse" }],
+    ["private_key= in a free-text value", { note: "private_key=abcdefgh12" }],
+    // RK9-678 verifier round 1: pass and pw in assignment and pair positions
+    ["pass, separator, value", { a: ["pass", "=", "Hunter2Hunter"] }],
+    ["pw, separator, value", { a: ["pw", "=", "Hunter2Hunter"] }],
+    ["db_pass, separator, value", { a: ["db_pass", "=", "Hunter2Hunter"] }],
+    ["pass= item", { a: ["pass=", "Hunter2Hunter"] }],
+    ["PW: item", { a: ["PW:", "Hunter2Hunter"] }],
+    ["PASS: item", { a: ["PASS:", "Hunter2Hunter"] }],
+    ["DB_PASS: item", { a: ["DB_PASS:", "Hunter2Hunter"] }],
+    ["DB PASS label", { a: ["DB PASS", "Hunter2Hunter"] }],
+    ["DB PW label", { a: ["DB PW", "Hunter2Hunter"] }],
+    ["pass as a pair name", { env: [{ name: "pass", value: "Hunter2Hunter" }] }],
+    ["pw as a pair name", { name: "pw", value: "Hunter2Hunter" }],
+    ["db_pass as a pair name", { name: "db_pass", value: "Hunter2Hunter" }],
+    ["db_pw as a Key/Value pair", { Key: "db_pw", Value: "Hunter2Hunter" }],
+    // RK9-678 verifier round 1: a token key below another credential key
+    ["counter key under token under userPass", { userPass: { token: { "session-user-model-cost-today": 1 } } }],
+    ["counter key under token under DB_PASS", { DB_PASS: { token: { "session-user-model-cost-today": 1 } } }],
+    ["counter key under token in a pair value", { name: "DB_PASSWORD", value: { token: { "session-user-model-cost-today": 1 } } }],
+    ["counter key under token after a name", { a: ["DB_PASSWORD", { token: { "session-user-model-cost-today": 1 } }] }],
+    ["counter key under access_tokens", { access_tokens: { system_user_session: 1 } }],
+    // RK9-678: a secret as a key, whatever it labels
+    ["secret key labelling a number under password", { password: { hunter2hunter2: 1 } }],
+    ["secret key labelling a number under secret_key", { secret_key: { hunter2hunter2: 1 } }],
+    ["secret key labelling a branch", { aws_secret_access_key: { hunter2hunter2: { a: 1 } } }],
+    ["secret key labelling a number under tokens", { tokens: { hunter2hunter2: 1 } }],
+    ["letters-only secret key under tokens", { tokens: { hunterpass: 1 } }],
+    ["counter key under a password key", { secret_key: { cache_read: 1 } }],
+    ["counter key under password below tokens", { tokens: { password: { cache_read: 1 } } }],
+    ["counter key after a name in a list", { env: ["DB_PASSWORD", { cache_read: 1 }] }],
+    ["counter key in a pair value", { name: "DB_PASSWORD", value: { cache_read: 1 } }],
     // --password-stdin exemption: a flag value after a real credential flag
     ["flag-like value after a credential flag", { argv: ["mysql", "--password", "--abcdef12"] }],
     ["value after --password still flagged", { argv: ["mysql", "--password", "hunter2hunter2"] }],
@@ -365,6 +420,23 @@ describe("presence metadata secret check", () => {
     ["count strings beside each other", { usage: { input_tokens: "1234567", output_tokens: "1,234" } }],
     ["cache count keys", { usage: { cache_read_tokens: "123456", cache_creation_input_tokens: "234567" } }],
     ["tokens_limit with a unit", { context: { tokens_used: 1234, tokens_limit: "200k" } }],
+    // RK9-678 false positives next to the leak fixtures above
+    ["tag list, bare name in the middle, known word", { tags: ["infra", "secret", "important"] }],
+    ["UUID under token_id stays accepted", { usage: { token_id: FAKE_UUID } }],
+    ["prefixed api_key_id", { api_key_id: FAKE_TOK_ID }],
+    ["UUID under api_key_ref", { api_key_ref: FAKE_UUID }],
+    ["counter map under tokens", { tokens: { input: 1234, cache_read: 12, output: null } }],
+    ["nested counter map under tokens", { usage: { tokens: { completion_details: { reasoning: 3 } } } }],
+    ["pwd key", { pwd: "/home/rk9admin" }],
+    ["compass key", { compass: "northwest" }],
+    ["bypass key", { bypass: "enabled_mode" }],
+    ["lower-case pass words in a list", { steps: ["first-pass", "second-pass", "review"] }],
+    ["pass as a tag", { status: ["pass", "completed"] }],
+    ["pass: in free text", { note: "second pass: refactoring" }],
+    ["pwd= in free text", { note: "cd ~ && pwd=/home/rk9admin" }],
+    ["tmux window", { tmux_window: "@7" }],
+    ["counter map under input_tokens", { input_tokens: { cache_read: 12 } }],
+    ["counter map under tokens under tokens", { tokens: { usage: { tokens: { cache_read: 1 } } } }],
   ])("accepts %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
   });

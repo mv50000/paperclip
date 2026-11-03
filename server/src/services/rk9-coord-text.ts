@@ -27,7 +27,11 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   "|-----BEGIN [A-Z ]*PRIVATE KEY-----" +
   "|://[^ /:@]+:[^ /@]+@" +
   "|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}" +
-  "|((token|secret|password|passwd|api[_-]?key|apikey)[\"']?\\s*[=:]\\s*)[\"']?[^\\s\"',;]{6,}";
+  // RK9-678 (operator decision): `passphrase`, `private_key`, `credentials`
+  // and `pw` (not after a letter: `pwd` and `compass` stay), and `pass` with
+  // `=` only (`user=bob pass=<value>`; `pass:` is prose: `second pass: ...`).
+  "|((token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]\\s*" +
+  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?[^\\s\"',;]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
 
@@ -83,10 +87,12 @@ const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
  * {"db": "..."}`, `secrets=(...)`), whose content up to the first closing
  * bracket goes (to the end of the text when it has none: RK9-676 kept this
  * fail-closed rule, because a cap left the tail of a long secret). Full-width
- * forms are caught by the NFKC matching reading, not here.
+ * forms are caught by the NFKC matching reading, not here. RK9-678 added the
+ * keywords of the default pattern (`passphrase`, `private_key`, `credential`,
+ * `pw`, and `pass` with an `=` separator only).
  */
 const KEYWORD_RX =
-  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
+  /((?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credential|api[_-]?key|apikey)s?|(?<![A-Za-z])pw)["']?\s*(?:[=:]|->|=>|%3[ad])\s*|(?<![A-Za-z])pass["']?\s*(?:=|%3d)\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
 /** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
 const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
 /**
@@ -569,6 +575,17 @@ export function toRk9CoordLine(
   if (line.length === 0 || rk9CoordMatchText(line).length === 0) return null;
   const points = Array.from(line);
   if (points.length <= max) return line;
-  return `${points.slice(0, Math.max(0, max - 1)).join("").trimEnd()}\u2026`;
+  // RK9-678: a cut inside a `[redacted]` marker moves to the marker start,
+  // so the line never ends in `[redac…`.
+  let cut = Math.max(0, max - 1);
+  for (let at = line.indexOf(RK9_COORD_REDACTED); at >= 0; at = line.indexOf(RK9_COORD_REDACTED, at + 1)) {
+    const start = Array.from(line.slice(0, at)).length;
+    if (start >= cut) break;
+    if (start + RK9_COORD_REDACTED.length > cut) {
+      cut = start;
+      break;
+    }
+  }
+  return `${points.slice(0, cut).join("").trimEnd()}\u2026`;
 }
 // --- /RK9 Custom ---
