@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# RK9 Custom: optional PAPERCLIP_RUN_ID and in_progress/no-assignee 422 handling (fork-only; upstream requires a run id)
 set -euo pipefail
 
 usage() {
