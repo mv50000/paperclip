@@ -65,8 +65,7 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     const quoted = line!.slice(line!.indexOf(":-'") + 3, line!.lastIndexOf("'}"));
     // RK9-673: claude-config loosened the client copy (sk- word boundary, bearer/basic value needs a
     // non-letter or 20+ letters, plus a 20+ sk- key with a digit that stops before a keyword, and quoted
-    // Authorization forms). The
-    // server copy stays stricter on purpose. Either the old client copy or exactly this variant passes.
+    // Authorization forms). The server copy stays stricter on purpose. Either the old client copy or exactly this variant passes.
     expect([RK9_COORD_SECRET_RX_DEFAULT, rk9673ClientVariant()]).toContain(quoted.replaceAll(`'"'"'`, "'"));
   });
 
