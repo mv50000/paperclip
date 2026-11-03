@@ -186,6 +186,18 @@ and the subtype in `payload.subtype`. The activity action is
   `ttl/3`, at most every 1200 s (RK9-648), so it keeps a lease under any
   allowed cap. rk9claude holds a `host:` lease for a scheduled
   reboot for at most 6 h (RK9-656), which fits the default cap.
+- Decision (RK9-664, 2026-11-03, the parent on the operator's
+  delegation): the default stays 6 h for now. RK9-660 removes
+  rk9claude's long reboot hold, and RK9-643 decides whether the cap goes
+  lower (for example 1 h, which shortens the worst case of a crashed
+  `prod:` or `migrate:` holder).
+- Leftovers (RK9-664): a lease or waiter row from before the cap
+  (RK9-648) is not clamped after the fact. The cap applies to grant, the
+  claim poll and renew only. Parent decision 2026-11-03: shortening a
+  granted lease mid-operation could let another actor into the resource,
+  and the prod check found no active lease beyond the cap. The queue ETA
+  does clamp each waiter's `requested_ttl_seconds` at read time, so an
+  old waiter row never adds more than the cap to the ETA.
 
 ## Break
 
