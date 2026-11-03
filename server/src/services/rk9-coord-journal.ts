@@ -35,6 +35,7 @@ import {
 import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
+import { RK9_COORD_REGISTERED_MARKER } from "./rk9-coord-presence.js";
 import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "./rk9-coord-text.js";
 
 /** DB CHECK: summary is 1..300 characters. */
@@ -107,6 +108,26 @@ const DEFAULT_PRESENCE_TTL_S = 300;
 export function rk9CoordPresenceTtlSeconds(env: NodeJS.ProcessEnv = process.env): number {
   const value = Number.parseInt(env.RK9_COORD_PRESENCE_TTL_S ?? "", 10);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_PRESENCE_TTL_S;
+}
+
+/**
+ * Stub rate limit (RK9-641, parent decision 3.11.2026): at most this many
+ * new stub actor rows per company and host per rolling hour. A stub is the
+ * row ensureRk9CoordActorRow inserts for an actor id that never registered
+ * through PUT /actors/me. Normal use stays far below it: a host creates one
+ * stub per new session, worktree or headless run that reads the delta or
+ * the inbox before registering (an /implement wave on paperclip-01 starts
+ * about 20). A remote token that mints random `cc:<host>:<random>` ids hits
+ * it and gets 429 `rk9_coord_stub_rate_limited`. Agent runs (server-verified
+ * running runs) and actors without a host are not limited.
+ * RK9_COORD_STUB_RATE_PER_HOUR overrides it; 0 turns the limit off.
+ */
+export const RK9_COORD_STUB_RATE_PER_HOUR_DEFAULT = 120;
+
+export function rk9CoordStubRatePerHour(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number.parseInt(env.RK9_COORD_STUB_RATE_PER_HOUR ?? "", 10);
+  if (!Number.isFinite(value) || value < 0) return RK9_COORD_STUB_RATE_PER_HOUR_DEFAULT;
+  return Math.min(value, 100_000);
 }
 
 /**
@@ -196,6 +217,37 @@ export async function ensureRk9CoordActorRow(
   const runId = actor.kind === "agent_run" ? parsed?.ref ?? null : null;
   const publications: ActivityPublication[] = [];
   await db.transaction(async (tx) => {
+    const limit = rk9CoordStubRatePerHour();
+    if (limit > 0 && actor.host && actor.kind !== "agent_run") {
+      // Serialize stub inserts per company and host, so concurrent calls
+      // cannot all pass the count (transaction-scoped advisory lock).
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`rk9_coord_stub:${companyId}:${actor.host}`}))`);
+      const since = new Date(Date.now() - 3600 * 1000);
+      const [recent] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(rk9CoordActors)
+        .where(
+          and(
+            eq(rk9CoordActors.companyId, companyId),
+            eq(rk9CoordActors.host, actor.host),
+            gt(rk9CoordActors.createdAt, since),
+            sql`(${rk9CoordActors.metadata} ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null`,
+          ),
+        );
+      if (Number(recent?.count ?? 0) >= limit) {
+        // A concurrent insert of the same id may have won meanwhile: reuse it.
+        const [raced] = await tx
+          .select({ id: rk9CoordActors.id })
+          .from(rk9CoordActors)
+          .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.actorRef, actor.actorId)))
+          .limit(1);
+        if (raced) return;
+        throw new HttpError(429, "Too many new coord actors from this host; register with PUT /actors/me or retry later", {
+          code: "rk9_coord_stub_rate_limited",
+          limitPerHour: limit,
+        });
+      }
+    }
     const inserted = await tx
       .insert(rk9CoordActors)
       .values({

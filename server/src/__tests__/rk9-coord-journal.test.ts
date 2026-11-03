@@ -286,8 +286,8 @@ if (!support.supported) {
     try {
       const failed = await post(cid, "worktree:RKL-1", body);
       expect(failed.status).toBe(500);
-      const none = await db.select().from(rk9CoordEvents).where(eq(rk9CoordEvents.companyId, cid));
-      expect(none).toHaveLength(0);
+      const stored = await db.select().from(rk9CoordEvents).where(eq(rk9CoordEvents.companyId, cid));
+      expect(stored).toHaveLength(0);
     } finally {
       await db.execute(sql.raw(`
         DROP TRIGGER rk9_test_event_log_fail ON activity_log;
@@ -324,6 +324,39 @@ if (!support.supported) {
     const stub = rows.find((row) => row.action === "rk9.coord.actor_stub_created")!;
     expect(stub).toMatchObject({ entityType: "rk9_coord_actor", actorType: "user", actorId: "operator-user" });
     expect(stub.details).toMatchObject({ actor: "worktree:RKS-1", kind: "worktree" });
+  });
+
+  it("rate-limits new stub actors per host and logs only new rows (RK9-641)", async () => {
+    const cid = await newCompany();
+    const previous = process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+    process.env.RK9_COORD_STUB_RATE_PER_HOUR = "2";
+    try {
+      const app = appFor(none, hostToken(cid));
+      const delta = (actorId: string) => request(app).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", actorId);
+      expect((await delta("cc:mv-laptop:mint-1")).status).toBe(204);
+      expect((await delta("cc:mv-laptop:mint-2")).status).toBe(204);
+      const limited = await delta("cc:mv-laptop:mint-3");
+      expect(limited.status).toBe(429);
+      expect(limited.body.code).toBe("rk9_coord_stub_rate_limited");
+      // An existing stub still works and writes no new row or activity.
+      expect((await delta("cc:mv-laptop:mint-1")).status).toBe(204);
+      const actors = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
+      expect(actors.map((row) => row.actorRef).sort()).toEqual(["cc:mv-laptop:mint-1", "cc:mv-laptop:mint-2"]);
+      const logged = await db
+        .select()
+        .from(activityLog)
+        .where(and(eq(activityLog.companyId, cid), eq(activityLog.action, "rk9.coord.actor_stub_created")));
+      expect(logged).toHaveLength(2);
+      // Another host has its own budget; 0 turns the limit off.
+      const local = (actorId: string) =>
+        request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", actorId);
+      expect((await local("worktree:RKM-1")).status).toBe(204);
+      process.env.RK9_COORD_STUB_RATE_PER_HOUR = "0";
+      expect((await delta("cc:mv-laptop:mint-3")).status).toBe(204);
+    } finally {
+      if (previous === undefined) delete process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+      else process.env.RK9_COORD_STUB_RATE_PER_HOUR = previous;
+    }
   });
 
   it("forces unverified trust for remote host rows whatever the client sends", async () => {

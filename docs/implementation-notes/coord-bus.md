@@ -441,6 +441,7 @@ Env vars:
 | `RK9_COORD_PRESENCE_TTL_S` | 300 (10-86400) | presence TTL; the client should refresh at most every TTL/3 |
 | `RK9_COORD_AGENT_RUN_STALE_S` | 7200 (0 = off) | orphan cutoff for projected running runs |
 | `RK9_SESSIONS_SECRET_RX` | the `rk9-sessions.sh` default | redaction pattern; an invalid JS RegExp falls back to the default |
+| `RK9_COORD_STUB_RATE_PER_HOUR` | 120 (0 = off) | new stub actor rows per company and host per hour (RK9-641); above it 429 `rk9_coord_stub_rate_limited` |
 
 ## Journal and inbox API (RK9-626)
 
@@ -521,7 +522,10 @@ required field is 400. Common optional fields: `client_event_id`,
   validation. The vault-mcp proxy adds the `[Grok, varmistamaton]` marker;
   the server enforces only the allow-list and the trust.
 - Each new event writes one `activity_log` row
-  (`rk9.coord.event_appended`).
+  (`rk9.coord.event_appended`) in the insert's transaction (RK9-641). A
+  failed log rolls the event back (500), so a client retry stores and logs
+  it; a retry can never answer `duplicate: true` for an unlogged event. A
+  duplicate writes no row.
 - There is no PATCH, PUT or DELETE route; those methods get the coord 404.
   The DB trigger rejects UPDATE and DELETE as well (see "Append-only").
 
@@ -692,9 +696,9 @@ Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
 - The cursor row is read FOR UPDATE. The read first fixes its window
   (cursor, newest company event id]. Count, rows and the new cursor all use
   that window, so an event is never returned twice. The cursor moves to the
-  window end in the same transaction. Count and rows are two READ COMMITTED
-  statements, so a late commit inside the window can make `more` differ from
-  the rows by one; see the known limit below. Two concurrent calls
+  window end in the same transaction. Count and rows come from one
+  statement (`count(*) over ()` before the LIMIT, RK9-641), so `total` and
+  `more` always agree with the returned rows. Two concurrent calls
   of one actor serialize, so the event goes to one of them. An immediate
   second call is 204.
 - `peek=1` reads without a lock and writes nothing: no cursor move, no stub
@@ -707,7 +711,22 @@ Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
 - Nothing new: 204 with an empty body, also with `fmt=line`.
 - The actor row: when the caller has no row in `rk9_coord_actors`, a
   non-peek delta or an inbox claim inserts a stub (kind, actor_ref, host, trust; ON CONFLICT DO
-  NOTHING). The presence API (RK9-625) owns every other column.
+  NOTHING). The presence API (RK9-625) owns every other column. A new stub
+  row writes one `activity_log` row (`rk9.coord.actor_stub_created`) in the
+  same transaction; a conflict or an existing row writes none (RK9-641).
+- Stub rate limit (RK9-641): at most `RK9_COORD_STUB_RATE_PER_HOUR` (default
+  120, `0` = off) new stub rows per company and host per rolling hour.
+  Above it the call is 429 `rk9_coord_stub_rate_limited` and no row is
+  written; an existing stub keeps working. A host makes one stub per new
+  session, worktree or headless run that reads the delta or the inbox
+  before it registers (an `/implement` wave on paperclip-01 starts about
+  20), so normal use stays far below the limit. A remote token that mints
+  random `cc:<host>:<random>` ids hits it. Agent runs (server-verified
+  running runs) and actors without a host are not limited. A per-host
+  advisory lock serializes the count and the insert.
+- The cursor move writes no `activity_log` row (RK9-641 decision): it is
+  read bookkeeping on every hook prompt, and the cursor row keeps its own
+  `updated_at`.
 - Known limit: event ids come from a sequence. An event whose transaction
   commits after a newer id is already visible can be skipped by a cursor
   that has passed it. Appends are single-row autocommits, so the window is
@@ -759,8 +778,12 @@ Paperclip agent targets:
   API, which applies the low-trust boundary, the watchdog scope and the
   visibility checks.
 - The comment goes through `issueService.addComment`, authored by the board
-  user. One `activity_log` row (`rk9.coord.message_commented`) records it.
-  No inbox row is left.
+  user. In the same transaction it writes the `issue.comment_added` row of
+  `POST /issues/:id/comments` (its live event goes out after the commit)
+  and the `rk9.coord.message_commented` row. The issue-reference index is
+  synced after the commit (RK9-641). External-object sync is left out: it
+  needs the plugin worker manager of the issue routes. No inbox row is
+  left.
 - Agent Chat conversation issues are 422
   `rk9_coord_inbox_target_not_allowed`. A paused issue tree is 409
   `rk9_coord_inbox_issue_paused`, as on the board comment route.
@@ -775,15 +798,26 @@ Paperclip agent targets:
   404 `rk9_coord_inbox_target_not_found`. The rk9 CLI dead-letters a
   spooled write only on that 404 code.
 
-Each inbox row also writes one `activity_log` row (`rk9.coord.inbox_sent`).
+Each inbox row also writes one `activity_log` row (`rk9.coord.inbox_sent`),
+in the insert's transaction.
 
 ### GET /inbox/me
 
 Claims every pending message for the caller and marks it delivered:
 
-- rows with `to_actor_id` = its row, `to_name` = its actor id or its name,
-  or `to_issue` = its issue;
+- rows with `to_actor_id` = its row or `to_name` = its actor id;
+- also rows with `to_name` = its name or `to_issue` = its issue, but only
+  for a local actor (board key on paperclip-01) or a verified one
+  (operator, rk9claude). Remote hosts, coord-token `cc` claims, Grok and
+  agent runs claim only rows addressed to their exact actor id, so an
+  actor that sets a session's name or issue in presence cannot read that
+  session's messages, and an agent run whose name matches a token's
+  name-addressed message does not get it (operator decision 2.11.2026,
+  RK9-641);
 - not expired, at most 50 per call, ascending id.
+- A claim that delivers rows writes one `activity_log` row
+  (`rk9.coord.inbox_claimed`, the claimed ids) in the claim's transaction.
+  An empty claim writes none.
 
 One statement claims the rows:
 `UPDATE ... SET delivered_at, delivered_to_actor_id WHERE delivered_at IS NULL
