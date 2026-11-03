@@ -503,11 +503,44 @@ describe("presence metadata secret check cost and counter flags (RK9-676)", () =
   it("keeps counter flags under tokens and rejects other keys there", () => {
     expect(rk9CoordMetadataHasSecret({ tokens: { output: null, cached: true, input: 12 } })).toBe(false);
     expect(rk9CoordMetadataHasSecret({ tokens: { hunterpass: true } })).toBe(true);
-    expect(rk9CoordMetadataHasSecret({ password: { output: true } })).toBe(true);
+    // RK9-684 item 5: a counter flag passes under every credential name; a count only under a token key.
+    expect(rk9CoordMetadataHasSecret({ password: { output: true } })).toBe(false);
+    expect(rk9CoordMetadataHasSecret({ passphrase: { cached: true, output: null } })).toBe(false);
+    expect(rk9CoordMetadataHasSecret({ password: { output: 1 } })).toBe(true);
+    expect(rk9CoordMetadataHasSecret({ password: { hunterpass: true } })).toBe(true);
   });
 
   it("flags a Bearer token glued with invisible characters in a metadata value", () => {
     expect(rk9CoordMetadataHasSecret({ note: `1Bearer\u200babcdefghijkl` })).toBe(true);
+  });
+});
+
+// RK9 Custom (RK9-684, folded in RK9-687): `pass`/`pw` names in a list and padded or full-width separators.
+describe("presence metadata list names and separators (RK9-687)", () => {
+  const value = ["Hunter2", "Hunter"].join("");
+
+  it.each([
+    ["db_pass", ["db_pass", value]],
+    ["dbPass", ["dbPass", value]],
+    ["DB_Pass", ["DB_Pass", value]],
+    ["db_pw", ["db_pw", value]],
+    ["mysql-pass", ["mysql-pass", value]],
+    ["padded separator", ["DB_PASSWORD", " = ", value]],
+    ["full-width separator", ["pass", "＝", value]],
+    ["full-width colon", ["DB_PASSWORD", "：", value]],
+    ["padded name", ["password =", value]],
+    ["full-width padded name", ["pass ＝", value]],
+  ])("rejects %s directly before a value", (_label, items) => {
+    expect(rk9CoordMetadataHasSecret({ a: items })).toBe(true);
+  });
+
+  it.each([
+    ["the hyphenated tag with a known word", ["first-pass", "review"]],
+    ["the bare word", ["pass", "refactoring"]],
+    ["a word that only ends in pass", ["bypass", value]],
+    ["a pass word in the middle", ["pass_through", value]],
+  ])("accepts %s", (_label, items) => {
+    expect(rk9CoordMetadataHasSecret({ a: items })).toBe(false);
   });
 });
 

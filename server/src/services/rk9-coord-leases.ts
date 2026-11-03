@@ -48,6 +48,7 @@ import {
   type Rk9CoordLeaseResource,
   type Rk9CoordTrust,
 } from "@paperclipai/shared";
+import { isForeignKeyViolation } from "../db-errors.js";
 import { HttpError } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
@@ -813,8 +814,36 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
    *   payload) when no live waiter is ahead of the caller; otherwise the old
    *   lease is released, the head waiter promoted, and the caller queued;
    * - live holder -> queue (wait=true) or a not-granted answer (wait=false; 409 at the route).
+   *
+   * RK9-684 item 7: the prune (rk9-coord-retention.ts) may delete a stale
+   * stub actor row while this acquire waits on its row lock; the lease or
+   * waiter insert then fails on the foreign key. The acquire runs once more
+   * (ensureRk9CoordActorRow creates a fresh row) and then answers 503
+   * `rk9_coord_lease_retry`, never 500.
    */
   async function acquire(
+    companyId: string,
+    caller: Rk9CoordLeaseCaller,
+    input: { resource: string; ttlS?: number; reason?: string | null; wait?: boolean; mode?: Rk9CoordLeaseMode },
+  ): Promise<Rk9CoordLeaseAcquireResult> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await acquireOnce(companyId, caller, input);
+      } catch (err) {
+        if (!isForeignKeyViolation(err)) throw err;
+        logger.warn(
+          { event: "rk9_coord_lease_acquire_actor_pruned", companyId, actor: caller.actor.actorId, attempt },
+          "lease acquire lost its actor row to the prune",
+        );
+        if (attempt >= 2) {
+          // The code is the retry signal: the error handler passes only `code`.
+          throw coordError(503, "rk9_coord_lease_retry", "The actor row was pruned during the acquire; try again");
+        }
+      }
+    }
+  }
+
+  async function acquireOnce(
     companyId: string,
     caller: Rk9CoordLeaseCaller,
     input: { resource: string; ttlS?: number; reason?: string | null; wait?: boolean; mode?: Rk9CoordLeaseMode },

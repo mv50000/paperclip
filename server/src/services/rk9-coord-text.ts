@@ -19,7 +19,11 @@ import { logger } from "../middleware/logger.js";
 
 /** Port of the RK9_SESSIONS_SECRET_RX default (Python `re.I` -> JS `gi`). */
 export const RK9_COORD_SECRET_RX_DEFAULT =
-  "(gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)[A-Za-z0-9_-]{6,}" +
+  // RK9-684 (RK9-690): the prefix value stops before a keyword, with the
+  // lookahead of the client's long `sk-` rule, so `QMK_API_KEY=<value>` and
+  // `sk-...-password=<value>` leave the value to the keyword rule.
+  "(gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)" +
+  "(?:(?!token|secret|passw|passphrase|private[_-]?key|credential|api[_-]?key|apikey|(?<![A-Za-z])pw[\"']?\\s*[=:]|(?<![A-Za-z])pass[\"']?\\s*=)[A-Za-z0-9_-]){6,}" +
   "|AKIA[0-9A-Z]{12,}" +
   "|AIza[0-9A-Za-z_-]{20,}" +
   // RK9-676: not compiled as a regex on the server; see RK9_COORD_JWT_BRANCH.
@@ -31,7 +35,8 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   // and `pw` (not after a letter: `pwd` and `compass` stay), and `pass` with
   // `=` only (`user=bob pass=<value>`; `pass:` is prose: `second pass: ...`).
   "|((token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]\\s*" +
-  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?[^\\s\"',;]{6,}";
+  // RK9-684 item 1: `token: Bearer <value>` hides the value, not only the word.
+  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?(?:(?:bearer|basic)\\s+)?[^\\s\"',;]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
 
@@ -76,6 +81,61 @@ export function rk9CoordJwtSpans(text: string, wordStart = false): Array<[number
   return spans;
 }
 
+/**
+ * Every position where the JWT branch (`gi`) matches, with the end of its
+ * match, in order. Unlike rk9CoordJwtSpans() this lists each `eyJ` of a run
+ * (RK9-684 item 8): a match of another alternative may end inside a run, and
+ * the regex then goes on from there.
+ */
+function rk9CoordJwtStarts(text: string): Rk9Range[] {
+  const starts: Rk9Range[] = [];
+  for (const run of text.matchAll(JWT_RUN_RX)) {
+    const value = run[0];
+    if (!value.includes(".")) continue;
+    const lower = value.toLowerCase();
+    let dot = -1;
+    for (let at = lower.indexOf("eyj"); at >= 0; at = lower.indexOf("eyj", at + 1)) {
+      if (dot < at) dot = value.indexOf(".", at);
+      if (dot < 0) break;
+      if (dot - (at + 3) < 8 || dot === value.length - 1) continue;
+      starts.push([run.index + at, run.index + value.length]);
+    }
+  }
+  return starts;
+}
+
+/**
+ * The matches of `rx` plus the JWT branch, picked as one leftmost-first regex
+ * with the branch picks them (RK9-684 item 8: the old union of two scans
+ * could let a match that the full regex never starts swallow a PEM header).
+ * Exact for the default pattern: no other alternative can start at an `eyJ`.
+ * Linear: a regex match is reused until the scan passes its start.
+ */
+function rk9CoordPatternMatches(rx: RegExp, text: string): Rk9Range[] {
+  const jwts = rk9CoordJwtStarts(text);
+  const out: Rk9Range[] = [];
+  let pos = 0;
+  let next = 0;
+  let match: RegExpExecArray | null | false = null;
+  while (pos <= text.length) {
+    if (match !== false && (match === null || match.index < pos)) {
+      rx.lastIndex = pos;
+      match = rx.exec(text) ?? false;
+    }
+    while (next < jwts.length && jwts[next]![0] < pos) next += 1;
+    const jwt = jwts[next];
+    if (jwt && (match === false || jwt[0] <= match.index)) {
+      out.push([jwt[0], jwt[1]]);
+      pos = jwt[1];
+      continue;
+    }
+    if (match === false) break;
+    const end = match.index + match[0].length;
+    out.push([match.index, end]);
+    pos = end > match.index ? end : end + 1;
+  }
+  return out;
+}
 
 /** Coord tokens are always redacted, whatever the env pattern says. */
 const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
@@ -89,20 +149,43 @@ const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
  * fail-closed rule, because a cap left the tail of a long secret). Full-width
  * forms are caught by the NFKC matching reading, not here. RK9-678 added the
  * keywords of the default pattern (`passphrase`, `private_key`, `credential`,
- * `pw`, and `pass` with an `=` separator only).
+ * `pw`, and `pass` with an `=` separator only). RK9-684 item 1: the value
+ * may start with `Bearer`/`Basic` and whitespace (`token: Bearer <value>`).
  */
-const KEYWORD_RX =
-  /((?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credential|api[_-]?key|apikey)s?|(?<![A-Za-z])pw)["']?\s*(?:[=:]|->|=>|%3[ad])\s*|(?<![A-Za-z])pass["']?\s*(?:=|%3d)\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
+const KEYWORD_NAME =
+  String.raw`(?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credential|api[_-]?key|apikey)s?|(?<![A-Za-z])pw)["']?\s*(?:[=:]|->|=>|%3[ad])\s*` +
+  String.raw`|(?<![A-Za-z])pass["']?\s*(?:=|%3d)\s*`;
+const KEYWORD_VALUE_START = String.raw`["']?(?:(?:bearer|basic)\s+)?`;
+/**
+ * RK9-684: an unbracketed value stops before the next keyword that has a
+ * value of its own (`secret=1&secrets: <value>`). Before, the first match
+ * ate `secrets:` and the second value stayed visible; RK9-690's prefix stop
+ * made that shape reachable from `ghp_..._secret=1&secrets: <value>`.
+ */
+const KEYWORD_RX = new RegExp(
+  `(${KEYWORD_NAME})(?:([[{(]\\s*[^\\]})]{6,}[\\]})]?)|${KEYWORD_VALUE_START}` +
+    `(?:(?!(?:${KEYWORD_NAME})(?:[[{(]|${KEYWORD_VALUE_START}[^\\s"',;]{6}))[^\\s"',;]){6,})`,
+  "gi",
+);
+/**
+ * RK9-684: the prefix rule as it was before the RK9-690 keyword stop. A
+ * keyword inside a random token (`ghp_tokenabc...`) now ends the prefix
+ * value early; this full form runs on the original text (redaction union and
+ * the identifier check), so no token that the old rule hid shows again.
+ */
+const PREFIX_FULL_RX =
+  /(?:gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)[A-Za-z0-9_-]{6,}/gi;
 /** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
-const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
+const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX, PREFIX_FULL_RX];
 /**
  * The one bracketed value that stays: a JSON object of counters after
  * `token` or `tokens` (`"tokens": {"input": 1234, "output": 56}`, nested
  * `{"cache": {"read": 1}}` too; the RK9-642 numbers rule). It holds only
  * braces, commas, colons, counter keys (isRk9CoordCounterKey) and JSON
  * numbers, booleans or null; a string value, an array, parentheses, a
- * digit in a key or any other key is redacted. Under `password`, `secret` or `api_key` no
- * bracketed value stays. A number may not be followed by another digit, so
+ * digit in a key or any other key is redacted. Under `password`, `secret`,
+ * `api_key` and the other keywords only a map of counter flags stays (true,
+ * false or null values, no numbers; RK9-684 item 5). A number may not be followed by another digit, so
  * the pattern cannot split one number into many (no catastrophic
  * backtracking).
  */
@@ -145,9 +228,9 @@ const COUNTER_LITERALS = new Set(["true", "false", "null"]);
  * Linear scan (RK9-641 round 3: a regex with a key-or-literal alternation
  * backtracked exponentially on `true:true:...`). Each word must be a key
  * (followed by `:`) or an unquoted true/false/null; a number must not run
- * into a digit, dot or letter.
+ * into a digit, dot or letter. `flagsOnly`: no number at all.
  */
-function isRk9CoordCounterMap(content: string): boolean {
+function isRk9CoordCounterMap(content: string, flagsOnly = false): boolean {
   if (content.length > 4096 || !content.startsWith("{") || !content.endsWith("}")) return false;
   let index = 0;
   while (index < content.length) {
@@ -159,7 +242,7 @@ function isRk9CoordCounterMap(content: string): boolean {
       COUNTER_KEY_FOLLOW_RX.lastIndex = end;
       const isKey = COUNTER_KEY_FOLLOW_RX.test(content);
       if (isKey ? !isRk9CoordCounterKey(token[2]) : !(token[1] === "" && COUNTER_LITERALS.has(token[2]))) return false;
-    } else if (/^-?\d/.test(token[0]) && end < content.length && /[\d.eEA-Za-z_]/.test(content[end]!)) {
+    } else if (/^-?\d/.test(token[0]) && (flagsOnly || (end < content.length && /[\d.eEA-Za-z_]/.test(content[end]!)))) {
       return false;
     }
     index = end;
@@ -208,16 +291,22 @@ function withoutJwtBranch(source: string): string {
   // the branch inside a group keeps it (an operator override, rare).
   const kept: string[] = [];
   let depth = 0;
+  // RK9-684 item 10: a `(`, `)` or `|` inside a character class does not count.
+  let inClass = false;
   let piece: string[] = [];
   for (const part of parts) {
     piece.push(part);
     for (let i = 0; i < part.length; i += 1) {
       const ch = part[i];
       if (ch === "\\") i += 1;
-      else if (ch === "(") depth += 1;
+      else if (inClass) inClass = ch !== "]";
+      else if (ch === "[") {
+        inClass = true;
+        if (part[i + 1] === "^") i += 1;
+      } else if (ch === "(") depth += 1;
       else if (ch === ")") depth -= 1;
     }
-    if (depth === 0) {
+    if (depth === 0 && !inClass) {
       const alternative = piece.join("|");
       if (alternative !== RK9_COORD_JWT_BRANCH) kept.push(alternative);
       piece = [];
@@ -249,13 +338,14 @@ export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = proces
   // RK9-676. Redaction works on ranges of the original text, so no step can
   // un-redact what another step found:
   // 1. the sequential replace of RK9-641 (pattern, coord tokens, keyword
-  //    rule, each over the previous output). The JWT branch runs as a
-  //    separate scan, so a match that started inside a JWT run can end
-  //    elsewhere; the one known case shows only PEM header words
-  //    (`eyJ<8>.x bearer abcdefgh-----BEGIN RSA PRIVATE KEY-----` keeps
-  //    `RSA PRIVATE KEY-----`), no secret bytes;
+  //    rule, each over the previous output). RK9-684 item 8: the pattern
+  //    step picks its matches exactly as the full regex with the JWT branch
+  //    did (rk9CoordPatternMatches), so `eyJ<8>.x bearer abcdefgh-----BEGIN
+  //    RSA PRIVATE KEY-----` hides the whole PEM header again;
   // 2. plus every pattern on the original text: one match can no longer eat
-  //    the start of the next secret (`AKIA...xrk9_coord_<token>`);
+  //    the start of the next secret (`AKIA...xrk9_coord_<token>`), plus each
+  //    JWT run's first span and the prefix rule without its keyword stop
+  //    (PREFIX_FULL_RX);
   // 3. plus up to 3 more rounds over the combined output, which add only new
   //    coverage (`token: [redacted]<tail>` goes whole).
   let sequential: Rk9Range[] = [];
@@ -280,26 +370,39 @@ type Rk9Range = [number, number];
 type RedactKind = "pattern" | "coord" | "keyword";
 const REDACT_KINDS: RedactKind[] = ["pattern", "coord", "keyword"];
 
-/** Matches of one step on `view`, as view ranges. Zero-length matches only when `keepEmpty`. */
-function redactMatches(kind: RedactKind, view: string, env: NodeJS.ProcessEnv, keepEmpty: boolean): Rk9Range[] {
+/**
+ * Matches of one step on `view`, as view ranges. `sequential`: the exact
+ * matches of the old sequential replace, zero-length ones included; otherwise
+ * the extra union matches of the pattern step too (every JWT run, the prefix
+ * rule without its keyword stop), non-empty only.
+ */
+function redactMatches(kind: RedactKind, view: string, env: NodeJS.ProcessEnv, sequential: boolean): Rk9Range[] {
   const out: Rk9Range[] = [];
   const add = (start: number, end: number) => {
-    if (end > start || keepEmpty) out.push([start, end]);
+    if (end > start || sequential) out.push([start, end]);
   };
   if (kind === "keyword") {
     KEYWORD_RX.lastIndex = 0;
     for (const match of view.matchAll(KEYWORD_RX)) {
       const bracket = match[2];
-      if (bracket !== undefined && COUNTER_KEYWORD_RX.test(match[1]!) && isRk9CoordCounterMap(bracket)) continue;
+      // RK9-684 item 5: counter flags (true/false/null only) stay under every
+      // keyword name (`passphrase: {"cached": true}`); counts only under token(s).
+      if (bracket !== undefined && isRk9CoordCounterMap(bracket, !COUNTER_KEYWORD_RX.test(match[1]!))) continue;
       add(match.index, match.index + match[0].length);
     }
     return out;
   }
-  const rx = kind === "pattern" ? rk9CoordSecretRx(env) : COORD_TOKEN_RX;
+  if (kind === "pattern") {
+    for (const [start, end] of rk9CoordPatternMatches(rk9CoordSecretRx(env), view)) add(start, end);
+    if (sequential) return out;
+    for (const [start, end] of rk9CoordJwtSpans(view)) add(start, end);
+    PREFIX_FULL_RX.lastIndex = 0;
+    for (const match of view.matchAll(PREFIX_FULL_RX)) add(match.index, match.index + match[0].length);
+    return out;
+  }
   // matchAll copies lastIndex from the shared RegExp: start at 0.
-  rx.lastIndex = 0;
-  for (const match of view.matchAll(rx)) add(match.index, match.index + match[0].length);
-  if (kind === "pattern") for (const [start, end] of rk9CoordJwtSpans(view)) add(start, end);
+  COORD_TOKEN_RX.lastIndex = 0;
+  for (const match of view.matchAll(COORD_TOKEN_RX)) add(match.index, match.index + match[0].length);
   return out;
 }
 
@@ -471,10 +574,13 @@ function rk9CoordReadingLeaks(text: string, line: string, env: NodeJS.ProcessEnv
     const seen = read(text);
     const redacted = redactRk9CoordText(seen, env);
     if (redacted === seen) continue;
-    const allowed = redacted.split(RK9_COORD_REDACTED).join(" ");
+    // RK9-684 item 6: a stored run must equal a whole run of the redacted
+    // reading. A substring test let a secret tail pass when it was part of a
+    // longer visible run (`abc` inside `xabcx`).
+    const allowed = new Set(redacted.split(RK9_COORD_REDACTED).join(" ").match(SECRET_RUN_RX) ?? []);
     const stored = read(line).split(RK9_COORD_REDACTED).join(" ");
     for (const run of stored.match(SECRET_RUN_RX) ?? []) {
-      if (!allowed.includes(run)) return true;
+      if (!allowed.has(run)) return true;
     }
   }
   return false;

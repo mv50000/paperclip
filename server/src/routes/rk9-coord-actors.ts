@@ -246,6 +246,9 @@ const KNOWN_WORDS = new Set([
   "rotation", "missing", "present", "invalid", "unknown", "reset", "flow", "manager", "management",
   "handling", "storage", "scanning", "scanner", "review", "security", "config", "settings", "update",
   "updated", "changed", "removed", "added", "refresh", "refreshed", "leaked", "exposed", "cleanup",
+  // RK9-687 (a): a list of pass tags (`["first-pass", "second-pass", "review"]`)
+  // puts each tag after a `word`-mode `x-pass` name.
+  "first", "second", "third", "final", "pass",
 ]);
 
 function isKnownVocabulary(value: string): boolean {
@@ -284,8 +287,16 @@ const PAIR_VALUE_KEY_RX = /^(v|val|data|content|default)$|value$/i;
 const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
 /** Stand-in values for the key prefix probe: plain 8-character values. */
 const KEY_PROBE_VALUES = ["abcdefgh", "12345678"];
-/** Separator items in an argv-style list (`["DB_PASSWORD", "=", "..."]`). */
-const ARG_SEPARATOR_RX = /^[=:]$/;
+/**
+ * Separator items in an argv-style list (`["DB_PASSWORD", "=", "..."]`).
+ * RK9-687 (d): the item is trimmed and read in the matching form, and the
+ * full-width `＝`/`：` count (`" = "`, `"＝"`).
+ */
+const ARG_SEPARATOR_RX = /^[=:＝：]$/;
+
+function isArgSeparator(item: unknown): boolean {
+  return typeof item === "string" && ARG_SEPARATOR_RX.test(rk9CoordMatchText(item.trim()));
+}
 /**
  * Credential words that may end a credential name given as a value.
  * `authorization` names the HTTP header (`{"name": "Authorization", ...}`).
@@ -300,6 +311,8 @@ const ASSIGN_NAME_WORDS = new Set([...CREDENTIAL_WORDS, "authorization"]);
  * (`DB_PASS`, `"DB PW"`).
  */
 const VALUE_NAME_WORDS = new Set([...ASSIGN_NAME_WORDS].filter((word) => word !== "pass" && word !== "pw"));
+/** The words that VALUE_NAME_WORDS leaves out. */
+const PASS_WORDS = new Set(["pass", "pw"]);
 /** Words that end a credential name together with a final `key`. */
 const VALUE_KEY_PREFIXES = new Set(["api", "secret", "access", "private"]);
 /** Upper-case environment variable names: `GITHUB_TOKEN_RW`, `PASSWORD1`. */
@@ -334,7 +347,9 @@ function isBareWord(text: string): boolean {
  */
 function valueNameMode(value: unknown, assign = false): SecretMode {
   if (typeof value !== "string") return "none";
-  const text = rk9CoordMatchText(value);
+  // RK9-687 (d): a padded separator at the end counts like a glued one
+  // (`"password ="`, `"pass ＝"` -> `password=`, `pass=`).
+  const text = rk9CoordMatchText(value).replace(/\s+([=:])$/, "$1");
   const nameWords = assign || /[=:]$/.test(text) || !/[a-z]/.test(text) ? ASSIGN_NAME_WORDS : VALUE_NAME_WORDS;
   if (text.length === 0 || text.length > 100 || text.includes("/")) return "none";
   if (/\s/.test(text) && !UPPER_LABEL_RX.test(text)) return "none";
@@ -352,8 +367,23 @@ function valueNameMode(value: unknown, assign = false): SecretMode {
     if (nameWords.has(last)) return true;
     return last === "key" && prev !== undefined && VALUE_KEY_PREFIXES.has(prev);
   });
-  if (!named) return "none";
+  if (!named) return nameWords === VALUE_NAME_WORDS ? passNameMode(text, segmentations) : "none";
   return isBareWord(text) ? "word" : "strong";
+}
+
+/**
+ * RK9-687 (a), operator decision: a lower-case `pass`/`pw` value ending a
+ * name of two or more words names a credential. With `_` or a camelCase
+ * boundary it is a variable name (`db_pass`, `dbPass`, `DB_Pass`, `db_pw`:
+ * `strong`). With only `-` it may be a tag (`first-pass`), so it gets the
+ * `word` mode: a known-vocabulary value after it passes, a secret does not
+ * (`["mysql-pass", "<secret>"]` is 422). The bare word stays a word.
+ */
+function passNameMode(text: string, segmentations: string[][]): SecretMode {
+  const endsInPass = segmentations.some((segments) => segments.length > 1 && PASS_WORDS.has(segments.at(-1)!));
+  if (!endsInPass) return "none";
+  if (/_|[a-z0-9][A-Z]/.test(text)) return "strong";
+  return text.includes("-") ? "word" : "none";
 }
 
 /**
@@ -394,7 +424,7 @@ function credentialValueIndexes(items: unknown[]): { modes: Map<number, SecretMo
   const mark = (index: number, mode: SecretMode) => modes.set(index, combineModes(modes.get(index) ?? "none", mode));
   items.forEach((item, index) => {
     const following = items[index + 1];
-    const assignment = typeof following === "string" && ARG_SEPARATOR_RX.test(following);
+    const assignment = isArgSeparator(following);
     const mode = valueNameMode(item, assignment);
     if (mode === "none" || typeof item !== "string") return;
     // `name = value` is an assignment, never a tag list: no `word` exemption.
@@ -607,7 +637,11 @@ export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boole
       // labels (RK9-678: `{"password": {"<secret>": 1}}`). Only a counter
       // key below a token key passes (`{"tokens": {"output": null}}`,
       // RK9-676 counter flags; `{"tokens": {"input": 12}}`).
-      if (!(counters && isRk9CoordCounterKey(key)) && isSecretValue(mode, key)) {
+      // RK9-684 item 5: a counter flag (true, false or null) passes under
+      // every credential name (`{"passphrase": {"cached": true}}`); a count
+      // only below a token key.
+      const flag = item === null || typeof item === "boolean";
+      if (!((counters || flag) && isRk9CoordCounterKey(key)) && isSecretValue(mode, key)) {
         found = true;
         return;
       }

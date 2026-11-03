@@ -393,7 +393,13 @@ Rules:
   `authorization`; `pass` and `pw` only in an assignment: a pair object
   name, the name before a `=`/`:` item, a value that ends in `=`/`:` or
   has no lower-case letters, so `["pass", "=", "..."]`, `"PW:"` and `"DB
-  PASS"` count and the tag `"first-pass"` does not; RK9-678) or
+  PASS"` count and the tag `"first-pass"` does not; RK9-678; RK9-687 (a),
+  operator decision: a lower-case `pass`/`pw` ending a name of two or more
+  words counts with `_` or a camelCase boundary (`db_pass`, `dbPass`,
+  `DB_Pass`, `db_pw`), and with only `-` (`mysql-pass`, `first-pass`) it
+  is a `word`-mode name, so a known word after it passes and a secret does
+  not; `first`, `second`, `third`, `final` and `pass` are known words, so
+  `["first-pass", "second-pass", "review"]` passes) or
   `api`/`secret`/`access`/`private` + `key`, or is an
   upper-case environment variable name or a command-line flag that the key
   rule accepts (`GITHUB_TOKEN_RW`, `API_KEY_PROD`, `PASSWORD1`,
@@ -417,7 +423,9 @@ Rules:
   `ParameterValue`), the item after the name in an array of any length
   (`["DB_PASSWORD", "..."]`, `["PASSWORD", "...", "x"]`; before RK9-678
   only a two-item array) and the item after a credential flag or a `=`
-  item (`["--password", "..."]`, `["DB_PASSWORD", "=", "..."]`). The item
+  item (`["--password", "..."]`, `["DB_PASSWORD", "=", "..."]`; RK9-687 (d):
+  the separator item is trimmed and full-width `＝`/`：` count, and a
+  padded name `"password ="` counts like `"password="`). The item
   after a credential flag is a secret at any length (`["--secret", "foo"]`)
   unless it starts with `-`; then the usual 6-character rule applies. Under a credential key, every key is checked like a
   leaf, whatever its value (`{"password": {"<secret>": true}}`, and since
@@ -426,7 +434,9 @@ Rules:
   (`COUNTER_WORDS`, as in the free-text counter map) whose nearest
   credential ancestor is a `token`/`tokens` key, so `{"tokens": {"input":
   1234, "cache_read": 12}}` passes and `{"tokens": {"hunterpass": 1}}` is
-  422. A counter-holding key is `token`, `tokens` or a token-count key
+  422. RK9-684 (item 5): a counter key whose value is `true`, `false` or
+  `null` (a counter flag) passes under every credential key
+  (`{"passphrase": {"cached": true}}`); a number there is still 422. A counter-holding key is `token`, `tokens` or a token-count key
   (`input_tokens`; not `access_tokens`), and a token key below another
   credential key does not turn the exemption back on (`{"DB_PASS":
   {"token": {...}}}` is checked strictly). **Numbers are exempt:** a JSON number is never a secret, so
@@ -538,11 +548,35 @@ model is called.
   output that add only new coverage. A seeded differential fuzz test
   against the sequential replace guards (1), and the round-3 verifier ran
   180 000 random strings against the origin/master module with no secret
-  byte shown. The emulation is not exact: the JWT branch runs as a separate
-  linear scan, so a leftmost-first match that master started inside a JWT
-  run can end elsewhere. The one known case
-  (`eyJ<8 chars>.x bearer abcdefgh-----BEGIN RSA PRIVATE KEY-----`) shows
-  `RSA PRIVATE KEY-----`, header words only, not key material.
+  byte shown. Since RK9-684 (item 8) the pattern step of (1) is exact: it
+  picks the regex matches and the JWT matches as one leftmost-first regex
+  with the JWT branch picks them, so `eyJ<8 chars>.x bearer
+  abcdefgh-----BEGIN RSA PRIVATE KEY-----` hides the whole PEM header again
+  (before, `RSA PRIVATE KEY-----` stayed). The fuzz baseline has a canary
+  inside a PEM header and also runs against the pattern string before
+  RK9-684. (2) also takes each JWT run's first span and the prefix rule
+  without its keyword stop (`PREFIX_FULL_RX`, see below).
+- **The prefix value stops before a keyword (RK9-684, RK9-690).** The
+  prefix branch (`ghp_`, `pcp_<x>_`, `qmk_`, `sk-`, `sk_live_`, `whsec_`,
+  ...) has the lookahead of the client's long `sk-` rule, so
+  `QMK_API_KEY=<value>`, `SK_LIVE_PASSWORD=<value>` and
+  `sk-...-password=<value>` leave the value to the keyword rule (before,
+  `[redacted]=<value>`). A keyword inside a random token
+  (`ghp_tokenABC...`) would end the value early, so the server also runs
+  the old prefix rule without the stop on the original text and in the
+  identifier check: no token that the old rule hid shows again. The
+  clients have only the stopped form (claude-config `coord-remote.md`,
+  "Tunnetut rajat").
+- **`token: Bearer <value>` (RK9-684 item 1).** The keyword value may start
+  with `Bearer` or `Basic` and whitespace, in the pattern string and in the
+  wider keyword rule. Before, the keyword match ended after `Bearer` and the
+  value stayed visible (a single leftmost-first pass never tried the
+  bearer branch inside it).
+- **One keyword value no longer eats the next keyword (RK9-684).** In the
+  wider keyword rule, an unbracketed value stops before the next keyword
+  that has a value of its own (`secret=1&secrets: <value>`). The stop
+  needs a full match after it (a bracket, or 6+ value characters), so
+  `password=secret:abc` is still one match.
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
@@ -553,7 +587,10 @@ model is called.
   object of counters after `token` or `tokens`: only braces, commas,
   colons, counter keys, and JSON numbers, booleans
   or null (`"tokens": {"input": 1234}`, nested `{"cache": {"read": 1}}`
-  too), so token counts stay. A counter key (RK9-676) has at most 5
+  too), so token counts stay. RK9-684 (item 5): after any other keyword a
+  map of counter flags stays too: counter keys with only `true`, `false` or
+  `null` values (`"passphrase": {"cached": true}`); a number there is
+  still redacted. A counter key (RK9-676) has at most 5
   characters, or every word of it (split at `_`, `-` and camelCase) is a
   counter word (`input`, `output`, `cache`, `read`, `prompt`, `completion`,
   `reasoning`, `total`, `tokens`, ...; the list is `COUNTER_WORDS` in
@@ -568,7 +605,29 @@ model is called.
   separator only and not after a letter (`user=bob pass=<value>`; `pass:`
   is prose, `second pass: refactoring`; `passed=3` and `compass=` stay).
   Two other client copies (`pcp-headsup.sh`, `bin/rk9`) did not change in
-  RK9-678.
+  RK9-678; since RK9-684 (RK9-687 b) all client copies have the set, and
+  `pcp-headsup.sh`'s default is byte-identical with the server default.
+  RK9-687 (c): under `re.I` Python reads `ı`, `ſ`, `İ` and the Kelvin sign
+  as `[A-Za-z]` letters, so the client lookbehind hid `pw=` after them; the
+  clients now compile every negative lookbehind ASCII-only (`(?a:...)`).
+  The pattern string stays byte-identical.
+- **Tunnetut rajat (RK9-684).**
+  - Item 9 (operator decision: document only): an `RK9_SESSIONS_SECRET_RX`
+    override that matches inside the `[redacted]` marker
+    (`ab|\[re|ed\]`) makes the coverage test quadratic (`"ab ".repeat(40000)`
+    about 2.3 s). The default pattern stays linear; only the operator sets
+    an override.
+  - Item 10 is fixed (character classes in the split), but an override with
+    the JWT branch inside a group (`(x|eyJ...)`) still compiles that branch
+    as written; the linear JWT scan runs anyway, so coverage does not
+    weaken.
+  - RK9-687 (e), accepted false 422s: `{"usage_tokens": {"session-user-model-cost-today": 1}}`
+    (`usage` is not a token-count word), and an upper-case status tag before
+    a 6+ character word (`["PASS", "completed"]`, `["PW", "review"]`).
+    RK9-684 adds `["first-pass", "<a word that is not a known word>"]`.
+  - A lease acquire that loses its actor row to the prune twice answers 503
+    `rk9_coord_lease_retry`; the error handler reports any 5xx as a crash,
+    so a rare race shows in the crash log.
 - **Cap.** A cut that falls inside a `[redacted]` marker moves to the
   marker start (RK9-678), so a capped line never ends in `[redac…`.
 - **Known prose false positive.** A keyword, a separator and one word of 6+
@@ -630,11 +689,13 @@ model is called.
   test checks that the spans equal the old regex's, and 100 KB of `eyJ`
   takes well under 50 ms. Only an exact top-level JWT alternative is
   dropped from the compiled pattern; an `RK9_SESSIONS_SECRET_RX` override
-  with another JWT form runs as written. **Client difference:** the
+  with another JWT form runs as written. RK9-684 (item 10): the split into
+  alternatives skips character classes, so `[)]` or `[|]` in an override
+  no longer shifts the group depth. **Clients (RK9-684, item 2):** the
   claude-config copies (`rk9-sessions.sh`, `rk9`, `pcp-headsup.sh`, the gate
-  scripts, vault-mcp and grok-mcp) keep the regex form. They see short
-  lines (session names, phases, hook text), where the quadratic case costs
-  little; a port of the scan is follow-up work. The presence metadata check probes each ancestor key once with a
+  scripts, vault-mcp and grok-mcp) share one secret-scan block with the
+  same linear scan and the same exact leftmost-first merge (see
+  claude-config `docs/implementation-notes/coord-remote.md`). The presence metadata check probes each ancestor key once with a
   short stand-in value and checks `key: value` only for keys that can start
   a secret (`token: ...`), instead of every ancestor with the full value.
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
@@ -1015,6 +1076,13 @@ older than RK9-676 answers it with 404 `rk9_coord_not_found`, while it
 would ignore `?peek=1` on `/inbox/me` and claim the messages. Before
 RK9-676 the CLI background refresh did exactly that and consumed the
 messages that `rk9 inbox` should show.
+
+Known limit (RK9-684 item 3, operator decision: document only): an `rk9`
+CLI older than the RK9-676 claude-config change sends `rk9 inbox --peek`
+to `/inbox/me?peek=1` and reads the answer as a message list. The new
+server answers with a count, so the old CLI prints "no pending" although
+messages wait. Nothing is claimed. paperclip-01 has the new CLI; the other
+hosts get it with their claude-config sync.
 
 ### GET /inbox/me
 

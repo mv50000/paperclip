@@ -351,11 +351,20 @@ describe("RK9-676 redaction never weaker than the sequential replace", () => {
   const R = "[redacted]";
   const KEYWORD =
     /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
+  // RK9-684: the default pattern before RK9-684 (no prefix keyword stop, no
+  // `Bearer` keyword value). The fuzz below must be at least as strict as the
+  // replace with this one too.
+  const PRE_RK9_684_DEFAULT =
+    "(gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)[A-Za-z0-9_-]{6,}" +
+    "|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9._-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----" +
+    "|://[^ /:@]+:[^ /@]+@|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}" +
+    "|((token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]\\s*" +
+    "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?[^\\s\"',;]{6,}";
   // The RK9-641 redaction (origin/master before RK9-676), with the counter
   // exemption widened to every brace value under token(s): a weaker baseline.
-  function sequential(text: string): string {
+  function sequential(text: string, pattern = RK9_COORD_SECRET_RX_DEFAULT): string {
     return text
-      .replace(new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi"), R)
+      .replace(new RegExp(pattern, "gi"), R)
       .replace(/rk9_coord_[A-Za-z0-9_-]{6,}/gi, R)
       .replace(KEYWORD, (match: string, prefix: string, bracket: string | undefined) =>
         bracket !== undefined && bracket.startsWith("{") && /^tokens?(?![a-z])/i.test(prefix) ? match : R,
@@ -379,25 +388,38 @@ describe("RK9-676 redaction never weaker than the sequential replace", () => {
 
   it("keeps every secret that the sequential replace removed (seeded differential fuzz)", () => {
     const canary = "Qz9Kp7WmX";
+    // RK9-684 item 8: an upper-case canary inside a PEM header, so the fuzz
+    // sees header words that a JWT-adjacent match leaves visible.
+    const header = "QZCANARYX";
     const pieces = [
       "token", "tokens", "secrets", "password", "api_key", ": ", "=", "->", "%3D", " ", " ", "Bearer ", "basic ",
       "AKIA", "ABCDEFGHIJKLMNOP", "rk9_coord_", "ghp_", ["-----BEGIN", "PRIVATE", "KEY-----"].join(" "), "\\n", "\"", "'", "[", "{",
       "(", ")", "]", "}", "eyJ", "abcdefgh", ".", "-", "_", "&", ",", "x", "://u:", "@", canary,
+      "-----BEGIN ", `${header} `, ["PRIVATE", "KEY-----"].join(" "), "bearer ", "secret", "passphrase",
     ];
     let seed = 676;
     const next = () => {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff;
       return seed;
     };
-    const count = (text: string) => text.split(canary).length - 1;
+    const count = (text: string) => text.split(canary).length - 1 + text.split(header).length - 1;
     const leaks: string[] = [];
     for (let i = 0; i < 20_000 && leaks.length < 5; i += 1) {
       const length = 2 + (next() % 14);
       let text = "";
       for (let k = 0; k < length; k += 1) text += pieces[next() % pieces.length];
-      if (count(redactRk9CoordText(text, env)) > count(sequential(text))) leaks.push(text);
+      const shown = count(redactRk9CoordText(text, env));
+      if (shown > count(sequential(text)) || shown > count(sequential(text, PRE_RK9_684_DEFAULT))) leaks.push(text);
     }
     expect(leaks).toEqual([]);
+  });
+
+  it("hides the PEM header next to a JWT run, as the full regex did (RK9-684 item 8)", () => {
+    const text = `eyJabcdefgh.bearer abcdefgh${["-----BEGIN RSA", "PRIVATE", "KEY-----"].join(" ")}`;
+    expect(sequential(text)).not.toContain("RSA");
+    expect(redactRk9CoordText(text, env)).not.toContain("RSA");
+    expect(redactRk9CoordText(text, env)).not.toContain("PRIVATE");
+    expect(toRk9CoordLine(text, 500, env)).not.toContain("RSA");
   });
 });
 
@@ -512,5 +534,75 @@ describe("RK9-678 cap never cuts the marker", () => {
     expect(line).toContain(" [redacted] b");
     expect(line.endsWith("…")).toBe(true);
     expect(Array.from(line).length).toBe(140);
+  });
+});
+
+// RK9 Custom (RK9-684): RK9-676 verifier follow-ups (items 1, 5, 6, 8, 10) and
+// RK9-690 (the prefix rule no longer swallows the keyword).
+describe("RK9-684 redaction follow-ups", () => {
+  const value = ["super", "secret", "99"].join("");
+
+  it.each([
+    [`token: Bearer ${value}`],
+    [`token=Bearer ${value}`],
+    [`{"token": "Bearer ${value}"}`],
+    [`password: basic ${value}`],
+    [`api_key => Bearer ${value} tail`],
+  ])("hides the value after `token: Bearer` too (item 1): %j", (input) => {
+    expect(redactRk9CoordText(input, env)).not.toContain(value);
+    expect(toRk9CoordLine(input, 500, env)).not.toContain(value);
+  });
+
+  it.each([
+    [`QMK_API_KEY=${value}`, "[redacted]"],
+    [`PCP_AGENT_API_KEY=${value}`, "[redacted]"],
+    [`VCK_API_KEY=${value}`, "[redacted]"],
+    [`SK_LIVE_PASSWORD=${value}`, "[redacted]"],
+    [`whsec_api_key: ${value}`, "[redacted]"],
+    [`sk-abc123def456ghi789jkl-password=${value}`, "[redacted]"],
+    [`rk9_coord_SECRET=${value}`, "[redacted]"],
+    [`RK9_COORD_API_TOKEN=${value}`, "[redacted]"],
+  ])("RK9-690: the prefix rule leaves the value to the keyword rule: %j", (input, expected) => {
+    expect(redactRk9CoordText(input, env)).toBe(expected);
+    expect(new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi").exec(input)?.[0]).not.toBe(input.split(/[=:]/)[0]);
+  });
+
+  it("stops a prefix value before a keyword in the pattern string alone (client parity, RK9-690)", () => {
+    const rx = new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi");
+    for (const input of [`QMK_API_KEY=${value}`, `SK_LIVE_PASSWORD=${value}`, `sk-abc123def456ghi789jkl-password=${value}`]) {
+      expect(input.replace(rx, "[redacted]")).not.toContain(value);
+    }
+    expect(`token: Bearer ${value}`.replace(rx, "[redacted]")).toBe("[redacted]");
+  });
+
+  it("still hides a token whose random part holds a keyword (the full prefix rule runs too)", () => {
+    const token = `${"gh" + "p_"}tokenABCDEF1234567890`;
+    expect(redactRk9CoordText(`x ${token} y`, env)).toBe("x [redacted] y");
+    expect(rk9CoordIdentifierHasSecret(token, env)).toBe(true);
+  });
+
+  it("does not let one keyword value eat the next keyword (secret=1&secrets: <value>)", () => {
+    const input = `${"gh" + "p_"}abcdefghij_secret=1&secrets: ${value} end`;
+    expect(redactRk9CoordText(input, env)).not.toContain(value);
+    expect(redactRk9CoordText(`secret=1&secrets: ${value}`, env)).not.toContain(value);
+  });
+
+  it("keeps counter flags under every keyword name, counts only under token(s) (item 5)", () => {
+    expect(redactRk9CoordText(`passphrase: {"cached": true, "output": null}`, env)).toBe(`passphrase: {"cached": true, "output": null}`);
+    expect(redactRk9CoordText(`"secret": {"output": false}`, env)).toBe(`"secret": {"output": false}`);
+    expect(redactRk9CoordText(`passphrase: {"input": 12}`, env)).toBe("[redacted]");
+    expect(redactRk9CoordText(`password: {"hunterpass": true}`, env)).toBe("[redacted]");
+    expect(redactRk9CoordText(`tokens: {"input": 12, "cached": true}`, env)).toBe(`tokens: {"input": 12, "cached": true}`);
+  });
+
+  it("matches the stored runs exactly, not as substrings (item 6)", () => {
+    // `ghijkl` is the tail of the token after the combining mark, and also part of the visible `zzghijklzz`.
+    const line = toRk9CoordLine(`zzghijklzz ${"gh" + "p_"}abcdef\u0301ghijkl`, 500, env);
+    expect(line).toBe("[redacted]");
+  });
+
+  it("splits an override pattern outside character classes (item 10)", () => {
+    const override = { RK9_SESSIONS_SECRET_RX: `([)]|${RK9_COORD_JWT_BRANCH}|x)|zzsecretzz` } as NodeJS.ProcessEnv;
+    expect(redactRk9CoordText("a ) b zzsecretzz", override)).toBe("a [redacted] b [redacted]");
   });
 });
