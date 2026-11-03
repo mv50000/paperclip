@@ -49,8 +49,10 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   // match.
   "(?:(?!(?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]|(?<![A-Za-z])pass[\"']?\\s*=)\\s*[\"']?[^\\s\"',;]{6})[^\\s\"',;]){6,}" +
   // A credential flag with a space (`--password <value>`, `--api-key <value>`)
-  // and a curl user (`-u alice:<value>`, `--user alice:<value>`).
-  "|(?<![A-Za-z0-9_-])--?(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|pw|pass)\\s+[\"']?[^\\s\"',;-][^\\s\"',;]{5,}|(?<![A-Za-z0-9_-])(?:-u\\s+|--user[\\s=]+)[\"']?[^\\s:\"'@/]+:[^\\s\"',;@]{6,}";
+  // and a curl user (`-u alice:<value>`, `--user alice:<value>`). RK9-684
+  // re-verify: one separator after `--user` and no `=` in the user part, so
+  // no two parts can take the same `=` (`--user` + `=` x N was quadratic).
+  "|(?<![A-Za-z0-9_-])--?(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|pw|pass)\\s+[\"']?[^\\s\"',;-][^\\s\"',;]{5,}|(?<![A-Za-z0-9_-])(?:-u\\s+|--user(?:\\s+|=))[\"']?[^\\s:\"'@/=]+:[^\\s\"',;@]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
 

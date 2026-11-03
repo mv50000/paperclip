@@ -679,6 +679,26 @@ describe("RK9-684 redaction follow-ups", () => {
     expect(toRk9CoordLine(input, 500, env)).not.toContain(pw);
   });
 
+  // Re-verify (ReDoS): `--user[\s=]+` and the user part both took `=`, so a long `=` run backtracked through every split.
+  it.each([
+    ["--user + = x 200k", "--user" + "=".repeat(200_000)],
+    ["--user= x N", "--user=".repeat(200_000 / 7)],
+    ["--user a= x N", "--user a=".repeat(200_000 / 9)],
+    ["-u a x N", "-u a".repeat(50_000)],
+    ["--password a x N", "--password a".repeat(200_000 / 12)],
+    ["--user + tab= x N", "--user\t" + "\t=".repeat(100_000)],
+  ])("the flag and curl-user alternatives stay linear: %s", (_name, input) => {
+    const rx = new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi");
+    let started = performance.now();
+    input.replace(rx, "[redacted]");
+    expect(performance.now() - started).toBeLessThan(100);
+    const capped = input.slice(0, 4000);
+    started = performance.now();
+    toRk9CoordLine(capped, 4000, env);
+    redactRk9CoordText(capped, env);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
   it("verifier round 1: an identifier with a stopped keyword value still has a secret (H1)", () => {
     expect(rk9CoordIdentifierHasSecret("secrets=abctoken->ABCDEFGH", env)).toBe(true);
   });
