@@ -23,7 +23,7 @@ import { appendRk9CoordEventSchema } from "@paperclipai/shared";
 import { errorHandler } from "../middleware/error-handler.js";
 import type { Rk9CoordAgentRun, Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
-import { formatRk9CoordDeltaLine, RK9_COORD_LINE_MAX } from "../services/rk9-coord-journal.js";
+import { ensureRk9CoordActorRow, formatRk9CoordDeltaLine, RK9_COORD_LINE_MAX } from "../services/rk9-coord-journal.js";
 import { pruneRk9Coord } from "../services/rk9-coord-retention.js";
 import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "../services/rk9-coord-text.js";
 import {
@@ -358,6 +358,61 @@ if (!support.supported) {
       expect((await local("worktree:RKM-1")).status).toBe(204);
       process.env.RK9_COORD_STUB_RATE_PER_HOUR = "0";
       expect((await delta("cc:mv-laptop:mint-3")).status).toBe(204);
+    } finally {
+      if (previous === undefined) delete process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+      else process.env.RK9_COORD_STUB_RATE_PER_HOUR = previous;
+    }
+  });
+
+  // RK9 Custom (RK9-676): the first registration through PUT /actors/me takes
+  // the same per-host budget as the stubs; a refresh of an existing row does not.
+  it("rate-limits first registrations through presence with the stub budget (RK9-676)", async () => {
+    const cid = await newCompany();
+    const previous = process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+    process.env.RK9_COORD_STUB_RATE_PER_HOUR = "2";
+    try {
+      const app = appFor(none, hostToken(cid));
+      const put = (actorId: string) => request(app).put(`${base(cid)}/actors/me`).set("X-RK9-Actor", actorId).send({});
+      expect((await put("cc:mv-laptop:p-1")).status).toBe(201);
+      // A stub from another route shares the budget.
+      expect((await request(app).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", "cc:mv-laptop:p-2")).status).toBe(204);
+      const limited = await put("cc:mv-laptop:p-3");
+      expect(limited.status).toBe(429);
+      expect(limited.body.code).toBe("rk9_coord_stub_rate_limited");
+      // Refreshing a registered row and registering the stub still work.
+      expect((await put("cc:mv-laptop:p-1")).status).toBe(200);
+      expect((await put("cc:mv-laptop:p-2")).status).toBe(200);
+      const actors = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
+      expect(actors.map((row) => row.actorRef).sort()).toEqual(["cc:mv-laptop:p-1", "cc:mv-laptop:p-2"]);
+    } finally {
+      if (previous === undefined) delete process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+      else process.env.RK9_COORD_STUB_RATE_PER_HOUR = previous;
+    }
+  });
+
+  // RK9 Custom (RK9-676 item 10): the advisory lock holds the budget under concurrency.
+  it("creates at most the budget of stubs under concurrent inserts from one host (RK9-676)", async () => {
+    const cid = await newCompany();
+    const previous = process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+    process.env.RK9_COORD_STUB_RATE_PER_HOUR = "3";
+    try {
+      const results = await Promise.allSettled(
+        Array.from({ length: 10 }, (_, i) =>
+          ensureRk9CoordActorRow(db, cid, {
+            kind: "cc",
+            actorId: `cc:mv-laptop:burst-${i}`,
+            host: "mv-laptop",
+            trust: "attributed",
+            principal: "coord_token",
+          }),
+        ),
+      );
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(3);
+      const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      expect(rejected).toHaveLength(7);
+      for (const result of rejected) expect(result.reason).toMatchObject({ status: 429 });
+      const rows = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
+      expect(rows).toHaveLength(3);
     } finally {
       if (previous === undefined) delete process.env.RK9_COORD_STUB_RATE_PER_HOUR;
       else process.env.RK9_COORD_STUB_RATE_PER_HOUR = previous;
@@ -1139,6 +1194,70 @@ if (!support.supported) {
     ]);
     const inbox = await db.select({ body: rk9CoordInbox.body }).from(rk9CoordInbox).where(eq(rk9CoordInbox.companyId, cid));
     expect(inbox.map((row) => row.body).sort()).toEqual(["claimed", "for-stub", "pending-new"]);
+  });
+
+  // RK9 Custom (RK9-676 items 7 and 8).
+  it("keeps an actor that only appends events, and prunes it once its events are old (RK9-676)", async () => {
+    const cid = await newCompany();
+    const now = new Date();
+    const daysAgo = (days: number) => new Date(now.getTime() - days * 24 * 3600 * 1000);
+    const registered = { presence_registered_at: "nonce" };
+    await db.insert(rk9CoordActors).values([
+      { companyId: cid, kind: "cc", actorRef: "cc:h:writer", trust: "attributed", lastSeenAt: daysAgo(40), metadata: registered },
+      { companyId: cid, kind: "cc", actorRef: "cc:h:old-writer", trust: "attributed", lastSeenAt: daysAgo(40), metadata: registered },
+      { companyId: cid, kind: "cc", actorRef: "cc:h:stub-writer", trust: "attributed", lastSeenAt: daysAgo(20) },
+    ]);
+    await db.insert(rk9CoordEvents).values([
+      { companyId: cid, type: "blocker", actorRef: "cc:h:writer", actorKind: "cc", trust: "attributed", summary: "recent", createdAt: daysAgo(2) },
+      { companyId: cid, type: "blocker", actorRef: "cc:h:old-writer", actorKind: "cc", trust: "attributed", summary: "old", createdAt: daysAgo(35) },
+      { companyId: cid, type: "blocker", actorRef: "cc:h:stub-writer", actorKind: "cc", trust: "attributed", summary: "recent", createdAt: daysAgo(3) },
+    ]);
+    await pruneRk9Coord(db, { now });
+    const left = await db.select({ ref: rk9CoordActors.actorRef }).from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
+    expect(left.map((row) => row.ref).sort()).toEqual(["cc:h:stub-writer", "cc:h:writer"]);
+  });
+
+  it("does not prune a stale stub while a lease insert for it is in flight (RK9-676)", async () => {
+    const cid = await newCompany();
+    const now = new Date();
+    const [stub] = await db
+      .insert(rk9CoordActors)
+      .values({
+        companyId: cid,
+        kind: "cc",
+        actorRef: "cc:h:racing",
+        trust: "attributed",
+        lastSeenAt: new Date(now.getTime() - 20 * 24 * 3600 * 1000),
+      })
+      .returning({ id: rk9CoordActors.id });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inserted!: () => void;
+    const insertedSignal = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    // The lease transaction inserts (its foreign-key check locks the actor
+    // row) and stays open while the prune runs.
+    const lease = db.transaction(async (tx) => {
+      await tx.insert(rk9CoordLeases).values({
+        companyId: cid,
+        resource: "prod:race",
+        holderActorId: stub!.id,
+        expiresAt: new Date(now.getTime() + 600_000),
+      });
+      inserted();
+      await held;
+    });
+    await insertedSignal;
+    await pruneRk9Coord(db, { now });
+    release();
+    await lease;
+    const [row] = await db.select({ id: rk9CoordActors.id }).from(rk9CoordActors).where(eq(rk9CoordActors.id, stub!.id));
+    expect(row?.id).toBe(stub!.id);
+    const leases = await db.select().from(rk9CoordLeases).where(eq(rk9CoordLeases.holderActorId, stub!.id));
+    expect(leases).toHaveLength(1);
   });
 
   it("prunes old events, ended actors and old inbox rows idempotently and keeps decisions a year", async () => {

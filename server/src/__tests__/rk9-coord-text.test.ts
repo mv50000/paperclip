@@ -7,6 +7,10 @@ import { describe, expect, it } from "vitest";
 import { sendRk9CoordInboxSchema } from "@paperclipai/shared";
 import {
   collapseRk9CoordText,
+  redactRk9CoordText,
+  RK9_COORD_JWT_BRANCH,
+  RK9_COORD_SECRET_RX_DEFAULT,
+  rk9CoordJwtSpans,
   rk9CoordIdentifierHasSecret,
   rk9CoordMatchText,
   rk9CoordTextHasSecret,
@@ -253,5 +257,193 @@ describe("verifier round 3 (RK9-641)", () => {
 
   it("flags a glued Bearer token in an identifier", () => {
     expect(rk9CoordIdentifierHasSecret(`Bearer\u200babcd\u200befghijkl`, env)).toBe(true);
+  });
+});
+
+// RK9 Custom (RK9-676): follow-ups of the RK9-641 verifier rounds. Fake values only.
+describe("RK9-676 redaction follow-ups", () => {
+  const jwt = ["ey", "J", "hbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiIxIn0", ".", "sig"].join("");
+
+  it("still redacts a JWT, also after a separator or a keyword", () => {
+    for (const text of [jwt, `auth=${jwt}`, `x ${jwt} y`, `"${jwt}"`]) {
+      expect(rk9CoordTextHasSecret(text, env), text).toBe(true);
+      expect(toRk9CoordLine(text, 300, env), text).not.toContain("eyJzdWIi");
+    }
+  });
+
+  it("checks `eyJ` repeated without a dot in linear time", () => {
+    const text = "eyJ".repeat(1400);
+    const started = performance.now();
+    for (let i = 0; i < 20; i += 1) rk9CoordTextHasSecret(text, env);
+    expect((performance.now() - started) / 20).toBeLessThan(20);
+  });
+
+  it("flags Bearer glued with invisible characters after a digit", () => {
+    expect(rk9CoordTextHasSecret(`1Bearer​abcdefghijkl`, env)).toBe(true);
+    expect(rk9CoordIdentifierHasSecret(`1Bearer​abcdefghijkl`, env)).toBe(true);
+    expect(toRk9CoordLine(`id 1Bearer​abcdefghijkl`, 140, env)).toBe("[redacted]");
+    // A letter before it is still another word.
+    expect(rk9CoordTextHasSecret(`acidbasic‍\u{1F600}`, env)).toBe(false);
+  });
+
+  // Verifier round 1 (RK9-676): a 256-character cap on an unclosed bracket
+  // left the tail of a long secret; the value still goes to the end.
+  it("redacts an unclosed bracket value to the end of the text", () => {
+    const long = ["s3", "Kr"].join("").repeat(200);
+    const out = toRk9CoordLine(`secrets: ["${long} later text`, 500, env)!;
+    expect(out).toBe("[redacted]");
+    expect(toRk9CoordLine(`tokens: [ ${canary} more`, 200, env)).not.toContain(canary);
+  });
+
+  it.each([
+    [`AKIAABCDEFGHIJKLMNOPx${"rk9_" + "coord_"}MX5t3Hg8GRqENUrSzwPp`, "MX5t3Hg8"],
+    [`Bearer abcdefgh12_token%3DUTznH4BGTFGMSPX ok`, "UTznH4BG"],
+    [`\u2705\ufe0f retry: Bearer abcdefgh12_token%3DUTznH4BGTFGMSPX ok`, "UTznH4BG"],
+  ])("does not let one match eat the start of the next secret %j", (input, tail) => {
+    const out = toRk9CoordLine(input, 300, env)!;
+    expect(out).not.toContain(tail);
+    expect(out).toContain("[redacted]");
+  });
+
+  it.each([[`tokens={abcdef:1}`], [`"tokens": {"hunterpass": 1}`], [`tokens: {"zzqxwvjk": true}`], [`"tokens": {"input": 1, "qwertyuiopas": 2}`]])(
+    "redacts a counter object whose key is not a counter word %j",
+    (input) => {
+      expect(rk9CoordTextHasSecret(input, env)).toBe(true);
+    },
+  );
+
+  it.each([
+    [`"tokens": {"cache_read_input_tokens": 12, "completionTokensDetails": {"reasoningTokens": 3}}`],
+    [`tokens={input: 12, output: 3, ratio: 0.5, x: null}`],
+    [`"usage_tokens": {"prompt_tokens": 10, "total_tokens": 12, "cached": true}`],
+  ])("keeps a counter object of counter words %j", (input) => {
+    expect(rk9CoordTextHasSecret(input, env)).toBe(false);
+  });
+
+  // Whole-line loss (RK9-641 item 5): an emoji selector or an NFD accent next to
+  // a redacted keyword value keeps the rest of the line.
+  it.each([
+    [`deploy ❤️ done, token: ${canary} next step`, "next step"],
+    [`token️ note: password=${canary} then välilehti auki`, "välilehti auki"],
+    [`päivitetty: token=välitetty${canary} ja muu teksti`, "ja muu teksti"],
+    [`\u{1F44D}️ api_key=${canary}, sitten tarkistus`, "sitten tarkistus"],
+  ])("keeps the harmless rest of %j", (input, rest) => {
+    const out = toRk9CoordLine(input, 300, env)!;
+    expect(out).not.toBe("[redacted]");
+    expect(out).toContain("[redacted]");
+    expect(out).toContain(rest);
+    expect(out).not.toContain(canary);
+  });
+
+  it.each([
+    [`ghp_abcdef́ghijklmnop rest`],
+    [`ghp_abcdeöxyzxyzxyz rest`],
+    [`auth Bearer abcdefgh́ijklmn rest`],
+    [`auth Bearer​${canary}xyz rest`],
+    [`sećrets: [aaa bbb ccc] rest`],
+  ])("still fails closed when an invisible character splits a secret %j", (input) => {
+    expect(toRk9CoordLine(input, 300, env)).toBe("[redacted]");
+  });
+});
+
+// RK9 Custom (RK9-676, verifier round 2 and the parent's JWT decision).
+describe("RK9-676 redaction never weaker than the sequential replace", () => {
+  const R = "[redacted]";
+  const KEYWORD =
+    /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
+  // The RK9-641 redaction (origin/master before RK9-676), with the counter
+  // exemption widened to every brace value under token(s): a weaker baseline.
+  function sequential(text: string): string {
+    return text
+      .replace(new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi"), R)
+      .replace(/rk9_coord_[A-Za-z0-9_-]{6,}/gi, R)
+      .replace(KEYWORD, (match: string, prefix: string, bracket: string | undefined) =>
+        bracket !== undefined && bracket.startsWith("{") && /^tokens?(?![a-z])/i.test(prefix) ? match : R,
+      );
+  }
+  const body = ["MIIEvQIBADANBg", "kqhkiG9w0BAQEF"].join("");
+  // Built at runtime so the repo secret scan does not flag the fake keys.
+  const pem = (kind: string, edge = "BEGIN") => `-----${edge} ${kind}${kind ? " " : ""}PRIVATE ${"KEY"}-----`;
+
+  it.each([
+    [`{"secrets": "${pem("")}\\n${body}\\n${pem("", "END")}\\n"}`, body],
+    [`secrets: "${pem("RSA")}\\n${body}"`, body],
+    [`passwords -> "${pem("OPENSSH")}\\n${body}`, body],
+    [`{"tokens": "Bearer abcdefgh12%2Bsecretpart%3D%3D"}`, "secretpart"],
+    [`Bearer abcdefgh12_token=abc&tokens: REALSECRETVALUE9`, "REALSECRETVALUE9"],
+    [`${"gh" + "p_"}abcdefghij_secret=1&secrets: REALSECRETVALUE9 end`, "REALSECRETVALUE9"],
+  ])("redacts %j", (input, secret) => {
+    expect(redactRk9CoordText(input, env)).not.toContain(secret);
+    expect(toRk9CoordLine(input, 16000, env)).not.toContain(secret);
+  });
+
+  it("keeps every secret that the sequential replace removed (seeded differential fuzz)", () => {
+    const canary = "Qz9Kp7WmX";
+    const pieces = [
+      "token", "tokens", "secrets", "password", "api_key", ": ", "=", "->", "%3D", " ", " ", "Bearer ", "basic ",
+      "AKIA", "ABCDEFGHIJKLMNOP", "rk9_coord_", "ghp_", ["-----BEGIN", "PRIVATE", "KEY-----"].join(" "), "\\n", "\"", "'", "[", "{",
+      "(", ")", "]", "}", "eyJ", "abcdefgh", ".", "-", "_", "&", ",", "x", "://u:", "@", canary,
+    ];
+    let seed = 676;
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed;
+    };
+    const count = (text: string) => text.split(canary).length - 1;
+    const leaks: string[] = [];
+    for (let i = 0; i < 20_000 && leaks.length < 5; i += 1) {
+      const length = 2 + (next() % 14);
+      let text = "";
+      for (let k = 0; k < length; k += 1) text += pieces[next() % pieces.length];
+      if (count(redactRk9CoordText(text, env)) > count(sequential(text))) leaks.push(text);
+    }
+    expect(leaks).toEqual([]);
+  });
+});
+
+describe("RK9-676 linear JWT scan (parent decision)", () => {
+  const head = ["ey", "J", "hbGciOiJSU0EtT0FFUCJ9"].join("");
+  const jwe = `${head}.OKOawDo13gRp2ojaHV7LFpZcgV7T6DVZKTyKOMTYUmKoTCVJRgckCL9kiMT03JGeipsEdY3mx_etLbbWSrFr05kLzcSr4qKAq7YN7e9jwQRb23nfa6c9d-StnImGyFDbSv04uVuxIp5Zms1gNxKKK2Da14B8S4rzVRltdYwam_lDp5XnZAYpQdb76FdIKLaVmqgfwX7XWRxv2322i-vDxRfqNzo_tETKzpVLzfiwQyeyPGLBIO56YJ7eObdv0je81860ppamavo35UgoRdbYaBcoh9QcfylQr66oc6vFWXRcZ_ZT2LawVCWTIy3brGPi6UklfCpIMfIjf7iGdXKHzg.48V1_ALb6US04U3b.5eym8TW_c8SuK0ltJ3rpYIzOeDQz7TALvtu6UG9oMo4vpzs9tX_EFShS8iB7j6jiSdiwkIr3ajwQzaBtQD_A.XFBoMYUZodetZdvTiFvSkQ`;
+
+  it.each([[`id-${jwe}`], [`session_${jwe}`], [`a${["eyJ", "hbGciOiJub25lIn0"].join("")}.${["eyJ", "zdWIiOiIxIn0"].join("")}.`], [`{-${jwe}`], [jwe]])(
+    "still redacts a glued token %j",
+    (input) => {
+      expect(redactRk9CoordText(input, env)).not.toContain("OKOawDo13gRp");
+      expect(redactRk9CoordText(input, env)).not.toContain("hbGciOiJub25l");
+    },
+  );
+
+  it("scans `eyJ` repeated over 100 KB in under 50 ms", () => {
+    for (const text of ["eyJ".repeat(34_000), `${"eyJ".repeat(34_000)}.x`, "eyJ.".repeat(25_000), "a.".repeat(50_000)]) {
+      redactRk9CoordText(text, env);
+      const started = performance.now();
+      redactRk9CoordText(text, env);
+      rk9CoordIdentifierHasSecret(text, env);
+      expect(performance.now() - started, text.slice(0, 12)).toBeLessThan(50);
+    }
+  });
+
+  it("finds exactly the matches of the old JWT regex on a seeded corpus", () => {
+    const old = new RegExp(RK9_COORD_JWT_BRANCH, "gi");
+    const oldIdentifier = new RegExp(`(?:(?<![A-Za-z0-9])|(?=[^A-Za-z0-9]))(?:${RK9_COORD_JWT_BRANCH})`, "gi");
+    const pieces = ["eyJ", "EYJ", "eyj", "a", "Z", "0", "9", "-", "_", ".", " ", "x", "abcdefgh", "/"];
+    let seed = 42;
+    const next = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed;
+    };
+    for (let i = 0; i < 20_000; i += 1) {
+      let text = "";
+      const length = 1 + (next() % 24);
+      for (let k = 0; k < length; k += 1) text += pieces[next() % pieces.length];
+      const expected = [...text.matchAll(old)].map((match) => [match.index, match.index + match[0].length]);
+      expect(rk9CoordJwtSpans(text), text).toEqual(expected);
+      oldIdentifier.lastIndex = 0;
+      expect(rk9CoordJwtSpans(text, true).length > 0, text).toBe(oldIdentifier.test(text));
+    }
+  });
+
+  it("keeps the pattern string identical to the bash default", () => {
+    expect(RK9_COORD_SECRET_RX_DEFAULT).toContain(`|${RK9_COORD_JWT_BRANCH}|`);
   });
 });

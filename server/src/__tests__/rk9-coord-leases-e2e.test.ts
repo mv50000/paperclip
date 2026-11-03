@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, gt, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -311,6 +311,29 @@ if (!support.supported) {
     const claim = await acquire(cc("nt2"), { resource: res, ttl_s: 3600, wait: true });
     expect(claim.body).toMatchObject({ granted: true, already_held: true });
     expect(new Date(claim.body.expires_at).getTime() - Date.now()).toBeGreaterThan(3000 * 1000);
+  });
+
+  // RK9 Custom (RK9-676 item 10): the stub budget also guards lease acquire.
+  it("answers 429 on acquire for a new actor once the host's actor budget is spent", async () => {
+    await db.insert(rk9CoordActors).values({ companyId, kind: "cc", actorRef: cc("budget-seed"), host: "paperclip-01", trust: "attributed" });
+    const [recent] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(rk9CoordActors)
+      .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.host, "paperclip-01"), gt(rk9CoordActors.createdAt, new Date(Date.now() - 3600_000))));
+    const previous = process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+    process.env.RK9_COORD_STUB_RATE_PER_HOUR = String(recent!.count);
+    try {
+      const limited = await acquire(cc("budget-new"), { resource: "prod:rkbudget", ttl_s: 60 });
+      expect(limited.status).toBe(429);
+      expect(limited.body.code).toBe("rk9_coord_stub_rate_limited");
+      const leases = await db.select().from(rk9CoordLeases).where(and(eq(rk9CoordLeases.companyId, companyId), eq(rk9CoordLeases.resource, "prod:rkbudget")));
+      expect(leases).toHaveLength(0);
+      // An existing actor is not limited.
+      expect((await acquire(cc("budget-seed"), { resource: "prod:rkbudget", ttl_s: 60 })).status).toBe(200);
+    } finally {
+      if (previous === undefined) delete process.env.RK9_COORD_STUB_RATE_PER_HOUR;
+      else process.env.RK9_COORD_STUB_RATE_PER_HOUR = previous;
+    }
   });
 
   it("validates the resource format with 422", async () => {

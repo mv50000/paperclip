@@ -118,6 +118,11 @@ one active token.
 Amended by RK9-653 (migration 9016): the index also has `scope`. Each host or
 service has at most one active token per scope (one `coord`, one `recall`).
 
+RK9-676: no host token for the board host (`RK9_COORD_BOARD_HOST`, default
+`paperclip-01`). Issue and rotate answer 422 `rk9_coord_token_board_host`;
+an old such token can only be revoked. Its `cc:paperclip-01:*` claims would
+share actor rows and the per-host actor budget with the board-key sessions.
+
 ### Actor kinds and actor_id grammar
 
 Kind enum (closed): `cc | worktree | headless | agent_run | orch | remote |

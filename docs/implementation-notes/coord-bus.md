@@ -267,7 +267,8 @@ claim or another coord route inserts for an actor that never sent
 `PUT /actors/me` (agent runs, remote hosts). The last activity is the
 latest of `last_seen_at`, the cursor's `updated_at` (every non-peek delta
 touches it, also when nothing is new), the newest inbox claim of the
-actor and its newest lease acquire, renew or release. An actor is never
+actor, its newest lease acquire, renew or release and its newest appended
+event (RK9-676: an actor that only appends events is active). An actor is never
 pruned this way while it holds an unreleased lease (expired or not: the
 sweeper journals the expiry first), waits in a lease queue, or is the
 target of an undelivered, unexpired inbox row (the cascade would delete
@@ -478,7 +479,7 @@ Env vars:
 | `RK9_COORD_PRESENCE_TTL_S` | 300 (10-86400) | presence TTL; the client should refresh at most every TTL/3 |
 | `RK9_COORD_AGENT_RUN_STALE_S` | 7200 (0 = off) | orphan cutoff for projected running runs |
 | `RK9_SESSIONS_SECRET_RX` | the `rk9-sessions.sh` default | redaction pattern; an invalid JS RegExp falls back to the default |
-| `RK9_COORD_STUB_RATE_PER_HOUR` | 120 (0 = off) | new stub actor rows per company and host per hour (RK9-641); above it 429 `rk9_coord_stub_rate_limited` |
+| `RK9_COORD_STUB_RATE_PER_HOUR` | 120 (0 = off) | new actor rows (stubs and, since RK9-676, first presence registrations) per company and host per hour (RK9-641); above it 429 `rk9_coord_stub_rate_limited` |
 
 ## Journal and inbox API (RK9-626)
 
@@ -508,17 +509,37 @@ model is called.
 - The pattern is the `RK9_SESSIONS_SECRET_RX` default of `rk9-sessions.sh`
   (RK9-549). The env var overrides it on the server too. An invalid value
   falls back to the default. `rk9_coord_` tokens are always redacted.
-- Matches become `[redacted]`. Whitespace collapses to one space.
+- Matches become `[redacted]`. Whitespace collapses to one space. Since
+  RK9-676 the redaction marks ranges of the original text and writes one
+  `[redacted]` per merged range. The ranges are the union of (1) the
+  sequential replace of RK9-641 (pattern, coord tokens, keyword rule, each
+  over the previous output), emulated over ranges; (2) every pattern on the original text, so one match
+  cannot eat the start of the next secret (`AKIA...xrk9_coord_<token>` kept
+  `_coord_<token>`); and (3) up to three more rounds over the combined
+  output that add only new coverage. A seeded differential fuzz test
+  against the sequential replace guards (1), and the round-3 verifier ran
+  180 000 random strings against the origin/master module with no secret
+  byte shown. The emulation is not exact: the JWT branch runs as a separate
+  linear scan, so a leftmost-first match that master started inside a JWT
+  run can end elsewhere. The one known case
+  (`eyJ<8 chars>.x bearer abcdefgh-----BEGIN RSA PRIVATE KEY-----`) shows
+  `RSA PRIVATE KEY-----`, header words only, not key material.
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
   object as the value (`"tokens": ["..."]`, `"secrets": {"db": "..."}`,
   `secrets=(...)`). The content up to the first closing bracket goes (to
-  the end of the text when there is none). The one exception is a JSON
+  the end of the text when there is none; RK9-676 tried a 256-character cap
+  and dropped it, because the tail of a long secret stayed). The one exception is a JSON
   object of counters after `token` or `tokens`: only braces, commas,
-  colons, keys that are words without digits, and JSON numbers, booleans
+  colons, counter keys, and JSON numbers, booleans
   or null (`"tokens": {"input": 1234}`, nested `{"cache": {"read": 1}}`
-  too), so token counts stay. A string value or a digit in a key under
+  too), so token counts stay. A counter key (RK9-676) has at most 5
+  characters, or every word of it (split at `_`, `-` and camelCase) is a
+  counter word (`input`, `output`, `cache`, `read`, `prompt`, `completion`,
+  `reasoning`, `total`, `tokens`, ...; the list is `COUNTER_WORDS` in
+  `rk9-coord-text.ts`), so `tokens={abcdef: 1}` is redacted. A string
+  value, any other key or a digit in a key under
   `tokens` is redacted, and so is any bracketed value under `password`,
   `secret` or `api_key` and any array.
 - **Known prose false positive.** A keyword, a separator and one word of 6+
@@ -545,21 +566,48 @@ model is called.
   two mixed readings (controls as spaces and the rest removed, and the
   reverse). The readings are NFKC-folded, so full-width text matches too.
   The braille blank (U+2800) counts as invisible here. `Bearer` or
-  `Basic` at a word start, then only invisible characters as the
+  `Basic` not after a letter (RK9-676: a digit before it, `1Bearer`, no
+  longer hides it), then only invisible characters as the
   separator, then 8+ token characters with invisible characters between
   them counts as a secret too (one invisible character as the separator,
   another inside the token). The counter-object check is a linear scan,
   not a regex, so no input can make it backtrack.
 - **Fail closed.** A text that contains any control, format, combining or
-  filler character becomes `[redacted]` as a whole when any reading shows a
-  secret. Any text whose stored line still shows a secret in some reading
-  (a full-width token) becomes `[redacted]` as a whole too. Only a plain
+  filler character becomes `[redacted]` as a whole when invisible
+  characters are the only separator of `Bearer`/`Basic` and its token, or
+  when the stored line still shows part of a secret that some reading of
+  the text shows (RK9-676). That second test runs per normalizing
+  reading: each run of secret characters (`[A-Za-z0-9._~+/=-]`) in the
+  stored line, read the same way, must also appear in that reading of the
+  text after redaction. A token tail left after a combining mark
+  (`ghp_abcdef<U+0301>ghijkl`) fails it; an emoji selector or an NFD
+  accent next to a redacted keyword value does not, so that line keeps its
+  harmless rest (before RK9-676 any secret anywhere in such a text took the
+  whole line). Any text whose stored line still shows a secret in some
+  reading (a full-width token) becomes `[redacted]` as a whole too. A plain
   text with an ordinary secret keeps the rest of the line
   (`deploy ok token=... done` -> `deploy ok [redacted] done`). The server
   does not count `[redacted]` markers (a literal marker in the text could
-  fool such a count). Trade-off: text with an emoji variation selector
-  (U+FE0F) or decomposed accents (NFD) and an ordinary secret loses the
-  whole line.
+  fool such a count).
+- **JWT and linear time (RK9-676, parent decision).** The JWT branch
+  `eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+` stays in the pattern string, so
+  it is identical to the bash default, but the server does not compile it:
+  on `eyJeyJ...` without a dot every `eyJ` rescanned the rest of the text
+  (quadratic; a 4 KB value took ~7 ms per check). `rk9CoordJwtSpans` finds
+  the same matches in one pass: in each maximal run of `[A-Za-z0-9_.-]`
+  with a dot, the first `eyJ` (any case) with 8+ characters before the next
+  dot and at least one character after it starts a match to the end of the
+  run. Glued prefixes stay covered (`id-<JWE>`, `aeyJ...`). A seeded corpus
+  test checks that the spans equal the old regex's, and 100 KB of `eyJ`
+  takes well under 50 ms. Only an exact top-level JWT alternative is
+  dropped from the compiled pattern; an `RK9_SESSIONS_SECRET_RX` override
+  with another JWT form runs as written. **Client difference:** the
+  claude-config copies (`rk9-sessions.sh`, `rk9`, `pcp-headsup.sh`, the gate
+  scripts, vault-mcp and grok-mcp) keep the regex form. They see short
+  lines (session names, phases, hook text), where the quadratic case costs
+  little; a port of the scan is follow-up work. The presence metadata check probes each ancestor key once with a
+  short stand-in value and checks `key: value` only for keys that can start
+  a secret (`token: ...`), instead of every ancestor with the full value.
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
   `client_event_id`, the heads-up `session_id`) are grammar-restricted. A secret-looking value there is
   422 `rk9_coord_secret_in_field`, not a silent store. A match counts only at
@@ -830,8 +878,9 @@ Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
   20), so normal use stays far below the limit. A remote token that mints
   random `cc:<host>:<random>` ids through the delta, inbox or lease path
   hits it. The count covers every actor row the host created in the hour,
-  registered or not, so registering each stub does not reset it. A first
-  registration through `PUT /actors/me` is not limited. Agent runs (server-verified
+  registered or not, so registering each stub does not reset it. Since
+  RK9-676 a first registration through `PUT /actors/me` (an insert) takes
+  the same budget; a refresh of an existing row does not. Agent runs (server-verified
   running runs) and actors without a host are not limited. A per-host
   advisory lock serializes the count and the insert.
 - The cursor move writes no `activity_log` row (RK9-641 decision): it is
@@ -898,7 +947,11 @@ Paperclip agent targets:
   `rk9_coord_inbox_target_not_allowed`. A paused issue tree is 409
   `rk9_coord_inbox_issue_paused`, as on the board comment route.
 - The comment does not wake the agent. The agent sees it on its next
-  heartbeat, so a message never buys a heartbeat run.
+  heartbeat, so a message never buys a heartbeat run. It does not lift the
+  issue rewake throttle either (RK9-676, operator decision 3.11.2026): the
+  throttle's new-input query skips activity rows whose `details` contain
+  `coordInbox: true` (`ISSUE_REWAKE_COORD_INBOX_DETAILS` in
+  `issue-rewake-throttle.ts`). The comment and its plugin event stay.
 - A coord-token caller cannot write comments (403
   `rk9_coord_kind_not_allowed`), per the least-privilege rule of the ADR.
   The check runs before any run or agent lookup, so the answer tells a
@@ -910,6 +963,19 @@ Paperclip agent targets:
 
 Each inbox row also writes one `activity_log` row (`rk9.coord.inbox_sent`),
 in the insert's transaction.
+
+### GET /inbox/me?peek=1 and GET /inbox/me/count (RK9-676)
+
+A count-only read: 200 `{ actor, peek: true, count, capped }`, also when
+the count is 0. It counts the rows a claim by this actor would take (same
+rules as below, at most 50: `capped` is true at 50) and changes nothing: no
+claim, no actor row (an actor without a row counts only the rows addressed
+to its id), no `activity_log` row. `peek` accepts `1`, `true` or `yes`;
+anything else claims. The `rk9` CLI calls `/inbox/me/count`: a server
+older than RK9-676 answers it with 404 `rk9_coord_not_found`, while it
+would ignore `?peek=1` on `/inbox/me` and claim the messages. Before
+RK9-676 the CLI background refresh did exactly that and consumed the
+messages that `rk9 inbox` should show.
 
 ### GET /inbox/me
 

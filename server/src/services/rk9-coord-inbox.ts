@@ -13,6 +13,9 @@
 //     reach issues or agents (ADR least privilege), not even by lookup;
 //   * anything else -> an inbox row for that actor (to_actor_id) or name.
 //   The answer carries target_live + name, so the CLI can suggest SendMessage.
+// - count(): GET /inbox/me?peek=1 or /inbox/me/count (RK9-676). A read
+//   only: no claim, no actor row, no activity row. The count is capped at
+//   one claim batch (50).
 // - claim(): GET /inbox/me. One UPDATE ... WHERE id IN (SELECT ... FOR UPDATE
 //   SKIP LOCKED) RETURNING: two concurrent claimers never get the same row.
 //   Only a local (board-key) or verified actor claims rows addressed by
@@ -49,7 +52,9 @@ import { toRk9CoordLine } from "./rk9-coord-text.js";
 
 /** DB CHECK: body is 1..500 characters. */
 export const RK9_COORD_INBOX_BODY_MAX = 500;
-const CLAIM_LIMIT = 50;
+/** At most this many rows per claim; the peek count is capped at it too. */
+export const RK9_COORD_INBOX_CLAIM_LIMIT = 50;
+const CLAIM_LIMIT = RK9_COORD_INBOX_CLAIM_LIMIT;
 const COMMENT_PREFIX = "**RK9 coord message**";
 
 function coordError(status: number, code: string, message: string) {
@@ -475,6 +480,49 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     return claimForRow(companyId, actor, self, now, opts.activityActor ?? null);
   }
 
+  /**
+   * The rows a claim by this actor would take: its actor row, its actor id
+   * held as a name, and (local or verified actors only) its name and issue.
+   * `self` is null when the actor has no row yet (peek does not create one).
+   */
+  function claimTargets(actor: Rk9CoordResolvedActor, self: Rk9CoordActorRow | null) {
+    // The exact actor id: the actor row, or a name row that holds the id
+    // (send() stores an actor id without a row as to_name).
+    const targets = [sql`i.to_name = ${actor.actorId}`];
+    if (self) targets.push(sql`i.to_actor_id = ${self.id}`);
+    if (rk9CoordMayClaimByNameOrIssue(actor)) {
+      if (self?.name) targets.push(sql`i.to_name = ${self.name}`);
+      const issue = rk9CoordActorIssue(self ?? { issue: null, actorRef: actor.actorId });
+      if (issue) targets.push(sql`i.to_issue = ${issue}`);
+    }
+    return targets;
+  }
+
+  /**
+   * RK9-676: GET /inbox/me?peek=1 and GET /inbox/me/count. Counts the
+   * messages a claim would deliver, without claiming them: no UPDATE, no
+   * actor row (an unknown actor counts its id-addressed rows only), no
+   * activity row. The CLI background refresh calls it for the status line;
+   * before RK9-676 the server ignored `peek` and the refresh consumed the
+   * messages that `rk9 inbox` should show.
+   */
+  async function count(companyId: string, actor: Rk9CoordResolvedActor): Promise<number> {
+    const at = sql`${clock().toISOString()}::timestamptz`;
+    const self = await findRk9CoordActorRow(db, companyId, actor.actorId);
+    const result = await db.execute<{ count: string | number }>(sql`
+      select count(*)::int as count from (
+        select i.id from rk9_coord_inbox i
+        where i.company_id = ${companyId}
+          and i.delivered_at is null
+          and (i.expires_at is null or i.expires_at > ${at})
+          and (${sql.join(claimTargets(actor, self), sql` or `)})
+        limit ${CLAIM_LIMIT}
+      ) pending
+    `);
+    const rows = Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? []);
+    return Number((rows[0] as { count?: string | number } | undefined)?.count ?? 0);
+  }
+
   async function claimForRow(
     companyId: string,
     actor: Rk9CoordResolvedActor,
@@ -483,14 +531,7 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     activity: Rk9CoordActivityActor | null,
   ): Promise<Rk9CoordInboxMessage[]> {
     const at = sql`${now.toISOString()}::timestamptz`;
-    // The exact actor id: the actor row, or a name row that holds the id
-    // (send() stores an actor id without a row as to_name).
-    const targets = [sql`i.to_actor_id = ${self.id}`, sql`i.to_name = ${self.actorRef}`];
-    if (rk9CoordMayClaimByNameOrIssue(actor)) {
-      if (self.name) targets.push(sql`i.to_name = ${self.name}`);
-      const issue = rk9CoordActorIssue(self);
-      if (issue) targets.push(sql`i.to_issue = ${issue}`);
-    }
+    const targets = claimTargets(actor, self);
     const publications: ActivityPublication[] = [];
     const result = await db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
@@ -574,6 +615,6 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     });
   }
 
-  return { send, claim };
+  return { send, claim, count };
 }
 // --- /RK9 Custom ---

@@ -97,6 +97,16 @@ export const ISSUE_NEW_INPUT_ACTIVITY_ACTIONS: string[] = [
   "issue.blockers_resolved_wake_emitted",
 ];
 
+/**
+ * RK9 Custom (RK9-676): activity rows whose `details` contain this object do
+ * not count as new issue input. The coord inbox turns a board user's coord
+ * message to an agent into an issue comment (`issue.comment_added` with
+ * `details.coordInbox: true`). The comment stays, with its plugin event, but
+ * a coord message must not lift the throttle and buy a heartbeat run (cost;
+ * operator decision 3.11.2026). JSON text for a `details @> ...::jsonb` test.
+ */
+export const ISSUE_REWAKE_COORD_INBOX_DETAILS = JSON.stringify({ coordInbox: true });
+
 export interface IssueRewakeCandidateInput {
   reason: string | null;
   wakeCommentId: string | null;

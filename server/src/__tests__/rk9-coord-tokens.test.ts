@@ -695,6 +695,33 @@ if (!support.supported) {
     expect(audit.map((row) => row.action)).toEqual(["rk9_coord.token_rotated"]);
   });
 
+  // RK9 Custom (RK9-676 item 9): no host token for the board host.
+  it("refuses to issue or rotate a host token named after the board host", async () => {
+    const app = manageApp(operatorKey);
+    for (const principalName of ["paperclip-01"]) {
+      const res = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens`).send({ principalKind: "host", principalName });
+      expect(res.status, principalName).toBe(422);
+      expect(res.body.code, principalName).toBe("rk9_coord_token_board_host");
+    }
+    // A service or another host is fine; an old board-host token can only be revoked.
+    const [old] = await db
+      .insert(rk9CoordTokens)
+      .values({
+        companyId,
+        principalKind: "host",
+        principalName: "paperclip-01",
+        tokenHash: hashRk9CoordToken(generateRk9CoordToken()),
+        tokenPrefix: "rk9_coord_xxxx",
+        scope: "coord",
+      })
+      .returning();
+    const rotate = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${old!.id}/rotate`).send({});
+    expect(rotate.status).toBe(422);
+    expect(rotate.body.code).toBe("rk9_coord_token_board_host");
+    const revoke = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${old!.id}/revoke`).send({});
+    expect(revoke.status).toBeLessThan(300);
+  });
+
   it("does not rotate or revoke another company's token", async () => {
     const service = rk9CoordTokenService(db);
     const { record } = await service.issue({ companyId: otherCompanyId, principalKind: "host", principalName: "pve-01" });

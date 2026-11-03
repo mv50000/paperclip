@@ -28,7 +28,7 @@ import type { Db } from "@paperclipai/db";
 import { rk9CoordTokens } from "@paperclipai/db";
 import { RK9_COORD_TOKEN_PREFIX, RK9_COORD_TOKEN_SCOPES, type Rk9CoordTokenScope } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import type { Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
+import { resolveRk9CoordBoardHost, type Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
 
 /** Full token grammar; anything else is rejected before the DB lookup. */
 export const RK9_COORD_TOKEN_PATTERN = /^rk9_coord_[A-Za-z0-9_-]{43}$/;
@@ -137,6 +137,20 @@ function isUniqueViolation(err: unknown, constraint: string): boolean {
 
 const ACTIVE_PRINCIPAL_UQ = "rk9_coord_tokens_active_principal_uq";
 
+/**
+ * RK9-676: no host token for the board host. The board key already speaks for
+ * that host; a host token named `paperclip-01` would claim `cc:paperclip-01:*`
+ * ids that share actor rows and the per-host actor budget with the board-key
+ * sessions. Applies to issue and rotate (an old such token can only be revoked).
+ */
+function assertNotBoardHost(principalKind: string, principalName: string) {
+  if (principalKind === "host" && principalName.trim().toLowerCase() === resolveRk9CoordBoardHost()) {
+    throw unprocessable("The board host uses the board key, not a host token; revoke this token", {
+      code: "rk9_coord_token_board_host",
+    });
+  }
+}
+
 export function rk9CoordTokenService(db: Db) {
   /**
    * Resolve a bearer to its principal. Returns null for a malformed, unknown,
@@ -180,6 +194,7 @@ export function rk9CoordTokenService(db: Db) {
         code: "rk9_coord_token_recall_all_scope",
       });
     }
+    assertNotBoardHost(input.principalKind, input.principalName);
     const token = generateRk9CoordToken();
     try {
       return await db.transaction(async (tx) => {
@@ -234,6 +249,7 @@ export function rk9CoordTokenService(db: Db) {
         .for("update")
         .limit(1);
       if (!old) throw notFound("No active coord token with this id", { code: "rk9_coord_token_not_found" });
+      assertNotBoardHost(old.principalKind, old.principalName);
       // An inherited expiry that has passed, or that leaves less than the
       // minimum lifetime, would mint a (nearly) dead token and take the
       // active-principal slot: ask for an explicit expiry.

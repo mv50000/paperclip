@@ -383,6 +383,130 @@ if (!support.supported) {
     expect(plain.status).toBe(201);
   });
 
+  // RK9 Custom (RK9-676 item 3): a count-only read that claims nothing.
+  it("counts pending messages on peek without claiming, logging or creating an actor row", async () => {
+    await send("orch:main", { to: "worktree:RKI-300", body: "peek one" });
+    await send("orch:main", { to: "RKI-300", body: "peek two" });
+    const claimedBefore = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "rk9.coord.inbox_claimed")));
+    for (const path of ["/inbox/me?peek=1", "/inbox/me/count"]) {
+      const res = await request(appFor(boardKey([companyId]))).get(`${base()}${path}`).set("X-RK9-Actor", "worktree:RKI-300");
+      expect(res.status, path).toBe(200);
+      expect(res.body, path).toEqual({ actor: "worktree:RKI-300", peek: true, count: 2, capped: false });
+      expect(res.headers["cache-control"]).toBe("no-store");
+    }
+    const rows = await db.select().from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, "worktree:RKI-300"));
+    expect(rows).toHaveLength(0);
+    const pending = await db
+      .select()
+      .from(rk9CoordInbox)
+      .where(and(eq(rk9CoordInbox.companyId, companyId), eq(rk9CoordInbox.body, "peek one")));
+    expect(pending[0]!.deliveredAt).toBeNull();
+    const claimedAfter = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "rk9.coord.inbox_claimed")));
+    expect(claimedAfter).toHaveLength(claimedBefore.length);
+    // The claim still delivers both, and a later peek counts nothing.
+    const got = await claim("worktree:RKI-300");
+    expect(got.body.messages.map((m: { body: string }) => m.body)).toEqual(["peek one", "peek two"]);
+    const after = await request(appFor(boardKey([companyId]))).get(`${base()}/inbox/me/count`).set("X-RK9-Actor", "worktree:RKI-300");
+    expect(after.body.count).toBe(0);
+    // `peek=0` is a claim, as before.
+    expect((await request(appFor(boardKey([companyId]))).get(`${base()}/inbox/me?peek=0`).set("X-RK9-Actor", "worktree:RKI-300")).status).toBe(204);
+  });
+
+  it("counts on peek only what this actor may claim", async () => {
+    const principal: Rk9CoordTokenPrincipal = { tokenId: "t", companyId, principalKind: "host", principalName: "mv-laptop" };
+    await db.insert(rk9CoordActors).values({
+      companyId,
+      kind: "cc",
+      actorRef: "cc:mv-laptop:peek-1",
+      host: "mv-laptop",
+      trust: "attributed",
+      name: "peek-victim",
+      issue: "RKI-301",
+    });
+    await send("orch:main", { to: "peek-victim", body: "by name" });
+    await send("orch:main", { to: "RKI-301", body: "by issue" });
+    await send("orch:main", { to: "cc:mv-laptop:peek-1", body: "by id" });
+    const res = await request(appFor({ type: "none", source: "none" } as Actor, principal))
+      .get(`${base()}/inbox/me/count`)
+      .set("X-RK9-Actor", "cc:mv-laptop:peek-1");
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(1);
+  });
+
+  // RK9 Custom (RK9-676 item 10): claim trust rule, positive and negative cases.
+  it("lets operator, rk9claude and a board-key cc session claim by name and issue; not grok or an agent-key run", async () => {
+    const cid = otherCompanyId;
+    const actors: Array<[Rk9CoordResolvedActor, string, string, boolean]> = [
+      [{ kind: "operator", actorId: "operator", host: null, trust: "verified", principal: "session" }, "op-name", "RKO-501", true],
+      [{ kind: "rk9claude", actorId: "rk9claude", host: "rk9claude", trust: "verified", principal: "coord_token" }, "rc-name", "RKO-502", true],
+      [
+        { kind: "cc", actorId: "cc:paperclip-01:bk-1", host: "paperclip-01", trust: "attributed", principal: "board_key" },
+        "cc-name",
+        "RKO-503",
+        true,
+      ],
+      [{ kind: "grok", actorId: "grok", host: "grok", trust: "unverified", principal: "coord_token" }, "grok-name", "RKO-504", false],
+      [
+        { kind: "agent_run", actorId: `agent_run:${randomUUID()}`, host: null, trust: "verified", principal: "agent_key" },
+        "run-name",
+        "RKO-505",
+        false,
+      ],
+    ];
+    const inbox = rk9CoordInboxService(db);
+    const sender = { actor: worktree("RKO-1"), paperclip: { type: "user" as const, userId: "operator-user" } };
+    for (const [actor, name, issue] of actors) {
+      await db.insert(rk9CoordActors).values({
+        companyId: cid,
+        kind: actor.kind,
+        actorRef: actor.actorId,
+        host: actor.host,
+        trust: actor.trust,
+        name,
+        issue,
+      });
+      await inbox.send(cid, sender, { to: name, body: `name ${name}` });
+      await inbox.send(cid, sender, { to: issue, body: `issue ${issue}` });
+      // A message to an agent_run id becomes an issue comment, not an inbox row.
+      if (actor.kind !== "agent_run") await inbox.send(cid, sender, { to: actor.actorId, body: `id ${actor.actorId}` });
+    }
+    for (const [actor, name, issue, mayClaim] of actors) {
+      const got = (await inbox.claim(cid, actor)).map((message) => message.body).sort();
+      expect(got, actor.actorId).toEqual(
+        mayClaim
+          ? [`id ${actor.actorId}`, `issue ${issue}`, `name ${name}`].sort()
+          : actor.kind === "agent_run"
+            ? []
+            : [`id ${actor.actorId}`],
+      );
+    }
+  });
+
+  it("logs the route caller as the actor of a claim", async () => {
+    await send("orch:main", { to: "worktree:RKI-310", body: "board claim" });
+    expect((await claim("worktree:RKI-310")).status).toBe(200);
+    const principal: Rk9CoordTokenPrincipal = { tokenId: "t", companyId, principalKind: "host", principalName: "mv-laptop" };
+    await send("orch:main", { to: "remote:mv-laptop", body: "token claim" });
+    const tokenClaim = await request(appFor({ type: "none", source: "none" } as Actor, principal))
+      .get(`${base()}/inbox/me`)
+      .set("X-RK9-Actor", "remote:mv-laptop");
+    expect(tokenClaim.status).toBe(200);
+    const rows = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "rk9.coord.inbox_claimed")));
+    const board = rows.find((row) => (row.details as { actor?: string }).actor === "worktree:RKI-310");
+    expect(board).toMatchObject({ actorType: "user", actorId: "operator-user", entityType: "rk9_coord_actor" });
+    const token = rows.filter((row) => (row.details as { actor?: string }).actor === "remote:mv-laptop").at(-1);
+    expect(token).toMatchObject({ actorType: "system", actorId: "remote:mv-laptop" });
+  });
+
   it("validates the body and keeps companies apart", async () => {
     expect((await send("orch:main", { to: "RKI-9" })).status).toBe(400);
     expect((await send("orch:main", { body: "x" })).status).toBe(400);

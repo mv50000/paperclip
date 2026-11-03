@@ -3,18 +3,29 @@
 // Mounted by routes/rk9-coord.ts at /api/companies/:companyId/rk9/coord/inbox.
 //   POST /     send; `to` = actor id | issue identifier | name
 //   GET  /me   claim and mark delivered (204 when empty)
-import { Router, type Request } from "express";
+//   GET  /me?peek=1, GET /me/count   count only, no claim (RK9-676)
+import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import { sendRk9CoordInboxSchema, type SendRk9CoordInbox } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
-import { rk9CoordInboxService, type Rk9CoordInboxCaller } from "../services/rk9-coord-inbox.js";
+import {
+  RK9_COORD_INBOX_CLAIM_LIMIT,
+  rk9CoordInboxService,
+  type Rk9CoordInboxCaller,
+} from "../services/rk9-coord-inbox.js";
 import {
   companyIdOf,
   rk9CoordActivityActor,
   rk9CoordCallerAgentId,
   requireRk9CoordActor,
 } from "./rk9-coord-events.js";
+
+/** `?peek=1` (also `true`, `yes`); anything else, or no value, claims. */
+function isPeek(value: unknown): boolean {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return typeof raw === "string" && /^(1|true|yes)$/i.test(raw.trim());
+}
 
 function inboxCaller(req: Request, actor: Rk9CoordResolvedActor): Rk9CoordInboxCaller {
   if (req.rk9CoordPrincipal) return { actor, paperclip: { type: "coord_token" } };
@@ -49,8 +60,30 @@ export function rk9CoordInboxRoutes(db: Db) {
     }
   });
 
+  // RK9-676: a count-only read. `/me/count` is the form the CLI uses: a
+  // server without it answers 404, while an older server would ignore
+  // `?peek=1` on `/me` and claim (consume) the messages.
+  async function sendCount(req: Request, res: Response) {
+    const actor = requireRk9CoordActor(req);
+    const count = await inbox.count(companyIdOf(req), actor);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ actor: actor.actorId, peek: true, count, capped: count >= RK9_COORD_INBOX_CLAIM_LIMIT });
+  }
+
+  router.get("/me/count", async (req, res, next) => {
+    try {
+      await sendCount(req, res);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/me", async (req, res, next) => {
     try {
+      if (isPeek(req.query.peek)) {
+        await sendCount(req, res);
+        return;
+      }
       const actor = requireRk9CoordActor(req);
       const messages = await inbox.claim(companyIdOf(req), actor, {
         agentId: rk9CoordCallerAgentId(req),
