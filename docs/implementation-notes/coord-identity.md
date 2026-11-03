@@ -102,7 +102,8 @@ All tables are RK9-only, 9000-series, and created by RK9-623 alone.
 | `principal_name` | text NOT NULL | host: DNS label `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`; service: `rk9claude` or `grok` |
 | `token_hash` | text NOT NULL UNIQUE | sha256 hex of the full token; plaintext is never stored |
 | `token_prefix` | text NOT NULL | first 14 characters (`rk9_coord_` + 4), for display only |
-| `scope` | text NOT NULL DEFAULT `coord` | CHECK in (`coord`) |
+| `scope` | text NOT NULL DEFAULT `coord` | CHECK in (`coord`, `recall`); `recall` added by RK9-653 (migration 9016) |
+| `recall_all` | boolean NOT NULL DEFAULT false | RK9-653 (9016): operator opt-in for `scope: "all"` recall; CHECK `recall_all = false or scope = 'recall'` |
 | `label` | text | free text, ≤ 200 |
 | `created_by_user_id` | text | board user that issued it |
 | `rotated_from_token_id` | uuid | FK `rk9_coord_tokens(id)` ON DELETE set null |
@@ -114,6 +115,8 @@ All tables are RK9-only, 9000-series, and created by RK9-623 alone.
 Index: a partial unique index on (`company_id`, `principal_kind`,
 `principal_name`) WHERE `revoked_at IS NULL`. Each host or service has at most
 one active token.
+Amended by RK9-653 (migration 9016): the index also has `scope`. Each host or
+service has at most one active token per scope (one `coord`, one `recall`).
 
 ### Actor kinds and actor_id grammar
 
@@ -453,7 +456,53 @@ Conditions for the remote-access child:
   secret policy. It is outside this repository.
 - **The board key never leaves paperclip-01.** Remote hosts never receive it.
   Q6 (remote recall moving from the board key to a scoped token) is a
-  follow-up, not part of this epic.
+  follow-up, not part of this epic. Resolved by RK9-653: see "Recall scope"
+  below.
+
+## Recall scope (RK9-653, operator decision Q6)
+
+Remote recall (`qmd-recall-remote.sh` on mv-laptop, htpc and skynet) used a
+Paperclip board key in `~/.config/rk9-recall.env`. It now uses a per-host
+token with scope `recall`. No board key is needed on any host other than
+paperclip-01.
+
+- **Token:** a separate `rk9_coord_tokens` row with `scope = 'recall'`, for
+  the same `(company, host)` as the coord token. Issue it with
+  `POST .../coord-tokens` and `{ "scope": "recall" }`, or
+  `rk9-coord-token.mjs issue --host <h> --scope recall`. Rotate keeps the
+  scope and the flag. Revoke works as for a coord token: the next call is 401.
+- **Reach:** the global guard lets a recall token call only
+  `POST /api/companies/:companyId/knowledge/recall` (exact path, raw and
+  routed, no `#`, `\` or whitespace). Everything else is 403
+  `rk9_coord_token_route_forbidden`, the coord routes included. A coord token
+  gets 403 on the recall route. The route binds the token to its own company
+  (403 `rk9_coord_wrong_company` otherwise). The call is read-only.
+- **Activity:** the recall row is logged with actor type `system` and actor
+  id `rk9_recall_token:<kind>:<name>`.
+- **`scope: "all"` (operator mode):** decided explicitly.
+  - An instance-admin caller (session or board key) keeps it, as before.
+  - A recall token gets it only when its `recall_all` flag is on. The flag
+    is an opt-in that only the operator sets at issue time
+    (`recallAll: true`, CLI `--recall-all`), because only an instance admin
+    reaches the token routes. It is allowed only on a recall token.
+  - Without the flag, a recall token asking for `all` is silently
+    company-scoped, the same downgrade as for agents and non-admin boards.
+  - The flag is read-only too: it widens which business collections the
+    recall route searches, never the routes the token reaches. The personal
+    vault stays excluded from both scopes (`isPersonalCollection`).
+  - Parent decision (2026-11-03): mv-laptop, htpc and skynet are provisioned
+    with the flag, because the board key they replace already gave more.
+- **Client file:** `~/.config/rk9/recall.env`, mode 0600, with
+  `RK9_RECALL_URL`, `RK9_RECALL_COMPANY_ID` and `RK9_RECALL_TOKEN`. The
+  names differ from `coord.env`, so a recall token is never mistaken for a
+  coord token. Provisioning: `rk9-coord-provision.sh recall <host>
+  [--recall-all]` in claude-config.
+- **Migration 9016** runs with `SET LOCAL lock_timeout = '5s'`. If another
+  transaction holds a lock on `rk9_coord_tokens` at startup, the migration
+  fails after 5 s with `lock_not_available`, rolls back completely and records
+  nothing. The next start retries it. The DDL is small: a CHECK and an index
+  rebuild on a table of a few rows, and an `ADD COLUMN` with a constant
+  default (no table rewrite, no backfill).
 
 ## Prototype checks
 

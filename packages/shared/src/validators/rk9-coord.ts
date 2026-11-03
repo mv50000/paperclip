@@ -7,6 +7,7 @@ import {
   RK9_COORD_ACTOR_KINDS,
   RK9_COORD_HOST_LABEL_PATTERN,
   RK9_COORD_TOKEN_PRINCIPAL_KINDS,
+  RK9_COORD_TOKEN_SCOPES,
   RK9_COORD_TOKEN_SERVICES,
 } from "../rk9-coord.js";
 
@@ -38,11 +39,22 @@ export const issueRk9CoordTokenSchema = z
   .object({
     principalKind: z.enum(RK9_COORD_TOKEN_PRINCIPAL_KINDS),
     principalName: z.string().min(1).max(63),
+    // RK9-653: omitted = coord. A recall token is a separate token per host.
+    scope: z.enum(RK9_COORD_TOKEN_SCOPES).optional(),
+    // RK9-653: operator opt-in, recall scope only: the token may use scope:"all".
+    recallAll: z.boolean().optional(),
     label: tokenLabelSchema,
     expiresAt: tokenExpiresAtSchema,
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.recallAll && value.scope !== "recall") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["recallAll"],
+        message: "recallAll is allowed only on a recall-scoped token",
+      });
+    }
     const ok =
       value.principalKind === "host"
         ? RK9_COORD_HOST_LABEL_PATTERN.test(value.principalName)

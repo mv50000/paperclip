@@ -9,11 +9,17 @@ import request from "supertest";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, companies, createDb, rk9CoordTokens, type Db } from "@paperclipai/db";
+// RK9-653: the recall route runs for real; only the qmd-backed service is stubbed.
+const mockRecallKnowledge = vi.hoisted(() => vi.fn());
+vi.mock("../services/knowledge-recall.js", () => ({ recallKnowledge: mockRecallKnowledge }));
+
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import type { Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
+import { knowledgeRoutes } from "../routes/knowledge.js";
 import {
   isRk9CoordGuardAllowed,
+  isRk9RecallGuardAllowed,
   isRk9CoordRoutePath,
   rk9CoordTokenGuard,
   type Rk9CoordTokenResolver,
@@ -35,10 +41,19 @@ const RK9 = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const HOST_TOKEN = generateRk9CoordToken();
 const SERVICE_TOKEN = generateRk9CoordToken();
+const RECALL_TOKEN = generateRk9CoordToken();
 
 const principals: Record<string, Rk9CoordTokenPrincipal> = {
   [HOST_TOKEN]: { tokenId: "t-host", companyId: RK9, principalKind: "host", principalName: "mv-laptop" },
   [SERVICE_TOKEN]: { tokenId: "t-svc", companyId: RK9, principalKind: "service", principalName: "rk9claude" },
+  [RECALL_TOKEN]: {
+    tokenId: "t-recall",
+    companyId: RK9,
+    principalKind: "host",
+    principalName: "mv-laptop",
+    scope: "recall",
+    recallAll: false,
+  },
 };
 
 /**
@@ -61,6 +76,8 @@ function makeApp(deploymentMode: "authenticated" | "local_trusted" = "authentica
   api.get("/agents/me", reached);
   api.patch("/agents/:agentId", reached);
   api.post("/companies/:companyId/approvals", reached);
+  api.post("/companies/:companyId/knowledge/recall", reached);
+  api.get("/companies/:companyId/knowledge/recall", reached);
   app.use("/api", api);
   app.get("/", reached);
   app.use(errorHandler);
@@ -239,6 +256,57 @@ describe("deny by default: a coord token gets 403 on every non-coord route", () 
   });
 });
 
+describe("recall scope (RK9-653): a recall token reaches only POST .../knowledge/recall", () => {
+  it("passes the guard on the recall route", async () => {
+    const { app } = makeApp();
+    const res = await request(app)
+      .post(`/api/companies/${RK9}/knowledge/recall`)
+      .set("Authorization", bearer(RECALL_TOKEN))
+      .send({ query: "x" });
+    expect(res.status).toBe(200);
+  });
+
+  it.each([
+    ["GET", `/api/companies/${RK9}/knowledge/recall`],
+    ["POST", `/api/companies/${RK9}/knowledge/recall/`],
+    ["POST", `/api/companies/${RK9}/Knowledge/recall`],
+    ["POST", `/api/companies/${RK9}/knowledge/recall%2F..`],
+    ["GET", whoami()],
+    ["POST", `/api/companies/${RK9}/rk9/coord/leases`],
+    ["GET", `/api/companies/${RK9}/issues`],
+    ["POST", `/api/companies/${RK9}/rk9/coord-tokens`],
+    ["GET", "/api/agents/me"],
+  ])("403 on %s %s", async (method, path) => {
+    const { app } = makeApp();
+    const res = await request(app)[method.toLowerCase() as "get"](path).set("Authorization", bearer(RECALL_TOKEN)).send({});
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("rk9_coord_token_route_forbidden");
+  });
+
+  it("keeps coord-scope tokens off the recall route", async () => {
+    const { app } = makeApp();
+    for (const token of [HOST_TOKEN, SERVICE_TOKEN]) {
+      const res = await request(app)
+        .post(`/api/companies/${RK9}/knowledge/recall`)
+        .set("Authorization", bearer(token))
+        .send({ query: "x" });
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it("matches only POST to the exact recall path, raw and routed", () => {
+    const path = `/api/companies/${RK9}/knowledge/recall`;
+    expect(isRk9RecallGuardAllowed("POST", path, path)).toBe(true);
+    expect(isRk9RecallGuardAllowed("POST", `${path}?x=1`, path)).toBe(true);
+    expect(isRk9RecallGuardAllowed("GET", path, path)).toBe(false);
+    expect(isRk9RecallGuardAllowed("POST", `${path}#x`, path)).toBe(false);
+    expect(isRk9RecallGuardAllowed("POST", `${path}\\x`, path)).toBe(false);
+    expect(isRk9RecallGuardAllowed("POST", path, `/api/companies/${RK9}/issues`)).toBe(false);
+    expect(isRk9RecallGuardAllowed("POST", `/api/companies/${RK9}/issues`, path)).toBe(false);
+    expect(isRk9RecallGuardAllowed("POST", `/api/companies/${RK9}/x/knowledge/recall`, path)).toBe(false);
+  });
+});
+
 describe("token format", () => {
   it("is rk9_coord_ plus 43 base64url characters and unique per call", () => {
     const a = generateRk9CoordToken();
@@ -297,6 +365,7 @@ if (!support.supported) {
     app.use(rk9CoordTokenGuard());
     app.use("/api", rk9CoordRoutes(db, { boardHost: "paperclip-01", boardKeyIds: null }));
     app.get("/api/companies/:companyId/issues", (_req, res) => res.json({ reached: true }));
+    app.use("/api", knowledgeRoutes(db));
     app.use(errorHandler);
     return app;
   }
@@ -379,6 +448,127 @@ if (!support.supported) {
     ]);
     expect(JSON.stringify(audit)).not.toContain(token);
     expect(JSON.stringify(audit)).not.toContain(newToken);
+  });
+
+  it("issues a recall token beside the coord token; it recalls only its own company (RK9-653)", async () => {
+    mockRecallKnowledge.mockReset();
+    mockRecallKnowledge.mockResolvedValue({ snippets: [], collections: ["rk9"], timedOut: false });
+    const app = manageApp(operatorKey);
+    const live = liveApp();
+    const recallPath = (company = companyId) => `/api/companies/${company}/knowledge/recall`;
+
+    const coord = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "host", principalName: "htpc" });
+    expect(coord.status).toBe(201);
+    expect(coord.body.record).toMatchObject({ scope: "coord", recallAll: false });
+
+    // recallAll only with scope recall.
+    const bad = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "host", principalName: "htpc", recallAll: true });
+    expect(bad.status).toBe(400);
+
+    const recall = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "host", principalName: "htpc", scope: "recall" });
+    expect(recall.status).toBe(201);
+    expect(recall.body.record).toMatchObject({ scope: "recall", recallAll: false, principalName: "htpc" });
+    const recallToken = recall.body.token as string;
+    // One active token per host per scope.
+    const dup = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "host", principalName: "htpc", scope: "recall" });
+    expect(dup.status).toBe(409);
+
+    // The recall token recalls, company-scoped even when it asks for "all".
+    const ok = await request(live).post(recallPath()).set("Authorization", bearer(recallToken)).send({ query: "deploy", scope: "all" });
+    expect(ok.status).toBe(200);
+    expect(mockRecallKnowledge).toHaveBeenLastCalledWith(
+      db,
+      expect.objectContaining({
+        companyId,
+        allCollections: false,
+        actorType: "system",
+        actorId: "rk9_recall_token:host:htpc",
+        agentId: null,
+        runId: null,
+      }),
+    );
+    // Another company: 403, and the service is never called.
+    const calls = mockRecallKnowledge.mock.calls.length;
+    const other = await request(live).post(recallPath(otherCompanyId)).set("Authorization", bearer(recallToken)).send({ query: "x" });
+    expect(other.status).toBe(403);
+    expect(mockRecallKnowledge.mock.calls.length).toBe(calls);
+    // Not a coord token: coord routes and every other route stay closed.
+    expect((await request(live).get(`/api/companies/${companyId}/rk9/coord/whoami`).set("Authorization", bearer(recallToken))).status).toBe(403);
+    expect((await request(live).get(`/api/companies/${companyId}/issues`).set("Authorization", bearer(recallToken))).status).toBe(403);
+    // And the coord token cannot recall.
+    expect((await request(live).post(recallPath()).set("Authorization", bearer(coord.body.token)).send({ query: "x" })).status).toBe(403);
+
+    // Rotate keeps the scope; the old token is refused on its next call.
+    const rotated = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${recall.body.record.id}/rotate`).send({});
+    expect(rotated.status).toBe(201);
+    expect(rotated.body.record).toMatchObject({ scope: "recall", recallAll: false });
+    expect((await request(live).post(recallPath()).set("Authorization", bearer(recallToken)).send({ query: "x" })).status).toBe(401);
+    const rotatedToken = rotated.body.token as string;
+    expect((await request(live).post(recallPath()).set("Authorization", bearer(rotatedToken)).send({ query: "x" })).status).toBe(200);
+
+    // Revoke: the next call is refused.
+    const revoked = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${rotated.body.record.id}/revoke`).send({});
+    expect(revoked.status).toBe(200);
+    expect((await request(live).post(recallPath()).set("Authorization", bearer(rotatedToken)).send({ query: "x" })).status).toBe(401);
+    // The coord token of the same host is untouched.
+    expect((await request(live).get(`/api/companies/${companyId}/rk9/coord/whoami`).set("Authorization", bearer(coord.body.token))).status).toBe(200);
+
+    const audit = await db.select().from(activityLog).where(eq(activityLog.entityId, recall.body.record.id));
+    expect(audit.find((row) => row.action === "rk9_coord.token_issued")?.details).toMatchObject({ scope: "recall", recallAll: false });
+  });
+
+  it("honours scope:all only for a recall token with the operator-set recallAll flag (RK9-653)", async () => {
+    mockRecallKnowledge.mockReset();
+    mockRecallKnowledge.mockResolvedValue({ snippets: [], collections: ["rk9"], timedOut: false });
+    const app = manageApp(operatorKey);
+    const live = liveApp();
+    const issued = await request(app)
+      .post(`/api/companies/${companyId}/rk9/coord-tokens`)
+      .send({ principalKind: "host", principalName: "skynet", scope: "recall", recallAll: true });
+    expect(issued.status).toBe(201);
+    expect(issued.body.record).toMatchObject({ scope: "recall", recallAll: true });
+    const token = issued.body.token as string;
+    const path = `/api/companies/${companyId}/knowledge/recall`;
+    await request(live).post(path).set("Authorization", bearer(token)).send({ query: "x", scope: "all" }).expect(200);
+    expect(mockRecallKnowledge.mock.calls.at(-1)![1]).toMatchObject({ allCollections: true });
+    await request(live).post(path).set("Authorization", bearer(token)).send({ query: "x" }).expect(200);
+    expect(mockRecallKnowledge.mock.calls.at(-1)![1]).toMatchObject({ allCollections: false });
+    await request(live).post(path).set("Authorization", bearer(token)).send({ query: "x", scope: "company" }).expect(200);
+    expect(mockRecallKnowledge.mock.calls.at(-1)![1]).toMatchObject({ allCollections: false });
+
+    // Rotate keeps the flag.
+    const rotated = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${issued.body.record.id}/rotate`).send({});
+    expect(rotated.body.record).toMatchObject({ scope: "recall", recallAll: true });
+    // Even with the flag, the token is bound to its company and to the recall route.
+    expect(
+      (await request(live).post(`/api/companies/${otherCompanyId}/knowledge/recall`).set("Authorization", bearer(rotated.body.token)).send({ query: "x", scope: "all" })).status,
+    ).toBe(403);
+    expect((await request(live).get(`/api/companies/${companyId}/issues`).set("Authorization", bearer(rotated.body.token))).status).toBe(403);
+
+    // A coord token can never carry the flag, even if a row were written directly.
+    await expect(
+      db.insert(rk9CoordTokens).values({
+        companyId,
+        principalKind: "host",
+        principalName: "flagged",
+        tokenHash: hashRk9CoordToken(generateRk9CoordToken()),
+        tokenPrefix: "rk9_coord_abcd",
+        scope: "coord",
+        recallAll: true,
+      }),
+    ).rejects.toThrow();
+    const service = rk9CoordTokenService(db);
+    await expect(
+      service.issue({ companyId, principalKind: "host", principalName: "flagged", recallAll: true }),
+    ).rejects.toMatchObject({ status: 422 });
   });
 
   it("refuses an expired token", async () => {

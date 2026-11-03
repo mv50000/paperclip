@@ -58,7 +58,13 @@ describe("rk9-coord-token.mjs", () => {
       const base = `/api/companies/${COMPANY}/rk9/coord-tokens`;
       if (req.method === "POST" && req.url === base) {
         res.statusCode = 201;
-        res.end(JSON.stringify({ token: TOKEN, record: record() }));
+        const issued = body as { scope?: string; recallAll?: boolean } | undefined;
+        res.end(
+          JSON.stringify({
+            token: TOKEN,
+            record: issued?.scope ? record({ scope: issued.scope, recallAll: issued.recallAll === true }) : record(),
+          }),
+        );
       } else if (req.method === "POST" && req.url === `${base}/${TOKEN_ID}/rotate`) {
         res.statusCode = 201;
         res.end(JSON.stringify({ token: TOKEN, record: record({ rotatedFromTokenId: TOKEN_ID }) }));
@@ -115,6 +121,34 @@ describe("rk9-coord-token.mjs", () => {
     const call = seen.at(-1)!;
     expect(call.authorization).toBe(`Bearer ${BOARD_KEY}`);
     expect(call.body).toEqual({ principalKind: "host", principalName: "mv-laptop", label: "laptop" });
+  });
+
+  it("issues a recall token with recall_all into RK9_RECALL_* variables (RK9-653)", async () => {
+    const out = path.join(dir, "recall.env");
+    const res = await run(["issue", "--host", "htpc", "--scope", "recall", "--recall-all", "--out", out]);
+    expect(res.code, res.stderr).toBe(0);
+    expect(res.stdout).not.toContain(TOKEN);
+    expect(JSON.parse(res.stdout)[0]).toMatchObject({ scope: "recall", recallAll: true, envFile: out });
+    expect(seen.at(-1)!.body).toEqual({ principalKind: "host", principalName: "htpc", scope: "recall", recallAll: true });
+    const content = await readFile(out, "utf8");
+    expect(content).toContain(`RK9_RECALL_TOKEN=${TOKEN}\n`);
+    expect(content).toContain(`RK9_RECALL_COMPANY_ID=${COMPANY}\n`);
+    expect(content).toContain("RK9_RECALL_URL=http://paperclip:3100\n");
+    expect(content).not.toContain("RK9_COORD_TOKEN");
+    expect((await stat(out)).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses --recall-all without --scope recall and an unknown scope, before any API call (RK9-653)", async () => {
+    const before = seen.length;
+    for (const args of [
+      ["issue", "--host", "htpc", "--recall-all", "--out", path.join(dir, "ra-coord.env")],
+      ["issue", "--host", "htpc", "--scope", "admin", "--out", path.join(dir, "ra-admin.env")],
+      ["rotate", "--id", TOKEN_ID, "--scope", "recall", "--out", path.join(dir, "ra-rotate.env")],
+    ]) {
+      const res = await run(args);
+      expect(res.code, args.join(" ")).toBe(2);
+    }
+    expect(seen.length).toBe(before);
   });
 
   it("refuses to overwrite an existing file before calling the API", async () => {

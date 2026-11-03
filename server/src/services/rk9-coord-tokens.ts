@@ -17,11 +17,16 @@
 //   audit row cannot be written, the token write rolls back too: the caller
 //   never loses a plaintext it was not shown, and a rotate never revokes the
 //   old token without a replacement.
+// - Scope (RK9-653): a token is `coord` (coord routes only) or `recall`
+//   (POST /api/companies/:companyId/knowledge/recall only). A host or
+//   service holds at most one active token per scope. `recallAll` is an
+//   operator opt-in on a recall token: the recall route then honours
+//   scope:"all" for it. Rotate keeps the scope and the flag.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { rk9CoordTokens } from "@paperclipai/db";
-import { RK9_COORD_TOKEN_PREFIX } from "@paperclipai/shared";
+import { RK9_COORD_TOKEN_PREFIX, RK9_COORD_TOKEN_SCOPES, type Rk9CoordTokenScope } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import type { Rk9CoordTokenPrincipal } from "../middleware/rk9-coord-actor.js";
 
@@ -48,7 +53,8 @@ export interface Rk9CoordTokenView {
   principalKind: "host" | "service";
   principalName: string;
   tokenPrefix: string;
-  scope: "coord";
+  scope: Rk9CoordTokenScope;
+  recallAll: boolean;
   label: string | null;
   createdByUserId: string | null;
   rotatedFromTokenId: string | null;
@@ -62,6 +68,10 @@ export interface IssueRk9CoordTokenInput {
   companyId: string;
   principalKind: "host" | "service";
   principalName: string;
+  /** Omitted = coord. */
+  scope?: Rk9CoordTokenScope;
+  /** Operator opt-in for scope:"all" recall; only on a recall token. */
+  recallAll?: boolean;
   label?: string | null;
   expiresAt?: Date | null;
   createdByUserId?: string | null;
@@ -107,6 +117,7 @@ export function rk9CoordTokenView(row: Rk9CoordTokenRecord): Rk9CoordTokenView {
     principalName: row.principalName,
     tokenPrefix: row.tokenPrefix,
     scope: row.scope,
+    recallAll: row.recallAll,
     label: row.label,
     createdByUserId: row.createdByUserId,
     rotatedFromTokenId: row.rotatedFromTokenId,
@@ -142,7 +153,8 @@ export function rk9CoordTokenService(db: Db) {
       .limit(1);
     if (!row || !hashesEqual(row.tokenHash, tokenHash)) return null;
     if (row.expiresAt && row.expiresAt.getTime() <= now.getTime()) return null;
-    if (row.scope !== "coord") return null;
+    // An unknown scope (a newer row on an older server) is never honoured.
+    if (!(RK9_COORD_TOKEN_SCOPES as readonly string[]).includes(row.scope)) return null;
     await db
       .update(rk9CoordTokens)
       .set({ lastUsedAt: now })
@@ -153,6 +165,8 @@ export function rk9CoordTokenService(db: Db) {
       companyId: row.companyId,
       principalKind: row.principalKind,
       principalName: row.principalName,
+      scope: row.scope,
+      recallAll: row.scope === "recall" && row.recallAll,
     };
   }
 
@@ -160,6 +174,12 @@ export function rk9CoordTokenService(db: Db) {
     input: IssueRk9CoordTokenInput,
     audit?: Rk9CoordTokenAudit<Rk9CoordTokenIssueResult>,
   ): Promise<Rk9CoordTokenIssueResult> {
+    const scope = input.scope ?? "coord";
+    if (input.recallAll && scope !== "recall") {
+      throw unprocessable("recallAll is allowed only on a recall-scoped token", {
+        code: "rk9_coord_token_recall_all_scope",
+      });
+    }
     const token = generateRk9CoordToken();
     try {
       return await db.transaction(async (tx) => {
@@ -171,6 +191,8 @@ export function rk9CoordTokenService(db: Db) {
             principalName: input.principalName,
             tokenHash: hashRk9CoordToken(token),
             tokenPrefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
+            scope,
+            recallAll: input.recallAll === true,
             label: input.label ?? null,
             expiresAt: input.expiresAt ?? null,
             createdByUserId: input.createdByUserId ?? null,
@@ -182,7 +204,7 @@ export function rk9CoordTokenService(db: Db) {
       });
     } catch (err) {
       if (isUniqueViolation(err, ACTIVE_PRINCIPAL_UQ)) {
-        throw conflict("This host or service already has an active coord token; rotate or revoke it", {
+        throw conflict(`This host or service already has an active ${scope} token; rotate or revoke it`, {
           code: "rk9_coord_token_exists",
         });
       }
@@ -242,6 +264,8 @@ export function rk9CoordTokenService(db: Db) {
           principalName: old.principalName,
           tokenHash: hashRk9CoordToken(token),
           tokenPrefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
+          scope: old.scope,
+          recallAll: old.recallAll,
           label: input.label === undefined ? old.label : input.label,
           expiresAt: input.expiresAt === undefined ? old.expiresAt : input.expiresAt,
           createdByUserId: input.createdByUserId ?? null,

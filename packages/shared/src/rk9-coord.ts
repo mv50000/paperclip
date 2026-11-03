@@ -98,6 +98,13 @@ export const RK9_COORD_TOKEN_PREFIX = "rk9_coord_";
 /** Coord token principal kinds: a tailnet host or one named service. */
 export const RK9_COORD_TOKEN_PRINCIPAL_KINDS = ["host", "service"] as const;
 export type Rk9CoordTokenPrincipalKind = (typeof RK9_COORD_TOKEN_PRINCIPAL_KINDS)[number];
+/**
+ * Token scopes (RK9-653). `coord` reaches only the coord routes; `recall`
+ * reaches only `POST /api/companies/:companyId/knowledge/recall` of the
+ * token's company. A host or service holds at most one active token per scope.
+ */
+export const RK9_COORD_TOKEN_SCOPES = ["coord", "recall"] as const;
+export type Rk9CoordTokenScope = (typeof RK9_COORD_TOKEN_SCOPES)[number];
 /** Services that may hold a coord service token. */
 export const RK9_COORD_TOKEN_SERVICES = ["rk9claude", "grok"] as const;
 /** Host token name: a lower-case DNS label (the tailnet host name). */
