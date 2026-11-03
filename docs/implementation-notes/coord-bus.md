@@ -721,7 +721,10 @@ Query: `peek=1`, `fmt=line`, `limit` (1–100, default 20), and `repo` and
   session, worktree or headless run that reads the delta or the inbox
   before it registers (an `/implement` wave on paperclip-01 starts about
   20), so normal use stays far below the limit. A remote token that mints
-  random `cc:<host>:<random>` ids hits it. Agent runs (server-verified
+  random `cc:<host>:<random>` ids through the delta, inbox or lease path
+  hits it. The count covers every actor row the host created in the hour,
+  registered or not, so registering each stub does not reset it. A first
+  registration through `PUT /actors/me` is not limited. Agent runs (server-verified
   running runs) and actors without a host are not limited. A per-host
   advisory lock serializes the count and the insert.
 - The cursor move writes no `activity_log` row (RK9-641 decision): it is

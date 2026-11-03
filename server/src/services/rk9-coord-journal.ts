@@ -35,7 +35,6 @@ import {
 import { HttpError } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
-import { RK9_COORD_REGISTERED_MARKER } from "./rk9-coord-presence.js";
 import { rk9CoordIdentifierHasSecret, toRk9CoordLine } from "./rk9-coord-text.js";
 
 /** DB CHECK: summary is 1..300 characters. */
@@ -114,7 +113,9 @@ export function rk9CoordPresenceTtlSeconds(env: NodeJS.ProcessEnv = process.env)
  * Stub rate limit (RK9-641, parent decision 3.11.2026): at most this many
  * new stub actor rows per company and host per rolling hour. A stub is the
  * row ensureRk9CoordActorRow inserts for an actor id that never registered
- * through PUT /actors/me. Normal use stays far below it: a host creates one
+ * through PUT /actors/me. The count covers every actor row the host created
+ * in the hour, registered or not, so registering a stub does not free budget.
+ * PUT /actors/me itself is not limited here. Normal use stays far below it: a host creates one
  * stub per new session, worktree or headless run that reads the delta or
  * the inbox before registering (an /implement wave on paperclip-01 starts
  * about 20). A remote token that mints random `cc:<host>:<random>` ids hits
@@ -230,8 +231,9 @@ export async function ensureRk9CoordActorRow(
           and(
             eq(rk9CoordActors.companyId, companyId),
             eq(rk9CoordActors.host, actor.host),
+            // Registered rows count too: registering a stub must not
+            // reset the budget (verifier finding, RK9-641).
             gt(rk9CoordActors.createdAt, since),
-            sql`(${rk9CoordActors.metadata} ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null`,
           ),
         );
       if (Number(recent?.count ?? 0) >= limit) {

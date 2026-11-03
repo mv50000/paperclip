@@ -335,6 +335,11 @@ if (!support.supported) {
       const delta = (actorId: string) => request(app).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", actorId);
       expect((await delta("cc:mv-laptop:mint-1")).status).toBe(204);
       expect((await delta("cc:mv-laptop:mint-2")).status).toBe(204);
+      // Registering a stub does not free budget.
+      await db
+        .update(rk9CoordActors)
+        .set({ metadata: sql`jsonb_build_object('presence_registered_at', 'n1')` })
+        .where(and(eq(rk9CoordActors.companyId, cid), eq(rk9CoordActors.actorRef, "cc:mv-laptop:mint-2")));
       const limited = await delta("cc:mv-laptop:mint-3");
       expect(limited.status).toBe(429);
       expect(limited.body.code).toBe("rk9_coord_stub_rate_limited");
