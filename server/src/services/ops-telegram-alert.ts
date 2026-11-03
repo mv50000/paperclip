@@ -5,8 +5,8 @@
 // curl-based sender with the same rules.
 //
 // Rules:
-//   - TG_BOT_TOKEN and TG_CHAT_ID come from the environment (the systemd unit
-//     loads /etc/paperclip/approval-telegram.env). Missing or malformed values
+//   - TG_BOT_TOKEN and TG_CHAT_ID come from the environment (the operator adds
+//     EnvironmentFile=-/etc/paperclip/approval-telegram.env to the unit). Missing or malformed values
 //     disable sending; the caller logs one WARN line and carries on.
 //   - The token is part of the request URL, so the URL is never logged. Every
 //     error text that reaches a log is redacted.
