@@ -17,7 +17,8 @@
 #
 # Run by the paperclip-io-watch.service systemd unit (User=paperclip). Every sample
 # is logged to $LOG; confirmed edge events add an "ALERT:" line and a Telegram message.
-# The unit loads TG_BOT_TOKEN and TG_CHAT_ID from /etc/paperclip/approval-telegram.env.
+# TG_BOT_TOKEN and TG_CHAT_ID come from /etc/paperclip/approval-telegram.env once the unit
+# has EnvironmentFile=-/etc/paperclip/approval-telegram.env (added by the operator, RK9-710).
 # Missing or malformed values log one WARN line at start, and sampling runs without
 # Telegram. The token never goes to argv or $LOG: curl reads the URL from stdin (-K -).
 set -u

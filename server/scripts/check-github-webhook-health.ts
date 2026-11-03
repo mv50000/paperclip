@@ -20,9 +20,10 @@
 // Environment:
 //   GITHUB_TOKEN          - required, used for gh REST calls (GitHub PAT or app token)
 //   GITHUB_TOKEN_<OWNER>  - optional per-owner override (see resolveToken below)
-//   TG_BOT_TOKEN, TG_CHAT_ID - optional Telegram alert target (the unit loads
-//                           /etc/paperclip/approval-telegram.env). Missing values
-//                           log one WARN line and the monitor runs without Telegram.
+//   TG_BOT_TOKEN, TG_CHAT_ID - optional Telegram alert target. The unit must load
+//                           /etc/paperclip/approval-telegram.env (EnvironmentFile,
+//                           added by the operator, RK9-710). Missing values log one
+//                           WARN line and the monitor runs without Telegram.
 //   PAPERCLIP_WEBHOOK_MONITOR_LOG - log path named in the Telegram text
 //
 // Exits 0 on healthy, 1 on degraded (failures or blind spots), 2 on script error.
@@ -402,6 +403,8 @@ async function main() {
   }
   const telegram = readTelegramAlertConfig(process.env);
   if (!telegram) console.warn(TELEGRAM_CONFIG_MISSING_WARNING);
+  // The probe curl children do not need the token in their environment.
+  delete process.env.TG_BOT_TOKEN;
 
   const cutoffMs = Date.now() - LOOKBACK_HOURS * 3600 * 1000;
   const [results, probes] = await Promise.all([
