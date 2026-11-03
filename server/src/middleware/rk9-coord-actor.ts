@@ -47,6 +47,7 @@ import {
   RK9_COORD_BOARD_HOST_DEFAULT,
   type Rk9CoordActorKind,
   type Rk9CoordParsedActorId,
+  type Rk9CoordTokenScope,
   type Rk9CoordTrust,
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
@@ -68,6 +69,18 @@ export interface Rk9CoordTokenPrincipal {
   principalKind: "host" | "service";
   /** Host label (`mv-laptop`) or service name (`rk9claude`, `grok`). */
   principalName: string;
+  /**
+   * RK9-653: `coord` reaches only the coord routes, `recall` only the recall
+   * route. Absent means `coord` (principals built before the scope existed).
+   */
+  scope?: Rk9CoordTokenScope;
+  /** RK9-653: operator opt-in, recall scope only: scope:"all" is honoured. */
+  recallAll?: boolean;
+}
+
+/** Effective scope of a coord-token principal (absent = coord). */
+export function rk9CoordPrincipalScope(principal: Rk9CoordTokenPrincipal): Rk9CoordTokenScope {
+  return principal.scope ?? "coord";
 }
 
 export interface Rk9CoordResolvedActor {
@@ -383,6 +396,11 @@ export function rk9CoordActorMiddleware(db: Db, opts: Rk9CoordActorOptions = {})
         throw coordError(401, "rk9_coord_untrusted_principal", "Coord routes require an authenticated principal");
       }
       if (!principal) assertCompanyAccess(req, companyId);
+      // RK9-653: defence in depth behind the global guard: only a coord-scope
+      // token acts on the coord bus; a recall token never does.
+      if (principal && rk9CoordPrincipalScope(principal) !== "coord") {
+        throw coordError(403, "rk9_coord_token_scope_forbidden", "This token is not a coord-scope token");
+      }
       req.rk9CoordActor = await resolveRk9CoordActor({
         actor: req.actor,
         principal,

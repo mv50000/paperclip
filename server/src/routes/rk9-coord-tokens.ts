@@ -13,6 +13,11 @@
 // The local_trusted implicit board is refused (RK9-616: being local never
 // grants authority on the coord bus).
 //
+// RK9-653: issue takes `scope` (coord | recall, default coord) and, for a
+// recall token only, `recallAll` (operator opt-in for scope:"all" recall).
+// Because only the operator reaches these routes, only an instance admin can
+// set the flag. Rotate keeps both.
+//
 // The plaintext token appears exactly once, in the 201 body of issue and
 // rotate, with Cache-Control: no-store. Activity rows carry ids and names only.
 // The activity row is written in the same transaction as the token write
@@ -148,6 +153,8 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
         details: {
           principalKind: record.principalKind,
           principalName: record.principalName,
+          scope: record.scope,
+          recallAll: record.recallAll,
           rotatedFromTokenId: record.rotatedFromTokenId,
           expiresAt: record.expiresAt,
         },
@@ -194,6 +201,8 @@ export function rk9CoordTokenRoutes(db: Db, opts: Rk9CoordTokenRouteOptions = {}
         companyId,
         principalKind: body.principalKind,
         principalName: body.principalName,
+        scope: body.scope ?? "coord",
+        recallAll: body.recallAll === true,
         label: body.label ?? null,
         expiresAt: parseExpiresAt(body.expiresAt) ?? null,
         createdByUserId: userId,

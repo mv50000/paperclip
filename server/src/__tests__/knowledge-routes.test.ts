@@ -100,3 +100,89 @@ describe("POST /companies/:companyId/knowledge/recall — client-disconnect abor
     }
   });
 });
+
+// --- RK9 Custom (RK9-653): a recall-scope coord token instead of a board key ---
+describe("POST /companies/:companyId/knowledge/recall — recall-scope coord token (RK9-653)", () => {
+  type Principal = NonNullable<Express.Request["rk9CoordPrincipal"]>;
+
+  function tokenApp(principal: Principal, isInstanceAdminBoard = false) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      // What resolveRk9CoordBearer leaves: an anonymous actor plus the principal.
+      req.actor = { type: "none", source: "none" };
+      req.rk9CoordPrincipal = principal;
+      if (isInstanceAdminBoard) {
+        // A principal never coexists with a board actor; prove the token path wins anyway.
+        req.actor = { type: "board", userId: "u", isInstanceAdmin: true, source: "board_key", companyIds: [] } as never;
+      }
+      next();
+    });
+    app.use("/api", knowledgeRoutes({} as never));
+    app.use(errorHandler);
+    return app;
+  }
+
+  const recall = (overrides: Partial<Principal> = {}): Principal => ({
+    tokenId: "t-recall",
+    companyId: "company-1",
+    principalKind: "host",
+    principalName: "mv-laptop",
+    scope: "recall",
+    recallAll: false,
+    ...overrides,
+  });
+
+  async function post(app: express.Express, company: string, body: Record<string, unknown>) {
+    const server = app.listen(0);
+    try {
+      const { port } = server.address() as AddressInfo;
+      return await fetch(`http://127.0.0.1:${port}/api/companies/${company}/knowledge/recall`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } finally {
+      server.close();
+    }
+  }
+
+  beforeEach(() => {
+    mockRecallKnowledge.mockReset();
+    mockRecallKnowledge.mockResolvedValue({ snippets: [], collections: ["rk9"], timedOut: false });
+  });
+
+  it("recalls for the token's own company, company-scoped, as a system actor", async () => {
+    const res = await post(tokenApp(recall()), "company-1", { query: "hello", scope: "all" });
+    expect(res.status).toBe(200);
+    expect(mockRecallKnowledge.mock.calls[0]![1]).toMatchObject({
+      companyId: "company-1",
+      allCollections: false,
+      actorType: "system",
+      actorId: "rk9_recall_token:host:mv-laptop:t-recall",
+      agentId: null,
+      runId: null,
+    });
+  });
+
+  it("honours scope:all only with recallAll", async () => {
+    await post(tokenApp(recall({ recallAll: true })), "company-1", { query: "hello", scope: "all" });
+    expect(mockRecallKnowledge.mock.calls[0]![1]).toMatchObject({ allCollections: true });
+    await post(tokenApp(recall({ recallAll: true })), "company-1", { query: "hello" });
+    expect(mockRecallKnowledge.mock.calls[1]![1]).toMatchObject({ allCollections: false });
+  });
+
+  it("refuses another company and a coord-scope token, before the service runs", async () => {
+    const wrong = await post(tokenApp(recall({ recallAll: true })), "company-2", { query: "hello", scope: "all" });
+    expect(wrong.status).toBe(403);
+    expect((await wrong.json()).details).toMatchObject({ code: "rk9_coord_wrong_company" });
+    const coord = await post(tokenApp(recall({ scope: "coord" })), "company-1", { query: "hello" });
+    expect(coord.status).toBe(403);
+    const legacy = await post(tokenApp(recall({ scope: undefined })), "company-1", { query: "hello" });
+    expect(legacy.status).toBe(403);
+    const withBoard = await post(tokenApp(recall({ scope: "coord" }), true), "company-1", { query: "hello", scope: "all" });
+    expect(withBoard.status).toBe(403);
+    expect(mockRecallKnowledge).not.toHaveBeenCalled();
+  });
+});
+// --- /RK9 Custom ---

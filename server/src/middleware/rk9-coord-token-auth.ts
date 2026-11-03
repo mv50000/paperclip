@@ -12,11 +12,14 @@
 // 2. rk9CoordTokenGuard is mounted right after actorMiddleware, before every
 //    API router. A request that carries a coord principal and is not under
 //    /api/companies/:companyId/rk9/coord/ gets 403 (deny by default).
+//    RK9-653: a `recall`-scope token is allowed only on
+//    POST /api/companies/:companyId/knowledge/recall and never on a coord
+//    route. The recall route itself binds the company to the token.
 import type { Request, RequestHandler } from "express";
 import type { Db } from "@paperclipai/db";
 import { unauthorized } from "../errors.js";
 import { isRk9CoordBearer, rk9CoordTokenService } from "../services/rk9-coord-tokens.js";
-import type { Rk9CoordTokenPrincipal } from "./rk9-coord-actor.js";
+import { rk9CoordPrincipalScope, type Rk9CoordTokenPrincipal } from "./rk9-coord-actor.js";
 
 export type Rk9CoordTokenResolver = (token: string) => Promise<Rk9CoordTokenPrincipal | null>;
 
@@ -53,6 +56,25 @@ export function isRk9CoordRoutePath(path: string): boolean {
   return COORD_ROUTE_PATH.test(path);
 }
 
+/** The one route a recall-scope token may reach (RK9-653). */
+const RECALL_ROUTE_PATH = /^\/api\/companies\/[^/]+\/knowledge\/recall$/;
+
+export function isRk9RecallRoutePath(path: string): boolean {
+  return RECALL_ROUTE_PATH.test(path);
+}
+
+/**
+ * Same raw-vs-routed rule as isRk9CoordGuardAllowed, for a recall-scope
+ * token: only POST to the exact recall path (no trailing slash, no case
+ * variant, no `#`, `\\` or whitespace in the target).
+ */
+export function isRk9RecallGuardAllowed(method: string, rawUrl: string, routedPath: string): boolean {
+  if (method !== "POST") return false;
+  if (/[#\\\s]/.test(rawUrl)) return false;
+  const rawPath = rawUrl.split("?", 1)[0] ?? "";
+  return isRk9RecallRoutePath(rawPath) && isRk9RecallRoutePath(routedPath);
+}
+
 /**
  * Decide whether a coord-token request may pass. Both the raw request target
  * and the pathname Express routes on (`req.path`, from parseurl) must be under
@@ -71,8 +93,20 @@ export function isRk9CoordGuardAllowed(rawUrl: string, routedPath: string): bool
 /** Deny-by-default guard for coord-token callers on non-coord routes. */
 export function rk9CoordTokenGuard(): RequestHandler {
   return (req, res, next) => {
-    if (!req.rk9CoordPrincipal) {
+    const principal = req.rk9CoordPrincipal;
+    if (!principal) {
       next();
+      return;
+    }
+    if (rk9CoordPrincipalScope(principal) === "recall") {
+      if (isRk9RecallGuardAllowed(req.method, req.originalUrl ?? req.url, req.path)) {
+        next();
+        return;
+      }
+      res.status(403).json({
+        error: "A recall token may only call POST /api/companies/:companyId/knowledge/recall",
+        code: "rk9_coord_token_route_forbidden",
+      });
       return;
     }
     if (isRk9CoordGuardAllowed(req.originalUrl ?? req.url, req.path)) {

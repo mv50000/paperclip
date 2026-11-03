@@ -11,11 +11,15 @@
 //   atomically, never overwritten without --force) in the client format of the
 //   ADR: RK9_COORD_URL, RK9_COORD_COMPANY_ID, RK9_COORD_TOKEN. Deliver that
 //   file to the host as ~/.config/rk9/coord.env (mode 0600).
+//   RK9-653: a recall-scope token (--scope recall) is written as
+//   RK9_RECALL_URL, RK9_RECALL_COMPANY_ID, RK9_RECALL_TOKEN instead, for
+//   ~/.config/rk9/recall.env, which qmd-recall-remote.sh reads.
 // stdout carries metadata only (id, display prefix, principal, file path).
 //
 // Usage:
 //   node server/scripts/rk9-coord-token.mjs issue (--host <name> | --service <rk9claude|grok>) --out <file>
-//        [--label <text>] [--expires-at <iso>] [--force]
+//        [--scope coord|recall] [--recall-all] [--label <text>] [--expires-at <iso>] [--force]
+//        --recall-all (recall scope only): the token may use scope:"all" recall (operator mode).
 //   node server/scripts/rk9-coord-token.mjs rotate --id <token-id> --out <file> [--label <text>]
 //        [--expires-at <iso> | --no-expiry] [--force]
 //   node server/scripts/rk9-coord-token.mjs revoke --id <token-id>
@@ -51,7 +55,7 @@ function fail(message, code = 1) {
  * `revoke --expires-at` would otherwise look like they did something.
  */
 const COMMAND_FLAGS = {
-  issue: ["host", "service", "out", "label", "expires-at", "company", "force"],
+  issue: ["host", "service", "scope", "recall-all", "out", "label", "expires-at", "company", "force"],
   rotate: ["id", "out", "label", "expires-at", "no-expiry", "company", "force"],
   revoke: ["id", "company"],
   list: ["company"],
@@ -68,6 +72,8 @@ function parse(argv) {
     options: {
       host: { type: "string" },
       service: { type: "string" },
+      scope: { type: "string" },
+      "recall-all": { type: "boolean" },
       id: { type: "string" },
       out: { type: "string" },
       label: { type: "string" },
@@ -109,12 +115,19 @@ async function prepareOut(out, force) {
 /** Write the env file atomically with mode 0600. */
 export async function writeCoordEnvFile(target, { coordUrl, companyId, token, record }) {
   if (!TOKEN_RE.test(token)) throw new Error("server returned a token in an unexpected format");
+  // RK9-653: a recall token gets its own variable names, so it can never be
+  // mistaken for a coord token (and the other way round).
+  const recall = record.scope === "recall";
+  const prefix = recall ? "RK9_RECALL" : "RK9_COORD";
   const body = [
-    `# rk9 coord credentials: ${record.principalKind} ${record.principalName}, token ${record.id}.`,
+    recall
+      ? `# rk9 recall credentials: ${record.principalKind} ${record.principalName}, token ${record.id}` +
+        `${record.recallAll ? " (recall_all: scope \"all\" allowed)" : ""}.`
+      : `# rk9 coord credentials: ${record.principalKind} ${record.principalName}, token ${record.id}.`,
     "# Mode 0600. Never commit, paste or pass this token as a command argument.",
-    `RK9_COORD_URL=${coordUrl}`,
-    `RK9_COORD_COMPANY_ID=${companyId}`,
-    `RK9_COORD_TOKEN=${token}`,
+    `${prefix}_URL=${coordUrl}`,
+    `${prefix}_COMPANY_ID=${companyId}`,
+    `${prefix}_TOKEN=${token}`,
     "",
   ].join("\n");
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${randomBytes(6).toString("hex")}.tmp`);
@@ -163,6 +176,9 @@ function summary(record, extra = {}) {
     id: record.id,
     principalKind: record.principalKind,
     principalName: record.principalName,
+    // An older server has no scope: every token there is a coord token.
+    scope: record.scope ?? "coord",
+    recallAll: record.recallAll === true,
     tokenPrefix: record.tokenPrefix,
     label: record.label,
     expiresAt: record.expiresAt,
@@ -201,9 +217,14 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (Boolean(values.host) === Boolean(values.service)) {
       throw new UsageError("issue needs exactly one of --host <name> or --service <rk9claude|grok>");
     }
+    const scope = values.scope ?? "coord";
+    if (scope !== "coord" && scope !== "recall") throw new UsageError("--scope must be coord or recall");
+    if (values["recall-all"] && scope !== "recall") throw new UsageError("--recall-all needs --scope recall");
     result = await api("POST", base, apiKey, {
       principalKind: values.host ? "host" : "service",
       principalName: values.host ?? values.service,
+      ...(scope === "recall" ? { scope } : {}),
+      ...(values["recall-all"] ? { recallAll: true } : {}),
       ...(values.label ? { label: values.label } : {}),
       ...(values["expires-at"] ? { expiresAt: values["expires-at"] } : {}),
     });

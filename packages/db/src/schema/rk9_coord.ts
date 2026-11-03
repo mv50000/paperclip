@@ -15,6 +15,7 @@ import { sql } from "drizzle-orm";
 import {
   bigint,
   bigserial,
+  boolean,
   check,
   index,
   integer,
@@ -362,7 +363,9 @@ export const rk9CoordTokens = pgTable(
     principalName: text("principal_name").notNull(),
     tokenHash: text("token_hash").notNull().unique("rk9_coord_tokens_token_hash_unique"),
     tokenPrefix: text("token_prefix").notNull(),
-    scope: text("scope").$type<"coord">().notNull().default("coord"),
+    scope: text("scope").$type<"coord" | "recall">().notNull().default("coord"),
+    // RK9-653 (9016): operator opt-in; a recall token may use scope:"all".
+    recallAll: boolean("recall_all").notNull().default(false),
     label: text("label"),
     createdByUserId: text("created_by_user_id"),
     rotatedFromTokenId: uuid("rotated_from_token_id").references((): AnyPgColumn => rk9CoordTokens.id, {
@@ -374,8 +377,9 @@ export const rk9CoordTokens = pgTable(
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
   (table) => ({
+    // RK9-653 (migration 9016): one active token per principal AND scope.
     activePrincipalUq: uniqueIndex("rk9_coord_tokens_active_principal_uq")
-      .on(table.companyId, table.principalKind, table.principalName)
+      .on(table.companyId, table.principalKind, table.principalName, table.scope)
       .where(sql`${table.revokedAt} is null`),
     rotatedFromIdx: index("rk9_coord_tokens_rotated_from_idx").on(table.rotatedFromTokenId),
     principalKindCheck: check(
@@ -391,8 +395,12 @@ export const rk9CoordTokens = pgTable(
       "rk9_coord_tokens_token_prefix_check",
       sql`char_length(${table.tokenPrefix}) = 14 and left(${table.tokenPrefix}, 10) = 'rk9_coord_'`,
     ),
-    scopeCheck: check("rk9_coord_tokens_scope_check", sql`${table.scope} in ('coord')`),
+    scopeCheck: check("rk9_coord_tokens_scope_check", sql`${table.scope} in ('coord', 'recall')`),
     labelCheck: check("rk9_coord_tokens_label_check", sql`${table.label} is null or char_length(${table.label}) <= 200`),
+    recallAllCheck: check(
+      "rk9_coord_tokens_recall_all_check",
+      sql`${table.recallAll} = false or ${table.scope} = 'recall'`,
+    ),
   }),
 );
 

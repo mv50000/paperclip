@@ -197,6 +197,9 @@ Exactly the ADR column list. CHECKs: `principal_kind` in (`host`,
 `grok`; `token_hash` is 64 lower-case hex characters; `token_prefix` is 14
 characters starting with `rk9_coord_`; `scope` is `coord`; `label` at most
 200. `rotated_from_token_id` is a self-FK (set null).
+RK9-653 (migration 9016): `scope` is `coord` or `recall`, `recall_all` is
+allowed only on a recall token, and the active-principal index includes
+`scope`. See "Recall scope" in [`coord-identity.md`](coord-identity.md).
 
 #### rk9_coord_escalations
 
