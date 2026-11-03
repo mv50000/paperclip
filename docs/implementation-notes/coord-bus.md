@@ -1033,6 +1033,13 @@ and `client_event_id` are null, and `payload_hidden` is `true`. The operator,
 paperclip-01 sessions on the board key and other attributed viewers get the
 full row. The delta already gives an agent no other actor's question.
 
+The hiding is for other readers only. A restricted viewer still reads in
+full its own questions (for an `agent_run` also those of another run of the
+same agent), the answers to them (an operator-side `ask-operator` whose
+`reply_to` points at one of them, or that is on the issue of one of them)
+and the `escalated` row of one of them. Otherwise an agent would not get
+the answer to its question.
+
 ## Lease engine (RK9-627)
 
 Routes, transitions, liveness rules and the sweeper are documented in

@@ -86,6 +86,21 @@ export function rk9CoordBoardShowsAskOperatorPayload(viewer: Rk9CoordResolvedAct
   if (viewer.kind === "agent_run" || viewer.kind === "grok") return false;
   return rk9CoordJournalTrust(viewer) !== "unverified";
 }
+/**
+ * "Mine" for ask-operator visibility (RK9-647, RK9-657): the actor itself, or
+ * for an agent_run another run of the same agent (a primary-key lookup in
+ * heartbeat_runs per candidate row; the CASE keeps the uuid cast off refs
+ * that are not agent_run ids).
+ */
+function rk9CoordMineSql(ref: AnyColumn, companyId: string, actorId: string, agentId: string | null): SQL {
+  const self = eq(ref, actorId);
+  if (!agentId) return self;
+  return or(
+    self,
+    sql`exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${companyId} and ${heartbeatRuns.agentId} = ${agentId} and ${heartbeatRuns.id} = case when ${ref} ~ ${AGENT_RUN_REF_RX} then substring(${ref} from 11)::uuid end)`,
+  )!;
+}
+
 /** RK9-647: types the delta never returns. A heads-up is delivered locally by the session's own hook. */
 export const RK9_COORD_DELTA_HIDDEN_TYPES = ["headsup"] as const;
 /** An `agent_run:<uuid>` actor ref; substring(ref from 11) is the run id. */
@@ -931,17 +946,7 @@ export function rk9CoordJournalService(db: Db) {
 
       // RK9-647: which ask-operator events this actor may see.
       const agentId = actor.kind === "agent_run" ? opts.agentId ?? null : null;
-      // "Mine": the actor itself, or another run of the same agent (a primary
-      // key lookup in heartbeat_runs per candidate row; the CASE keeps the
-      // uuid cast off refs that are not agent_run ids).
-      const mine = (ref: AnyColumn): SQL => {
-        const self = eq(ref, actor.actorId);
-        if (!agentId) return self;
-        return or(
-          self,
-          sql`exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${companyId} and ${heartbeatRuns.agentId} = ${agentId} and ${heartbeatRuns.id} = case when ${ref} ~ ${AGENT_RUN_REF_RX} then substring(${ref} from 11)::uuid end)`,
-        )!;
-      };
+      const mine = (ref: AnyColumn): SQL => rk9CoordMineSql(ref, companyId, actor.actorId, agentId);
       let askOperatorVisible: SQL | undefined;
       if (!rk9CoordSeesAllAskOperator(actor.kind)) {
         const asked = alias(rk9CoordEvents, "asked");
@@ -1042,8 +1047,14 @@ export function rk9CoordJournalService(db: Db) {
     companyId: string,
     opts: {
       viewerTrust: Rk9CoordTrust;
-      /** RK9-657: false gives every ask-operator row (rk9CoordIsAskOperatorRow) as rk9CoordHiddenPayloadView. Default true. */
+      /**
+       * RK9-657: false gives every ask-operator row (rk9CoordIsAskOperatorRow)
+       * as rk9CoordHiddenPayloadView, except the viewer's own questions and
+       * the answers to them (rk9CoordBoardAskerRows). Default true.
+       */
       askOperatorPayloads?: boolean;
+      /** The restricted viewer, for its own questions (agentId: an agent_run's agent, for sibling runs). */
+      viewer?: { actorId: string; agentId: string | null } | null;
       now?: Date;
       eventLimit?: number;
     },
@@ -1140,6 +1151,7 @@ export function rk9CoordJournalService(db: Db) {
     // Unverified viewers (remote hosts, Grok) see who messages whom, not what.
     const showBodies = opts.viewerTrust !== "unverified";
     const showAskPayloads = opts.askOperatorPayloads !== false;
+    const askerRows = showAskPayloads ? new Set<number>() : await askerVisibleRows(companyId, events, opts.viewer ?? null);
     return {
       generated_at: now.toISOString(),
       presence_ttl_s: ttl,
@@ -1166,7 +1178,9 @@ export function rk9CoordJournalService(db: Db) {
         queue: queues.get(row.resource) ?? [],
       })),
       events: events.map((row) =>
-        !showAskPayloads && rk9CoordIsAskOperatorRow(row) ? rk9CoordHiddenPayloadView(row) : rk9CoordBoardEventView(row),
+        !showAskPayloads && rk9CoordIsAskOperatorRow(row) && !askerRows.has(row.id)
+          ? rk9CoordHiddenPayloadView(row)
+          : rk9CoordBoardEventView(row),
       ),
       inbox: inbox.map((row) => ({
         id: row.id,
@@ -1178,6 +1192,64 @@ export function rk9CoordJournalService(db: Db) {
         expires_at: row.expiresAt ? row.expiresAt.toISOString() : null,
       })),
     };
+  }
+
+  /**
+   * RK9-657 (parent refinement 3.11.2026): the ask-operator rows of `events`
+   * a restricted board viewer still reads in full: its own questions (also of
+   * a sibling run of the same agent), the answers to them (an operator-side
+   * actor, RK9_COORD_ASK_OPERATOR_ANSWER_KINDS and not unverified, whose
+   * reply_to points at one of them or whose event is on the issue of one of
+   * them) and the escalation of one of them. Every other ask-operator row
+   * stays hidden.
+   */
+  async function askerVisibleRows(
+    companyId: string,
+    events: EventRow[],
+    viewer: { actorId: string; agentId: string | null } | null,
+  ): Promise<Set<number>> {
+    const visible = new Set<number>();
+    if (!viewer) return visible;
+    const candidates = events.filter((row) => rk9CoordIsAskOperatorRow(row));
+    if (candidates.length === 0) return visible;
+    const answerer = (row: EventRow) =>
+      (RK9_COORD_ASK_OPERATOR_ANSWER_KINDS as readonly string[]).includes(row.actorKind) && row.trust !== "unverified";
+    const ids = new Set<number>();
+    const issues = new Set<string>();
+    for (const row of candidates) {
+      if (row.type === "ask-operator") ids.add(row.id);
+      if (row.refEventId !== null) ids.add(row.refEventId);
+      if (row.type === "ask-operator" && answerer(row) && row.issue) issues.add(row.issue);
+    }
+    const scope: SQL[] = [inArray(rk9CoordEvents.id, [...ids])];
+    if (issues.size > 0) scope.push(inArray(rk9CoordEvents.issue, [...issues]));
+    const mineRows = await db
+      .select({ id: rk9CoordEvents.id, issue: rk9CoordEvents.issue })
+      .from(rk9CoordEvents)
+      .where(
+        and(
+          eq(rk9CoordEvents.companyId, companyId),
+          eq(rk9CoordEvents.type, "ask-operator"),
+          rk9CoordMineSql(rk9CoordEvents.actorRef, companyId, viewer.actorId, viewer.agentId),
+          or(...scope),
+        ),
+      );
+    const mineIds = new Set(mineRows.map((row) => row.id));
+    const mineIssues = new Set(mineRows.map((row) => row.issue).filter((issue): issue is string => Boolean(issue)));
+    for (const row of candidates) {
+      if (row.type === "escalated") {
+        if (row.refEventId !== null && mineIds.has(row.refEventId)) visible.add(row.id);
+        continue;
+      }
+      if (mineIds.has(row.id)) visible.add(row.id);
+      else if (
+        answerer(row) &&
+        ((row.refEventId !== null && mineIds.has(row.refEventId)) || (row.issue !== null && mineIssues.has(row.issue)))
+      ) {
+        visible.add(row.id);
+      }
+    }
+    return visible;
   }
 
   /**

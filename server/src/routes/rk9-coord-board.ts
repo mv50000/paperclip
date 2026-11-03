@@ -11,7 +11,7 @@ import {
   rk9CoordJournalService,
   rk9CoordJournalTrust,
 } from "../services/rk9-coord-journal.js";
-import { companyIdOf } from "./rk9-coord-events.js";
+import { companyIdOf, rk9CoordCallerAgentId } from "./rk9-coord-events.js";
 import { logger } from "../middleware/logger.js";
 // RK9 Custom (RK9-629): failed and unacked escalations on the board
 import { resolveRk9CoordEscalatorConfig, rk9CoordEscalationService } from "../services/rk9-coord-stall-escalator.js";
@@ -29,7 +29,19 @@ export function rk9CoordBoardRoutes(db: Db) {
       const viewerTrust = req.rk9CoordActor ? rk9CoordJournalTrust(req.rk9CoordActor) : "attributed";
       // RK9-657: agent_run, grok and unverified viewers get no ask-operator payload.
       const askOperatorPayloads = rk9CoordBoardShowsAskOperatorPayload(req.rk9CoordActor);
-      const board = await journal.board(companyIdOf(req), { viewerTrust, askOperatorPayloads, eventLimit: query.events });
+      // The asker still reads its own questions and their answers.
+      const viewer = req.rk9CoordActor
+        ? {
+            actorId: req.rk9CoordActor.actorId,
+            agentId: req.rk9CoordActor.kind === "agent_run" ? rk9CoordCallerAgentId(req) : null,
+          }
+        : null;
+      const board = await journal.board(companyIdOf(req), {
+        viewerTrust,
+        askOperatorPayloads,
+        viewer,
+        eventLimit: query.events,
+      });
       // RK9-629: a failed or unacked escalation never vanishes silently.
       // Fail-open: the board still answers when the escalation query fails.
       const escalationsAttention = await escalations

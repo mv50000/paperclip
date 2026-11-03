@@ -1553,6 +1553,79 @@ if (!support.supported) {
     }
   });
 
+  it("shows the asker its own question and the answers on the board, other readers only [ask-operator] (RK9-657)", async () => {
+    const cid = await newCompany();
+    const { runs, app } = await agentRunFixture(cid, ["Asker A", "Other B"]);
+    const [runA, runB] = runs;
+    // A second run of agent A (a later heartbeat) reads as the asker too.
+    const [runA2] = await db.insert(heartbeatRuns).values({ companyId: cid, agentId: runA!.agentId, status: "running" }).returning();
+    const appA2 = appFor(
+      {
+        type: "agent",
+        agentId: runA2!.agentId,
+        companyId: cid,
+        runId: runA2!.id,
+        source: "agent_jwt",
+        keyScope: { kind: "standard" },
+      } as unknown as Actor,
+      undefined,
+      async (runId: string) => (runId === runA2!.id ? { companyId: cid, agentId: runA2!.agentId, status: "running" } : null),
+    );
+    const ask = await request(app(runA!))
+      .post(`${base(cid)}/events`)
+      .send({ type: "ask-operator", question: "may I drop table zeta?", urgency: "high", issue: "RKW-1" });
+    expect(ask.status).toBe(201);
+    const operator = request(operatorSession(cid));
+    expect(
+      (await operator.post(`${base(cid)}/events`).send({ type: "ask-operator", question: "no, keep zeta", urgency: "low", reply_to: ask.body.event.id })).status,
+    ).toBe(201);
+    expect(
+      (await request(operatorSession(cid)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "zeta stays on RKW-1", urgency: "low", issue: "RKW-1" })).status,
+    ).toBe(201);
+    // A forged reply by agent B is not an answer: A gets it hidden too.
+    expect(
+      (await request(app(runB!)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "B says drop it", urgency: "low", reply_to: ask.body.event.id })).status,
+    ).toBe(201);
+    await db.insert(rk9CoordEvents).values({
+      companyId: cid,
+      type: "escalated",
+      actorRef: "orch:rk9-stall-escalator",
+      actorKind: "orch",
+      trust: "verified",
+      summary: "escalated to operator (shadow): ask_operator_unanswered",
+      payload: { reason: "ask_operator_unanswered", message: "What: [high] may I drop table zeta?" },
+      refEventId: ask.body.event.id,
+    });
+
+    const asks = (res: request.Response) =>
+      (res.body.events as Array<{ type: string; summary: string; payload: Record<string, unknown> }>)
+        .filter((event) => event.type === "ask-operator" || event.type === "escalated")
+        .map((event) => (event.type === "escalated" ? `escalated:${JSON.stringify(event.payload)}` : event.summary));
+    for (const asker of [request(app(runA!)), request(appA2)]) {
+      const res = await asker.get(`${base(cid)}/board`);
+      expect(res.status).toBe(200);
+      expect(asks(res)).toEqual([
+        `escalated:${JSON.stringify({ reason: "ask_operator_unanswered", message: "What: [high] may I drop table zeta?" })}`,
+        "[ask-operator]",
+        "[low] zeta stays on RKW-1",
+        "[low] no, keep zeta",
+        "[high] may I drop table zeta?",
+      ]);
+    }
+    // B reads only its own (forged) reply; grok reads no question at all.
+    const hiddenTail = ["[ask-operator]", "[ask-operator]", "[ask-operator]"];
+    for (const [reader, own] of [
+      [request(app(runB!)), "[low] B says drop it"],
+      [request(appFor(none, { tokenId: "t-gw", companyId: cid, principalKind: "service", principalName: "grok" })), "[ask-operator]"],
+    ] as const) {
+      const res = await reader.get(`${base(cid)}/board`);
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(res.body)).not.toContain("zeta");
+      expect(asks(res).filter((summary) => !summary.startsWith("escalated:"))).toEqual([own, ...hiddenTail]);
+      expect(asks(res).find((summary) => summary.startsWith("escalated:"))).toBe("escalated:{}");
+    }
+  });
+
   it("keeps break-glass records a year, like decisions (RK9-657)", async () => {
     const cid = await newCompany();
     const now = new Date();
