@@ -3,7 +3,8 @@
 // counts non-200 responses in the last 24h, runs synthetic endpoint probes
 // (small + GitHub-PR-sized unsigned POSTs through the real proxy chain), and
 // prints throttled "ALERT:" lines if any failures were found. Slack posting
-// was removed in RK9-697 (operator decision 2026-11-03).
+// was removed in RK9-697; since RK9-710 the same throttled alert also goes to
+// Telegram (operator decision 2026-11-03).
 //
 // Why this exists: 2026-04-29 incident — /opt/paperclip got checked out onto
 // origin/master (upstream), the github-webhook route disappeared, and PR #78
@@ -19,14 +20,26 @@
 // Environment:
 //   GITHUB_TOKEN          - required, used for gh REST calls (GitHub PAT or app token)
 //   GITHUB_TOKEN_<OWNER>  - optional per-owner override (see resolveToken below)
+//   TG_BOT_TOKEN, TG_CHAT_ID - optional Telegram alert target. The unit must load
+//                           /etc/paperclip/approval-telegram.env (EnvironmentFile,
+//                           added by the operator, RK9-710). Missing values log one
+//                           WARN line and the monitor runs without Telegram.
+//   PAPERCLIP_WEBHOOK_MONITOR_LOG - log path named in the Telegram text
 //
 // Exits 0 on healthy, 1 on degraded (failures or blind spots), 2 on script error.
 
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  readTelegramAlertConfig,
+  sendTelegramAlert,
+  TELEGRAM_CONFIG_MISSING_WARNING,
+} from "../src/services/ops-telegram-alert.js";
+import {
+  buildWebhookTelegramMessage,
   selectAlertableRepos,
   splitHealth,
 } from "../src/services/webhook-monitor-alerting.js";
@@ -43,6 +56,9 @@ const FAILURE_GROWTH_THRESHOLD = 2;
 const STATE_FILE =
   process.env.PAPERCLIP_WEBHOOK_MONITOR_STATE ??
   "/var/lib/paperclip/webhook-monitor-state.json";
+const MONITOR_LOG =
+  process.env.PAPERCLIP_WEBHOOK_MONITOR_LOG ??
+  "/var/log/paperclip-webhook-monitor.log";
 
 // Synthetic end-to-end probe of the webhook endpoint. Delivery history alone
 // misses failures that only affect real-sized payloads: 2026-08-04 incident —
@@ -385,6 +401,10 @@ async function main() {
     );
     process.exit(2);
   }
+  const telegram = readTelegramAlertConfig(process.env);
+  if (!telegram) console.warn(TELEGRAM_CONFIG_MISSING_WARNING);
+  // The probe curl children do not need the token in their environment.
+  delete process.env.TG_BOT_TOKEN;
 
   const cutoffMs = Date.now() - LOOKBACK_HOURS * 3600 * 1000;
   const [results, probes] = await Promise.all([
@@ -540,9 +560,20 @@ async function main() {
   }
 
   if (args.dryRun) {
-    console.log("--dry-run: alert state not persisted");
+    console.log("--dry-run: alert state not persisted, Telegram not sent");
     process.exit(1);
   }
+
+  // Same throttle as the ALERT lines: only repos and probe failures that passed
+  // it in this run reach Telegram. A send failure is logged, never fatal.
+  const telegramText = buildWebhookTelegramMessage({
+    alertable: newUnhealthy,
+    alertableProbeFailures: shouldAlertProbe ? probeFailures : [],
+    lookbackHours: LOOKBACK_HOURS,
+    host: hostname().split(".")[0] || "paperclip-01",
+    logPath: MONITOR_LOG,
+  });
+  if (telegramText) await sendTelegramAlert(telegram, telegramText);
 
   try {
     mkdirSync(path.dirname(STATE_FILE), { recursive: true });

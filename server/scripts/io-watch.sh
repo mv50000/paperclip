@@ -1,7 +1,8 @@
 #!/bin/bash
 # io-watch.sh — continuously sample nvme0n1 IO-pressure and log alert lines ONLY on
 # SUSTAINED latency pressure (confirmed edge + hysteresis recovery), plus a throttled
-# reminder while sustained. Slack posting was removed in RK9-697: alerts go to $LOG only.
+# reminder while sustained. Slack posting was removed in RK9-697. Since RK9-710 every
+# ALERT line is also sent to Telegram (TG_BOT_TOKEN + TG_CHAT_ID from the environment).
 #
 # Tuning history:
 #  - 2026-05-23 disk fill (85%) drove nvme0n1 w_await to 5690ms / util 87%, queueing
@@ -15,7 +16,11 @@
 #    context, NOT as triggers (util~100% on NVMe is normal throughput, not latency).
 #
 # Run by the paperclip-io-watch.service systemd unit (User=paperclip). Every sample
-# is logged to $LOG; confirmed edge events add an "ALERT:" line.
+# is logged to $LOG; confirmed edge events add an "ALERT:" line and a Telegram message.
+# TG_BOT_TOKEN and TG_CHAT_ID come from /etc/paperclip/approval-telegram.env once the unit
+# has EnvironmentFile=-/etc/paperclip/approval-telegram.env (added by the operator, RK9-710).
+# Missing or malformed values log one WARN line at start, and sampling runs without
+# Telegram. The token never goes to argv or $LOG: curl reads the URL from stdin (-K -).
 set -u
 DEV=nvme0n1
 LOG=${IO_WATCH_LOG:-/var/lib/paperclip/io-watch.log}
@@ -25,18 +30,50 @@ WARN_CONSEC=${IO_WATCH_WARN_CONSEC:-4}   # consecutive pressure samples before a
 OK_CONSEC=${IO_WATCH_OK_CONSEC:-3}       # consecutive OK samples before recovery (~45s)
 REMIND=${IO_WATCH_REMIND:-1800}          # s between reminders while sustained WARN
 HOST=$(hostname -s 2>/dev/null || echo paperclip-01)
+MAX_SAMPLES=${IO_WATCH_MAX_SAMPLES:-0}   # tests only: stop after N samples (0 = run forever)
+
+TG_TOKEN=${TG_BOT_TOKEN:-}
+TG_CHAT=${TG_CHAT_ID:-}
+# Child processes (iostat, curl, awk) do not need the token in their environment.
+export -n TG_BOT_TOKEN TG_CHAT_ID 2>/dev/null
+TG_ON=0
+if [[ $TG_TOKEN =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] && [[ $TG_CHAT =~ ^-?[0-9]+$ ]]; then
+  TG_ON=1
+fi
+
+tg_send() {  # $1 = message text; a failure is logged and never stops sampling
+  [ "$TG_ON" = 1 ] || return 0
+  local resp rc desc
+  resp=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TG_TOKEN" |
+    curl -sS --max-time 10 -K - --data-urlencode "chat_id=$TG_CHAT" \
+      --data-urlencode "text=$1" 2>&1)
+  rc=$?
+  if [ "$rc" = 0 ] && [[ $resp == *'"ok":true'* ]]; then
+    return 0
+  fi
+  desc=$(printf '%s' "$resp" | sed -n 's/.*"description":"\([^"]*\)".*/\1/p' | head -c 200)
+  desc=${desc//"$TG_TOKEN"/<redacted>}
+  echo "$(date '+%F %T')  WARN: Telegram-lähetys epäonnistui (curl exit $rc${desc:+, $desc})" >>"$LOG"
+}
 
 log_alert() {  # $1 = message text
   echo "$(date '+%F %T')  ALERT: $1" >>"$LOG"
+  tg_send "$1
+Loki: $LOG"
 }
 
 echo "# io-watch alkoi $(date -Is) — kynnys await>${WARN_AWAIT}ms, vahvistus ${WARN_CONSEC} näytettä, recovery ${OK_CONSEC} näytettä, näyte ${SAMPLE}s (PID $$)" >>"$LOG"
+if [ "$TG_ON" != 1 ]; then
+  echo "$(date '+%F %T')  WARN: TG_BOT_TOKEN tai TG_CHAT_ID puuttuu tai on virheellinen, joten Telegram-hälytystä ei lähetetä." >>"$LOG"
+fi
 
 state=OK
 last_alert=0
 warn_streak=0
 ok_streak=0
-while true; do
+samples=0
+while [ "$MAX_SAMPLES" = 0 ] || [ "$samples" -lt "$MAX_SAMPLES" ]; do
+  samples=$((samples+1))
   # iostat -x SAMPLE 2 -> second row is the live SAMPLE-second average
   line=$(iostat -x "$SAMPLE" 2 "$DEV" 2>/dev/null | awk -v d="$DEV" '$1==d{l=$0} END{print l}')
   if [ -z "$line" ]; then

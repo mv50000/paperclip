@@ -72,3 +72,53 @@ export function selectAlertableRepos<T extends RepoHealthLike>(
   });
   return { alertable, throttled };
 }
+
+export interface ProbeFailureLike {
+  name: string;
+  detail: string;
+}
+
+export interface WebhookTelegramInput<T extends RepoHealthLike> {
+  /** Repos that passed selectAlertableRepos in this run. */
+  alertable: T[];
+  /** Probe failures that passed the probe re-alert window in this run. */
+  alertableProbeFailures: ProbeFailureLike[];
+  lookbackHours: number;
+  host: string;
+  logPath: string;
+}
+
+/**
+ * Short Finnish Telegram text: what is broken, on which host, which log.
+ * Null when nothing passed the throttle, so a throttled run sends nothing.
+ */
+export function buildWebhookTelegramMessage<T extends RepoHealthLike & { recentTotal?: number }>(
+  input: WebhookTelegramInput<T>,
+): string | null {
+  const { failing, blind } = splitHealth(input.alertable);
+  const probes = input.alertableProbeFailures;
+  if (failing.length === 0 && blind.length === 0 && probes.length === 0) return null;
+  const lines = [`🔴 GitHub-webhook-valvonta (${input.host})`];
+  if (failing.length > 0) {
+    const repos = failing
+      .map((r) =>
+        r.recentTotal === undefined
+          ? `${r.repo} ${r.recentFailures}`
+          : `${r.repo} ${r.recentFailures}/${r.recentTotal}`,
+      )
+      .join(", ");
+    lines.push(`Toimitusvirheitä ${input.lookbackHours} h: ${repos}`);
+  }
+  if (blind.length > 0) {
+    lines.push(
+      `Valvonta ei näe repoa (token- tai API-ongelma): ${blind.map((r) => r.repo).join(", ")}`,
+    );
+  }
+  if (probes.length > 0) {
+    lines.push(
+      `Synteettinen testi epäonnistuu: ${probes.map((p) => `${p.name} ${p.detail}`).join(", ")}`,
+    );
+  }
+  lines.push(`Loki: ${input.logPath}`);
+  return lines.join("\n");
+}

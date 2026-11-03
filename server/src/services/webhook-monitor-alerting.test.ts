@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type AlertState,
+  buildWebhookTelegramMessage,
   selectAlertableRepos,
   splitHealth,
 } from "./webhook-monitor-alerting.js";
@@ -145,5 +146,53 @@ describe("selectAlertableRepos", () => {
       OPTS,
     );
     expect(alertable.map((r) => r.repo)).toEqual(["mv50000/paperclip"]);
+  });
+});
+
+describe("buildWebhookTelegramMessage", () => {
+  const base = {
+    lookbackHours: 24,
+    host: "paperclip-01",
+    logPath: "/var/log/paperclip-webhook-monitor.log",
+  };
+
+  it("names the fault, the host and the log in Finnish", () => {
+    const text = buildWebhookTelegramMessage({
+      ...base,
+      alertable: [
+        { repo: "rk9-ai/bk", recentFailures: 3, recentTotal: 10, error: null },
+        { repo: "mv50000/paperclip", recentFailures: 0, error: "GitHub → 403" },
+      ],
+      alertableProbeFailures: [{ name: "edge-large", detail: "HTTP 500" }],
+    });
+    expect(text).toContain("paperclip-01");
+    expect(text).toContain("Toimitusvirheitä 24 h: rk9-ai/bk 3/10");
+    expect(text).toContain("Valvonta ei näe repoa (token- tai API-ongelma): mv50000/paperclip");
+    expect(text).toContain("Synteettinen testi epäonnistuu: edge-large HTTP 500");
+    expect(text).toContain("Loki: /var/log/paperclip-webhook-monitor.log");
+  });
+
+  it("returns null when nothing passed the throttle", () => {
+    expect(
+      buildWebhookTelegramMessage({ ...base, alertable: [], alertableProbeFailures: [] }),
+    ).toBeNull();
+  });
+
+  it("sends once per throttle window for an unchanged failure", () => {
+    const repo = { repo: "rk9-ai/bk", recentFailures: 3, recentTotal: 10, error: null };
+    const first = selectAlertableRepos([repo], state(), NOW, OPTS);
+    expect(
+      buildWebhookTelegramMessage({ ...base, alertable: first.alertable, alertableProbeFailures: [] }),
+    ).not.toBeNull();
+    // The script persists this state after the first alert.
+    const after = state({
+      repoAlertedAt: { "rk9-ai/bk": hoursAgo(1) },
+      repoLastFailureCount: { "rk9-ai/bk": 3 },
+    });
+    const second = selectAlertableRepos([repo], after, NOW, OPTS);
+    expect(second.throttled).toEqual(["rk9-ai/bk"]);
+    expect(
+      buildWebhookTelegramMessage({ ...base, alertable: second.alertable, alertableProbeFailures: [] }),
+    ).toBeNull();
   });
 });
