@@ -28,15 +28,22 @@ set -euo pipefail
 # The per-host recall token wins (RK9-653): ~/.config/rk9/recall.env is loaded whenever it exists,
 # even when a board key is already in the environment (a sourced legacy file, an exported key), so a
 # provisioned host never sends the board key. The legacy file is read only without recall.env.
+RECALL_FILE=""
 # shellcheck disable=SC1090  # the env file paths are chosen at run time
 if [ -z "${RK9_RECALL_TOKEN:-}" ]; then
   if [ -n "${RK9_RECALL_ENV:-}" ]; then
-    if [ -z "${PAPERCLIP_API_TOKEN:-}" ] && [ -f "$RK9_RECALL_ENV" ]; then set -a; . "$RK9_RECALL_ENV"; set +a; fi
+    if [ -f "$RK9_RECALL_ENV" ]; then RECALL_FILE=$RK9_RECALL_ENV; set -a; . "$RK9_RECALL_ENV"; set +a; fi
   elif [ -f "$HOME/.config/rk9/recall.env" ]; then
-    set -a; . "$HOME/.config/rk9/recall.env"; set +a
+    RECALL_FILE=$HOME/.config/rk9/recall.env; set -a; . "$RECALL_FILE"; set +a
   elif [ -z "${PAPERCLIP_API_TOKEN:-}" ] && [ -f "$HOME/.config/rk9-recall.env" ]; then
     set -a; . "$HOME/.config/rk9-recall.env"; set +a
   fi
+fi
+# Fail closed: a recall file without a token never falls back to a board key in the environment.
+if [ -z "${RK9_RECALL_TOKEN:-}" ] && [ -n "$RECALL_FILE" ] \
+  && { [ "$RECALL_FILE" = "$HOME/.config/rk9/recall.env" ] || grep -q '^RK9_RECALL_' "$RECALL_FILE"; }; then
+  echo "qmd-recall-remote: $RECALL_FILE holds no RK9_RECALL_TOKEN; re-provision it (rk9-coord-provision.sh recall <host> --rotate)" >&2
+  exit 2
 fi
 
 if [ -n "${RK9_RECALL_TOKEN:-}" ]; then
