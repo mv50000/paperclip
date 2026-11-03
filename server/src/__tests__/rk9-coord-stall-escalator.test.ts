@@ -12,8 +12,10 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
+  agents,
   companies,
   createDb,
+  heartbeatRuns,
   rk9CoordActors,
   rk9CoordEscalations,
   rk9CoordEvents,
@@ -568,6 +570,106 @@ if (!support.supported) {
     expect(await tick(at(T, 7 * 60))).toMatchObject({ escalated: 0, nudged: 0 });
   });
 
+  it("counts only operator-side answers and the author's own progress; a shared issue mutes nothing (RK9-657, RK9-662, RK9-677)", async () => {
+    const T = new Date("2026-07-10T10:00:00Z");
+    const [agentA, agentB] = await db
+      .insert(agents)
+      .values(
+        ["Stall A", "Stall B"].map((name) => ({
+          companyId,
+          name,
+          role: "engineer",
+          status: "active",
+          adapterType: "process",
+          adapterConfig: {},
+          runtimeConfig: {},
+        })),
+      )
+      .returning();
+    const [runA1, runA2, runB1] = await db
+      .insert(heartbeatRuns)
+      .values([
+        { companyId, agentId: agentA!.id, status: "running" },
+        { companyId, agentId: agentA!.id, status: "succeeded" },
+        { companyId, agentId: agentB!.id, status: "running" },
+      ])
+      .returning();
+    const runRef = (run: { id: string }) => `agent_run:${run.id}`;
+    const insertEvent = async (values: Partial<typeof rk9CoordEvents.$inferInsert>) => {
+      const [row] = await db
+        .insert(rk9CoordEvents)
+        .values({
+          companyId,
+          type: "blocker",
+          actorRef: "worktree:RKU-0",
+          actorKind: "worktree",
+          trust: "attributed",
+          summary: "blocked",
+          payload: {},
+          createdAt: at(T, -40),
+          ...values,
+        })
+        .returning({ id: rk9CoordEvents.id });
+      return row!.id;
+    };
+    const later = { createdAt: at(T, -30) };
+    const ask = (issue: string, over: Partial<typeof rk9CoordEvents.$inferInsert> = {}) =>
+      insertEvent({ type: "ask-operator", issue, summary: `[normal] ${issue}?`, ...over });
+    const hostCc = { actorRef: "cc:mv-laptop:s1", actorKind: "cc", trust: "unverified" };
+    const boardCc = { actorRef: "cc:paperclip-01:s1", actorKind: "cc", trust: "attributed" };
+    const rk9claude = { actorRef: "rk9claude", actorKind: "rk9claude", trust: "verified" };
+    const otherRun = { actorRef: runRef(runB1!), actorKind: "agent_run", trust: "verified" };
+
+    // ask-operator
+    const hostCcReply = await ask("RKU-1");
+    await insertEvent({ type: "ask-operator", ...hostCc, summary: "[low] yes", refEventId: hostCcReply, ...later });
+    const agentReply = await ask("RKU-2");
+    await insertEvent({ type: "ask-operator", ...otherRun, summary: "[low] yes", refEventId: agentReply, ...later });
+    const boardCcReply = await ask("RKU-3");
+    await insertEvent({ type: "ask-operator", ...boardCc, summary: "[low] yes", refEventId: boardCcReply, ...later });
+    const operatorOnIssue = await ask("RKU-4");
+    await insertEvent({ type: "decision", actorRef: "operator", actorKind: "operator", issue: "RKU-4", summary: "go", ...later });
+    const sharedAsk = await ask("RKU-5");
+    await insertEvent({ ...rk9claude, issue: "RKU-5", summary: "alert", ...later });
+    await insertEvent({ type: "done", ...rk9claude, issue: "RKU-5", summary: "RKU-5 done", ...later });
+    const askerDone = await ask("RKU-6", { actorRef: runRef(runA1!), actorKind: "agent_run", trust: "verified" });
+    await insertEvent({ type: "done", actorRef: runRef(runA2!), actorKind: "agent_run", trust: "verified", issue: "RKU-6", summary: "done", ...later });
+    const otherDone = await ask("RKU-7");
+    await insertEvent({ type: "done", ...otherRun, issue: "RKU-7", summary: "RKU-7 done", ...later });
+    // The asker's own reply_to or phase does not answer its question.
+    const selfReply = await ask("RKU-13");
+    await insertEvent({ type: "ask-operator", summary: "[low] still?", refEventId: selfReply, ...later });
+    // blocker
+    const sharedBlocker = await insertEvent({ issue: "RKU-8", summary: "waits" });
+    await insertEvent({ ...rk9claude, issue: "RKU-8", summary: "alert", ...later });
+    await insertEvent({ type: "done", ...rk9claude, issue: "RKU-8", summary: "RKU-8 done", ...later });
+    const siblingRun = await insertEvent({ actorRef: runRef(runA1!), actorKind: "agent_run", trust: "verified", issue: "RKU-9" });
+    await insertEvent({ type: "handoff", actorRef: runRef(runA2!), actorKind: "agent_run", trust: "verified", issue: "RKU-9", summary: "moved", ...later });
+    const otherAgent = await insertEvent({ actorRef: runRef(runA1!), actorKind: "agent_run", trust: "verified", issue: "RKU-10" });
+    await insertEvent({ type: "handoff", ...otherRun, issue: "RKU-10", summary: "not mine", ...later });
+    const boardCcOnBlocker = await insertEvent({ issue: "RKU-11" });
+    await insertEvent({ type: "handoff", ...boardCc, issue: "RKU-11", summary: "unblocked", ...later });
+    const ownProgress = await insertEvent({ issue: "RKU-12" });
+    await insertEvent({ type: "handoff", issue: "RKU-12", summary: "moved on", ...later });
+    // A resource match by the operator side answers; by another agent it does not.
+    const operatorOnResource = await ask("RKU-14", { resource: "prod:rku14" });
+    await insertEvent({ type: "decision", actorRef: "operator", actorKind: "operator", resource: "prod:rku14", summary: "ok", ...later });
+    const agentOnResource = await ask("RKU-15", { resource: "prod:rku15" });
+    await insertEvent({ type: "decision", ...otherRun, resource: "prod:rku15", summary: "ok", ...later });
+    // A cc asker closes its own question with done; a board cc's reply_to answers it.
+    const ccAskerDone = await ask("RKU-16", boardCc);
+    await insertEvent({ type: "done", ...boardCc, issue: "RKU-16", summary: "done", ...later });
+
+    await tick(T);
+    const nudged = async (id: number) => (await ledger(`%event:${id}#%`)).length > 0;
+    for (const [name, id] of Object.entries({ hostCcReply, agentReply, sharedAsk, otherDone, selfReply, sharedBlocker, otherAgent, agentOnResource })) {
+      expect(await nudged(id), `${name} stays unanswered`).toBe(true);
+    }
+    for (const [name, id] of Object.entries({ boardCcReply, operatorOnIssue, askerDone, siblingRun, boardCcOnBlocker, ownProgress, operatorOnResource, ccAskerDone })) {
+      expect(await nudged(id), `${name} is answered`).toBe(false);
+    }
+  });
+
   describe("routes", () => {
     const rk9claude: Rk9CoordTokenPrincipal = { tokenId: "t-svc", companyId, principalKind: "service", principalName: "rk9claude" };
     const none = { type: "none", source: "none" } as Actor;
@@ -661,6 +763,70 @@ if (!support.supported) {
         .from(activityLog)
         .where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityId, row!.id)));
       expect(acks.map((a) => a.action).sort()).toEqual(["rk9.coord.escalation_reserved", "rk9.coord.escalation_sent"]);
+    });
+
+    it("hides the question text of an ask escalation from agent runs and grok on GET /escalations (RK9-657)", async () => {
+      const runId = randomUUID();
+      const agentId = randomUUID();
+      const agentApp = () => {
+        const app = express();
+        app.use(express.json());
+        app.use((req, _res, next) => {
+          req.actor = {
+            type: "agent",
+            agentId,
+            companyId,
+            runId,
+            source: "agent_jwt",
+            keyScope: { kind: "standard" },
+          } as unknown as Actor;
+          next();
+        });
+        app.use(
+          "/api",
+          rk9CoordRoutes(db, {
+            boardHost: "paperclip-01",
+            boardKeyIds: null,
+            findAgentRun: async (id) => (id === runId ? { companyId, agentId, status: "running" } : null),
+          }),
+        );
+        app.use(errorHandler);
+        return app;
+      };
+      const [askRow, leaseRow] = await db
+        .insert(rk9CoordEscalations)
+        .values([
+          {
+            companyId,
+            episodeKey: `event:${randomUUID()}#1`,
+            reason: "ask_operator_unanswered",
+            mode: "shadow",
+            status: "shadow",
+            message: "What: [high] rotate sigma keys?",
+          },
+          {
+            companyId,
+            episodeKey: `lease:${randomUUID()}#1`,
+            reason: "lease_stuck",
+            mode: "shadow",
+            status: "shadow",
+            message: "Coord jam: prod:sigma",
+          },
+        ])
+        .returning();
+      const find = (res: request.Response, id: string) =>
+        (res.body.escalations as Array<{ id: string; message: string | null }>).find((row) => row.id === id);
+      for (const app of [agentApp(), appFor(none, { tokenId: "t-g", companyId, principalKind: "service", principalName: "grok" })]) {
+        const res = await request(app).get(`${coord}/escalations?limit=200`);
+        expect(res.status).toBe(200);
+        expect(JSON.stringify(res.body)).not.toContain("sigma keys");
+        expect(find(res, askRow!.id)!.message).toBeNull();
+      }
+      // An agent run still reads a lease jam's text; the operator side reads both.
+      const agentRes = await request(agentApp()).get(`${coord}/escalations?limit=200`);
+      expect(find(agentRes, leaseRow!.id)!.message).toBe("Coord jam: prod:sigma");
+      const operatorRes = await request(appFor(boardKey())).get(`${coord}/escalations?limit=200`);
+      expect(find(operatorRes, askRow!.id)!.message).toBe("What: [high] rotate sigma keys?");
     });
 
     it("shows a failed escalation on the board and refuses to ack a shadow row", async () => {

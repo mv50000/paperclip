@@ -1307,4 +1307,399 @@ if (!support.supported) {
     // The prune exception is transaction-local: a plain DELETE still fails.
     await expect(db.execute(sql`delete from rk9_coord_events where company_id = ${cid}`)).rejects.toThrow();
   });
+  // ---------------------------------------------------------------- RK9-657
+
+  async function agentRunFixture(cid: string, names: string[]) {
+    const created = await db
+      .insert(agents)
+      .values(
+        names.map((name) => ({
+          companyId: cid,
+          name,
+          role: "engineer",
+          status: "active",
+          adapterType: "process",
+          adapterConfig: {},
+          runtimeConfig: {},
+        })),
+      )
+      .returning();
+    const runs = await db
+      .insert(heartbeatRuns)
+      .values(created.map((agent) => ({ companyId: cid, agentId: agent.id, status: "running" })))
+      .returning();
+    const byId = new Map(runs.map((run) => [run.id, run]));
+    const findRun = async (runId: string) => {
+      const run = byId.get(runId);
+      return run ? { companyId: run.companyId, agentId: run.agentId, status: run.status } : null;
+    };
+    const app = (run: { id: string; agentId: string }) =>
+      appFor(
+        {
+          type: "agent",
+          agentId: run.agentId,
+          companyId: cid,
+          runId: run.id,
+          source: "agent_jwt",
+          keyScope: { kind: "standard" },
+        } as unknown as Actor,
+        undefined,
+        findRun,
+      );
+    return { runs, app };
+  }
+
+  const operatorSession = (cid: string) =>
+    appFor({
+      type: "board",
+      userId: "operator-user",
+      companyIds: [cid],
+      memberships: [{ companyId: cid, membershipRole: "owner", status: "active" }],
+      isInstanceAdmin: true,
+      source: "session",
+    } as Actor);
+
+  it("denies break-glass to an agent run, redacts its reason, rejects a secret resource and keeps a host cc unverified (RK9-657)", async () => {
+    const cid = await newCompany();
+    const { runs, app } = await agentRunFixture(cid, ["Breaker"]);
+    const body = { type: "break-glass", resource: "prod:bk", gate: "deploy", reason: "hotfix" };
+    const denied = await request(app(runs[0]!)).post(`${base(cid)}/events`).send(body);
+    expect(denied.status).toBe(403);
+    expect(denied.body.code).toBe("rk9_coord_event_kind_not_allowed");
+
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    const redacted = await post(cid, "cc:paperclip-01:sess-bg", { ...body, reason: `rotated token=${secret} after the leak` });
+    expect(redacted.status).toBe(201);
+    const [row] = await db.select().from(rk9CoordEvents).where(eq(rk9CoordEvents.id, redacted.body.event.id));
+    expect(row!.summary).not.toContain(secret);
+    expect(JSON.stringify(row!.payload)).not.toContain(secret);
+    expect(row!.summary).toMatch(/^BREAK-GLASS deploy prod:bk: rotated /);
+    expect(String((row!.payload as { reason: string }).reason)).toMatch(/^rotated /);
+
+    const secretResource = await post(cid, "cc:paperclip-01:sess-bg", { ...body, gate: "repo", resource: "repo:rk9-ai/ghp_abcdefghijkl" });
+    expect(secretResource.status).toBe(422);
+    expect(secretResource.body.code).toBe("rk9_coord_secret_in_field");
+    expect(JSON.stringify(secretResource.body)).toContain("resource");
+
+    const hostCc = await request(appFor(none, hostToken(cid)))
+      .post(`${base(cid)}/events`)
+      .set("X-RK9-Actor", "cc:mv-laptop:sess-bg")
+      .send({ ...body, trust: "verified" });
+    expect(hostCc.status).toBe(201);
+    expect(hostCc.body.event).toMatchObject({ actor_kind: "cc", trust: "unverified" });
+    const [stored] = await db.select().from(rk9CoordEvents).where(eq(rk9CoordEvents.id, hostCc.body.event.id));
+    expect(stored!.trust).toBe("unverified");
+  });
+
+  it("leaves the lease on a resource unchanged after a break-glass on it (RK9-657)", async () => {
+    const cid = await newCompany();
+    const holder = "cc:paperclip-01:holder";
+    const acquired = await request(appFor(boardKey([cid])))
+      .post(`${base(cid)}/leases/acquire`)
+      .set("X-RK9-Actor", holder)
+      .send({ resource: "prod:bk", ttl_s: 1800, reason: "deploying", wait: false });
+    expect(acquired.status).toBeLessThan(300);
+    const before = await db.select().from(rk9CoordLeases).where(eq(rk9CoordLeases.companyId, cid));
+    expect(before).toHaveLength(1);
+    expect(before[0]!.releasedAt).toBeNull();
+
+    const bg = await post(cid, "cc:paperclip-01:other", { type: "break-glass", resource: "prod:bk", gate: "deploy", reason: "ci down" });
+    expect(bg.status).toBe(201);
+    const after = await db.select().from(rk9CoordLeases).where(eq(rk9CoordLeases.companyId, cid));
+    expect(after).toEqual(before);
+    const waiters = await db.select().from(rk9CoordLeaseWaiters).where(eq(rk9CoordLeaseWaiters.companyId, cid));
+    expect(waiters).toHaveLength(0);
+  });
+
+  it("gates grok on an array body, a non-JSON body and an odd-cased type (RK9-657)", async () => {
+    const grok = () => request(appFor(none, { tokenId: "t-grok2", companyId, principalKind: "service", principalName: "grok" }));
+    const url = `${base(companyId)}/events`;
+    const arrayBody = await grok().post(url).set("X-RK9-Actor", "grok").send([{ type: "blocker", issue: "RK9-626", what: "x" }]);
+    expect(arrayBody.status).toBe(403);
+    expect(arrayBody.body.code).toBe("rk9_coord_event_kind_not_allowed");
+    // A text body is not parsed: no type, so the gate denies it before validation.
+    const textBody = await grok()
+      .post(url)
+      .set("X-RK9-Actor", "grok")
+      .set("Content-Type", "text/plain")
+      .send('{"type":"blocker","issue":"RK9-626","what":"x"}');
+    expect(textBody.status).toBe(403);
+    expect(textBody.body.code).toBe("rk9_coord_event_kind_not_allowed");
+    for (const type of ["Blocker", "BLOCKER", "Ask-Operator", "handoff ", "Decision", "BREAK-GLASS"]) {
+      const res = await grok().post(url).set("X-RK9-Actor", "grok").send({ type, issue: "RK9-626", what: "x" });
+      expect(res.status, type).toBe(403);
+      expect(res.body.code, type).toBe("rk9_coord_event_kind_not_allowed");
+    }
+    const rows = await db
+      .select({ id: rk9CoordEvents.id })
+      .from(rk9CoordEvents)
+      .where(and(eq(rk9CoordEvents.companyId, companyId), eq(rk9CoordEvents.actorRef, "grok"), eq(rk9CoordEvents.summary, "x")));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("delivers an ask-operator answer only from the operator or a board-key cc, never a host-token cc (RK9-657)", async () => {
+    const cid = await newCompany();
+    const { runs, app } = await agentRunFixture(cid, ["Asker"]);
+    const run = runs[0]!;
+    expect((await request(app(run)).get(`${base(cid)}/events/delta`)).status).toBe(204);
+    const ask = await request(app(run))
+      .post(`${base(cid)}/events`)
+      .send({ type: "ask-operator", question: "merge now?", urgency: "high", issue: "RKA-1" });
+    expect(ask.status).toBe(201);
+    const askId = ask.body.event.id as number;
+    const reply = (question: string) => ({ type: "ask-operator", question, urgency: "low", reply_to: askId });
+    // A host-token cc claim may post the reply, but it is stored unverified and is no answer.
+    const hostReply = await request(appFor(none, hostToken(cid)))
+      .post(`${base(cid)}/events`)
+      .set("X-RK9-Actor", "cc:mv-laptop:sess-q")
+      .send(reply("host cc says yes"));
+    expect(hostReply.status).toBe(201);
+    expect(hostReply.body.event.trust).toBe("unverified");
+    expect((await post(cid, "cc:paperclip-01:sess-q", reply("board cc says yes"))).status).toBe(201);
+    expect((await request(operatorSession(cid)).post(`${base(cid)}/events`).send(reply("operator says yes"))).status).toBe(201);
+    const delta = await request(app(run)).get(`${base(cid)}/events/delta`);
+    expect(delta.status).toBe(200);
+    expect(delta.body.events.map((event: { summary: string }) => event.summary)).toEqual([
+      "[low] board cc says yes",
+      "[low] operator says yes",
+    ]);
+  });
+
+  it("gives a host-token cc claim only its own questions and their answers in the delta (RK9-657)", async () => {
+    const cid = await newCompany();
+    const hostCc = "cc:mv-laptop:sess-d";
+    const hostApp = () => appFor(none, hostToken(cid));
+    const hostDelta = () => request(hostApp()).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", hostCc);
+    const boardCc = "cc:paperclip-01:sess-d";
+    const boardDelta = () => request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta`).set("X-RK9-Actor", boardCc);
+    expect((await hostDelta()).status).toBe(204);
+    expect((await boardDelta()).status).toBe(204);
+    const other = await post(cid, "worktree:RKD-1", { type: "ask-operator", question: "other kappa?", urgency: "low" });
+    expect(other.status).toBe(201);
+    const mine = await request(hostApp())
+      .post(`${base(cid)}/events`)
+      .set("X-RK9-Actor", hostCc)
+      .send({ type: "ask-operator", question: "my lambda?", urgency: "low" });
+    expect(mine.status).toBe(201);
+    expect(
+      (await request(operatorSession(cid)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "yes lambda", urgency: "low", reply_to: mine.body.event.id })).status,
+    ).toBe(201);
+    const host = await hostDelta();
+    expect(host.status).toBe(200);
+    expect(host.body.events.map((event: { summary: string }) => event.summary)).toEqual(["[low] yes lambda"]);
+    expect(JSON.stringify(host.body)).not.toContain("kappa");
+    // A board-key cc on paperclip-01 still gets every question.
+    const board = await boardDelta();
+    expect(board.body.events.map((event: { summary: string }) => event.summary)).toEqual([
+      "[low] other kappa?",
+      "[low] my lambda?",
+      "[low] yes lambda",
+    ]);
+  });
+
+  it("hides ask-operator text on the board from agent runs, grok and unverified viewers (RK9-657)", async () => {
+    const cid = await newCompany();
+    const { runs, app } = await agentRunFixture(cid, ["Viewer"]);
+    const ask = await post(cid, "worktree:RKV-1", {
+      type: "ask-operator",
+      question: "deploy bk?",
+      urgency: "normal",
+      options: ["yes", "no"],
+      issue: "RKV-1",
+    });
+    expect(ask.status).toBe(201);
+    await db.insert(rk9CoordEvents).values({
+      companyId: cid,
+      type: "escalated",
+      actorRef: "orch:rk9-stall-escalator",
+      actorKind: "orch",
+      trust: "verified",
+      summary: "escalated to operator (shadow): ask_operator_unanswered #1, 40 min",
+      payload: { reason: "ask_operator_unanswered", message: "What: [normal] deploy bk?", holder: "worktree:RKV-1" },
+      refEventId: ask.body.event.id,
+    });
+    await post(cid, "worktree:RKV-1", { type: "blocker", issue: "RKV-1", what: "plain blocker" });
+    expect(
+      (
+        await request(operatorSession(cid))
+          .post(`${base(cid)}/events`)
+          .send({ type: "ask-operator", question: "deploy bk? go ahead", urgency: "low", reply_to: ask.body.event.id })
+      ).status,
+    ).toBe(201);
+    // The agent's delta never carries another actor's question either.
+    const runDelta = await request(app(runs[0]!)).get(`${base(cid)}/events/delta`);
+    expect(JSON.stringify(runDelta.body ?? "")).not.toContain("deploy bk");
+
+    const boardOf = async (res: request.Response) => {
+      expect(res.status).toBe(200);
+      const events = res.body.events as Array<Record<string, unknown>>;
+      return {
+        ask: events.find((event) => event.id === ask.body.event.id)!,
+        escalated: events.find((event) => event.type === "escalated")!,
+        blocker: events.find((event) => event.type === "blocker")!,
+      };
+    };
+    const hidden = {
+      type: "ask-operator",
+      issue: "RKV-1",
+      summary: "[ask-operator]",
+      payload: {},
+      actor: "worktree:RKV-1",
+      actor_kind: "worktree",
+      trust: null,
+      ref_event_id: null,
+      payload_hidden: true,
+    };
+    const restricted = [
+      request(app(runs[0]!)).get(`${base(cid)}/board`),
+      request(appFor(none, { tokenId: "t-gv", companyId: cid, principalKind: "service", principalName: "grok" })).get(`${base(cid)}/board`),
+      request(appFor(none, hostToken(cid))).get(`${base(cid)}/board`),
+      request(appFor(none, hostToken(cid))).get(`${base(cid)}/board`).set("X-RK9-Actor", "cc:mv-laptop:viewer"),
+    ];
+    for (const res of await Promise.all(restricted)) {
+      const view = await boardOf(res);
+      expect(view.ask).toMatchObject(hidden);
+      expect(view.escalated).toMatchObject({ type: "escalated", payload: {}, payload_hidden: true, ref_event_id: null });
+      // The question text appears nowhere in the restricted board, the operator's answer included.
+      expect(JSON.stringify(res.body)).not.toContain("deploy bk");
+      expect(JSON.stringify(res.body)).not.toContain("go ahead");
+      // Other event types keep their payload.
+      expect(view.blocker).toMatchObject({ payload: { what: "plain blocker" }, actor: "worktree:RKV-1" });
+    }
+    const full = [
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`),
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "cc:paperclip-01:viewer"),
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/board`).set("X-RK9-Actor", "worktree:RKV-2"),
+      request(operatorSession(cid)).get(`${base(cid)}/board`),
+      request(appFor(none, { tokenId: "t-rv", companyId: cid, principalKind: "service", principalName: "rk9claude" })).get(`${base(cid)}/board`),
+    ];
+    for (const res of await Promise.all(full)) {
+      const view = await boardOf(res);
+      expect(view.ask).toMatchObject({
+        actor: "worktree:RKV-1",
+        summary: "[normal] deploy bk?",
+        payload: { question: "deploy bk?", options: ["yes", "no"] },
+      });
+      expect(view.ask).not.toHaveProperty("payload_hidden");
+      expect(view.escalated.payload).toMatchObject({ reason: "ask_operator_unanswered" });
+    }
+  });
+
+  it("shows the asker its own question and the answers on the board, other readers only [ask-operator] (RK9-657)", async () => {
+    const cid = await newCompany();
+    const { runs, app } = await agentRunFixture(cid, ["Asker A", "Other B"]);
+    const [runA, runB] = runs;
+    // A second run of agent A (a later heartbeat) reads as the asker too.
+    const [runA2] = await db.insert(heartbeatRuns).values({ companyId: cid, agentId: runA!.agentId, status: "running" }).returning();
+    const appA2 = appFor(
+      {
+        type: "agent",
+        agentId: runA2!.agentId,
+        companyId: cid,
+        runId: runA2!.id,
+        source: "agent_jwt",
+        keyScope: { kind: "standard" },
+      } as unknown as Actor,
+      undefined,
+      async (runId: string) => (runId === runA2!.id ? { companyId: cid, agentId: runA2!.agentId, status: "running" } : null),
+    );
+    const ask = await request(app(runA!))
+      .post(`${base(cid)}/events`)
+      .send({ type: "ask-operator", question: "may I drop table zeta?", urgency: "high", issue: "RKW-1" });
+    expect(ask.status).toBe(201);
+    const operator = request(operatorSession(cid));
+    expect(
+      (await operator.post(`${base(cid)}/events`).send({ type: "ask-operator", question: "no, keep zeta", urgency: "low", reply_to: ask.body.event.id })).status,
+    ).toBe(201);
+    expect(
+      (await request(operatorSession(cid)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "zeta stays on RKW-1", urgency: "low", issue: "RKW-1" })).status,
+    ).toBe(201);
+    // A forged reply by agent B is not an answer: A gets it hidden too.
+    expect(
+      (await request(app(runB!)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "B says drop it", urgency: "low", reply_to: ask.body.event.id })).status,
+    ).toBe(201);
+    await db.insert(rk9CoordEvents).values({
+      companyId: cid,
+      type: "escalated",
+      actorRef: "orch:rk9-stall-escalator",
+      actorKind: "orch",
+      trust: "verified",
+      summary: "escalated to operator (shadow): ask_operator_unanswered",
+      payload: { reason: "ask_operator_unanswered", message: "What: [high] may I drop table zeta?" },
+      refEventId: ask.body.event.id,
+    });
+
+    const asks = (res: request.Response) =>
+      (res.body.events as Array<{ type: string; summary: string; payload: Record<string, unknown> }>)
+        .filter((event) => event.type === "ask-operator" || event.type === "escalated")
+        .map((event) => (event.type === "escalated" ? `escalated:${JSON.stringify(event.payload)}` : event.summary));
+    // An operator-side ask that is only on the same issue is no answer: hidden.
+    for (const asker of [request(app(runA!)), request(appA2)]) {
+      const res = await asker.get(`${base(cid)}/board`);
+      expect(res.status).toBe(200);
+      expect(asks(res)).toEqual([
+        `escalated:${JSON.stringify({ reason: "ask_operator_unanswered", message: "What: [high] may I drop table zeta?" })}`,
+        "[ask-operator]",
+        "[ask-operator]",
+        "[low] no, keep zeta",
+        "[high] may I drop table zeta?",
+      ]);
+    }
+    // B reads only its own (forged) reply; grok reads no question at all.
+    const hiddenTail = ["[ask-operator]", "[ask-operator]", "[ask-operator]"];
+    for (const [reader, own] of [
+      [request(app(runB!)), "[low] B says drop it"],
+      [request(appFor(none, { tokenId: "t-gw", companyId: cid, principalKind: "service", principalName: "grok" })), "[ask-operator]"],
+    ] as const) {
+      const res = await reader.get(`${base(cid)}/board`);
+      expect(res.status).toBe(200);
+      expect(JSON.stringify(res.body)).not.toContain("zeta");
+      expect(asks(res).filter((summary) => !summary.startsWith("escalated:"))).toEqual([own, ...hiddenTail]);
+      expect(asks(res).find((summary) => summary.startsWith("escalated:"))).toBe("escalated:{}");
+    }
+    // Picking the issue of an operator-side question does not reveal it (RK9-657 verifier).
+    const ccQuestion = await post(cid, "cc:paperclip-01:sess-z", {
+      type: "ask-operator",
+      question: "rotate omega credentials?",
+      urgency: "high",
+      issue: "RKW-2",
+    });
+    expect(ccQuestion.status).toBe(201);
+    const grokApp = appFor(none, { tokenId: "t-gw2", companyId: cid, principalKind: "service", principalName: "grok" });
+    expect(
+      (await request(grokApp).post(`${base(cid)}/events`).set("X-RK9-Actor", "grok").send({ type: "ask-operator", question: "probe", urgency: "low", issue: "RKW-2" })).status,
+    ).toBe(201);
+    expect(
+      (await request(app(runB!)).post(`${base(cid)}/events`).send({ type: "ask-operator", question: "probe b", urgency: "low", issue: "RKW-2" })).status,
+    ).toBe(201);
+    for (const prober of [request(grokApp), request(app(runB!))]) {
+      const res = await prober.get(`${base(cid)}/board`);
+      expect(JSON.stringify(res.body)).not.toContain("omega");
+    }
+  });
+
+  it("keeps break-glass records a year, like decisions (RK9-657)", async () => {
+    const cid = await newCompany();
+    const now = new Date();
+    const daysAgo = (days: number) => new Date(now.getTime() - days * 24 * 3600 * 1000);
+    await db.insert(rk9CoordEvents).values(
+      [
+        ["break-glass", 100, "bg 100d"],
+        ["break-glass", 365, "bg 365d"],
+        ["break-glass", 400, "bg 400d"],
+        ["blocker", 100, "blocker 100d"],
+      ].map(([type, days, summary]) => ({
+        companyId: cid,
+        type: type as string,
+        actorRef: "cc:paperclip-01:bg",
+        actorKind: "cc",
+        trust: "attributed",
+        summary: summary as string,
+        createdAt: daysAgo(days as number),
+      })),
+    );
+    await pruneRk9Coord(db, { now });
+    const left = await db.select({ summary: rk9CoordEvents.summary }).from(rk9CoordEvents).where(eq(rk9CoordEvents.companyId, cid));
+    expect(left.map((row) => row.summary).sort()).toEqual(["bg 100d", "bg 365d"]);
+  });
 });

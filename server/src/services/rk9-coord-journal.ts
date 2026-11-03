@@ -7,11 +7,13 @@
 // - delta(): the events after the actor's cursor that concern it (its repo,
 //   issue or held leases, plus every deploy event). `cc` and `operator` get
 //   every ask-operator; other kinds only their own questions (also of a
-//   sibling run of the same agent) and the answers to them. Never a headsup
-//   (RK9-647). The cursor advances in the same transaction; a peek does not
-//   move it.
+//   sibling run of the same agent) and the answers to them by an operator-side
+//   actor (RK9_COORD_ASK_OPERATOR_ANSWER_KINDS, RK9-657). Never a headsup (RK9-647).
+//   The cursor advances in the same transaction; a peek does not move it.
 // - formatRk9CoordDeltaLine(): the <= 400-char hook line.
 // - board(): the full view, for explicit requests only (never from hooks).
+//   agent_run, grok and unverified viewers get an ask-operator without its
+//   payload (rk9CoordBoardShowsAskOperatorPayload, RK9-657).
 //
 // The journal has no UPDATE or DELETE path here; the DB trigger rejects both.
 // Contract: docs/implementation-notes/coord-bus.md.
@@ -55,15 +57,55 @@ export const RK9_COORD_GLOBAL_EVENT_TYPES = ["deploy", "ask-operator", "break-gl
  * RK9-647: an `ask-operator` is an operator-class question. These actor kinds
  * get every one in their delta. Any other kind gets only its own questions
  * (for an agent_run also those of another run of the same agent) and the
- * answers by a `cc` or `operator` actor whose `ref_event_id` points at one
- * of them: an agent session that
- * saw another actor's open question might decide it and bypass the approval
- * gate.
+ * answers by an operator-side actor (RK9_COORD_ASK_OPERATOR_ANSWER_KINDS) whose
+ * `ref_event_id` points at one of them: an agent session that saw another
+ * actor's open question might decide it and bypass the approval gate.
  */
 export const RK9_COORD_ASK_OPERATOR_DELTA_KINDS = ["cc", "operator"] as const;
+
+/**
+ * RK9-657 (operator decision 3.11.2026): the actor kinds whose event may
+ * answer an `ask-operator`. A `cc` row answers only when it is not
+ * `unverified`, i.e. a paperclip-01 session on the board key. A `cc:<host>`
+ * claim through a host coord token is stored `unverified`
+ * (rk9CoordJournalTrust) and never answers; neither do `agent_run`, `grok`,
+ * `remote`, `rk9claude` and the other kinds. The delta and the stall
+ * escalator apply the same rule (coord-bus.md, coord-stall-escalator.md).
+ */
+export const RK9_COORD_ASK_OPERATOR_ANSWER_KINDS = ["cc", "operator"] as const;
+
+/**
+ * RK9-657 (operator decision 3.11.2026): may this `GET /board` viewer read the
+ * text of an `ask-operator`? `agent_run` and `grok` never do, nor does any
+ * other viewer whose journal trust is `unverified` (a remote host token, also
+ * its `cc` claims). They get rk9CoordHiddenPayloadView. A board-key read
+ * without a claim is the operator's own key (null or undefined): full view.
+ */
+export function rk9CoordBoardShowsAskOperatorPayload(viewer: Rk9CoordResolvedActor | null | undefined): boolean {
+  if (!viewer) return true;
+  if (viewer.kind === "agent_run" || viewer.kind === "grok") return false;
+  return rk9CoordJournalTrust(viewer) !== "unverified";
+}
+/**
+ * "Mine" for ask-operator visibility (RK9-647, RK9-657): the actor itself, or
+ * for an agent_run another run of the same agent (a primary-key lookup in
+ * heartbeat_runs per candidate row; the CASE keeps the uuid cast off refs
+ * that are not agent_run ids).
+ */
+function rk9CoordMineSql(ref: AnyColumn, companyId: string, actorId: string, agentId: string | null): SQL {
+  const self = eq(ref, actorId);
+  if (!agentId) return self;
+  return or(
+    self,
+    sql`exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${companyId} and ${heartbeatRuns.agentId} = ${agentId} and ${heartbeatRuns.id} = case when ${ref} ~ ${AGENT_RUN_REF_RX} then substring(${ref} from 11)::uuid end)`,
+  )!;
+}
+
 /** RK9-647: types the delta never returns. A heads-up is delivered locally by the session's own hook. */
 export const RK9_COORD_DELTA_HIDDEN_TYPES = ["headsup"] as const;
-const AGENT_RUN_REF_RX = "^agent_run:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+/** An `agent_run:<uuid>` actor ref; substring(ref from 11) is the run id. */
+export const RK9_COORD_AGENT_RUN_REF_RX = "^agent_run:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+const AGENT_RUN_REF_RX = RK9_COORD_AGENT_RUN_REF_RX;
 /** Summary prefix of a heads-up: the label says the observation is unverified. */
 export const RK9_COORD_HEADSUP_SUMMARY_PREFIX = "[Heads up, varmistamaton]";
 
@@ -91,8 +133,15 @@ export function assertRk9CoordEventKindAllowed(actor: Pick<Rk9CoordResolvedActor
   if (type === "break-glass" && !(RK9_COORD_BREAK_GLASS_KINDS as readonly string[]).includes(actor.kind)) deny();
 }
 
-export function rk9CoordSeesAllAskOperator(kind: string): boolean {
-  return (RK9_COORD_ASK_OPERATOR_DELTA_KINDS as readonly string[]).includes(kind);
+/**
+ * Does this actor get every ask-operator in its delta? Kinds `cc` and
+ * `operator`, and (RK9-657) not when the actor's journal trust is
+ * `unverified`: a `cc:<host>` claim through a host coord token gets only its
+ * own questions and their answers, as on the board.
+ */
+export function rk9CoordSeesAllAskOperator(actor: Rk9CoordResolvedActor): boolean {
+  if (!(RK9_COORD_ASK_OPERATOR_DELTA_KINDS as readonly string[]).includes(actor.kind)) return false;
+  return rk9CoordJournalTrust(actor) !== "unverified";
 }
 /** A new cursor starts this far back, so a fresh session is not flooded. */
 export const RK9_COORD_NEW_CURSOR_LOOKBACK_MS = 24 * 3600 * 1000;
@@ -521,6 +570,66 @@ export function rk9CoordMayVaultDecision(actor: Rk9CoordResolvedActor, decisionA
   return parsed !== null && (parsed.kind === "cc" || parsed.kind === "remote") && parsed.host === host;
 }
 
+/** RK9-657: the summary a restricted board viewer gets instead of the question. */
+export const RK9_COORD_HIDDEN_ASK_SUMMARY = "[ask-operator]";
+
+/**
+ * RK9-657 (operator decision 3.11.2026, refined by the parent): the board view
+ * of an `ask-operator`, and of the `escalated` event of an unanswered one (its
+ * payload repeats the question), for a viewer that may not read the question
+ * (rk9CoordBoardShowsAskOperatorPayload). The viewer sees that the issue has
+ * an open question, not its text: id, type, issue, actor and times. An
+ * ask-operator summary becomes RK9_COORD_HIDDEN_ASK_SUMMARY; an escalation
+ * summary names no question text and stays. The other fields keep their
+ * keys, null or empty, so a client that reads them does not break.
+ */
+export interface Rk9CoordHiddenPayloadView {
+  id: number;
+  type: string;
+  actor: string;
+  actor_kind: string;
+  trust: null;
+  issue: string | null;
+  repo: null;
+  resource: null;
+  summary: string;
+  payload: Record<string, never>;
+  ref_event_id: null;
+  vault_path: null;
+  client_event_id: null;
+  occurred_at: string | null;
+  created_at: string;
+  payload_hidden: true;
+}
+
+/** RK9-657: does this row carry an ask-operator question in its payload? */
+export function rk9CoordIsAskOperatorRow(row: Pick<EventRow, "type" | "payload">): boolean {
+  if (row.type === "ask-operator") return true;
+  const payload = row.payload as Record<string, unknown> | null;
+  return row.type === "escalated" && payload?.reason === "ask_operator_unanswered";
+}
+
+export function rk9CoordHiddenPayloadView(row: EventRow): Rk9CoordHiddenPayloadView {
+  return {
+    id: row.id,
+    type: row.type,
+    actor: row.actorRef,
+    actor_kind: row.actorKind,
+    trust: null,
+    issue: row.issue,
+    repo: null,
+    resource: null,
+    summary: row.type === "ask-operator" ? RK9_COORD_HIDDEN_ASK_SUMMARY : row.summary,
+    payload: {},
+    ref_event_id: null,
+    vault_path: null,
+    client_event_id: null,
+    occurred_at: row.occurredAt ? row.occurredAt.toISOString() : null,
+    created_at: row.createdAt.toISOString(),
+    payload_hidden: true,
+  };
+}
+
 /** Board view of an event: a heads-up shows its summary, not its explanation. */
 export function rk9CoordBoardEventView(row: EventRow): Rk9CoordEventView {
   const view = rk9CoordEventView(row);
@@ -844,19 +953,9 @@ export function rk9CoordJournalService(db: Db) {
 
       // RK9-647: which ask-operator events this actor may see.
       const agentId = actor.kind === "agent_run" ? opts.agentId ?? null : null;
-      // "Mine": the actor itself, or another run of the same agent (a primary
-      // key lookup in heartbeat_runs per candidate row; the CASE keeps the
-      // uuid cast off refs that are not agent_run ids).
-      const mine = (ref: AnyColumn): SQL => {
-        const self = eq(ref, actor.actorId);
-        if (!agentId) return self;
-        return or(
-          self,
-          sql`exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${companyId} and ${heartbeatRuns.agentId} = ${agentId} and ${heartbeatRuns.id} = case when ${ref} ~ ${AGENT_RUN_REF_RX} then substring(${ref} from 11)::uuid end)`,
-        )!;
-      };
+      const mine = (ref: AnyColumn): SQL => rk9CoordMineSql(ref, companyId, actor.actorId, agentId);
       let askOperatorVisible: SQL | undefined;
-      if (!rk9CoordSeesAllAskOperator(actor.kind)) {
+      if (!rk9CoordSeesAllAskOperator(actor)) {
         const asked = alias(rk9CoordEvents, "asked");
         const myQuestions = tx
           .select({ id: asked.id })
@@ -867,8 +966,11 @@ export function rk9CoordJournalService(db: Db) {
           mine(rk9CoordEvents.actorRef),
           // Only the operator side answers: an agent or an unverified actor
           // cannot push a forged approval into another agent's delta.
+          // RK9-657: RK9_COORD_ASK_OPERATOR_ANSWER_KINDS and not unverified, so a host-token cc claim
+          // (stored unverified) is not an answer either.
           and(
-            inArray(rk9CoordEvents.actorKind, [...RK9_COORD_ASK_OPERATOR_DELTA_KINDS]),
+            inArray(rk9CoordEvents.actorKind, [...RK9_COORD_ASK_OPERATOR_ANSWER_KINDS]),
+            ne(rk9CoordEvents.trust, "unverified"),
             isNotNull(rk9CoordEvents.refEventId),
             inArray(rk9CoordEvents.refEventId, myQuestions),
           ),
@@ -948,7 +1050,22 @@ export function rk9CoordJournalService(db: Db) {
   }
 
   /** The full view: live presence, active leases with queues, recent events, pending inbox. */
-  async function board(companyId: string, opts: { viewerTrust: Rk9CoordTrust; now?: Date; eventLimit?: number }) {
+  async function board(
+    companyId: string,
+    opts: {
+      viewerTrust: Rk9CoordTrust;
+      /**
+       * RK9-657: false gives every ask-operator row (rk9CoordIsAskOperatorRow)
+       * as rk9CoordHiddenPayloadView, except the viewer's own questions and
+       * the answers to them (rk9CoordBoardAskerRows). Default true.
+       */
+      askOperatorPayloads?: boolean;
+      /** The restricted viewer, for its own questions (agentId: an agent_run's agent, for sibling runs). */
+      viewer?: { actorId: string; agentId: string | null } | null;
+      now?: Date;
+      eventLimit?: number;
+    },
+  ) {
     const now = opts.now ?? new Date();
     const ttl = rk9CoordPresenceTtlSeconds();
     const liveSince = new Date(now.getTime() - ttl * 1000);
@@ -1040,6 +1157,8 @@ export function rk9CoordJournalService(db: Db) {
 
     // Unverified viewers (remote hosts, Grok) see who messages whom, not what.
     const showBodies = opts.viewerTrust !== "unverified";
+    const showAskPayloads = opts.askOperatorPayloads !== false;
+    const askerRows = showAskPayloads ? new Set<number>() : await askerVisibleRows(companyId, events, opts.viewer ?? null);
     return {
       generated_at: now.toISOString(),
       presence_ttl_s: ttl,
@@ -1065,7 +1184,11 @@ export function rk9CoordJournalService(db: Db) {
         expires_at: row.expiresAt.toISOString(),
         queue: queues.get(row.resource) ?? [],
       })),
-      events: events.map(rk9CoordBoardEventView),
+      events: events.map((row) =>
+        !showAskPayloads && rk9CoordIsAskOperatorRow(row) && !askerRows.has(row.id)
+          ? rk9CoordHiddenPayloadView(row)
+          : rk9CoordBoardEventView(row),
+      ),
       inbox: inbox.map((row) => ({
         id: row.id,
         to: row.toActor ?? row.toIssue ?? row.toName,
@@ -1076,6 +1199,58 @@ export function rk9CoordJournalService(db: Db) {
         expires_at: row.expiresAt ? row.expiresAt.toISOString() : null,
       })),
     };
+  }
+
+  /**
+   * RK9-657 (parent refinement 3.11.2026): the ask-operator rows of `events`
+   * a restricted board viewer still reads in full: its own questions (also of
+   * a sibling run of the same agent), the answers to them (an operator-side
+   * actor, RK9_COORD_ASK_OPERATOR_ANSWER_KINDS and not unverified, whose
+   * reply_to points at one of them, the delta's rule) and the escalation of
+   * one of them. Every other ask-operator row stays hidden. An operator-side
+   * ask-operator that is only on the same issue is NOT shown: any actor can
+   * pick the issue of its own question, so that match would let grok or
+   * another agent read the operator side's questions on any issue (RK9-657
+   * verifier). The operator's other events on the issue (decision, done,
+   * phase) are never hidden.
+   */
+  async function askerVisibleRows(
+    companyId: string,
+    events: EventRow[],
+    viewer: { actorId: string; agentId: string | null } | null,
+  ): Promise<Set<number>> {
+    const visible = new Set<number>();
+    if (!viewer) return visible;
+    const candidates = events.filter((row) => rk9CoordIsAskOperatorRow(row));
+    if (candidates.length === 0) return visible;
+    const answerer = (row: EventRow) =>
+      (RK9_COORD_ASK_OPERATOR_ANSWER_KINDS as readonly string[]).includes(row.actorKind) && row.trust !== "unverified";
+    const ids = new Set<number>();
+    for (const row of candidates) {
+      if (row.type === "ask-operator") ids.add(row.id);
+      if (row.refEventId !== null) ids.add(row.refEventId);
+    }
+    const mineRows = await db
+      .select({ id: rk9CoordEvents.id })
+      .from(rk9CoordEvents)
+      .where(
+        and(
+          eq(rk9CoordEvents.companyId, companyId),
+          eq(rk9CoordEvents.type, "ask-operator"),
+          rk9CoordMineSql(rk9CoordEvents.actorRef, companyId, viewer.actorId, viewer.agentId),
+          inArray(rk9CoordEvents.id, [...ids]),
+        ),
+      );
+    const mineIds = new Set(mineRows.map((row) => row.id));
+    for (const row of candidates) {
+      if (row.type === "escalated") {
+        if (row.refEventId !== null && mineIds.has(row.refEventId)) visible.add(row.id);
+        continue;
+      }
+      if (mineIds.has(row.id)) visible.add(row.id);
+      else if (answerer(row) && row.refEventId !== null && mineIds.has(row.refEventId)) visible.add(row.id);
+    }
+    return visible;
   }
 
   /**

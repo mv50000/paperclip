@@ -17,7 +17,7 @@ import {
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import { validate } from "../middleware/validate.js";
-import { rk9CoordJournalTrust } from "../services/rk9-coord-journal.js";
+import { rk9CoordBoardShowsAskOperatorPayload, rk9CoordJournalTrust } from "../services/rk9-coord-journal.js";
 import { resolveRk9CoordEscalatorConfig, rk9CoordEscalationService } from "../services/rk9-coord-stall-escalator.js";
 import { companyIdOf, requireRk9CoordActor, rk9CoordActivityActor } from "./rk9-coord-events.js";
 
@@ -48,6 +48,8 @@ export function rk9CoordEscalationRoutes(db: Db, env: NodeJS.ProcessEnv = proces
         limit: query.limit,
         nudges: query.nudges === "true",
         withText: viewerTrust !== "unverified",
+        // RK9-657: the board's ask-operator rule; agent_run and grok get no question text.
+        askText: rk9CoordBoardShowsAskOperatorPayload(req.rk9CoordActor),
       });
       res.setHeader("Cache-Control", "no-store");
       res.json({
