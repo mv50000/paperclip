@@ -277,7 +277,9 @@ router reads `req.rk9CoordActor` and never parses `X-RK9-Actor` itself.
 
 - Router: `server/src/routes/rk9-coord-actors.ts`.
 - Service: `server/src/services/rk9-coord-presence.ts`.
-- Redaction: `server/src/services/rk9-coord-redact.ts`.
+- Redaction: `server/src/services/rk9-coord-text.ts`, the one redaction
+  module of the coord bus (RK9-641 merged the RK9-625 copy into it; rules
+  under "Free text" in the journal section).
 - Bodies and query: `packages/shared/src/validators/rk9-coord.ts`.
 - Tests: `server/src/__tests__/rk9-coord-actors-routes.test.ts`
   (embedded Postgres).
@@ -323,10 +325,8 @@ Rules:
   every format character (`\p{Cf}`: soft hyphen, ZWJ, bidi controls,
   invisible operators), combining mark and Hangul filler is removed or
   turned into a space, so none of them can split a keyword or glue it to
-  its value. The display form, which the
-  stored `phase` and `name` use, keeps ZWJ (U+200D) so emoji sequences
-  survive; it strips U+00AD, U+034F, U+180E, U+200B, U+200C, U+2060-U+2064
-  and U+FEFF.
+  its value. The display form, which the stored `phase` and `name` use, is
+  the one described under "Free text" (journal section).
 - **Metadata keys that name a credential are rejected** when they carry a
   string value. The key rule (RK9-642), applied after the invisible
   characters are removed: split the name into segments at every
@@ -371,15 +371,11 @@ Rules:
 - **Liveness.** Live means `ended_at IS NULL AND last_seen_at > now -
   RK9_COORD_PRESENCE_TTL_S`. It is a read rule, so a crashed actor drops out
   after one TTL and no cleanup job runs. Its row stays until retention.
-- **Phase and name.** The text is first collapsed to one line: every run of
-  whitespace and control characters becomes one space (JS `\s` misses most
-  C0 controls, so redacting first would let `Bearer\x01<token>` through).
-  Zero-width characters (U+200B-U+200D, U+2060, U+FEFF) are removed in the
-  same step. It is then matched case-insensitively against
-  `RK9_SESSIONS_SECRET_RX` and every match becomes `[redacted]`.
-  `rk9_coord_` tokens and the plural keyword forms (`tokens=`, `secrets:`,
-  `passwords=`, `api_keys=`) are always redacted on top. Last, the text is capped: phase at 140 code points, name
-  at 200. The raw input limit is
+- **Phase and name.** `toRk9CoordLine()` of `rk9-coord-text.ts`, the same
+  function as every journal and inbox free-text field (see "Free text"
+  below): redacted, collapsed to one line, fail closed on invisible
+  characters that hide a secret. The text is capped: phase at 140 code
+  points, name at 200. The raw input limit is
   1000 characters (422 beyond). `phase_at` changes only when the phase text
   changes.
 - **Agent runs.** `heartbeat_runs` rows of the company with status `running`
@@ -448,15 +444,45 @@ model is called.
   (RK9-549). The env var overrides it on the server too. An invalid value
   falls back to the default. `rk9_coord_` tokens are always redacted.
 - Matches become `[redacted]`. Whitespace collapses to one space.
-- Control, zero-width and bidi characters can split a secret past the
-  pattern (C0/C1 controls, soft hyphen, zero-width, bidi, variation selectors,
-  tag characters). When a text has any, the server checks it twice: with
-  them removed and with them as spaces. If either reading shows a secret, the
-  whole field becomes `[redacted]` (fail closed).
+- The keyword rule is always applied in a wider form too (RK9-641): singular
+  and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
+  `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
+  object as the value (`"tokens": ["..."]`, `"secrets": {"db": "..."}`).
+  A bracketed value counts only when it holds a value (not a key) of 6+
+  characters that is not a number, boolean or null, so token counts
+  (`"tokens": {"input": 1234}`) stay.
+- **Known prose false positive.** A keyword, a separator and one word of 6+
+  characters is redacted: `Secrets: rotated today` is stored as
+  `[redacted] today`. This is deliberate (fail closed): a rule that keeps
+  plain words would also keep a lower-case passphrase such as
+  `password: correcthorsebattery`. Write `the secrets were rotated` instead.
+- **Display form** (what is stored): C0 controls other than whitespace, DEL
+  and C1 are removed; so are the soft hyphen (U+00AD), CGJ (U+034F), U+180E,
+  ZWSP (U+200B), the word joiner and invisible operators (U+2060-U+2064),
+  bidi embeddings, overrides and isolates (U+202A-U+202E, U+2066-U+2069),
+  the BOM, the stand-alone Hangul fillers (U+3164, U+FFA0) and the tag
+  characters (U+E0000-U+E007F; a subdivision flag such as England's shows
+  as a black flag). ZWNJ (U+200C), ZWJ (U+200D) and the variation selectors
+  stay when they stand alone or in pairs, so emoji sequences (👩‍💻, ❤️‍🔥)
+  and Persian ZWNJ survive; a run of three or more of them is
+  steganography (emoji smuggling) and is removed.
+- **Matching readings.** Invisible characters can split a secret past the
+  pattern or glue a keyword to its value. The server also reads the text with
+  every format character (`\p{Cf}`), combining mark (`\p{Mn}`, `\p{Me}`),
+  Hangul filler and control removed, and once with them as spaces; both
+  readings are NFKC-folded, so full-width text (`ｔｏｋｅｎ＝...`) matches
+  too. When a reading finds a secret the display text does not show, the
+  stripped reading is stored only if both readings agree and come out
+  clean; otherwise the whole field becomes `[redacted]` (fail closed).
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
   `client_event_id`, the heads-up `session_id`) are grammar-restricted. A secret-looking value there is
   422 `rk9_coord_secret_in_field`, not a silent store. A match counts only at
-  a word start, so `rk9-ai/task-runner` or `kiosk-frontend` pass.
+  a word start, so `rk9-ai/task-runner` or `kiosk-frontend` pass. The rule
+  is a lookbehind in the pattern (RK9-641), so a mid-word candidate cannot
+  hide a token after it (`task-runner_ghp_...` is 422), and a match that
+  starts with a non-alphanumeric character counts anywhere
+  (`https://user:pw@host` is 422). The inbox `to` also rejects control and
+  format characters with 400.
 - The raw text is redacted before the collapse too, so a pattern that spans
   a tab or newline is caught.
 - Caps: `summary` 300, each payload text field 500 (`rationale` 2000, the

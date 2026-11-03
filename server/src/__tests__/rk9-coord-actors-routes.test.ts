@@ -26,7 +26,7 @@ import {
   redactRk9CoordText,
   rk9CoordMatchText,
   toRk9CoordLine,
-} from "../services/rk9-coord-redact.js";
+} from "../services/rk9-coord-text.js";
 import { rk9CoordPresenceService } from "../services/rk9-coord-presence.js";
 import {
   getEmbeddedPostgresTestSupport,

@@ -194,10 +194,22 @@ export const appendRk9CoordEventSchema = z.discriminatedUnion("type", [
 ]);
 export type AppendRk9CoordEvent = z.infer<typeof appendRk9CoordEventSchema>;
 
+/** Control (\p{Cc}) and format (\p{Cf}) characters; not allowed in a verbatim `to`. */
+const RK9_COORD_TO_FORBIDDEN_RX = /[\p{Cc}\p{Cf}]/u;
+
 /** POST /companies/:companyId/rk9/coord/inbox */
 export const sendRk9CoordInboxSchema = z.object({
-  /** An actor id, an issue identifier or a name (orchestrator, session, Paperclip agent). */
-  to: z.string().trim().min(1).max(RK9_COORD_ACTOR_ID_MAX_LENGTH),
+  /**
+   * An actor id, an issue identifier or a name (orchestrator, session,
+   * Paperclip agent). Stored verbatim (to_name), so control and format
+   * characters (NUL, C1, zero-width, bidi) are 400 here (RK9-641).
+   */
+  to: z
+    .string()
+    .trim()
+    .min(1)
+    .max(RK9_COORD_ACTOR_ID_MAX_LENGTH)
+    .refine((value) => !RK9_COORD_TO_FORBIDDEN_RX.test(value), "to must not contain control or format characters"),
   body: freeText(4000),
   /** Lower-case token, default `message`. */
   kind: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/).optional(),
