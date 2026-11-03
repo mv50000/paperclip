@@ -336,6 +336,26 @@ describe("presence metadata secret check", () => {
     ["pass= in a free-text value", { note: "user=bob pass=hunter2hunter" }],
     ["passphrase= in a free-text value", { note: "passphrase=correcthorse" }],
     ["private_key= in a free-text value", { note: "private_key=abcdefgh12" }],
+    // RK9-678 verifier round 1: pass and pw in assignment and pair positions
+    ["pass, separator, value", { a: ["pass", "=", "Hunter2Hunter"] }],
+    ["pw, separator, value", { a: ["pw", "=", "Hunter2Hunter"] }],
+    ["db_pass, separator, value", { a: ["db_pass", "=", "Hunter2Hunter"] }],
+    ["pass= item", { a: ["pass=", "Hunter2Hunter"] }],
+    ["PW: item", { a: ["PW:", "Hunter2Hunter"] }],
+    ["PASS: item", { a: ["PASS:", "Hunter2Hunter"] }],
+    ["DB_PASS: item", { a: ["DB_PASS:", "Hunter2Hunter"] }],
+    ["DB PASS label", { a: ["DB PASS", "Hunter2Hunter"] }],
+    ["DB PW label", { a: ["DB PW", "Hunter2Hunter"] }],
+    ["pass as a pair name", { env: [{ name: "pass", value: "Hunter2Hunter" }] }],
+    ["pw as a pair name", { name: "pw", value: "Hunter2Hunter" }],
+    ["db_pass as a pair name", { name: "db_pass", value: "Hunter2Hunter" }],
+    ["db_pw as a Key/Value pair", { Key: "db_pw", Value: "Hunter2Hunter" }],
+    // RK9-678 verifier round 1: a token key below another credential key
+    ["counter key under token under userPass", { userPass: { token: { "session-user-model-cost-today": 1 } } }],
+    ["counter key under token under DB_PASS", { DB_PASS: { token: { "session-user-model-cost-today": 1 } } }],
+    ["counter key under token in a pair value", { name: "DB_PASSWORD", value: { token: { "session-user-model-cost-today": 1 } } }],
+    ["counter key under token after a name", { a: ["DB_PASSWORD", { token: { "session-user-model-cost-today": 1 } }] }],
+    ["counter key under access_tokens", { access_tokens: { system_user_session: 1 } }],
     // RK9-678: a secret as a key, whatever it labels
     ["secret key labelling a number under password", { password: { hunter2hunter2: 1 } }],
     ["secret key labelling a number under secret_key", { secret_key: { hunter2hunter2: 1 } }],
@@ -415,6 +435,8 @@ describe("presence metadata secret check", () => {
     ["pass: in free text", { note: "second pass: refactoring" }],
     ["pwd= in free text", { note: "cd ~ && pwd=/home/rk9admin" }],
     ["tmux window", { tmux_window: "@7" }],
+    ["counter map under input_tokens", { input_tokens: { cache_read: 12 } }],
+    ["counter map under tokens under tokens", { tokens: { usage: { tokens: { cache_read: 1 } } } }],
   ])("accepts %s", (_label, metadata) => {
     expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
   });

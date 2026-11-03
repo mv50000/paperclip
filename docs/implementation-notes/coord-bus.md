@@ -388,7 +388,10 @@ Rules:
   and a credential name given as a value. Such a name is one word without
   whitespace or `/` (or an upper-case label of up to three words, `"DB
   PASSWORD"`) that either ends in a credential word (the key words plus
-  `authorization`, but not `pass` or `pw`: `"first-pass"` is a word) or
+  `authorization`; `pass` and `pw` only in an assignment: a pair object
+  name, the name before a `=`/`:` item, a value that ends in `=`/`:` or
+  has no lower-case letters, so `["pass", "=", "..."]`, `"PW:"` and `"DB
+  PASS"` count and the tag `"first-pass"` does not; RK9-678) or
   `api`/`secret`/`access`/`private` + `key`, or is an
   upper-case environment variable name or a command-line flag that the key
   rule accepts (`GITHUB_TOKEN_RW`, `API_KEY_PROD`, `PASSWORD1`,
@@ -421,7 +424,10 @@ Rules:
   (`COUNTER_WORDS`, as in the free-text counter map) whose nearest
   credential ancestor is a `token`/`tokens` key, so `{"tokens": {"input":
   1234, "cache_read": 12}}` passes and `{"tokens": {"hunterpass": 1}}` is
-  422. **Numbers are exempt:** a JSON number is never a secret, so
+  422. A counter-holding key is `token`, `tokens` or a token-count key
+  (`input_tokens`; not `access_tokens`), and a token key below another
+  credential key does not turn the exemption back on (`{"DB_PASS":
+  {"token": {...}}}` is checked strictly). **Numbers are exempt:** a JSON number is never a secret, so
   token counts (`{"max_tokens": 200000}`, `{"tokens": {"input": 1234}}`)
   are accepted; a numeric password sent as a JSON number is accepted too,
   as a string it is 422 (operator decision 3.11.2026, RK9-665: numeric JSON
