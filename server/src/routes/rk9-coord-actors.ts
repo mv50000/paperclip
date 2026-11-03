@@ -28,7 +28,7 @@ import {
 import { HttpError, unprocessable } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
-import { rk9CoordMatchText, rk9CoordTextHasSecret } from "../services/rk9-coord-redact.js";
+import { rk9CoordMatchText, rk9CoordTextHasSecret } from "../services/rk9-coord-text.js";
 import {
   rk9CoordPresenceService,
   type Rk9CoordPresenceIdentity,

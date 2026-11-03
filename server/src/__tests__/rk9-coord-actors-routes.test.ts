@@ -26,7 +26,7 @@ import {
   redactRk9CoordText,
   rk9CoordMatchText,
   toRk9CoordLine,
-} from "../services/rk9-coord-redact.js";
+} from "../services/rk9-coord-text.js";
 import { rk9CoordPresenceService } from "../services/rk9-coord-presence.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -104,8 +104,8 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     ["Bearer\u202e abcdefghijkl", "[redacted]"],
     // verifier round 1 (RK9-642): an invisible character as the only separator, non-Cf fillers
     ["Bearer\u200babcdefgh12345", "[redacted]"],
-    // both readings find the same secret: the rest of the line stays
-    ["ok\u200bfine token=\u00adsupersecret123", "okfine [redacted]"],
+    // RK9-641: a text with invisible characters and a secret fails closed as a whole
+    ["ok\u200bfine token=\u00adsupersecret123", "[redacted]"],
     ["pass\u3164word=hunter2hunter2", "[redacted]"],
     ["pass\u0301word=hunter2hunter2", "[redacted]"],
     ["pass\u{E0100}word=hunter2hunter2", "[redacted]"],

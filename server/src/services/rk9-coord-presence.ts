@@ -25,7 +25,7 @@ import {
   type Rk9CoordTrust,
 } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
-import { toRk9CoordLine } from "./rk9-coord-redact.js";
+import { toRk9CoordLine } from "./rk9-coord-text.js";
 
 export const RK9_COORD_PRESENCE_TTL_S_DEFAULT = 300;
 /** A running heartbeat run with no activity for this long is treated as an orphan. */
