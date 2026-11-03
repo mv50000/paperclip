@@ -509,14 +509,19 @@ model is called.
 - The pattern is the `RK9_SESSIONS_SECRET_RX` default of `rk9-sessions.sh`
   (RK9-549). The env var overrides it on the server too. An invalid value
   falls back to the default. `rk9_coord_` tokens are always redacted.
-- Matches become `[redacted]`. Whitespace collapses to one space.
+- Matches become `[redacted]`. Whitespace collapses to one space. All
+  patterns match the same text and overlapping matches merge into one
+  `[redacted]` (RK9-676): applied one after another, a pattern ate the start
+  of the next secret and left its tail (`AKIA...xrk9_coord_<token>` kept
+  `_coord_<token>`). A second pass then sees the markers
+  (`token: [redacted]` goes whole).
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
   object as the value (`"tokens": ["..."]`, `"secrets": {"db": "..."}`,
-  `secrets=(...)`). The content up to the first closing bracket goes; when
-  there is none, the next 256 characters go (RK9-676; before, the rest of
-  the text went). The one exception is a JSON
+  `secrets=(...)`). The content up to the first closing bracket goes (to
+  the end of the text when there is none; RK9-676 tried a 256-character cap
+  and dropped it, because the tail of a long secret stayed). The one exception is a JSON
   object of counters after `token` or `tokens`: only braces, commas,
   colons, counter keys, and JSON numbers, booleans
   or null (`"tokens": {"input": 1234}`, nested `{"cache": {"read": 1}}`

@@ -40,12 +40,12 @@ const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
  * `api_keys`, ...); `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A` as
  * the separator; and a bracketed value (`"tokens": ["..."]`, `"secrets":
  * {"db": "..."}`, `secrets=(...)`), whose content up to the first closing
- * bracket goes. Without a closing bracket, the next 256 characters go
- * (RK9-676: before, the rest of the text went). Full-width forms are caught
- * by the NFKC matching reading, not here.
+ * bracket goes (to the end of the text when it has none: RK9-676 kept this
+ * fail-closed rule, because a cap left the tail of a long secret). Full-width
+ * forms are caught by the NFKC matching reading, not here.
  */
 const KEYWORD_RX =
-  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*(?:[^\]})]{6,}[\]})]|[^\]})]{6,256}))|["']?[^\s"',;]{6,})/gi;
+  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
 /** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
 const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
 /**
@@ -173,16 +173,51 @@ export function rk9CoordSecretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
 
 /** Replace every secret-looking match with `[redacted]`; the rest of the text stays. */
 export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = process.env): string {
-  const rx = rk9CoordSecretRx(env);
-  rx.lastIndex = 0;
-  return text
-    .replace(rx, RK9_COORD_REDACTED)
-    .replace(COORD_TOKEN_RX, RK9_COORD_REDACTED)
-    .replace(KEYWORD_RX, (match: string, prefix: string, bracket: string | undefined) =>
-      bracket !== undefined && COUNTER_KEYWORD_RX.test(prefix) && isRk9CoordCounterMap(bracket)
-        ? match
-        : RK9_COORD_REDACTED,
-    );
+  // RK9-676: every pattern matches the same text and overlapping matches
+  // merge into one `[redacted]`. Applied one after another, a pattern could
+  // eat the start of the next secret and leave its tail unrecognised
+  // (`AKIA...xrk9_coord_<token>` kept `_coord_<token>`, `Bearer
+  // <value>_token%3D<secret>` kept `%3D<secret>`). A second pass sees the
+  // markers, as the sequential replace did (`token: [redacted]` goes whole).
+  let current = text;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = redactRk9CoordSpans(current, env);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+function redactRk9CoordSpans(text: string, env: NodeJS.ProcessEnv): string {
+  const spans: Array<[number, number]> = [];
+  for (const pattern of [rk9CoordSecretRx(env), COORD_TOKEN_RX]) {
+    for (const match of text.matchAll(pattern)) {
+      if (match[0].length > 0) spans.push([match.index, match.index + match[0].length]);
+    }
+  }
+  for (const match of text.matchAll(KEYWORD_RX)) {
+    const bracket = match[2];
+    if (bracket !== undefined && COUNTER_KEYWORD_RX.test(match[1]!) && isRk9CoordCounterMap(bracket)) continue;
+    spans.push([match.index, match.index + match[0].length]);
+  }
+  if (spans.length === 0) return text;
+  spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  let out = "";
+  let cursor = 0;
+  let open: [number, number] | null = null;
+  for (const span of spans) {
+    if (open && span[0] < open[1]) {
+      open[1] = Math.max(open[1], span[1]);
+      continue;
+    }
+    if (open) {
+      out += text.slice(cursor, open[0]) + RK9_COORD_REDACTED;
+      cursor = open[1];
+    }
+    open = [span[0], span[1]];
+  }
+  out += text.slice(cursor, open![0]) + RK9_COORD_REDACTED + text.slice(open![1]);
+  return out;
 }
 
 /**

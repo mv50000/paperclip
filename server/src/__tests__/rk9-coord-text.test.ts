@@ -282,12 +282,23 @@ describe("RK9-676 redaction follow-ups", () => {
     expect(rk9CoordTextHasSecret(`acidbasic‍\u{1F600}`, env)).toBe(false);
   });
 
-  it("redacts an unclosed bracket value for 256 characters, not to the end of the text", () => {
-    const tail = " later text".repeat(40);
-    const out = toRk9CoordLine(`secrets: [${canary}x${"y".repeat(300)}${tail}`, 2000, env)!;
-    expect(out).not.toContain(canary);
-    expect(out).toContain("later text later text");
+  // Verifier round 1 (RK9-676): a 256-character cap on an unclosed bracket
+  // left the tail of a long secret; the value still goes to the end.
+  it("redacts an unclosed bracket value to the end of the text", () => {
+    const long = ["s3", "Kr"].join("").repeat(200);
+    const out = toRk9CoordLine(`secrets: ["${long} later text`, 500, env)!;
+    expect(out).toBe("[redacted]");
     expect(toRk9CoordLine(`tokens: [ ${canary} more`, 200, env)).not.toContain(canary);
+  });
+
+  it.each([
+    [`AKIAABCDEFGHIJKLMNOPx${"rk9_" + "coord_"}MX5t3Hg8GRqENUrSzwPp`, "MX5t3Hg8"],
+    [`Bearer abcdefgh12_token%3DUTznH4BGTFGMSPX ok`, "UTznH4BG"],
+    [`\u2705\ufe0f retry: Bearer abcdefgh12_token%3DUTznH4BGTFGMSPX ok`, "UTznH4BG"],
+  ])("does not let one match eat the start of the next secret %j", (input, tail) => {
+    const out = toRk9CoordLine(input, 300, env)!;
+    expect(out).not.toContain(tail);
+    expect(out).toContain("[redacted]");
   });
 
   it.each([[`tokens={abcdef:1}`], [`"tokens": {"hunterpass": 1}`], [`tokens: {"zzqxwvjk": true}`], [`"tokens": {"input": 1, "qwertyuiopas": 2}`]])(
