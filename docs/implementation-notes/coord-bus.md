@@ -652,6 +652,9 @@ model is called.
     a bracketed value can leave a tail (`whsec_secretapi_key=>apikey:
     {passphrase}xyz` shows `xyz`; before, the whole text went). Contrived:
     a random token never holds a keyword with a separator.
+  - Verifier round 3, Low (not a regression): outside a keyword value,
+    `Bearer x_basic <credential>` still shows the credential, because the
+    auth alternative takes `Bearer x_basic`. origin/master behaves the same.
   - A lease acquire that loses its actor row to the prune twice answers 503
     `rk9_coord_lease_retry`; the error handler reports any 5xx as a crash,
     so a rare race shows in the crash log.
