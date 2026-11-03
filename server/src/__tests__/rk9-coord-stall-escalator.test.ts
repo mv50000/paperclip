@@ -31,6 +31,7 @@ import {
   evaluateRk9CoordUnansweredEvent,
   formatRk9CoordEscalationMessage,
   resolveRk9CoordEscalatorConfig,
+  rk9CoordEscalationService,
   runRk9CoordStallTick,
   RK9_COORD_ESCALATOR_ACTOR,
   type Rk9CoordEscalatorConfig,
@@ -765,7 +766,7 @@ if (!support.supported) {
       expect(acks.map((a) => a.action).sort()).toEqual(["rk9.coord.escalation_reserved", "rk9.coord.escalation_sent"]);
     });
 
-    it("hides the question text of an ask escalation from agent runs and grok on GET /escalations (RK9-657)", async () => {
+    it("hides the question text, resource and issue of an ask escalation from agent runs, grok, worktree and headless on GET /escalations (RK9-657, RK9-689)", async () => {
       const runId = randomUUID();
       const agentId = randomUUID();
       const agentApp = () => {
@@ -802,6 +803,8 @@ if (!support.supported) {
             reason: "ask_operator_unanswered",
             mode: "shadow",
             status: "shadow",
+            resource: "repo:rks",
+            issue: "RKS-7",
             message: "What: [high] rotate sigma keys?",
           },
           {
@@ -810,23 +813,56 @@ if (!support.supported) {
             reason: "lease_stuck",
             mode: "shadow",
             status: "shadow",
+            resource: "prod:sigma",
+            issue: "RKS-8",
             message: "Coord jam: prod:sigma",
           },
         ])
         .returning();
-      const find = (res: request.Response, id: string) =>
-        (res.body.escalations as Array<{ id: string; message: string | null }>).find((row) => row.id === id);
-      for (const app of [agentApp(), appFor(none, { tokenId: "t-g", companyId, principalKind: "service", principalName: "grok" })]) {
-        const res = await request(app).get(`${coord}/escalations?limit=200`);
+      type View = { id: string; message: string | null; resource: string | null; issue: string | null };
+      const find = (res: request.Response, id: string) => (res.body.escalations as View[]).find((row) => row.id === id);
+      const grokApp = () => appFor(none, { tokenId: "t-g", companyId, principalKind: "service", principalName: "grok" });
+      // RK9-689: worktree and headless claims on the board key are restricted too.
+      const claimApp = (claim: string) => ({ app: appFor(boardKey()), claim });
+      const restricted = [
+        { app: agentApp(), claim: null },
+        { app: grokApp(), claim: null },
+        claimApp("worktree:RKS-1"),
+        claimApp("headless:run-s1"),
+      ];
+      for (const { app, claim } of restricted) {
+        const req = request(app).get(`${coord}/escalations?limit=200`);
+        const res = claim ? await req.set("X-RK9-Actor", claim) : await req;
         expect(res.status).toBe(200);
         expect(JSON.stringify(res.body)).not.toContain("sigma keys");
-        expect(find(res, askRow!.id)!.message).toBeNull();
+        // Low 1: the hidden view drops resource and issue too, as the board does.
+        expect(find(res, askRow!.id)).toMatchObject({ message: null, resource: null, issue: null });
+        // A lease jam keeps its resource and issue for every reader.
+        expect(find(res, leaseRow!.id)).toMatchObject({ resource: "prod:sigma", issue: "RKS-8" });
       }
-      // An agent run still reads a lease jam's text; the operator side reads both.
+      // Low 2: grok is withText false anyway; only the askText rule nulls the ask row's resource and issue.
+      const grokRes = await request(grokApp()).get(`${coord}/escalations?limit=200`);
+      expect(find(grokRes, leaseRow!.id)!.message).toBeNull();
+      expect(find(grokRes, askRow!.id)).toMatchObject({ resource: null, issue: null });
+      const service = rk9CoordEscalationService(db);
+      const unverifiedNoAskRule = await service.list(companyId, { withText: false, limit: 200 });
+      expect(unverifiedNoAskRule.find((row) => row.id === askRow!.id)).toMatchObject({ message: null, resource: "repo:rks", issue: "RKS-7" });
+      const textNoAsk = await service.list(companyId, { withText: true, askText: false, limit: 200 });
+      expect(textNoAsk.find((row) => row.id === askRow!.id)).toMatchObject({ message: null, resource: null, issue: null });
+      expect(textNoAsk.find((row) => row.id === leaseRow!.id)!.message).toBe("Coord jam: prod:sigma");
+      // An agent run still reads a lease jam's text; the operator side and orch read both.
       const agentRes = await request(agentApp()).get(`${coord}/escalations?limit=200`);
       expect(find(agentRes, leaseRow!.id)!.message).toBe("Coord jam: prod:sigma");
-      const operatorRes = await request(appFor(boardKey())).get(`${coord}/escalations?limit=200`);
-      expect(find(operatorRes, askRow!.id)!.message).toBe("What: [high] rotate sigma keys?");
+      for (const res of [
+        await request(appFor(boardKey())).get(`${coord}/escalations?limit=200`),
+        await request(appFor(boardKey())).get(`${coord}/escalations?limit=200`).set("X-RK9-Actor", "orch:rk9-orchestrator"),
+      ]) {
+        expect(find(res, askRow!.id)).toMatchObject({
+          message: "What: [high] rotate sigma keys?",
+          resource: "repo:rks",
+          issue: "RKS-7",
+        });
+      }
     });
 
     it("shows a failed escalation on the board and refuses to ack a shadow row", async () => {

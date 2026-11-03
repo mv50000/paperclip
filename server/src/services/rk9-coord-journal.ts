@@ -12,8 +12,9 @@
 //   The cursor advances in the same transaction; a peek does not move it.
 // - formatRk9CoordDeltaLine(): the <= 400-char hook line.
 // - board(): the full view, for explicit requests only (never from hooks).
-//   agent_run, grok and unverified viewers get an ask-operator without its
-//   payload (rk9CoordBoardShowsAskOperatorPayload, RK9-657).
+//   agent_run, grok, worktree, headless and unverified viewers get another
+//   actor's ask-operator without its payload (rk9CoordBoardShowsAskOperatorPayload,
+//   RK9-657, RK9-689).
 //
 // The journal has no UPDATE or DELETE path here; the DB trigger rejects both.
 // Contract: docs/implementation-notes/coord-bus.md.
@@ -75,15 +76,26 @@ export const RK9_COORD_ASK_OPERATOR_DELTA_KINDS = ["cc", "operator"] as const;
 export const RK9_COORD_ASK_OPERATOR_ANSWER_KINDS = ["cc", "operator"] as const;
 
 /**
+ * RK9-657, RK9-689 (operator decisions 3.11.2026): the actor kinds that never
+ * read another actor's `ask-operator` text on `GET /board` and
+ * `GET /escalations`. `worktree` and `headless` see there only their own
+ * questions, the same as their delta. `orch` keeps every question: the
+ * orchestrator answers questions on the operator's delegation.
+ */
+export const RK9_COORD_BOARD_ASK_HIDDEN_KINDS = ["agent_run", "grok", "worktree", "headless"] as const;
+
+/**
  * RK9-657 (operator decision 3.11.2026): may this `GET /board` viewer read the
- * text of an `ask-operator`? `agent_run` and `grok` never do, nor does any
- * other viewer whose journal trust is `unverified` (a remote host token, also
- * its `cc` claims). They get rk9CoordHiddenPayloadView. A board-key read
- * without a claim is the operator's own key (null or undefined): full view.
+ * text of an `ask-operator`? The kinds in RK9_COORD_BOARD_ASK_HIDDEN_KINDS
+ * never do (RK9-689 added `worktree` and `headless`), nor does any other
+ * viewer whose journal trust is `unverified` (a remote host token, also its
+ * `cc` claims). They get rk9CoordHiddenPayloadView, except for their own
+ * questions. A board-key read without a claim is the operator's own key
+ * (null or undefined): full view.
  */
 export function rk9CoordBoardShowsAskOperatorPayload(viewer: Rk9CoordResolvedActor | null | undefined): boolean {
   if (!viewer) return true;
-  if (viewer.kind === "agent_run" || viewer.kind === "grok") return false;
+  if ((RK9_COORD_BOARD_ASK_HIDDEN_KINDS as readonly string[]).includes(viewer.kind)) return false;
   return rk9CoordJournalTrust(viewer) !== "unverified";
 }
 /**
@@ -1062,6 +1074,12 @@ export function rk9CoordJournalService(db: Db) {
       askOperatorPayloads?: boolean;
       /** The restricted viewer, for its own questions (agentId: an agent_run's agent, for sibling runs). */
       viewer?: { actorId: string; agentId: string | null } | null;
+      /**
+       * RK9-689 (Low 3): set for an attributed `agent_run` viewer. It reads
+       * the body and kind of inbox messages addressed to this actor id only;
+       * other messages show id, sender, recipient and times.
+       */
+      inboxBodiesOnlyFor?: string | null;
       now?: Date;
       eventLimit?: number;
     },
@@ -1189,15 +1207,21 @@ export function rk9CoordJournalService(db: Db) {
           ? rk9CoordHiddenPayloadView(row)
           : rk9CoordBoardEventView(row),
       ),
-      inbox: inbox.map((row) => ({
-        id: row.id,
-        to: row.toActor ?? row.toIssue ?? row.toName,
-        from: row.from,
-        kind: row.kind,
-        body: showBodies ? row.body : null,
-        created_at: row.createdAt.toISOString(),
-        expires_at: row.expiresAt ? row.expiresAt.toISOString() : null,
-      })),
+      inbox: inbox.map((row) => {
+        // RK9-689: an agent run reads only messages addressed to its own
+        // actor id (the actor row, or the id held as a name: its claim rule).
+        const own =
+          !opts.inboxBodiesOnlyFor || row.toActor === opts.inboxBodiesOnlyFor || row.toName === opts.inboxBodiesOnlyFor;
+        return {
+          id: row.id,
+          to: row.toActor ?? row.toIssue ?? row.toName,
+          from: row.from,
+          kind: own ? row.kind : null,
+          body: showBodies && own ? row.body : null,
+          created_at: row.createdAt.toISOString(),
+          expires_at: row.expiresAt ? row.expiresAt.toISOString() : null,
+        };
+      }),
     };
   }
 

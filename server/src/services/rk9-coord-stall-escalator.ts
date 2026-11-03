@@ -1013,14 +1013,14 @@ export interface Rk9CoordEscalationView {
   sent_at: string | null;
 }
 
-function escalationView(row: LedgerRow, opts: { withText: boolean }): Rk9CoordEscalationView {
+function escalationView(row: LedgerRow, opts: { withText: boolean; hideTarget?: boolean }): Rk9CoordEscalationView {
   return {
     id: row.id,
     episode_key: row.episodeKey,
     kind: row.reason === RK9_COORD_NUDGE_REASON ? "nudge" : "escalation",
     reason: row.reason,
-    resource: row.resource,
-    issue: row.issue,
+    resource: opts.hideTarget ? null : row.resource,
+    issue: opts.hideTarget ? null : row.issue,
     mode: row.mode,
     status: row.status,
     event_id: row.eventId,
@@ -1041,7 +1041,11 @@ export function rk9CoordEscalationService(db: Db) {
       limit?: number;
       nudges?: boolean;
       withText: boolean;
-      /** RK9-657: false hides message and error of ask_operator_unanswered rows (the question text). Default true. */
+      /**
+       * RK9-657: false hides message and error of ask_operator_unanswered
+       * rows (the question text); RK9-689 also their resource and issue, as
+       * the board's hidden view. Default true.
+       */
       askText?: boolean;
     },
   ) {
@@ -1057,11 +1061,10 @@ export function rk9CoordEscalationService(db: Db) {
       )
       .orderBy(desc(rk9CoordEscalations.reservedAt))
       .limit(Math.min(Math.max(opts.limit ?? 50, 1), 200));
-    return rows.map((row) =>
-      escalationView(row, {
-        withText: opts.withText && (opts.askText !== false || row.reason !== "ask_operator_unanswered"),
-      }),
-    );
+    return rows.map((row) => {
+      const hiddenAsk = opts.askText === false && row.reason === "ask_operator_unanswered";
+      return escalationView(row, { withText: opts.withText && !hiddenAsk, hideTarget: hiddenAsk });
+    });
   }
 
   /**
