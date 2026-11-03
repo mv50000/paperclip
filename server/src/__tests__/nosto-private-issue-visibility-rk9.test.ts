@@ -23,7 +23,7 @@ const repoRoot = path.resolve(root, "../..");
 /** Last upstream commit before the fork's own server files (RK9-693 merge base). */
 const FORK_BASE_COMMIT = "dffc2b3ca1";
 
-const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt/;
+const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt|hidden_at/;
 const QUERY_CALL = String.raw`\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*`;
 
 /** Drops // and /* *\/ comments but keeps string and template literals, so a comment neither adds nor hides a query. */
@@ -38,18 +38,21 @@ function stripComments(src: string): string {
  * True when the (comment-free) source queries the `issues` table. Recognised forms:
  * - query-builder calls `from(issues`, `join(issues`, `update(issues`, ... also through an import alias
  *   (`issues as issueRows`) and a drizzle alias (`const x = alias(issues, "x")` then `.from(x)`)
+ * - the relational query API: `db.query.issues.findMany(...)`
  * - an `sql` template that interpolates the table: `${issues}`
  * - plain SQL text: `from issues`, `join "issues"`, `update issues`, `insert into issues`
+ * Known limits: prose in a string ("cannot update issues") counts as a query, and the comment
+ * stripper does not parse regex literals or nested template literals.
  */
 function queriesIssues(src: string): boolean {
   const code = stripComments(src);
-  const names = [
-    "issues",
-    ...Array.from(code.matchAll(/\bissues\s+as\s+(\w+)/g), (match) => match[1]),
-    ...Array.from(code.matchAll(/\b(\w+)\s*=\s*alias\(\s*issues\s*,/g), (match) => match[1]),
-  ];
+  const tables = ["issues", ...Array.from(code.matchAll(/\bissues\s+as\s+(\w+)/g), (match) => match[1])];
+  const aliases = tables.flatMap((table) =>
+    Array.from(code.matchAll(new RegExp(String.raw`\b(\w+)\s*=\s*alias\(\s*${table}\s*,`, "g")), (match) => match[1]),
+  );
   return (
-    names.some((name) => new RegExp(`${QUERY_CALL}${name}\\b`).test(code)) ||
+    [...tables, ...aliases].some((name) => new RegExp(`${QUERY_CALL}${name}\\b`).test(code)) ||
+    /\bquery\s*\.\s*issues\s*\./.test(code) ||
     /\$\{\s*issues\s*\}/.test(code) ||
     /\b(?:from|join|update|into)\s+"?issues"?(?![\w.])/i.test(code)
   );
@@ -198,8 +201,8 @@ function forkAddedFiles(): Set<string> | null {
 }
 
 const forkAdded = forkAddedFiles();
-/** CI fetches FORK_BASE_COMMIT for the server shards, so a missing commit there is a CI break, not a skip. */
-const requireGitHistory = process.env.GITHUB_ACTIONS === "true";
+/** pr.yml fetches FORK_BASE_COMMIT and sets this flag, so a missing commit there is a CI break, not a skip. */
+const requireGitHistory = process.env.RK9_REQUIRE_FORK_BASE === "1";
 
 describe("issue visibility inventory (RK9-693, RK9-707)", () => {
   it("classifies every file that queries issues without the visibility condition", () => {
@@ -226,6 +229,8 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
       builderJoin: `${imports}db.select().from(agents).leftJoin(issues, eq(a, b));`,
       importAlias: `import { issues as issueRows } from "@paperclipai/db";\ndb.update(issueRows).set({});`,
       drizzleAlias: `${imports}const parent = alias(issues, "parent");\ndb.select().from(parent);`,
+      drizzleAliasOfImportAlias: `import { issues as issueRows } from "@paperclipai/db";\nconst p = alias(issueRows, "p");\ndb.select().from(p);`,
+      relationalQuery: `db.query.issues.findMany({ where: eq(a, b) });`,
       sqlInterpolation: `${imports}db.execute(sql\`SELECT id FROM \${issues} WHERE x = 1\`);`,
       sqlText: `db.execute(sql.raw("select id from issues where company_id = $1"));`,
       sqlTextQuoted: `db.execute(sql\`UPDATE "issues" SET status = 'done'\`);`,
@@ -245,16 +250,18 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
     // A comment that names the filter no longer hides an unfiltered query.
     expect(lacksVisibilityFilter(`${imports}// TODO hiddenAt\ndb.select().from(issues);`)).toBe(true);
     expect(lacksVisibilityFilter(`${imports}db.select().from(issues).where(isNull(issues.hiddenAt));`)).toBe(false);
+    expect(lacksVisibilityFilter(`db.execute(sql\`select id from issues where hidden_at is null\`);`)).toBe(false);
   });
 
   it("fetches FORK_BASE_COMMIT in the CI test job (RK9-709)", () => {
     const workflow = readFileSync(path.join(repoRoot, ".github/workflows/pr.yml"), "utf8");
     const fetched = workflow.match(/git fetch --no-tags --depth=1 origin ([0-9a-f]{40})/)?.[1];
     expect(fetched?.startsWith(FORK_BASE_COMMIT), `pr.yml fetches ${fetched}`).toBe(true);
+    expect(workflow).toContain('RK9_REQUIRE_FORK_BASE: "1"');
   });
 
   it.skipIf(forkAdded === null && !requireGitHistory)("matches the fork list against the files git shows as fork-added", () => {
-    // In CI a null here means the FORK_BASE_COMMIT fetch step in pr.yml is missing or broken.
+    // With the pr.yml flag set, a null here means the FORK_BASE_COMMIT fetch step is missing or broken.
     expect(forkAdded, `git history for ${FORK_BASE_COMMIT} is missing`).not.toBeNull();
     const added = forkAdded!;
     const forkHits = scanUnfilteredIssueQueries().filter((file) => added.has(file));

@@ -241,8 +241,8 @@ jobs:
       # --- RK9 Custom (RK9-709) --- The issue visibility inventory
       # (server/src/__tests__/nosto-private-issue-visibility-rk9.test.ts) diffs
       # FORK_BASE_COMMIT against HEAD. The checkout is shallow, so fetch only that
-      # one commit instead of the full history. Keep the SHA in sync with the test;
-      # the test fails in CI when the commit is missing.
+      # one commit instead of the full history. Keep the SHA in sync with the test.
+      # RK9_REQUIRE_FORK_BASE on the test step makes a missing commit fail, not skip.
       - name: Fetch fork base commit for the issue visibility inventory
         run: git fetch --no-tags --depth=1 origin dffc2b3ca1b9e88fa21cb17493083e682dffd1ca
 
@@ -283,6 +283,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run grouped general test suites
+        env:
+          RK9_REQUIRE_FORK_BASE: "1"
         run: |
           if [ -n "${{ matrix.shard_count }}" ]; then
             pnpm test:run:general -- --group '${{ matrix.group }}' \
