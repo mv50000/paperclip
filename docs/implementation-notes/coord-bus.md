@@ -674,14 +674,30 @@ follow-up is the "vault_pending=false" flag.
   ` (push pending)` when `pushed` is false.
 - Only the decision's own actor, or a caller whose rows are not `unverified`,
   may post it (else 403 `rk9_coord_vault_owner_required`). A remote host token
-  or Grok cannot close someone else's decision.
+  or Grok cannot close another host's decision.
+- Host-level ownership (RK9-646): a host token (`cc:<host>:*` or
+  `remote:<host>` caller, host bound to the token) may also close every
+  decision written as `cc:<host>:*` or `remote:<host>` of its own host, so
+  a retry from a new session on the same host works. Grok has no host.
+- Check order (RK9-646): an unverified caller gets the owner 403 before any
+  existence answer. A missing event and another host's event both answer
+  403, so 404 and 409 are no existence oracle for it. A trusted caller still
+  gets 404 `rk9_coord_event_not_found` and 409 `rk9_coord_vault_path_mismatch`.
+- A `decision`'s `vault_note` has the same grammar as `vault_path`
+  (RK9-646; it was any relative path), so every noted decision can be closed.
 - The `decision` rationale cap is 2000 characters (was 1000), the CLI's
   `--why` limit.
 
-`GET /events/vault-pending[?id=<event id>][&limit=1-100]` lists `decision`
-events with a `vault_path` and no follow-up, oldest first (default 20). It
-needs a resolved actor (400 `rk9_coord_actor_required`). An unverified caller
-sees only its own decisions. Answer: `{ events: [<event view>] }`.
+`GET /events/vault-pending[?id=<event id>][&limit=1-100][&after=<event id>]`
+lists `decision` events with a `vault_path` and no follow-up, oldest first
+(default 20). It needs a resolved actor (400 `rk9_coord_actor_required`). An
+unverified caller sees only the decisions it may close (its own, and for a
+host token those of its host). A legacy row whose `vault_path` does not match
+the decision note grammar is left out: no follow-up can close it (RK9-646).
+Answer: `{ events: [<event view>], next_after: <id> | null }`. `next_after`
+is the last id of a full page; the next page is `?after=<next_after>`, and
+null means no more. A server before RK9-646 ignores `after` and sends no
+`next_after`, so a client stops after the first page there.
 
 ### headsup (RK9-647)
 

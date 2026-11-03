@@ -603,7 +603,7 @@ if (!support.supported) {
       type: "decision",
       title: "t",
       rationale: "r",
-      vault_note: "pcp_board_abcdefghijklmnop1234",
+      vault_note: "rk9/areas/pcp_board_abcdefghijklmnop1234.md",
     });
     expect(vault.status).toBe(422);
     expect(vault.body.code).toBe("rk9_coord_secret_in_field");

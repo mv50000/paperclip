@@ -55,6 +55,23 @@ describe("decision-vaulted schema", () => {
     expect(appendRk9CoordEventSchema.safeParse(body).success).toBe(false);
   });
 
+  // RK9-646: a decision's vault_note has the same grammar, so every noted decision can be closed.
+  it.each([
+    ["other company", "saatavilla/areas/x.md"],
+    ["dot dot", "rk9/areas/../x.md"],
+    ["sub dir", "rk9/areas/a/b.md"],
+    ["daily", "rk9/daily/2026-11-02.md"],
+    ["upper case", "rk9/areas/Decision.md"],
+    ["no .md", "rk9/areas/decision_log"],
+  ])("decision vault_note rejects %s", (_label, vaultNote) => {
+    expect(appendRk9CoordEventSchema.safeParse({ type: "decision", title: "t", rationale: "r", vault_note: vaultNote }).success).toBe(false);
+  });
+
+  it("decision vault_note accepts an rk9/ decision note", () => {
+    const body = { type: "decision", title: "t", rationale: "r", vault_note: "rk9/resources/coord_bus.md" };
+    expect(appendRk9CoordEventSchema.safeParse(body).success).toBe(true);
+  });
+
   it("note pattern matches the vault-mcp decision_append grammar", () => {
     expect(RK9_COORD_DECISION_NOTE_PATTERN.test("rk9/tacit/x_y-z.v2.md")).toBe(true);
     expect(RK9_COORD_DECISION_NOTE_PATTERN.test("rk9/areas/.md")).toBe(false);
@@ -225,6 +242,110 @@ if (!support.supported) {
     expect(res.status).toBe(403);
     res = await post(companyId, "cc:mv-laptop:sess-9", { ...body, ref_event_id: mine.body.event.id }, remote);
     expect(res.status).toBe(201);
+  });
+
+  it("a host token closes and lists the decisions of its own host, not another host's (RK9-646)", async () => {
+    const laptop = appFor(none, hostToken(companyId));
+    const desktop = appFor(none, { ...hostToken(companyId), tokenId: "t-host-2", principalName: "mv-desktop" });
+    const first = await post(companyId, "cc:mv-laptop:sess-old", {
+      type: "decision",
+      title: "host decision",
+      rationale: "r",
+      vault_note: note,
+    }, laptop);
+    expect(first.status).toBe(201);
+    const bare = await post(companyId, "remote:mv-laptop", {
+      type: "decision",
+      title: "bare host decision",
+      rationale: "r",
+      vault_note: note,
+    }, laptop);
+    expect(bare.status).toBe(201);
+    const ids = [first.body.event.id, bare.body.event.id];
+
+    // A new session on the same host sees and closes both.
+    const listed = await pending(companyId, "cc:mv-laptop:sess-new", "?limit=100", laptop);
+    expect(listed.body.events.map((e: { id: number }) => e.id)).toEqual(expect.arrayContaining(ids));
+    // Another host sees neither and may not close them.
+    const other = await pending(companyId, "cc:mv-desktop:sess-1", "?limit=100", desktop);
+    for (const id of ids) expect(other.body.events.map((e: { id: number }) => e.id)).not.toContain(id);
+    const body = { type: "decision-vaulted", vault_path: note, commit: "abc1234" };
+    let res = await post(companyId, "cc:mv-desktop:sess-1", { ...body, ref_event_id: ids[0] }, desktop);
+    expect(res.status).toBe(403);
+
+    res = await post(companyId, "cc:mv-laptop:sess-new", { ...body, ref_event_id: ids[0] }, laptop);
+    expect(res.status).toBe(201);
+    res = await post(companyId, "remote:mv-laptop", { ...body, ref_event_id: ids[1] }, laptop);
+    expect(res.status).toBe(201);
+  });
+
+  it("an unverified caller gets 403 before any 404/409 existence answer (RK9-646)", async () => {
+    const remote = appFor(none, hostToken(companyId));
+    const theirs = await decision(companyId, "worktree:RK9-631", "oracle");
+    const body = { type: "decision-vaulted", vault_path: note, commit: "abc1234" };
+    // Missing event and another host's event answer the same.
+    let res = await post(companyId, "cc:mv-laptop:sess-9", { ...body, ref_event_id: theirs.id + 100000 }, remote);
+    expect(res.status).toBe(403);
+    expect(res.body.code ?? res.body.details?.code).toBe("rk9_coord_vault_owner_required");
+    res = await post(companyId, "cc:mv-laptop:sess-9", { ...body, ref_event_id: theirs.id, vault_path: "rk9/areas/other.md" }, remote);
+    expect(res.status).toBe(403);
+    // A trusted caller still gets the precise answers.
+    res = await post(companyId, "worktree:RK9-631", { ...body, ref_event_id: theirs.id + 100000 });
+    expect(res.status).toBe(404);
+    res = await post(companyId, "worktree:RK9-631", { ...body, ref_event_id: theirs.id, vault_path: "rk9/areas/other.md" });
+    expect(res.status).toBe(409);
+  });
+
+  it("leaves legacy decisions with a non-rk9 vault_path out of vault-pending (RK9-646)", async () => {
+    const legacyCompany = randomUUID();
+    await db.insert(companies).values({ id: legacyCompany, name: "Legacy vault", issuePrefix: "RKL" });
+    const rows = await db
+      .insert(rk9CoordEvents)
+      .values(
+        ["saatavilla/areas/x.md", "rk9/areas/Upper.md", "rk9/areas/a/b.md", note].map((vaultPath) => ({
+          companyId: legacyCompany,
+          type: "decision",
+          actorRef: "worktree:RK9-631",
+          actorKind: "worktree",
+          trust: "attributed" as const,
+          summary: `legacy ${vaultPath}`,
+          payload: { title: "legacy", rationale: "r", vault_note: vaultPath },
+          vaultPath,
+        })),
+      )
+      .returning();
+    const res = await pending(legacyCompany, "worktree:RK9-631", "?limit=100", appFor(boardKey([legacyCompany])));
+    expect(res.status).toBe(200);
+    expect(res.body.events.map((e: { id: number }) => e.id)).toEqual([rows[3]!.id]);
+    expect(res.body.next_after).toBeNull();
+    const one = await pending(legacyCompany, "worktree:RK9-631", `?id=${rows[0]!.id}`, appFor(boardKey([legacyCompany])));
+    expect(one.body.events).toEqual([]);
+  });
+
+  it("pages vault-pending with after and next_after (RK9-646)", async () => {
+    const pagedCompany = randomUUID();
+    await db.insert(companies).values({ id: pagedCompany, name: "Paged vault", issuePrefix: "RKG" });
+    const app = appFor(boardKey([pagedCompany]));
+    const ids: number[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const res = await post(pagedCompany, "worktree:RK9-631", { type: "decision", title: `p${i}`, rationale: "r", vault_note: note }, app);
+      expect(res.status).toBe(201);
+      ids.push(res.body.event.id);
+    }
+    const seen: number[] = [];
+    let after: number | null = 0;
+    let pages = 0;
+    while (after !== null && pages < 10) {
+      const res = await pending(pagedCompany, "worktree:RK9-631", `?limit=2&after=${after}`, app);
+      expect(res.status).toBe(200);
+      seen.push(...res.body.events.map((e: { id: number }) => e.id));
+      after = res.body.next_after;
+      pages += 1;
+    }
+    expect(seen).toEqual(ids);
+    expect(pages).toBe(3);
+    const bad = await pending(pagedCompany, "worktree:RK9-631", "?after=-1", app);
+    expect(bad.status).toBe(400);
   });
 
   it("vault-pending needs a resolved actor", async () => {

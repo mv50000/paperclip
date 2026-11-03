@@ -49,19 +49,26 @@ const commonEventFields = {
   repo: rk9CoordRepoSchema.optional(),
 };
 
+/**
+ * Vault note of `rk9 decision --vault` (RK9-631): an rk9/ PARA note, the same
+ * grammar as vault-mcp's decision_append. No `..` segment can match.
+ */
+export const RK9_COORD_DECISION_NOTE_PATTERN = /^rk9\/(projects|areas|resources|archives|tacit)\/[a-z0-9][a-z0-9_.-]{0,119}\.md$/;
+
 const decisionSchema = z.object({
   ...commonEventFields,
   type: z.literal("decision"),
   issue: rk9CoordIssueSchema.optional(),
   title: freeText(1000),
   rationale: freeText(4000),
-  /** Vault note path, e.g. `rk9/resources/coord_bus.md`. */
+  /**
+   * Vault note path, e.g. `rk9/resources/coord_bus.md`. RK9-646: the same
+   * grammar as decision-vaulted's `vault_path` and vault-mcp's
+   * decision_append, so every decision with a note can be closed.
+   */
   vault_note: z
     .string()
-    .min(1)
-    .max(500)
-    .regex(/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/, "vault_note must be a relative vault path")
-    .refine((value) => !value.split("/").includes(".."), "vault_note must not contain ..")
+    .regex(RK9_COORD_DECISION_NOTE_PATTERN, "vault_note must be rk9/<section>/<name>.md")
     .optional(),
 });
 
@@ -114,12 +121,6 @@ export const rk9CoordAskOperatorSchema = z.object({
   /** Journal id of the event this one answers or follows up. */
   reply_to: z.number().int().positive().optional(),
 });
-
-/**
- * Vault note of `rk9 decision --vault` (RK9-631): an rk9/ PARA note, the same
- * grammar as vault-mcp's decision_append. No `..` segment can match.
- */
-export const RK9_COORD_DECISION_NOTE_PATTERN = /^rk9\/(projects|areas|resources|archives|tacit)\/[a-z0-9][a-z0-9_.-]{0,119}\.md$/;
 
 /**
  * decision-vaulted (RK9-631): the vault note of decision `ref_event_id` is
@@ -239,6 +240,8 @@ export const rk9CoordVaultPendingQuerySchema = z.object({
   /** One decision event id; omitted = every pending decision. */
   id: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
+  /** RK9-646: page cursor, only decisions with a larger event id (the previous answer's `next_after`). */
+  after: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
 });
 export type Rk9CoordVaultPendingQuery = z.infer<typeof rk9CoordVaultPendingQuerySchema>;
 
