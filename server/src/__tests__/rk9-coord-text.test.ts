@@ -226,3 +226,32 @@ describe("verifier round 2 (RK9-641)", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+// RK9-641 verifier round 3. Fake values only.
+describe("verifier round 3 (RK9-641)", () => {
+  it.each(["true:", "null:", "false:", "a:1,"])("scans a counter object in linear time (%j repeated)", (unit) => {
+    const started = Date.now();
+    toRk9CoordLine(`phase tokens: {${unit.repeat(400)}!}`, 140, env);
+    rk9CoordTextHasSecret(`tokens:{${unit.repeat(400)}!}`, env);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("still keeps a counter object and rejects a string value after the scan rewrite", () => {
+    expect(rk9CoordTextHasSecret(`"tokens": {"input": 1234, "ok": true, "x": null, "c": {"read": 1}}`, env)).toBe(false);
+    expect(rk9CoordTextHasSecret(`"tokens": {"input2": 1}`, env)).toBe(true);
+    expect(rk9CoordTextHasSecret(`"tokens": {"true": "x"}`, env)).toBe(true);
+    expect(rk9CoordTextHasSecret(`"tokens": {"input": 12ab}`, env)).toBe(true);
+  });
+
+  it.each([
+    [`\u2764\ufe0f fixing basic-auth-middleware`],
+    [`Pa\u0308ivita\u0308 basicsettings.yaml`],
+    [`ok \u{1F469}\u200d\u{1F4BB} Bearerless design`],
+  ])("keeps ordinary text with invisible characters and a bearer/basic word %j", (input) => {
+    expect(rk9CoordTextHasSecret(input, env)).toBe(false);
+  });
+
+  it("flags a glued Bearer token in an identifier", () => {
+    expect(rk9CoordIdentifierHasSecret(`Bearer\u200babcd\u200befghijkl`, env)).toBe(true);
+  });
+});

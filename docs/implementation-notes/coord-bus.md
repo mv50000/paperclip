@@ -479,10 +479,12 @@ model is called.
   Hangul filler and control removed, once with them as spaces, and in the
   two mixed readings (controls as spaces and the rest removed, and the
   reverse). The readings are NFKC-folded, so full-width text matches too.
-  The braille blank (U+2800) counts as invisible here. When the text has
-  any invisible character, `Bearer` or `Basic` glued to 8+ token
-  characters in the stripped reading counts as a secret too (one
-  invisible character as the separator, another inside the token).
+  The braille blank (U+2800) counts as invisible here. `Bearer` or
+  `Basic` at a word start, then only invisible characters as the
+  separator, then 8+ token characters with invisible characters between
+  them counts as a secret too (one invisible character as the separator,
+  another inside the token). The counter-object check is a linear scan,
+  not a regex, so no input can make it backtrack.
 - **Fail closed.** A text that contains any control, format, combining or
   filler character becomes `[redacted]` as a whole when any reading shows a
   secret. Any text whose stored line still shows a secret in some reading

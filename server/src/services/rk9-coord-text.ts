@@ -56,8 +56,36 @@ const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
  * the pattern cannot split one number into many (no catastrophic
  * backtracking).
  */
-const COUNTER_MAP_RX =
-  /^\{(?:\s|[{},:]|["']?[A-Za-z_][A-Za-z_-]{0,39}["']?(?=\s*:)|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\d.eE])|true|false|null)*\}$/;
+/** One token of a counter object; sticky, so the scan below never backtracks. */
+const COUNTER_TOKEN_RX = /\s+|[{},:]|(["']?)([A-Za-z_][A-Za-z_-]{0,39})\1|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const COUNTER_KEY_FOLLOW_RX = /\s*:/y;
+const COUNTER_LITERALS = new Set(["true", "false", "null"]);
+
+/**
+ * Linear scan (RK9-641 round 3: a regex with a key-or-literal alternation
+ * backtracked exponentially on `true:true:...`). Each word must be a key
+ * (followed by `:`) or an unquoted true/false/null; a number must not run
+ * into a digit, dot or letter.
+ */
+function isRk9CoordCounterMap(content: string): boolean {
+  if (content.length > 4096 || !content.startsWith("{") || !content.endsWith("}")) return false;
+  let index = 0;
+  while (index < content.length) {
+    COUNTER_TOKEN_RX.lastIndex = index;
+    const token = COUNTER_TOKEN_RX.exec(content);
+    if (!token || token[0].length === 0) return false;
+    const end = index + token[0].length;
+    if (token[2] !== undefined) {
+      COUNTER_KEY_FOLLOW_RX.lastIndex = end;
+      const isKey = COUNTER_KEY_FOLLOW_RX.test(content);
+      if (!isKey && !(token[1] === "" && COUNTER_LITERALS.has(token[2]))) return false;
+    } else if (/^-?\d/.test(token[0]) && end < content.length && /[\d.eEA-Za-z_]/.test(content[end]!)) {
+      return false;
+    }
+    index = end;
+  }
+  return true;
+}
 const COUNTER_KEYWORD_RX = /^tokens?(?![a-z])/i;
 
 /**
@@ -118,7 +146,7 @@ export function redactRk9CoordText(text: string, env: NodeJS.ProcessEnv = proces
     .replace(rx, RK9_COORD_REDACTED)
     .replace(COORD_TOKEN_RX, RK9_COORD_REDACTED)
     .replace(KEYWORD_RX, (match: string, prefix: string, bracket: string | undefined) =>
-      bracket !== undefined && COUNTER_KEYWORD_RX.test(prefix) && COUNTER_MAP_RX.test(bracket)
+      bracket !== undefined && COUNTER_KEYWORD_RX.test(prefix) && isRk9CoordCounterMap(bracket)
         ? match
         : RK9_COORD_REDACTED,
     );
@@ -173,17 +201,21 @@ function rk9CoordReadings(text: string): string[] {
   ];
 }
 
-/**
- * Bearer and Basic with the separator gone (RK9-641 round 2): when one
- * invisible character is the separator and another sits inside the token
- * (`Bearer<ZWSP>abcd<ZWSP>efgh...`), no reading of the whole text has both
- * a space and the joined token. Only used on the stripped reading of a text
- * that has invisible characters.
- */
-const GLUED_AUTH_RX = /(bearer|basic)[A-Za-z0-9._~+/=-]{8,}/i;
-
 /** Any control, format, combining or filler character (the matching set). */
 const HAS_INVISIBLE_RX = new RegExp(MATCH_INVISIBLE_RX.source, "u");
+/**
+ * Bearer or Basic at a word start, then one or more invisible characters as
+ * the only separator, then 8+ token characters with invisible characters
+ * between them (RK9-641 round 2: `Bearer<ZWSP>abcd<ZWSP>efgh...`; no single
+ * reading of the whole text has both a space and the joined token). Matched
+ * on the raw text, so `basic-auth` next to an emoji is not a secret. The
+ * token-character class and the invisible class are disjoint, so the
+ * repetition cannot backtrack.
+ */
+const GLUED_AUTH_RX = new RegExp(
+  `(?<![A-Za-z0-9])(?:bearer|basic)${MATCH_INVISIBLE_RX.source}+(?:[A-Za-z0-9._~+/=-]${MATCH_INVISIBLE_RX.source}*){8,}`,
+  "iu",
+);
 
 /**
  * True when any reading of the text (raw, display, matching) contains
@@ -196,7 +228,7 @@ export function rk9CoordTextHasSecret(text: string, env: NodeJS.ProcessEnv = pro
   for (const form of rk9CoordReadings(text)) {
     if (redactRk9CoordText(form, env) !== form) return true;
   }
-  return HAS_INVISIBLE_RX.test(text) && GLUED_AUTH_RX.test(rk9CoordMatchText(text));
+  return GLUED_AUTH_RX.test(text);
 }
 
 /**
@@ -238,7 +270,7 @@ export function rk9CoordIdentifierHasSecret(text: string, env: NodeJS.ProcessEnv
       if (identifierRx(pattern).test(form)) return true;
     }
   }
-  return false;
+  return GLUED_AUTH_RX.test(text);
 }
 
 /**
