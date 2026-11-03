@@ -181,3 +181,48 @@ describe("verifier round 1 (RK9-641)", () => {
     expect(collapseRk9CoordText("a\u200eb\u200fc\u061cd")).toBe("abcd");
   });
 });
+
+// RK9-641 verifier round 2. Fake values only.
+describe("verifier round 2 (RK9-641)", () => {
+  it.each([
+    [`auth Bearer\u200babcd\u200befghijkl done`],
+    [`auth Bearer\u3164abcd\u200befghijkl done`],
+    [`auth Bearer\u2800abcdefghijkl done`],
+    [`auth basic\u200bdXNl\u200bcjpodW50ZXIy done`],
+  ])("fails closed when invisible characters both separate and split a token %j", (input) => {
+    expect(toRk9CoordLine(input, 200, env)).toBe("[redacted]");
+    expect(rk9CoordTextHasSecret(input, env)).toBe(true);
+  });
+
+  it.each([[`Bearer\u3164abcdefghijkl`], [`Bearer\u1160abcdefghijkl`], [`Bearer\ufe0fabcdefghijkl`], [`Bearer\u2800abcdefghijkl`]])(
+    "flags an identifier with a blank-looking separator %j",
+    (to) => {
+      expect(rk9CoordIdentifierHasSecret(to, env)).toBe(true);
+    },
+  );
+
+  it.each([
+    [`password: {"pin": 83749201}`],
+    [`passwords: {pin: 83749201}`],
+    [`api_key: {"key": 1234567890123}`],
+    [`secret: {"CorrectHorseBatteryStaple": true}`],
+    [`"tokens": {"input": 1, "model": "opus-${canary}"}`],
+  ])("keeps no bracketed value under a credential keyword or with a string value %j", (input) => {
+    expect(rk9CoordTextHasSecret(input, env)).toBe(true);
+  });
+
+  it.each([
+    [`{"tokens":{"cache":{"read":1,"write":2}}}`],
+    [`{"tokens":{"usage":{"input":1}}}`],
+    [`"max_tokens": {"input": 1234, "output": -5, "ratio": 0.5, "ok": true, "x": null}`],
+    [`tokens={input: 12}`],
+  ])("keeps a counter object under tokens %j", (input) => {
+    expect(rk9CoordTextHasSecret(input, env)).toBe(false);
+  });
+
+  it("matches a long digit run in a counter object in linear time", () => {
+    const started = Date.now();
+    expect(rk9CoordTextHasSecret(`"tokens": {${"1".repeat(20000)}x}`, env)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});

@@ -449,10 +449,13 @@ model is called.
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or
   object as the value (`"tokens": ["..."]`, `"secrets": {"db": "..."}`,
   `secrets=(...)`). The content up to the first closing bracket goes (to
-  the end of the text when there is none). The one exception is a closed
-  JSON object of counters: every key a word without digits, every value a
-  JSON number, boolean or null (`"tokens": {"input": 1234}`), so token
-  counts stay. An array of numbers under a keyword is redacted.
+  the end of the text when there is none). The one exception is a JSON
+  object of counters after `token` or `tokens`: only braces, commas,
+  colons, keys that are words without digits, and JSON numbers, booleans
+  or null (`"tokens": {"input": 1234}`, nested `{"cache": {"read": 1}}`
+  too), so token counts stay. A string value or a digit in a key under
+  `tokens` is redacted, and so is any bracketed value under `password`,
+  `secret` or `api_key` and any array.
 - **Known prose false positive.** A keyword, a separator and one word of 6+
   characters is redacted: `Secrets: rotated today` is stored as
   `[redacted] today`. This is deliberate (fail closed): a rule that keeps
@@ -466,7 +469,8 @@ model is called.
   the BOM, the stand-alone Hangul fillers (U+3164, U+FFA0) and the tag
   characters (U+E0000-U+E007F; a subdivision flag such as England's shows
   as a black flag). ZWNJ (U+200C), ZWJ (U+200D) and the variation selectors
-  stay when they stand alone or in pairs, so emoji sequences (👩‍💻, ❤️‍🔥)
+  stay when they stand alone or in pairs, so emoji sequences (woman
+  technologist U+1F469 U+200D U+1F4BB, heart on fire U+2764 U+FE0F U+200D U+1F525)
   and Persian ZWNJ survive; a run of three or more of them is
   steganography (emoji smuggling) and is removed.
 - **Matching readings.** Invisible characters can split a secret past the
@@ -475,6 +479,10 @@ model is called.
   Hangul filler and control removed, once with them as spaces, and in the
   two mixed readings (controls as spaces and the rest removed, and the
   reverse). The readings are NFKC-folded, so full-width text matches too.
+  The braille blank (U+2800) counts as invisible here. When the text has
+  any invisible character, `Bearer` or `Basic` glued to 8+ token
+  characters in the stripped reading counts as a secret too (one
+  invisible character as the separator, another inside the token).
 - **Fail closed.** A text that contains any control, format, combining or
   filler character becomes `[redacted]` as a whole when any reading shows a
   secret. Any text whose stored line still shows a secret in some reading
@@ -482,7 +490,9 @@ model is called.
   text with an ordinary secret keeps the rest of the line
   (`deploy ok token=... done` -> `deploy ok [redacted] done`). The server
   does not count `[redacted]` markers (a literal marker in the text could
-  fool such a count).
+  fool such a count). Trade-off: text with an emoji variation selector
+  (U+FE0F) or decomposed accents (NFD) and an ordinary secret loses the
+  whole line.
 - Fields stored verbatim (`to`, `repo`, `app`, `vault_note`,
   `client_event_id`, the heads-up `session_id`) are grammar-restricted. A secret-looking value there is
   422 `rk9_coord_secret_in_field`, not a silent store. A match counts only at
@@ -491,8 +501,9 @@ model is called.
   hide a token after it (`task-runner_ghp_...` is 422), and a match that
   starts with a non-alphanumeric character counts anywhere
   (`https://user:pw@host` is 422). The check runs on the raw value and on
-  its matching reading, so a combining mark, a selector or a full-width
-  form cannot hide a token. The inbox `to` also rejects control and format
+  both matching readings (invisible characters removed, and as spaces), so
+  a combining mark, a selector, a blank filler or a full-width form cannot
+  hide a token. The inbox `to` also rejects control and format
   characters with 400.
 - The raw text is redacted before the collapse too, so a pattern that spans
   a tab or newline is caught.
