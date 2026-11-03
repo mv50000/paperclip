@@ -1,8 +1,12 @@
-// RK9-693 (nosto prep, RK9-675 option C): upstream v2026.1023 adds `unpriced_usage_policy`
-// with default 'block'. The fork has no such policy: a claude_local subscription run is
-// recorded with costCents = 0 and must never trip a budget hard stop or auto-pause the agent.
-// Wanted value after the lift (RK9-701): unpriced_usage_policy = 'allow' (do not block, do not
-// pause) for claude_local subscription usage. If the lift changes this behaviour, this test fails.
+// RK9-693 (nosto prep, RK9-675 option C), RK9-707: upstream v2026.1023 adds `unpriced_usage_policy`
+// with default 'block'. 1023 counts an event as unpriced only when
+// `cost_status = 'unpriced' AND billing_type <> 'subscription_included'` (budgets.ts
+// computeObservedSpends), so a subscription_included fixture passes under both 'block' and 'allow'.
+// The real risk is a claude_local run that reports billing_type `api` (stored as `metered_api`) or
+// no billing type (`unknown`) with no price: the heartbeat stores it as cost_status 'unpriced'
+// (resolveLedgerCostStatus). The fork never blocks on it. Wanted value after the lift (RK9-701):
+// unpriced_usage_policy = 'allow' (no hard stop, no auto-pause). Under the 1023 default 'block' the
+// unpriced cases below fail on the `active` / no-incident / no-block assertions.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -17,6 +21,7 @@ import {
 import { eq } from "drizzle-orm";
 import { costService } from "../services/costs.ts";
 import { budgetService } from "../services/budgets.ts";
+import { resolveLedgerCostStatus } from "../services/heartbeat.ts";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -27,7 +32,7 @@ vi.mock("../services/activity-log.js", () => ({ logActivity: vi.fn() }));
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
-describeEmbeddedPostgres("claude_local subscription usage never auto-pauses (RK9-693)", () => {
+describeEmbeddedPostgres("unpriced claude_local usage never auto-pauses (RK9-693, RK9-707)", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
@@ -98,26 +103,7 @@ describeEmbeddedPostgres("claude_local subscription usage never auto-pauses (RK9
     return { companyId, agentId };
   }
 
-  it("keeps the agent active and raises no incident for unpriced subscription runs", async () => {
-    const { companyId, agentId } = await fixture();
-    const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
-    const costs = costService(db, { cancelWorkForScope });
-
-    for (let i = 0; i < 3; i += 1) {
-      await costs.createEvent(companyId, {
-        agentId,
-        provider: "anthropic",
-        biller: "anthropic",
-        billingType: "subscription_included",
-        model: "claude-sonnet-5-5",
-        inputTokens: 5_000_000,
-        cachedInputTokens: 1_000_000,
-        outputTokens: 500_000,
-        costCents: 0,
-        occurredAt: new Date(),
-      });
-    }
-
+  async function expectNotPaused(companyId: string, agentId: string, cancelWorkForScope: ReturnType<typeof vi.fn>) {
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     expect(agent?.status).toBe("active");
     expect(agent?.pauseReason ?? null).toBeNull();
@@ -125,7 +111,73 @@ describeEmbeddedPostgres("claude_local subscription usage never auto-pauses (RK9
     expect(cancelWorkForScope).not.toHaveBeenCalled();
     const block = await budgetService(db).getInvocationBlock(companyId, agentId);
     expect(block).toBeNull();
+  }
+
+  it("a claude_local run with token usage and no price is stored as unpriced", () => {
+    // The precondition for the cases below: an unpriced run reaches the ledger as cost_status 'unpriced'.
+    expect(
+      resolveLedgerCostStatus({ costUsd: null, inputTokens: 5_000, cachedInputTokens: 0, outputTokens: 500 }),
+    ).toBe("unpriced");
   });
+
+  // `metered_api` is what the heartbeat stores for an adapter billing type `api` (normalizeLedgerBillingType).
+  it.each(["metered_api", "unknown"] as const)(
+    "keeps the agent active for an unpriced claude_local run with billing_type %s (policy allow)",
+    async (billingType) => {
+      const { companyId, agentId } = await fixture();
+      const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+      const costs = costService(db, { cancelWorkForScope });
+
+      for (let i = 0; i < 3; i += 1) {
+        await costs.createEvent(companyId, {
+          agentId,
+          provider: "anthropic",
+          biller: "anthropic",
+          billingType,
+          costStatus: "unpriced",
+          model: "claude-sonnet-5-5",
+          inputTokens: 5_000_000,
+          cachedInputTokens: 1_000_000,
+          outputTokens: 500_000,
+          costCents: 0,
+          occurredAt: new Date(),
+        });
+      }
+
+      const stored = await db.select().from(costEvents);
+      expect(stored.map((row) => [row.billingType, row.costStatus])).toEqual(
+        Array.from({ length: 3 }, () => [billingType, "unpriced"]),
+      );
+      await expectNotPaused(companyId, agentId, cancelWorkForScope);
+    },
+  );
+
+  it("keeps the agent active for an unpriced subscription_included run", async () => {
+    // 1023 exempts subscription_included from the unpriced count, so this case alone cannot tell
+    // 'block' from 'allow'. It stays as a regression guard for the subscription path.
+    const { companyId, agentId } = await fixture();
+    const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);
+    const costs = costService(db, { cancelWorkForScope });
+    await costs.createEvent(companyId, {
+      agentId,
+      provider: "anthropic",
+      biller: "anthropic",
+      billingType: "subscription_included",
+      costStatus: "unpriced",
+      model: "claude-sonnet-5-5",
+      inputTokens: 5_000_000,
+      cachedInputTokens: 1_000_000,
+      outputTokens: 500_000,
+      costCents: 0,
+      occurredAt: new Date(),
+    });
+    await expectNotPaused(companyId, agentId, cancelWorkForScope);
+  });
+
+  // 1023 also blocks while a finished run has heartbeat_runs.cost_accounting_pending = true
+  // (budgets.ts computeObservedSpends, `pendingRunCount - recoveringRunCount > 0`). The fork has no
+  // such column, so the case cannot be modelled yet. Activate in RK9-701.
+  it.todo("a finished claude_local run with cost accounting pending does not pause the agent (RK9-701)");
 
   it("control: a priced metered run over the limit still pauses (the hard stop itself stays)", async () => {
     const { companyId, agentId } = await fixture();
