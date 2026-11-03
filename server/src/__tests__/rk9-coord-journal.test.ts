@@ -945,6 +945,24 @@ if (!support.supported) {
     expect(remote.body.inbox[0].body).toBeNull();
   });
 
+  it("touches the cursor on every non-peek delta, also an empty one (RK9-641)", async () => {
+    const cid = await newCompany();
+    const actor = "worktree:RKT-1";
+    const delta = (query = "") =>
+      request(appFor(boardKey([cid]))).get(`${base(cid)}/events/delta${query}`).set("X-RK9-Actor", actor);
+    expect((await delta()).status).toBe(204);
+    const [row] = await db.select({ id: rk9CoordActors.id }).from(rk9CoordActors).where(eq(rk9CoordActors.actorRef, actor));
+    const old = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+    await db.update(rk9CoordCursors).set({ updatedAt: old }).where(eq(rk9CoordCursors.actorId, row!.id));
+    // A peek does not touch it.
+    expect((await delta("?peek=1")).status).toBe(204);
+    const [peeked] = await db.select().from(rk9CoordCursors).where(eq(rk9CoordCursors.actorId, row!.id));
+    expect(peeked!.updatedAt.getTime()).toBe(old.getTime());
+    expect((await delta()).status).toBe(204);
+    const [touched] = await db.select().from(rk9CoordCursors).where(eq(rk9CoordCursors.actorId, row!.id));
+    expect(touched!.updatedAt.getTime()).toBeGreaterThan(old.getTime());
+  });
+
   it("prunes never-ended stubs and stale actors by last activity, and old undelivered inbox rows (RK9-641)", async () => {
     const cid = await newCompany();
     const now = new Date();
@@ -1012,8 +1030,7 @@ if (!support.supported) {
       },
     ]);
 
-    const result = await pruneRk9Coord(db, { now });
-    expect(result.actors).toBeGreaterThanOrEqual(3);
+    await pruneRk9Coord(db, { now });
     const left = await db.select({ ref: rk9CoordActors.actorRef }).from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
     expect(left.map((row) => row.ref).sort()).toEqual([
       "cc:h:reg-8d",

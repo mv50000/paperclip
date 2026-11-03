@@ -272,7 +272,10 @@ the message; that row is pruned after 30 days and the actor after it).
 The delete repeats the staleness test on the target row, so a concurrent
 presence refresh wins. This bounds the growth from remote host tokens that
 mint new `cc:<host>:<random>` ids: each such id costs one actor row and
-one cursor row for about 7 days.
+one cursor row for about 7 days. Like an ended actor's delete, the
+cascade also removes the actor's delivered or expired inbox rows and its
+released leases at once, before their own 30 days; the journal keeps the
+history.
 
 The prune deletes in batches of 5,000 by `id`. It does not wait for old
 cursors: an actor whose cursor points at a pruned event simply continues
