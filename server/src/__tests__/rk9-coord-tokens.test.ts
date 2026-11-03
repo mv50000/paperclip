@@ -26,6 +26,7 @@ import {
 } from "../middleware/rk9-coord-token-auth.js";
 import { rk9CoordRoutes } from "../routes/rk9-coord.js";
 import { rk9CoordTokenRoutes } from "../routes/rk9-coord-tokens.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import {
   generateRk9CoordToken,
   hashRk9CoordToken,
@@ -577,10 +578,10 @@ if (!support.supported) {
       companyId,
       principalKind: "service",
       principalName: "grok",
-      expiresAt: new Date(Date.now() + 60_000),
+      expiresAt: new Date(Date.now() + 90_000),
     });
     expect(await service.resolve(token)).toMatchObject({ principalName: "grok" });
-    expect(await service.resolve(token, new Date(Date.now() + 120_000))).toBeNull();
+    expect(await service.resolve(token, new Date(Date.now() + 180_000))).toBeNull();
   });
 
   it("refuses to rotate an expired token into another dead token", async () => {
@@ -589,7 +590,7 @@ if (!support.supported) {
       companyId,
       principalKind: "host",
       principalName: "short-lived",
-      expiresAt: new Date(Date.now() + 1_000),
+      expiresAt: new Date(Date.now() + 3_600_000),
     });
     await db.update(rk9CoordTokens).set({ expiresAt: new Date(Date.now() - 1_000) }).where(eq(rk9CoordTokens.id, record.id));
     const app = manageApp(operatorKey);
@@ -611,8 +612,10 @@ if (!support.supported) {
       companyId,
       principalKind: "host",
       principalName: "nearly-dead",
-      expiresAt: new Date(Date.now() + 30_000),
+      expiresAt: new Date(Date.now() + 3_600_000),
     });
+    // Seeded below the minimum directly: the service refuses to issue it.
+    await db.update(rk9CoordTokens).set({ expiresAt: new Date(Date.now() + 30_000) }).where(eq(rk9CoordTokens.id, record.id));
     const app = manageApp(operatorKey);
     const inherited = await request(app).post(`/api/companies/${companyId}/rk9/coord-tokens/${record.id}/rotate`).send({});
     expect(inherited.status).toBe(422);
@@ -693,6 +696,89 @@ if (!support.supported) {
       .from(activityLog)
       .where(and(eq(activityLog.entityType, "rk9_coord_token"), eq(activityLog.entityId, ok.body.record.id)));
     expect(audit.map((row) => row.action)).toEqual(["rk9_coord.token_rotated"]);
+  });
+
+  // RK9-672: the minimum lifetime holds for a direct service caller too.
+  it("enforces the 60 s minimum lifetime in the service, not only in the route", async () => {
+    const service = rk9CoordTokenService(db);
+    await expect(
+      service.issue({ companyId, principalKind: "host", principalName: "svc-soon", expiresAt: new Date(Date.now() + 10_000) }),
+    ).rejects.toMatchObject({ status: 422, details: { code: "rk9_coord_token_expiry_too_soon" } });
+    await expect(
+      service.issue({ companyId, principalKind: "host", principalName: "svc-past", expiresAt: new Date(Date.now() - 1_000) }),
+    ).rejects.toMatchObject({ status: 422, details: { code: "rk9_coord_token_expiry_past" } });
+    expect(await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.principalName, "svc-soon"))).toHaveLength(0);
+    const { record } = await service.issue({ companyId, principalKind: "host", principalName: "svc-ok" });
+    await expect(service.rotate({ companyId, tokenId: record.id, expiresAt: new Date(Date.now() + 10_000) })).rejects.toMatchObject({
+      status: 422,
+      details: { code: "rk9_coord_token_expiry_too_soon" },
+    });
+    const [still] = await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.id, record.id));
+    expect(still!.revokedAt).toBeNull();
+    const ok = await service.rotate({ companyId, tokenId: record.id, expiresAt: new Date(Date.now() + 3_600_000) });
+    expect(ok.record.expiresAt).not.toBeNull();
+  });
+
+  // RK9-672: activity.logged goes out after the commit, never on rollback, and
+  // a throwing listener does not turn into a 500.
+  it("publishes activity.logged after the commit and survives a throwing listener", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeCompanyLiveEvents(companyId, (event) => {
+      if (event.type === "activity.logged") events.push({ type: event.type, payload: event.payload as Record<string, unknown> });
+    });
+    try {
+      const app = manageApp(operatorKey);
+      const base = `/api/companies/${companyId}/rk9/coord-tokens`;
+      const issued = await request(app).post(base).send({ principalKind: "host", principalName: "live-evt" });
+      expect(issued.status).toBe(201);
+      const mine = events.filter((e) => e.payload.entityId === issued.body.record.id);
+      expect(mine.map((e) => e.payload.action)).toEqual(["rk9_coord.token_issued"]);
+      expect(JSON.stringify(mine)).not.toContain(issued.body.token);
+
+      // Rollback: rotate writes two audit rows (revoked, then rotated). The
+      // second insert fails, so the first row was already written in the
+      // transaction. If events were published inside the transaction instead
+      // of after the commit, a token_revoked event would leak out here.
+      await db.execute(sql.raw(`
+        CREATE FUNCTION rk9_test_live_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.action = 'rk9_coord.token_rotated' AND NEW.details->>'principalName' = 'live-evt' THEN
+            RAISE EXCEPTION 'audit insert failed';
+          END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER rk9_test_live_fail_trg BEFORE INSERT ON activity_log
+          FOR EACH ROW EXECUTE FUNCTION rk9_test_live_fail();
+      `));
+      try {
+        const before = events.length;
+        const failed = await request(app).post(`${base}/${issued.body.record.id}/rotate`).send({});
+        expect(failed.status).toBe(500);
+        expect(events).toHaveLength(before);
+        const [still] = await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.id, issued.body.record.id));
+        expect(still!.revokedAt).toBeNull();
+      } finally {
+        await db.execute(sql.raw(`
+          DROP TRIGGER IF EXISTS rk9_test_live_fail_trg ON activity_log;
+          DROP FUNCTION IF EXISTS rk9_test_live_fail();
+        `));
+      }
+
+      // A throwing listener must not lose the plaintext of a committed token.
+      const unsubscribeBad = subscribeCompanyLiveEvents(companyId, () => {
+        throw new Error("listener boom");
+      });
+      try {
+        const res = await request(app).post(base).send({ principalKind: "host", principalName: "live-throw" });
+        expect(res.status).toBe(201);
+        expect(res.body.token).toMatch(RK9_COORD_TOKEN_PATTERN);
+        expect(await rk9CoordTokenService(db).resolve(res.body.token)).toMatchObject({ principalName: "live-throw" });
+      } finally {
+        unsubscribeBad();
+      }
+    } finally {
+      unsubscribe();
+    }
   });
 
   // RK9 Custom (RK9-676 item 9): no host token for the board host.

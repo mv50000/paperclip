@@ -170,7 +170,9 @@ privilege boundary needs a separate database role, for example a prune role
 that alone may delete (via a `SECURITY DEFINER` function, with the
 exemption checking `current_user`) and an application role without
 `DELETE` and `TRUNCATE` on `rk9_coord_events`. That is a new 9xxx migration
-plus a second connection secret, so it waits for an operator decision.
+plus a second connection secret. Decision (RK9-672, 2026-11-03: the parent's binding
+comment on RK9-672, made on the operator's delegation): **not now**. This is a deferred, accepted risk under
+the cooperative-session model; no migration is planned.
 
 #### rk9_coord_cursors
 
