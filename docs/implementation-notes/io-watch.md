@@ -18,6 +18,9 @@ RK9-697 (3.11.2026) poisti Slack-ilmoitukset. `io-watch-alert.ts` poistettiin, j
 prosessi kutsuu yhä poistettua tiedostoa. Kutsu epäonnistuu taustalla, ja virhe menee
 lokiin `io-watch.log.slack`. Sampling jatkuu normaalisti.
 
+RK9-710 lisäsi Telegram-lähetyksen jokaiselle `ALERT:`-riville. Säännöt ja yksikkömuutos:
+`docs/implementation-notes/ops-telegram-alerts.md`.
+
 ## Kohderepo ja kanoninen kopio
 
 - `/opt/paperclip` on tämän forkin checkout. Host-updater päivittää sen päivittäin
