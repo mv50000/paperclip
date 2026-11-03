@@ -9,10 +9,14 @@ versionhallintaa 11.9.2026 asti.
 | Repon polku | Ajaja | Huomio |
 |---|---|---|
 | `server/scripts/io-watch.sh` | `paperclip-io-watch.service` (ExecStart ajaa tiedoston suoraan, User=paperclip) | Tila `100755` on pakollinen. Ilman sitä restart kaatuu 203/EXEC-virheeseen. |
-| `server/scripts/io-watch-alert.ts` | `io-watch.sh` jokaisella hälytyksellä: `pnpm tsx scripts/io-watch-alert.ts` | Ei kuulu server-tsconfigin includeen. Importtaa `server/src/services/slack/client.ts`:n ja `@paperclipai/db`:n. |
 
 Unit-tiedosto ei ole repossa. Unit asettaa kynnysarvot ja tietokantaympäristön.
-Lokit: `/var/lib/paperclip/io-watch.log` ja `/var/lib/paperclip/io-watch.log.slack`.
+Loki: `/var/lib/paperclip/io-watch.log`. Vahvistettu hälytys kirjoittaa sinne rivin `ALERT: <viesti>`.
+
+RK9-697 (3.11.2026) poisti Slack-ilmoitukset. `io-watch-alert.ts` poistettiin, ja
+`io-watch.sh` kirjoittaa hälytykset vain lokiin. Ennen restarttia käynnissä oleva vanha
+prosessi kutsuu yhä poistettua tiedostoa. Kutsu epäonnistuu taustalla, ja virhe menee
+lokiin `io-watch.log.slack`. Sampling jatkuu normaalisti.
 
 ## Kohderepo ja kanoninen kopio
 
@@ -29,9 +33,6 @@ Lokit: `/var/lib/paperclip/io-watch.log` ja `/var/lib/paperclip/io-watch.log.sla
 - `io-watch.sh`: pullattu muutos ei vaikuta ajossa olevaan prosessiin. Muutos tulee
   voimaan `sudo systemctl restart paperclip-io-watch` -komennolla tai kun systemd
   käynnistää palvelun uudelleen (kaatuminen, reboot).
-- `io-watch-alert.ts` ja sen importit: muutos tulee voimaan seuraavassa hälytyksessä
-  pullin jälkeen ilman restarttia. Virhe näkyy vain `io-watch.log.slack`-lokissa,
-  joten Slack-hälytykset voivat lakata hiljaa.
 - Älä poista, siirrä tai revertoi näitä polkuja ennen kuin unit on päivitetty.
   Seuraava pull poistaisi ajettavan tiedoston.
 

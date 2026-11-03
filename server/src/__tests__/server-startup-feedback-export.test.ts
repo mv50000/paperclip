@@ -344,9 +344,6 @@ vi.mock("../services/index.js", () => ({
     isPaused: vi.fn(async () => false),
     getState: vi.fn(async () => null),
   })),
-  startSlackEventForwarder: vi.fn(() => ({ stop: vi.fn() })),
-  createSlackClientService: vi.fn(),
-  createChannelResolver: vi.fn(),
   statusCardService: vi.fn(() => ({})),
   toolAccessService: vi.fn(() => ({
     sweepConnectionHealth: vi.fn(async () => ({
@@ -374,14 +371,6 @@ vi.mock("../services/connection-intent-delivery.js", () => ({
 // companies.ts pulls in heartbeat.ts, which needs real @paperclipai/db tables. ---
 vi.mock("../services/companies.js", () => ({
   companyService: vi.fn(() => ({})),
-}));
-
-vi.mock("../services/slack/index.js", () => ({
-  startSlackEventForwarder: vi.fn(() => ({ stop: vi.fn() })),
-  createSystemPauseSlackNotifier: vi.fn(() => ({
-    onPaused: vi.fn(async () => undefined),
-    onResumed: vi.fn(async () => undefined),
-  })),
 }));
 
 // --- RK9 Custom (RK9-315): the fork risk listeners import services/issues.ts through the risk

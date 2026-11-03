@@ -14,8 +14,7 @@ const DEFAULT_STALE_SEC = 120;
  * disconnect (see killProcessGroup there), so under normal operation this watchdog should
  * find nothing. It exists for gaps outside that path — a qmd invocation started some other
  * way (manual debugging, a future caller of the CLI), or an unanticipated regression in the
- * primary kill logic — rather than as the primary mechanism. Mirrors the pull-based sweep
- * pattern of startAgentLivenessWatchdog (services/slack/liveness-watchdog.ts).
+ * primary kill logic — rather than as the primary mechanism. Pull-based periodic sweep.
  */
 
 export interface QmdProcessInfo {

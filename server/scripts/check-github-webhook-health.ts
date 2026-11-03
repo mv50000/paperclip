@@ -2,7 +2,8 @@
 // at /api/github/webhooks. Polls each repo's recent deliveries via gh API,
 // counts non-200 responses in the last 24h, runs synthetic endpoint probes
 // (small + GitHub-PR-sized unsigned POSTs through the real proxy chain), and
-// posts a Slack alert if any failures were found.
+// prints throttled "ALERT:" lines if any failures were found. Slack posting
+// was removed in RK9-697 (operator decision 2026-11-03).
 //
 // Why this exists: 2026-04-29 incident — /opt/paperclip got checked out onto
 // origin/master (upstream), the github-webhook route disappeared, and PR #78
@@ -13,12 +14,11 @@
 // Usage:
 //   pnpm tsx scripts/check-github-webhook-health.ts
 //   pnpm tsx scripts/check-github-webhook-health.ts --json    # machine-readable
-//   pnpm tsx scripts/check-github-webhook-health.ts --dry-run # don't post Slack
+//   pnpm tsx scripts/check-github-webhook-health.ts --dry-run # don't persist alert state
 //
 // Environment:
 //   GITHUB_TOKEN          - required, used for gh REST calls (GitHub PAT or app token)
 //   GITHUB_TOKEN_<OWNER>  - optional per-owner override (see resolveToken below)
-//   DATABASE_URL          - inherited from paperclip env, used to read slack secrets
 //
 // Exits 0 on healthy, 1 on degraded (failures or blind spots), 2 on script error.
 
@@ -26,10 +26,6 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { eq } from "drizzle-orm";
-import { createDb, companies } from "@paperclipai/db";
-import { createSlackClientService } from "../src/services/slack/client.js";
-import { createChannelResolver } from "../src/services/slack/channel-resolver.js";
 import {
   selectAlertableRepos,
   splitHealth,
@@ -37,11 +33,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const ALERT_COMPANY_NAME = "SelfEvolvingClaudeCo";
 const LOOKBACK_HOURS = 24;
 // Per-repo alert throttle. When a repo is already in a known-degraded state,
 // suppress further hourly alerts unless the failure count has grown sharply.
-// Prevents spamming Slack for hours while the underlying issue (e.g. NAT/DNS
+// Prevents repeating the same alert for hours while the underlying issue (e.g. NAT/DNS
 // outage) is being investigated.
 const THROTTLE_HOURS = 6;
 const FAILURE_GROWTH_THRESHOLD = 2;
@@ -328,115 +323,57 @@ function formatBytes(n: number): string {
   return n < 1024 ? `${n} B` : `${Math.round(n / 1024)} KB`;
 }
 
-function buildProbeBlock(probeFailures: ProbeResult[]) {
-  const lines = probeFailures.map(
-    (p) =>
-      `  • \`${p.name}\` (${formatBytes(p.bodyBytes)} unsigned POST) → *${p.detail}* (expected 401)`,
-  );
-  return {
-    type: "section",
-    text: {
-      type: "mrkdwn",
-      text:
-        `:warning: *Synthetic probe failing* against \`${PROBE_HOST}${PROBE_PATH}\`:\n` +
-        lines.join("\n") +
-        "\nLarge-body-only failure = proxy request-body buffering broken " +
-        "(2026-08-04: `/var/lib/nginx/body` perms after a stray `apt-get install nginx-light` — " +
-        "fix: `sudo systemctl restart nginx` on the paperclip host).",
-    },
-  };
-}
-
-function buildSlackBlocks(
+// Plain-text alert detail, written to stdout (the systemd unit appends it to
+// /var/log/paperclip-webhook-monitor.log). Slack posting was removed in RK9-697.
+function buildAlertLines(
   unhealthy: RepoHealth[],
   probeFailures: ProbeResult[],
   lookbackHours: number,
-) {
+): string[] {
   const { failing, blind } = splitHealth(unhealthy);
-  const headline =
-    failing.length > 0
-      ? `:rotating_light: GitHub webhook delivery failures (${lookbackHours}h)`
-      : `:mag: GitHub webhook monitor blind (${lookbackHours}h)`;
-  const blocks: Array<Record<string, unknown>> = [
-    {
-      type: "header",
-      text: { type: "plain_text", text: headline },
-    },
-  ];
+  const lines: string[] = [];
   if (failing.length > 0) {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text:
-          `*${failing.length}* repo(s) reporting non-200 webhook responses to ` +
-          "`paperclip.rk9.fi/api/github/webhooks`. Likely causes: paperclip down, " +
-          "wrong git branch deployed, expired/rotated webhook secret.",
-      },
-    });
+    lines.push(
+      `ALERT: GitHub webhook delivery failures (${lookbackHours}h): ${failing.length} repo(s) ` +
+        "reporting non-200 responses to paperclip.rk9.fi/api/github/webhooks. Likely causes: " +
+        "paperclip down, wrong git branch deployed, expired/rotated webhook secret.",
+    );
   }
   if (blind.length > 0) {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text:
-          `:warning: *${blind.length}* repo(s) could not be checked at all — the ` +
-          "monitor is blind there, so a real outage would go unnoticed. This is an " +
-          "API/credential problem, not evidence that webhooks are failing.",
-      },
-    });
-  }
-  if (probeFailures.length > 0) {
-    blocks.push(buildProbeBlock(probeFailures));
-  }
-  blocks.push({ type: "divider" });
-
-  for (const r of blind) {
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text:
-          `*<https://github.com/${r.repo}/settings/hooks/${r.hookId}|${r.repo}>* — not checked\n` +
-          `  • \`${r.error}\``,
-      },
-    });
-  }
-
-  for (const r of failing) {
-    const lines: string[] = [];
     lines.push(
-      `*<https://github.com/${r.repo}/settings/hooks/${r.hookId}|${r.repo}>* — ${r.recentFailures}/${r.recentTotal} deliveries failed`,
+      `ALERT: GitHub webhook monitor blind (${lookbackHours}h): ${blind.length} repo(s) could not ` +
+        "be checked. This is an API/credential problem, not evidence that webhooks are failing.",
     );
+  }
+  for (const r of blind) {
+    lines.push(`  ${r.repo} (hook ${r.hookId}) not checked: ${r.error}`);
+  }
+  for (const r of failing) {
+    lines.push(`  ${r.repo} (hook ${r.hookId}): ${r.recentFailures}/${r.recentTotal} deliveries failed`);
     for (const d of r.failingDeliveries.slice(0, 3)) {
       lines.push(
-        `  • \`${d.delivered_at}\` ${d.event}/${d.action ?? "-"} → *${d.status_code}* ${d.status}${d.redelivery ? " _(redelivery)_" : ""}`,
+        `    ${d.delivered_at} ${d.event}/${d.action ?? "-"} -> ${d.status_code} ${d.status}${d.redelivery ? " (redelivery)" : ""}`,
       );
     }
     if (r.failingDeliveries.length > 3) {
-      lines.push(`  • _and ${r.failingDeliveries.length - 3} more_`);
+      lines.push(`    and ${r.failingDeliveries.length - 3} more`);
     }
-    blocks.push({
-      type: "section",
-      text: { type: "mrkdwn", text: lines.join("\n") },
-    });
   }
-
-  blocks.push({
-    type: "context",
-    elements: [
-      {
-        type: "mrkdwn",
-        text:
-          "Diagnosis: `curl -X POST https://paperclip.rk9.fi/api/github/webhooks` should return 401 (signature missing). " +
-          "Repeat with a >26 KB body (`--data-binary` a big JSON file) — real GitHub payloads are large and can fail alone. " +
-          "If 404, /opt/paperclip is on the wrong branch — check `sudo -u paperclip git -C /opt/paperclip status`.",
-      },
-    ],
-  });
-
-  return blocks;
+  if (probeFailures.length > 0) {
+    lines.push(`ALERT: synthetic probe failing against ${PROBE_HOST}${PROBE_PATH}:`);
+    for (const p of probeFailures) {
+      lines.push(`  ${p.name} (${formatBytes(p.bodyBytes)} unsigned POST) -> ${p.detail} (expected 401)`);
+    }
+    lines.push(
+      "  Large-body-only failure = proxy request-body buffering broken " +
+        "(2026-08-04: /var/lib/nginx/body perms; fix: sudo systemctl restart nginx on the paperclip host).",
+    );
+  }
+  lines.push(
+    "  Diagnosis: curl -X POST https://paperclip.rk9.fi/api/github/webhooks should return 401. " +
+      "Repeat with a >26 KB body. If 404, /opt/paperclip is on the wrong branch.",
+  );
+  return lines;
 }
 
 async function main() {
@@ -598,111 +535,54 @@ async function main() {
     process.exit(1);
   }
 
+  for (const line of buildAlertLines(newUnhealthy, probeFailures, LOOKBACK_HOURS)) {
+    console.log(line);
+  }
+
   if (args.dryRun) {
-    console.log("--dry-run: skipping Slack alert");
+    console.log("--dry-run: alert state not persisted");
     process.exit(1);
   }
 
-  const dbUrl = process.env.DATABASE_URL;
-  if (!dbUrl) {
-    console.error("DATABASE_URL env var required");
-    process.exit(2);
-  }
-  const db = createDb(dbUrl);
   try {
-    const [target] = await db
-      .select({ id: companies.id, name: companies.name })
-      .from(companies)
-      .where(eq(companies.name, ALERT_COMPANY_NAME));
-    if (!target) {
-      console.error(
-        `alert company ${ALERT_COMPANY_NAME} not found — alert not posted`,
-      );
-      process.exit(1);
+    mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    const merged = Array.from(new Set([...seenIds, ...newFailureIds]));
+    const nowIso = new Date().toISOString();
+    const updatedAlertedAt = { ...repoAlertedAt };
+    const updatedFailureCount = { ...repoLastFailureCount };
+    const updatedLastError = { ...repoLastError };
+    // Drop state for repos that are healthy in this run. Without this a
+    // repo that recovered while another stayed broken kept its old
+    // timestamp, so its next failure could land inside a stale throttle.
+    for (const r of results) {
+      if (r.error || r.recentFailures > 0) continue;
+      delete updatedAlertedAt[r.repo];
+      delete updatedFailureCount[r.repo];
+      delete updatedLastError[r.repo];
     }
-    const channels = createChannelResolver(db);
-    const channel = await channels.resolve(target.id, "company");
-    if (!channel) {
-      console.error(
-        `${ALERT_COMPANY_NAME} has no slack.channel_id secret — alert not posted`,
-      );
-      process.exit(1);
+    for (const r of newUnhealthy) {
+      updatedAlertedAt[r.repo] = nowIso;
+      updatedFailureCount[r.repo] = r.recentFailures;
+      if (r.error) updatedLastError[r.repo] = r.error;
+      else delete updatedLastError[r.repo];
     }
-    const slack = createSlackClientService(db);
-    const blocks = buildSlackBlocks(newUnhealthy, probeFailures, LOOKBACK_HOURS);
-    const fallbackParts: string[] = [];
-    const { failing: newFailing, blind: newBlind } = splitHealth(newUnhealthy);
-    if (newFailing.length > 0) {
-      fallbackParts.push(
-        `GitHub webhook delivery failures: ${newFailing.length} repo(s)`,
-      );
-    }
-    if (newBlind.length > 0) {
-      fallbackParts.push(
-        `GitHub webhook monitor blind: ${newBlind.length} repo(s)`,
-      );
-    }
-    if (probeFailures.length > 0) {
-      fallbackParts.push(
-        `webhook endpoint probe failing (${probeFailures.map((p) => p.name).join(", ")})`,
-      );
-    }
-    const fallbackText = fallbackParts.join("; ");
-    const result = await slack.postMessage(target.id, {
-      channel,
-      text: fallbackText,
-      blocks,
-    });
-    if (result.ok) {
-      console.log(`Slack alert posted to ${ALERT_COMPANY_NAME} ts=${result.ts}`);
-      try {
-        mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-        const merged = Array.from(new Set([...seenIds, ...newFailureIds]));
-        const nowIso = new Date().toISOString();
-        const updatedAlertedAt = { ...repoAlertedAt };
-        const updatedFailureCount = { ...repoLastFailureCount };
-        const updatedLastError = { ...repoLastError };
-        // Drop state for repos that are healthy in this run. Without this a
-        // repo that recovered while another stayed broken kept its old
-        // timestamp, so its next failure could land inside a stale throttle.
-        for (const r of results) {
-          if (r.error || r.recentFailures > 0) continue;
-          delete updatedAlertedAt[r.repo];
-          delete updatedFailureCount[r.repo];
-          delete updatedLastError[r.repo];
-        }
-        for (const r of newUnhealthy) {
-          updatedAlertedAt[r.repo] = nowIso;
-          updatedFailureCount[r.repo] = r.recentFailures;
-          if (r.error) updatedLastError[r.repo] = r.error;
-          else delete updatedLastError[r.repo];
-        }
-        writeFileSync(
-          STATE_FILE,
-          JSON.stringify({
-            alertedDeliveryIds: merged,
-            repoAlertedAt: updatedAlertedAt,
-            repoLastFailureCount: updatedFailureCount,
-            repoLastError: updatedLastError,
-            // Keep the throttle timestamp while the probe is failing so the
-            // healthy path can clear it; refresh it when this alert covered
-            // a probe failure.
-            probeFailureAlertedAt: shouldAlertProbe
-              ? nowIso
-              : probeAlertedAtIso,
-          }),
-        );
-      } catch (err) {
-        console.warn(`Could not persist state to ${STATE_FILE}:`, err);
-      }
-    } else {
-      console.error(`Slack alert failed: ${result.reason}`);
-      process.exit(1);
-    }
-  } finally {
-    if ("end" in db && typeof (db as { end?: () => Promise<void> }).end === "function") {
-      await (db as { end: () => Promise<void> }).end();
-    }
+    writeFileSync(
+      STATE_FILE,
+      JSON.stringify({
+        alertedDeliveryIds: merged,
+        repoAlertedAt: updatedAlertedAt,
+        repoLastFailureCount: updatedFailureCount,
+        repoLastError: updatedLastError,
+        // Keep the throttle timestamp while the probe is failing so the
+        // healthy path can clear it; refresh it when this alert covered
+        // a probe failure.
+        probeFailureAlertedAt: shouldAlertProbe
+          ? nowIso
+          : probeAlertedAtIso,
+      }),
+    );
+  } catch (err) {
+    console.warn(`Could not persist state to ${STATE_FILE}:`, err);
   }
   process.exit(1);
 }

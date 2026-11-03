@@ -324,15 +324,6 @@ export function approvalService(db: Db) {
       return updated;
     },
 
-    setSlackMessageRef: async (id: string, ref: { channel: string; ts: string }) => {
-      const existing = await getExistingApproval(id);
-      const merged = { ...approvalPayloadAsRecord(existing), slackMessageRef: ref };
-      await db
-        .update(approvals)
-        .set({ payload: merged, updatedAt: new Date() })
-        .where(eq(approvals.id, id));
-    },
-
     listComments: async (approvalId: string) => {
       const existing = await getExistingApproval(approvalId);
       const { censorUsernameInLogs } = await instanceSettings.getGeneral();

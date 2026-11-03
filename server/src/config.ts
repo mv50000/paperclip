@@ -95,12 +95,8 @@ export interface Config {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
-  agentLivenessWatchdogEnabled: boolean;
-  agentLivenessWatchdogIntervalMs: number;
-  agentLivenessThresholdMultiplier: number;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
-  slackSigningSecret: string | undefined;
   systemPauseAutoEnabled: boolean;
   systemPauseCheckIntervalMs: number;
   systemPauseThresholdPct: number;
@@ -431,12 +427,8 @@ export function loadConfig(): Config {
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
-    agentLivenessWatchdogEnabled: process.env.AGENT_LIVENESS_WATCHDOG_ENABLED !== "false",
-    agentLivenessWatchdogIntervalMs: Math.max(60_000, Number(process.env.AGENT_LIVENESS_WATCHDOG_INTERVAL_MS) || 5 * 60_000),
-    agentLivenessThresholdMultiplier: Math.max(2, Number(process.env.AGENT_LIVENESS_THRESHOLD_MULTIPLIER) || 3),
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
-    slackSigningSecret: process.env.SLACK_SIGNING_SECRET?.trim() || undefined,
     systemPauseAutoEnabled: process.env.SYSTEM_PAUSE_AUTO_ENABLED !== "false",
     systemPauseCheckIntervalMs: Math.max(60000, Number(process.env.SYSTEM_PAUSE_CHECK_INTERVAL_MS) || 300_000),
     systemPauseThresholdPct: Math.min(100, Math.max(50, Number(process.env.SYSTEM_PAUSE_THRESHOLD_PCT) || 90)),

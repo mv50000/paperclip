@@ -37,8 +37,8 @@ export type AddApprovalComment = z.infer<typeof addApprovalCommentSchema>;
 
 // RK9-479: voice-proposed issue action. The server executes it on approve, so
 // the payload is validated on create, resubmit and again on approve. Unknown
-// keys are stripped, not rejected: the Slack forwarder stores
-// `slackMessageRef` in the payload after create.
+// keys are stripped, not rejected: older payloads can still carry
+// `slackMessageRef` from the removed fork Slack forwarder (RK9-697).
 export const VOICE_ACTION_KINDS = ["issue_comment", "issue_status"] as const;
 export const VOICE_ACTION_STATUSES = ["todo", "backlog", "blocked", "done", "cancelled"] as const;
 export const VOICE_ACTION_BODY_MAX_LENGTH = 1000;

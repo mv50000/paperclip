@@ -90,11 +90,10 @@ import {
   workspaceOperationService,
 } from "./services/index.js";
 import { questionResponseDeliveryService } from "./services/question-response-delivery.js";
-// --- RK9 Custom: Slack, risk, qmd, email, outreach services ---
+// --- RK9 Custom: risk, qmd, email, outreach services ---
 import { fetchAllQuotaWindows } from "./services/quota-windows.js";
 import { companyService } from "./services/companies.js";
 import { startRiskEventListeners } from "./services/risk-event-listeners.js";
-import { startSlackEventForwarder, startAgentLivenessWatchdog, createSystemPauseSlackNotifier } from "./services/slack/index.js";
 import { startQmdOrphanWatchdog } from "./services/qmd-orphan-watchdog.js";
 import { closeQmdMcpSession, startQmdHealthProbe, startQmdKeepwarm } from "./services/qmd-mcp-client.js";
 import { startEmailEscalationCron } from "./services/email/escalation.js";
@@ -824,14 +823,7 @@ async function startServerWithDatabaseTeardown(
   });
   const backupSettingsSvc = instanceSettingsService(db);
   // --- RK9 Custom: system pause ---
-  const systemPauseSlackNotifier = createSystemPauseSlackNotifier({
-    db: db as any,
-    listCompanyIds: () => backupSettingsSvc.listCompanyIds(),
-  });
-  const systemPauseSvc = systemPauseService(backupSettingsSvc, {
-    onPaused: (state) => systemPauseSlackNotifier.onPaused(state),
-    onResumed: (previous) => systemPauseSlackNotifier.onResumed(previous),
-  });
+  const systemPauseSvc = systemPauseService(backupSettingsSvc);
   const databaseBackupMaxAgeHours = Math.max(
     1,
     Number(process.env.PAPERCLIP_DB_BACKUP_MAX_AGE_HOURS) ||
@@ -956,8 +948,7 @@ async function startServerWithDatabaseTeardown(
     betterAuthHandler,
     resolveSession,
     pluginWorkerManager,
-    // --- RK9 Custom: Slack, system pause, outreach options ---
-    slackSigningSecret: config.slackSigningSecret,
+    // --- RK9 Custom: system pause, outreach options ---
     systemPause: systemPauseSvc,
     outreachSenderApiKey: config.outreachSenderApiKey,
     outreachUnsubscribeBaseUrl: config.outreachUnsubscribeBaseUrl,
@@ -1026,19 +1017,7 @@ async function startServerWithDatabaseTeardown(
     },
   });
 
-  // --- RK9 Custom: Slack, Risk, Email startup ---
-  startSlackEventForwarder(db as any);
-
-  // Pull-based liveness watchdog (RK9-43): complements the event-driven forwarder above by
-  // catching agents that stop being scheduled entirely (no run, no event for the forwarder
-  // to see). Alerts when a timer-heartbeat agent's last_heartbeat_at exceeds N× its interval.
-  if (config.agentLivenessWatchdogEnabled) {
-    startAgentLivenessWatchdog(db as any, {
-      intervalMs: config.agentLivenessWatchdogIntervalMs,
-      thresholdMultiplier: config.agentLivenessThresholdMultiplier,
-    });
-  }
-
+  // --- RK9 Custom: Risk, Email startup ---
   // Safety-net sweep for orphaned `qmd vsearch`/`search` workers (RK9-181). knowledge-recall.ts
   // is the primary fix (kills its own tracked process group on timeout/client-abort); this is a
   // backstop for gaps outside that path. Read directly from env, same convention as the qmd

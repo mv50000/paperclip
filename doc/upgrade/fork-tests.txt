@@ -71,11 +71,6 @@ server/src/__tests__/outreach-smtp-client.test.ts
 server/src/__tests__/outreach-unsubscribe-route.test.ts
 server/src/__tests__/resend-inbound-route.test.ts
 server/src/__tests__/risk-monitors.test.ts
-server/src/__tests__/slack-event-classifier.test.ts
-server/src/__tests__/slack-formatters.test.ts
-server/src/__tests__/slack-interactions.test.ts
-server/src/__tests__/slack-liveness-watchdog.test.ts
-server/src/__tests__/slack-signature-verify.test.ts
 server/src/services/knowledge-injection.test.ts
 server/src/services/knowledge-recall.test.ts
 server/src/services/qmd-mcp-client.test.ts

@@ -103,7 +103,6 @@ const RK9_FORK_ROUTE_FILES = new Set([
   // RK9-629: coord stall escalation report and ack (/rk9/coord/escalations).
   "rk9-coord-escalations.ts",
   "ses-inbound.ts",
-  "slack-interactions.ts",
   "unsubscribe.ts",
 ]);
 const RK9_FORK_ROUTES = new Set([

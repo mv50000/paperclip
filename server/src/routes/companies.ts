@@ -37,9 +37,6 @@ import {
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { PORTABLE_ZIP_UPLOAD_LIMIT_BYTES } from "../http/body-limits.js";
 import { logger } from "../middleware/logger.js";
-import { createSlackClientService } from "../services/slack/client.js";
-import { createChannelResolver } from "../services/slack/channel-resolver.js";
-import { header, section, contextLine } from "../services/slack/formatters.js";
 import { validate } from "../middleware/validate.js";
 import {
   assembleImportTransferZip,
@@ -1344,15 +1341,6 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
     res.json(company);
   });
 
-  const slackClient = createSlackClientService(db);
-  const channelResolver = createChannelResolver(db);
-
-  async function notifySlack(companyId: string, text: string, blocks: Record<string, unknown>[]) {
-    const channel = await channelResolver.resolve(companyId, "company");
-    if (!channel) return;
-    await slackClient.postMessage(companyId, { channel, text, blocks }).catch(() => {});
-  }
-
   router.post("/:companyId/pause", async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
@@ -1370,11 +1358,6 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
       entityType: "company",
       entityId: companyId,
     });
-    notifySlack(companyId, `:pause_button: Company "${company.name}" paused`, [
-      header(":pause_button: Company paused"),
-      section(`*${company.name}* has been paused. New agent runs are blocked.`),
-      contextLine("Active runs will continue to completion. Resume from Company Settings."),
-    ]);
     res.json(company);
   });
 
@@ -1395,10 +1378,6 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
       entityType: "company",
       entityId: companyId,
     });
-    notifySlack(companyId, `:arrow_forward: Company "${company.name}" resumed`, [
-      header(":arrow_forward: Company resumed"),
-      section(`*${company.name}* has been resumed. Agents can run again.`),
-    ]);
     res.json(company);
   });
 
