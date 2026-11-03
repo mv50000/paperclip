@@ -115,7 +115,8 @@ export function rk9CoordPresenceTtlSeconds(env: NodeJS.ProcessEnv = process.env)
  * row ensureRk9CoordActorRow inserts for an actor id that never registered
  * through PUT /actors/me. The count covers every actor row the host created
  * in the hour, registered or not, so registering a stub does not free budget.
- * PUT /actors/me itself is not limited here. Normal use stays far below it: a host creates one
+ * RK9-676: the first registration through PUT /actors/me (an insert) takes
+ * the same budget (assertRk9CoordNewActorBudget). Normal use stays far below it: a host creates one
  * stub per new session, worktree or headless run that reads the delta or
  * the inbox before registering (an /implement wave on paperclip-01 starts
  * about 20). A remote token that mints random `cc:<host>:<random>` ids hits
@@ -199,6 +200,54 @@ function defaultActivityActor(actor: Rk9CoordResolvedActor, agentId: string | nu
 }
 
 /**
+ * The per-host budget for new actor rows (RK9-641 stub limit; RK9-676 also
+ * the first registration through PUT /actors/me). Call it inside the
+ * transaction that inserts the row, before the insert. It takes the
+ * transaction-scoped advisory lock of (company, host), so concurrent calls
+ * cannot all pass the count. Returns "exists" when a row with this actor id
+ * is already there (a concurrent insert won: reuse it), "ok" when the insert
+ * may go ahead, and throws 429 `rk9_coord_stub_rate_limited` when the host
+ * has created `RK9_COORD_STUB_RATE_PER_HOUR` rows in the last hour. Agent
+ * runs and actors without a host are not limited.
+ */
+export async function assertRk9CoordNewActorBudget(
+  tx: Db,
+  companyId: string,
+  actor: Pick<Rk9CoordResolvedActor, "actorId" | "host" | "kind">,
+  now: Date = new Date(),
+): Promise<"ok" | "exists"> {
+  const limit = rk9CoordStubRatePerHour();
+  if (limit <= 0 || !actor.host || actor.kind === "agent_run") return "ok";
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`rk9_coord_stub:${companyId}:${actor.host}`}))`);
+  const [existing] = await tx
+    .select({ id: rk9CoordActors.id })
+    .from(rk9CoordActors)
+    .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.actorRef, actor.actorId)))
+    .limit(1);
+  if (existing) return "exists";
+  const since = new Date(now.getTime() - 3600 * 1000);
+  const [recent] = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(rk9CoordActors)
+    .where(
+      and(
+        eq(rk9CoordActors.companyId, companyId),
+        eq(rk9CoordActors.host, actor.host),
+        // Registered rows count too: registering a stub must not
+        // reset the budget (verifier finding, RK9-641).
+        gt(rk9CoordActors.createdAt, since),
+      ),
+    );
+  if (Number(recent?.count ?? 0) >= limit) {
+    throw new HttpError(429, "Too many new coord actors from this host; retry later", {
+      code: "rk9_coord_stub_rate_limited",
+      limitPerHour: limit,
+    });
+  }
+  return "ok";
+}
+
+/**
  * The caller's actor row. The presence API (RK9-625) owns the row; when it
  * does not exist yet, insert a minimal stub with ON CONFLICT DO NOTHING (never
  * an UPDATE, and metadata stays `{}` so presence can detect its own first
@@ -218,38 +267,7 @@ export async function ensureRk9CoordActorRow(
   const runId = actor.kind === "agent_run" ? parsed?.ref ?? null : null;
   const publications: ActivityPublication[] = [];
   await db.transaction(async (tx) => {
-    const limit = rk9CoordStubRatePerHour();
-    if (limit > 0 && actor.host && actor.kind !== "agent_run") {
-      // Serialize stub inserts per company and host, so concurrent calls
-      // cannot all pass the count (transaction-scoped advisory lock).
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`rk9_coord_stub:${companyId}:${actor.host}`}))`);
-      const since = new Date(Date.now() - 3600 * 1000);
-      const [recent] = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(rk9CoordActors)
-        .where(
-          and(
-            eq(rk9CoordActors.companyId, companyId),
-            eq(rk9CoordActors.host, actor.host),
-            // Registered rows count too: registering a stub must not
-            // reset the budget (verifier finding, RK9-641).
-            gt(rk9CoordActors.createdAt, since),
-          ),
-        );
-      if (Number(recent?.count ?? 0) >= limit) {
-        // A concurrent insert of the same id may have won meanwhile: reuse it.
-        const [raced] = await tx
-          .select({ id: rk9CoordActors.id })
-          .from(rk9CoordActors)
-          .where(and(eq(rk9CoordActors.companyId, companyId), eq(rk9CoordActors.actorRef, actor.actorId)))
-          .limit(1);
-        if (raced) return;
-        throw new HttpError(429, "Too many new coord actors from this host; register with PUT /actors/me or retry later", {
-          code: "rk9_coord_stub_rate_limited",
-          limitPerHour: limit,
-        });
-      }
-    }
+    if ((await assertRk9CoordNewActorBudget(tx as unknown as Db, companyId, actor)) === "exists") return;
     const inserted = await tx
       .insert(rk9CoordActors)
       .values({

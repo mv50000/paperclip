@@ -247,6 +247,38 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(admittedWake).not.toBeNull();
   });
 
+  // RK9 Custom (RK9-676): a coord inbox message (a board user's coord
+  // message turned into an issue comment) is not new input for the throttle.
+  it("keeps the throttle after a coord inbox comment but lifts it for an ordinary board comment", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 40 });
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 10 });
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "board-user",
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: issueId,
+      details: { commentId: randomUUID(), coordInbox: true },
+    });
+    expect(await assignmentWake(agentId, issueId)).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_throttled");
+
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "board-user",
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: issueId,
+      details: { commentId: randomUUID(), coordInbox: false },
+    });
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+  });
+
   it("does not throttle system comment-driven wakes even during a no-progress streak", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
 

@@ -370,6 +370,39 @@ describe("presence metadata secret check", () => {
   });
 });
 
+// RK9 Custom (RK9-676): one value check per string, not one per ancestor key.
+describe("presence metadata secret check cost and counter flags (RK9-676)", () => {
+  function nested(depth: number, leaf: unknown): Record<string, unknown> {
+    let value: unknown = leaf;
+    for (let level = depth - 1; level >= 0; level -= 1) value = { [`k${level}`]: value };
+    return value as Record<string, unknown>;
+  }
+
+  it("checks 15 levels over a 4 KB `eyJ` value in under 50 ms", () => {
+    const metadata = nested(15, "eyJ".repeat(1300));
+    expect(JSON.stringify(metadata).length).toBeGreaterThan(3900);
+    rk9CoordMetadataHasSecret(metadata);
+    const started = performance.now();
+    expect(rk9CoordMetadataHasSecret(metadata)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
+  it("still flags a value under a keyword ancestor deep in the tree", () => {
+    expect(rk9CoordMetadataHasSecret({ a: { token: { b: { c: "hunter2hunter2" } } } })).toBe(true);
+    expect(rk9CoordMetadataHasSecret(nested(12, `Bearer ${"x".repeat(12)}`))).toBe(true);
+  });
+
+  it("keeps counter flags under tokens and rejects other keys there", () => {
+    expect(rk9CoordMetadataHasSecret({ tokens: { output: null, cached: true, input: 12 } })).toBe(false);
+    expect(rk9CoordMetadataHasSecret({ tokens: { hunterpass: true } })).toBe(true);
+    expect(rk9CoordMetadataHasSecret({ password: { output: true } })).toBe(true);
+  });
+
+  it("flags a Bearer token glued with invisible characters in a metadata value", () => {
+    expect(rk9CoordMetadataHasSecret({ note: `1Bearer\u200babcdefghijkl` })).toBe(true);
+  });
+});
+
 describe("presence service source contract", () => {
   it("never writes heartbeat_runs and the heartbeat service does not know about presence", async () => {
     const service = await readFile(new URL("../services/rk9-coord-presence.ts", import.meta.url), "utf8");

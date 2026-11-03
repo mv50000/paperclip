@@ -22,7 +22,9 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   "(gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)[A-Za-z0-9_-]{6,}" +
   "|AKIA[0-9A-Z]{12,}" +
   "|AIza[0-9A-Za-z_-]{20,}" +
-  "|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9._-]+" +
+  // RK9-676: the lookbehind keeps `eyJeyJ...` without a dot linear (a JWT
+  // starts at a token boundary); without it each `eyJ` rescanned the rest.
+  "|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9._-]+" +
   "|-----BEGIN [A-Z ]*PRIVATE KEY-----" +
   "|://[^ /:@]+:[^ /@]+@" +
   "|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}" +
@@ -38,20 +40,21 @@ const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
  * `api_keys`, ...); `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A` as
  * the separator; and a bracketed value (`"tokens": ["..."]`, `"secrets":
  * {"db": "..."}`, `secrets=(...)`), whose content up to the first closing
- * bracket goes (to the end of the text when it has none). Full-width forms
- * are caught by the NFKC matching reading, not here.
+ * bracket goes. Without a closing bracket, the next 256 characters go
+ * (RK9-676: before, the rest of the text went). Full-width forms are caught
+ * by the NFKC matching reading, not here.
  */
 const KEYWORD_RX =
-  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*[^\]})]{6,}[\]})]?)|["']?[^\s"',;]{6,})/gi;
+  /((?:token|secret|password|passwd|api[_-]?key|apikey)s?["']?\s*(?:[=:]|->|=>|%3[ad])\s*)(?:([[{(]\s*(?:[^\]})]{6,}[\]})]|[^\]})]{6,256}))|["']?[^\s"',;]{6,})/gi;
 /** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
 const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
 /**
  * The one bracketed value that stays: a JSON object of counters after
  * `token` or `tokens` (`"tokens": {"input": 1234, "output": 56}`, nested
  * `{"cache": {"read": 1}}` too; the RK9-642 numbers rule). It holds only
- * braces, commas, colons, keys that are words without digits, and JSON
- * numbers, booleans or null; a string value, an array, parentheses or a
- * digit in a key is redacted. Under `password`, `secret` or `api_key` no
+ * braces, commas, colons, counter keys (isRk9CoordCounterKey) and JSON
+ * numbers, booleans or null; a string value, an array, parentheses, a
+ * digit in a key or any other key is redacted. Under `password`, `secret` or `api_key` no
  * bracketed value stays. A number may not be followed by another digit, so
  * the pattern cannot split one number into many (no catastrophic
  * backtracking).
@@ -59,6 +62,36 @@ const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX];
 /** One token of a counter object; sticky, so the scan below never backtracks. */
 const COUNTER_TOKEN_RX = /\s+|[{},:]|(["']?)([A-Za-z_][A-Za-z_-]{0,39})\1|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 const COUNTER_KEY_FOLLOW_RX = /\s*:/y;
+/**
+ * Words of a counter key (RK9-676). `tokens={abcdef: 1}` kept a letters-only
+ * secret as a key; a key now passes only when it is short (at most 5
+ * characters, below the 6-character value rule of the keyword pattern) or
+ * every word of it is on this list (`cache_read_input_tokens`,
+ * `completionTokensDetails`, `reasoning_tokens`).
+ */
+const COUNTER_WORDS = new Set([
+  "input", "inputs", "output", "outputs", "total", "totals", "cache", "cached", "read", "reads", "write", "writes",
+  "creation", "create", "created", "prompt", "prompts", "completion", "completions", "reasoning", "thinking",
+  "audio", "text", "image", "images", "video", "tool", "tools", "use", "used", "usage", "count", "counts",
+  "max", "min", "limit", "limits", "remaining", "reset", "token", "tokens", "sum", "avg", "mean", "per", "call",
+  "calls", "request", "requests", "response", "responses", "ephemeral", "hit", "hits", "miss", "misses",
+  "accepted", "rejected", "prediction", "predictions", "details", "server", "web", "search", "budget",
+  "context", "window", "last", "turn", "turns", "session", "sessions", "day", "hour", "week", "month",
+  "today", "model", "cost", "rate", "ratio", "estimate", "estimated", "new", "old", "before", "after", "delta",
+  "peak", "current", "previous", "average", "system", "user", "assistant", "message", "messages",
+]);
+
+/** May this word be a key in a counter object? See COUNTER_WORDS. */
+export function isRk9CoordCounterKey(key: string): boolean {
+  if (!/^[A-Za-z_][A-Za-z_-]{0,39}$/.test(key)) return false;
+  if (key.length <= 5) return true;
+  const words = key
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter(Boolean);
+  return words.length > 0 && words.every((word) => COUNTER_WORDS.has(word));
+}
 const COUNTER_LITERALS = new Set(["true", "false", "null"]);
 
 /**
@@ -78,7 +111,7 @@ function isRk9CoordCounterMap(content: string): boolean {
     if (token[2] !== undefined) {
       COUNTER_KEY_FOLLOW_RX.lastIndex = end;
       const isKey = COUNTER_KEY_FOLLOW_RX.test(content);
-      if (!isKey && !(token[1] === "" && COUNTER_LITERALS.has(token[2]))) return false;
+      if (isKey ? !isRk9CoordCounterKey(token[2]) : !(token[1] === "" && COUNTER_LITERALS.has(token[2]))) return false;
     } else if (/^-?\d/.test(token[0]) && end < content.length && /[\d.eEA-Za-z_]/.test(content[end]!)) {
       return false;
     }
@@ -204,7 +237,7 @@ function rk9CoordReadings(text: string): string[] {
 /** Any control, format, combining or filler character (the matching set). */
 const HAS_INVISIBLE_RX = new RegExp(MATCH_INVISIBLE_RX.source, "u");
 /**
- * Bearer or Basic at a word start, then one or more invisible characters as
+ * Bearer or Basic not after a letter, then one or more invisible characters as
  * the only separator, then 8+ token characters with invisible characters
  * between them (RK9-641 round 2: `Bearer<ZWSP>abcd<ZWSP>efgh...`; no single
  * reading of the whole text has both a space and the joined token). Matched
@@ -213,9 +246,44 @@ const HAS_INVISIBLE_RX = new RegExp(MATCH_INVISIBLE_RX.source, "u");
  * repetition cannot backtrack.
  */
 const GLUED_AUTH_RX = new RegExp(
-  `(?<![A-Za-z0-9])(?:bearer|basic)${MATCH_INVISIBLE_RX.source}+(?:[A-Za-z0-9._~+/=-]${MATCH_INVISIBLE_RX.source}*){8,}`,
+  // RK9-676: a digit before the keyword no longer hides it (`1Bearer<ZWSP>...`).
+  `(?<![A-Za-z])(?:bearer|basic)${MATCH_INVISIBLE_RX.source}+(?:[A-Za-z0-9._~+/=-]${MATCH_INVISIBLE_RX.source}*){8,}`,
   "iu",
 );
+
+/** A run of characters that can be part of a secret. */
+const SECRET_RUN_RX = /[A-Za-z0-9._~+/=-]+/g;
+/** The normalizing readings: each one applies to the stored line as well. */
+const LEAK_READINGS: Array<(text: string) => string> = [
+  collapseRk9CoordText,
+  rk9CoordMatchText,
+  rk9CoordSpacedText,
+  (text) => rk9CoordMatchText(text.replace(CONTROL_RX, " ")),
+  (text) => rk9CoordSpacedText(text.replace(CONTROL_RX, "")),
+];
+
+/**
+ * RK9-676: does the partly redacted line still show part of a secret that a
+ * reading of the original text shows? For every reading in which the text
+ * holds a secret, each run of secret characters of the same reading of the
+ * stored line must also appear in that reading redacted. A token tail left
+ * after an invisible character (`ghp_abcdef<U+0301>ghijkl` stores
+ * `[redacted]<U+0301>ghijkl`) is a leak; an emoji selector or an NFD accent
+ * next to a redacted keyword value is not, so the rest of that line stays.
+ */
+function rk9CoordReadingLeaks(text: string, line: string, env: NodeJS.ProcessEnv): boolean {
+  for (const read of LEAK_READINGS) {
+    const seen = read(text);
+    const redacted = redactRk9CoordText(seen, env);
+    if (redacted === seen) continue;
+    const allowed = redacted.split(RK9_COORD_REDACTED).join(" ");
+    const stored = read(line).split(RK9_COORD_REDACTED).join(" ");
+    for (const run of stored.match(SECRET_RUN_RX) ?? []) {
+      if (!allowed.includes(run)) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * True when any reading of the text (raw, display, matching) contains
@@ -292,13 +360,19 @@ export function toRk9CoordLine(
   // Fail closed (RK9-641, after the verifier showed that counting
   // `[redacted]` markers can be fooled by a literal marker in the text):
   // - a text with any control, format, combining or filler character becomes
-  //   `[redacted]` as a whole when any reading of it shows a secret. Such
-  //   characters can split a secret past the pattern or be the only separator
-  //   (`Bearer<ZWSP><token>`), and the display form keeps single joiners;
+  //   `[redacted]` as a whole when invisible characters are the only
+  //   separator of Bearer/Basic and its token (`Bearer<ZWSP><token>`), or
+  //   when the stored line still shows part of a secret that some reading of
+  //   the text shows (RK9-676: before, any secret anywhere in such a text
+  //   took the whole line, so an emoji selector or an NFD accent next to a
+  //   redacted keyword value lost a harmless line);
   // - any text whose stored line still shows a secret in some reading
   //   (full-width forms) becomes `[redacted]` too.
   // A plain text with an ordinary secret keeps the rest of the line.
-  if ((HAS_INVISIBLE_RX.test(text) && rk9CoordTextHasSecret(text, env)) || rk9CoordTextHasSecret(line, env)) {
+  if (
+    (HAS_INVISIBLE_RX.test(text) && (GLUED_AUTH_RX.test(text) || rk9CoordReadingLeaks(text, line, env))) ||
+    rk9CoordTextHasSecret(line, env)
+  ) {
     line = RK9_COORD_REDACTED;
   }
   // A text of only invisible characters (`\u200d`) is empty.

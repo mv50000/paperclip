@@ -25,6 +25,7 @@ import {
   type Rk9CoordTrust,
 } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
+import { assertRk9CoordNewActorBudget } from "./rk9-coord-journal.js";
 import { toRk9CoordLine } from "./rk9-coord-text.js";
 
 export const RK9_COORD_PRESENCE_TTL_S_DEFAULT = 300;
@@ -205,6 +206,16 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
     }
 
     return db.transaction(async (tx) => {
+      // RK9-676: a first registration (an insert) takes the per-host budget
+      // for new actor rows, the same one as the RK9-641 stubs, so a remote
+      // token cannot mint actor rows with random ids through presence. A
+      // refresh of an existing row (the hot path) skips the lock.
+      const [existing] = await tx
+        .select({ id: rk9CoordActors.id })
+        .from(rk9CoordActors)
+        .where(and(eq(rk9CoordActors.companyId, identity.companyId), eq(rk9CoordActors.actorRef, identity.actorId)))
+        .limit(1);
+      if (!existing) await assertRk9CoordNewActorBudget(tx as unknown as Db, identity.companyId, identity, at);
       const [row] = await tx
         .insert(rk9CoordActors)
         .values({

@@ -28,7 +28,7 @@ import {
 import { HttpError, unprocessable } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
-import { rk9CoordMatchText, rk9CoordTextHasSecret } from "../services/rk9-coord-text.js";
+import { isRk9CoordCounterKey, rk9CoordMatchText, rk9CoordTextHasSecret } from "../services/rk9-coord-text.js";
 import {
   rk9CoordPresenceService,
   type Rk9CoordPresenceIdentity,
@@ -265,6 +265,8 @@ const PAIR_NAME_KEY_RX = /^(k|id|var|variable|env|field|label|header|param|optio
 const PAIR_VALUE_KEY_RX = /^(v|val|data|content|default)$|value$/i;
 /** The value part of the key=value branch of RK9_SESSIONS_SECRET_RX. */
 const SECRET_VALUE_RX = /[^\s"',;]{6,}/;
+/** Stand-in values for the key prefix probe: plain 8-character values. */
+const KEY_PROBE_VALUES = ["abcdefgh", "12345678"];
 /** Separator items in an argv-style list (`["DB_PASSWORD", "=", "..."]`). */
 const ARG_SEPARATOR_RX = /^[=:]$/;
 /**
@@ -510,6 +512,20 @@ export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boole
   const json = JSON.stringify(metadata, (_key, value: unknown) => (typeof value === "number" ? 0 : value));
   if (rk9CoordTextHasSecret(json)) return true;
   let found = false;
+  // RK9-676: `key: value` was checked for every ancestor key with the full
+  // value (15 levels x a 4 KB value: ~0.5 s per request). Only a key that
+  // forms a secret prefix (`token: <value>`) can change the result of the
+  // joined text, so each key is probed once with a short stand-in value and
+  // the value is checked only after those keys.
+  const prefixKeys = new Map<string, boolean>();
+  const isPrefixKey = (key: string) => {
+    let hit = prefixKeys.get(key);
+    if (hit === undefined) {
+      hit = KEY_PROBE_VALUES.some((probe) => rk9CoordTextHasSecret(`${key}: ${probe}`));
+      prefixKeys.set(key, hit);
+    }
+    return hit;
+  };
   const walk = (value: unknown, path: string[], leafMode: SecretMode, depth: number) => {
     if (found) return;
     if (value === null || typeof value !== "object") {
@@ -518,7 +534,12 @@ export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boole
         found = true;
         return;
       }
-      if (path.some((key) => rk9CoordTextHasSecret(`${key}: ${value}`))) found = true;
+      for (const key of new Set(path)) {
+        if (isPrefixKey(key) && rk9CoordTextHasSecret(`${key}: ${value}`)) {
+          found = true;
+          return;
+        }
+      }
       return;
     }
     // The schema caps depth; a deeper value here is treated as suspect.
@@ -542,7 +563,11 @@ export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boole
       // A key under a credential key may itself be the secret, unless it
       // labels a number (a counter map) or a non-empty branch.
       const branch = item !== null && typeof item === "object" && Object.keys(item).length > 0;
-      if (typeof item !== "number" && !branch && isSecretValue(mode, key)) {
+      // RK9-676: a counter key with a boolean or null value is a counter
+      // flag (`{"tokens": {"output": null}}`), like a number. Under
+      // password, secret or api_key the JSON check above still rejects it.
+      const counterFlag = (item === null || typeof item === "boolean") && isRk9CoordCounterKey(key);
+      if (typeof item !== "number" && !counterFlag && !branch && isSecretValue(mode, key)) {
         found = true;
         return;
       }

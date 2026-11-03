@@ -8,7 +8,9 @@
 //   presence marker: rows from ensureRk9CoordActorRow, agent_run stubs) 7
 //   days after its last activity, any other actor 30 days after it. Last
 //   activity is the latest of last_seen_at, the cursor's updated_at, an
-//   inbox claim and a lease acquire, renew or release. An actor that holds
+//   inbox claim, a lease acquire, renew or release and an appended event
+//   (RK9-676). Locked FOR UPDATE SKIP LOCKED, then re-checked and deleted in
+//   a second statement of the same transaction (RK9-676). An actor that holds
 //   an unreleased lease, waits in a lease queue or has an undelivered,
 //   unexpired inbox row is kept;
 // - delivered inbox rows and expired undelivered ones: 30 days; undelivered
@@ -111,57 +113,96 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
   const stubCutoff = before(RK9_COORD_RETENTION.stubActorDays).toISOString();
   const staleCutoff = before(RK9_COORD_RETENTION.staleActorDays).toISOString();
   const nowIso = now.toISOString();
-  const staleActors = await batched(async () => {
-    // Last activity: presence refresh, a delta call (every non-peek delta
-    // touches the cursor), an inbox claim, or a lease acquire, renew or
-    // release (GREATEST ignores NULLs). Kept whatever their age: holders of
-    // an unreleased lease (the sweeper journals its expiry first), queued
-    // waiters, and targets of an undelivered, unexpired inbox row (the
-    // cascade would delete the message; it is pruned after inboxDays and the
-    // actor after it). The outer WHERE repeats the staleness test on the
-    // target row, so a concurrent presence PUT that refreshes last_seen_at
-    // wins (Postgres re-checks it on the updated row).
-    const result = await db.execute<{ id: string }>(sql`
-      delete from rk9_coord_actors t
-      where t.id in (
-        select a.id
-        from rk9_coord_actors a
-        left join rk9_coord_cursors c on c.company_id = a.company_id and c.actor_id = a.id
-        where a.ended_at is null
-          and greatest(
-            a.last_seen_at,
-            c.updated_at,
-            (select max(i.delivered_at) from rk9_coord_inbox i where i.delivered_to_actor_id = a.id),
-            (
-              select max(greatest(l.acquired_at, l.renewed_at, l.released_at))
-              from rk9_coord_leases l
-              where l.holder_actor_id = a.id
-            )
-          ) < case
-            when (a.metadata ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null then ${stubCutoff}::timestamptz
-            else ${staleCutoff}::timestamptz
-          end
-          and not exists (
-            select 1 from rk9_coord_leases l where l.holder_actor_id = a.id and l.released_at is null
-          )
-          and not exists (select 1 from rk9_coord_lease_waiters w where w.actor_id = a.id)
-          and not exists (
-            select 1 from rk9_coord_inbox i
-            where i.to_actor_id = a.id
-              and i.delivered_at is null
-              and (i.expires_at is null or i.expires_at > ${nowIso}::timestamptz)
-          )
-        limit ${BATCH}
+  // The oldest cutoff: an event older than it cannot keep any actor.
+  const eventSince = staleCutoff < stubCutoff ? staleCutoff : stubCutoff;
+  /**
+   * The full staleness test for actor `a` (`ev` is the per-actor latest
+   * event). Last activity: presence refresh, a delta call (every non-peek
+   * delta touches the cursor), an inbox claim, a lease acquire, renew or
+   * release, or an appended event (RK9-676: an actor that only appends
+   * events is active too). GREATEST ignores NULLs. Kept whatever their age:
+   * holders of an unreleased lease (the sweeper journals its expiry first),
+   * queued waiters, and targets of an undelivered, unexpired inbox row (the
+   * cascade would delete the message; it is pruned after inboxDays and the
+   * actor after it).
+   */
+  const staleTest = sql`
+    a.ended_at is null
+    and greatest(
+      a.last_seen_at,
+      c.updated_at,
+      ev.last_event_at,
+      (select max(i.delivered_at) from rk9_coord_inbox i where i.delivered_to_actor_id = a.id),
+      (
+        select max(greatest(l.acquired_at, l.renewed_at, l.released_at))
+        from rk9_coord_leases l
+        where l.holder_actor_id = a.id
       )
-        and t.ended_at is null
-        and t.last_seen_at < case
-          when (t.metadata ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null then ${stubCutoff}::timestamptz
-          else ${staleCutoff}::timestamptz
-        end
-      returning t.id
-    `);
-    return (Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])).length;
-  });
+    ) < case
+      when (a.metadata ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null then ${stubCutoff}::timestamptz
+      else ${staleCutoff}::timestamptz
+    end
+    and not exists (
+      select 1 from rk9_coord_leases l where l.holder_actor_id = a.id and l.released_at is null
+    )
+    and not exists (select 1 from rk9_coord_lease_waiters w where w.actor_id = a.id)
+    and not exists (
+      select 1 from rk9_coord_inbox i
+      where i.to_actor_id = a.id
+        and i.delivered_at is null
+        and (i.expires_at is null or i.expires_at > ${nowIso}::timestamptz)
+    )
+  `;
+  const staleFrom = sql`
+    rk9_coord_actors a
+    left join rk9_coord_cursors c on c.company_id = a.company_id and c.actor_id = a.id
+    left join (
+      select e.company_id, e.actor_ref, max(e.created_at) as last_event_at
+      from rk9_coord_events e
+      where e.created_at >= ${eventSince}::timestamptz
+      group by e.company_id, e.actor_ref
+    ) ev on ev.company_id = a.company_id and ev.actor_ref = a.actor_ref
+  `;
+  const rowsOf = (result: unknown) =>
+    (Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])) as Array<{ id: string }>;
+  const staleActors = await batched(() =>
+    // RK9-676 (lease-acquire race): two statements in one transaction. The
+    // first locks the candidates FOR UPDATE SKIP LOCKED: a row that a lease,
+    // waiter or inbox insert holds (its foreign-key check takes FOR KEY
+    // SHARE) is skipped, and once we hold the lock no such insert can
+    // commit for that actor. The second statement runs the whole test again
+    // with a fresh snapshot (READ COMMITTED), so a lease, presence refresh
+    // or event that committed while the first statement ran keeps the actor.
+    // An insert that waits for our lock fails on the foreign key after the
+    // delete instead of leaving a lease without its actor.
+    db.transaction(async (tx) => {
+      const candidates = rowsOf(
+        await tx.execute(sql`
+          select a.id from ${staleFrom}
+          where ${staleTest}
+          limit ${BATCH}
+          for update of a skip locked
+        `),
+      );
+      if (candidates.length === 0) return 0;
+      const ids = sql.join(
+        candidates.map((row) => sql`${row.id}::uuid`),
+        sql`, `,
+      );
+      const deleted = rowsOf(
+        await tx.execute(sql`
+          delete from rk9_coord_actors t
+          where t.id in (
+            select a.id from ${staleFrom}
+            where a.id in (${ids}) and ${staleTest}
+          )
+          returning t.id
+        `),
+      );
+      // A batch the re-check shrank ends this run early; the next run continues.
+      return deleted.length;
+    }),
+  );
 
   const inboxCutoff = before(RK9_COORD_RETENTION.inboxDays);
   const inbox = await batched(async () => {

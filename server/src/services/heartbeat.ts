@@ -350,6 +350,7 @@ import {
   ISSUE_REWAKE_LOOKBACK_MS,
   ISSUE_REWAKE_RUN_SAMPLE_LIMIT,
   evaluateIssueRewakeThrottle,
+  ISSUE_REWAKE_COORD_INBOX_DETAILS,
   isThrottleCandidateIssueRewake,
 } from "./issue-rewake-throttle.js";
 import {
@@ -27556,6 +27557,9 @@ export function heartbeatService(
                         wakeCommentId && opts.requestedByActorType === "agent"
                           ? ne(activityLog.actorType, "agent")
                           : undefined,
+                        // RK9 Custom (RK9-676): a coord inbox message is a
+                        // real comment, but it must not buy a heartbeat run.
+                        sql`not coalesce(${activityLog.details} @> ${ISSUE_REWAKE_COORD_INBOX_DETAILS}::jsonb, false)`,
                       ),
                     )
                     .limit(1)

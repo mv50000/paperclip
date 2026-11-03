@@ -255,3 +255,78 @@ describe("verifier round 3 (RK9-641)", () => {
     expect(rk9CoordIdentifierHasSecret(`Bearer\u200babcd\u200befghijkl`, env)).toBe(true);
   });
 });
+
+// RK9 Custom (RK9-676): follow-ups of the RK9-641 verifier rounds. Fake values only.
+describe("RK9-676 redaction follow-ups", () => {
+  const jwt = ["ey", "J", "hbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiIxIn0", ".", "sig"].join("");
+
+  it("still redacts a JWT, also after a separator or a keyword", () => {
+    for (const text of [jwt, `auth=${jwt}`, `x ${jwt} y`, `"${jwt}"`]) {
+      expect(rk9CoordTextHasSecret(text, env), text).toBe(true);
+      expect(toRk9CoordLine(text, 300, env), text).not.toContain("eyJzdWIi");
+    }
+  });
+
+  it("checks `eyJ` repeated without a dot in linear time", () => {
+    const text = "eyJ".repeat(1400);
+    const started = performance.now();
+    for (let i = 0; i < 20; i += 1) rk9CoordTextHasSecret(text, env);
+    expect((performance.now() - started) / 20).toBeLessThan(20);
+  });
+
+  it("flags Bearer glued with invisible characters after a digit", () => {
+    expect(rk9CoordTextHasSecret(`1Bearer​abcdefghijkl`, env)).toBe(true);
+    expect(rk9CoordIdentifierHasSecret(`1Bearer​abcdefghijkl`, env)).toBe(true);
+    expect(toRk9CoordLine(`id 1Bearer​abcdefghijkl`, 140, env)).toBe("[redacted]");
+    // A letter before it is still another word.
+    expect(rk9CoordTextHasSecret(`acidbasic‍\u{1F600}`, env)).toBe(false);
+  });
+
+  it("redacts an unclosed bracket value for 256 characters, not to the end of the text", () => {
+    const tail = " later text".repeat(40);
+    const out = toRk9CoordLine(`secrets: [${canary}x${"y".repeat(300)}${tail}`, 2000, env)!;
+    expect(out).not.toContain(canary);
+    expect(out).toContain("later text later text");
+    expect(toRk9CoordLine(`tokens: [ ${canary} more`, 200, env)).not.toContain(canary);
+  });
+
+  it.each([[`tokens={abcdef:1}`], [`"tokens": {"hunterpass": 1}`], [`tokens: {"zzqxwvjk": true}`], [`"tokens": {"input": 1, "qwertyuiopas": 2}`]])(
+    "redacts a counter object whose key is not a counter word %j",
+    (input) => {
+      expect(rk9CoordTextHasSecret(input, env)).toBe(true);
+    },
+  );
+
+  it.each([
+    [`"tokens": {"cache_read_input_tokens": 12, "completionTokensDetails": {"reasoningTokens": 3}}`],
+    [`tokens={input: 12, output: 3, ratio: 0.5, x: null}`],
+    [`"usage_tokens": {"prompt_tokens": 10, "total_tokens": 12, "cached": true}`],
+  ])("keeps a counter object of counter words %j", (input) => {
+    expect(rk9CoordTextHasSecret(input, env)).toBe(false);
+  });
+
+  // Whole-line loss (RK9-641 item 5): an emoji selector or an NFD accent next to
+  // a redacted keyword value keeps the rest of the line.
+  it.each([
+    [`deploy ❤️ done, token: ${canary} next step`, "next step"],
+    [`token️ note: password=${canary} then välilehti auki`, "välilehti auki"],
+    [`päivitetty: token=välitetty${canary} ja muu teksti`, "ja muu teksti"],
+    [`\u{1F44D}️ api_key=${canary}, sitten tarkistus`, "sitten tarkistus"],
+  ])("keeps the harmless rest of %j", (input, rest) => {
+    const out = toRk9CoordLine(input, 300, env)!;
+    expect(out).not.toBe("[redacted]");
+    expect(out).toContain("[redacted]");
+    expect(out).toContain(rest);
+    expect(out).not.toContain(canary);
+  });
+
+  it.each([
+    [`ghp_abcdef́ghijklmnop rest`],
+    [`ghp_abcdeöxyzxyzxyz rest`],
+    [`auth Bearer abcdefgh́ijklmn rest`],
+    [`auth Bearer​${canary}xyz rest`],
+    [`sećrets: [aaa bbb ccc] rest`],
+  ])("still fails closed when an invisible character splits a secret %j", (input) => {
+    expect(toRk9CoordLine(input, 300, env)).toBe("[redacted]");
+  });
+});
