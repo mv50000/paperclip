@@ -661,7 +661,7 @@ describe("RK9-684 redaction follow-ups", () => {
     [`--password ${pw}`, "[redacted]"],
     [`curl -u alice:${pw} https://x`, "curl [redacted] https://x"],
     [`docker run --user 1000:1000 img`, "docker run --user 1000:1000 img"],
-    ["git push -u origin main --token-file path", "git push -u origin main --token-file path"],
+    ["sort -u names.txt --token-file path", "sort -u names.txt --token-file path"],
   ])("the pattern string alone: %j", (input, expected) => {
     expect(input.replace(new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi"), "[redacted]")).toBe(expected);
   });
