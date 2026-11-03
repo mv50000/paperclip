@@ -605,4 +605,33 @@ describe("RK9-684 redaction follow-ups", () => {
     const override = { RK9_SESSIONS_SECRET_RX: `([)]|${RK9_COORD_JWT_BRANCH}|x)|zzsecretzz` } as NodeJS.ProcessEnv;
     expect(redactRk9CoordText("a ) b zzsecretzz", override)).toBe("a [redacted] b [redacted]");
   });
+
+  // Verifier round 1: each input leaked a part that origin/master hid.
+  const auth = ["AbCdEf", "123456789"].join("");
+  const jwt = ["eyJhbGciOiJIUzI1NiJ9", "e30", "sig"].join(".");
+  // Split, so the repo secret scan does not read the fixture as a private key.
+  const pem = ["-----BEGIN RSA", "PRIVATE KEY-----"].join(" ");
+  it.each([
+    // H1: the stopped keyword value lost what the full one hid.
+    ["api_keys=Ab1pw=(1)", ["Ab1pw", "(1)"]],
+    ['secrets: Q7x!kpassword={"cached": true}', ["Q7x!k"]],
+    ["tokens=abcdesecrets=(", ["abcde"]],
+    // H2: the union lost the plain regex scan without the JWT branch.
+    [`jwt ${jwt}-Bearer ${auth}`, [auth]],
+    [`eyJabcdefgh.bearer abcdefgh${pem}`, ["abcdefgh-", "BEGIN RSA"]],
+    [`eyJabcdefgh.x${pem}`, ["BEGIN RSA"]],
+    ["AKIA=eyJabcdefgh.Bearer Qz9Kp7WmX", ["Qz9Kp7WmX"]],
+    // H3: more than one auth word, and a keyword value that eats `bearer`.
+    [`token: Bearer Bearer ${auth}`, [auth]],
+    [`password=basic Bearer ${auth}`, [auth]],
+    [`${"gh" + "p_"}password://u:bearer ${auth}`, [auth]],
+  ])("verifier round 1: %j hides every secret part", (input, parts) => {
+    const out = redactRk9CoordText(input, env);
+    for (const part of parts) expect(out).not.toContain(part);
+    for (const part of parts) expect(toRk9CoordLine(input, 500, env)).not.toContain(part);
+  });
+
+  it("verifier round 1: an identifier with a stopped keyword value still has a secret (H1)", () => {
+    expect(rk9CoordIdentifierHasSecret("secrets=abctoken->ABCDEFGH", env)).toBe(true);
+  });
 });

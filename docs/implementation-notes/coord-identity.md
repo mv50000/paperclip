@@ -125,7 +125,10 @@ share actor rows and the per-host actor budget with the board-key sessions.
 RK9-673: the board host's short name (`paperclip` for `paperclip-01`, the
 host name without a `-NN` suffix) is refused the same way. The client maps
 the machine name `paperclip` to `paperclip-01`, so such a token would post
-unmarked as the board host.
+unmarked as the board host. RK9-684 (item 4): the bearer resolution refuses
+such a host token at use time too, on every route and in every scope: 403
+`rk9_coord_token_board_host`, and the log event
+`rk9_coord_token_board_host_refused` names the token id to revoke.
 
 ### Actor kinds and actor_id grammar
 

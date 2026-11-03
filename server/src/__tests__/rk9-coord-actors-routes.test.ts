@@ -43,7 +43,8 @@ const RK9_678_SK_STOP =
 function rk9673ClientVariant(rk9678 = false): string {
   const steps: Array<[string, string]> = [
     ["|qmk_|sk-|", "|qmk_|(?<![A-Za-z0-9_])sk-|"],
-    ["[A-Za-z0-9_-]{6,}|AKIA", `[A-Za-z0-9_-]{6,}|sk-(?=[A-Za-z_-]{0,64}[0-9])(?:${rk9678 ? RK9_678_SK_STOP : RK9_673_SK_STOP}[A-Za-z0-9_-]){20,}|AKIA`],
+    // RK9-684: the prefix value is a stopped group (`[A-Za-z0-9_-]){6,}`).
+    ["[A-Za-z0-9_-]){6,}|AKIA", `[A-Za-z0-9_-]){6,}|sk-(?=[A-Za-z_-]{0,64}[0-9])(?:${rk9678 ? RK9_678_SK_STOP : RK9_673_SK_STOP}[A-Za-z0-9_-]){20,}|AKIA`],
     [
       "|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}",
       "|(bearer|basic)\\s+(?=[A-Za-z]{0,19}[0-9._~+/=-]|[A-Za-z]{20})[A-Za-z0-9._~+/=-]{8,}" +

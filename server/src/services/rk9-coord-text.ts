@@ -172,6 +172,16 @@ const KEYWORD_RX = new RegExp(
   "gi",
 );
 /**
+ * RK9-684 verifier round 1: the keyword rule without the value stop. The
+ * stop ends a value at a keyword-like run inside it (`api_keys=Ab1pw=(1)`,
+ * `tokens=abcdesecrets=(`), where the old rule hid the whole value. The
+ * sequential step and the union run this form too, so the stop only adds.
+ */
+const KEYWORD_FULL_RX = new RegExp(
+  `(${KEYWORD_NAME})(?:([[{(]\\s*[^\\]})]{6,}[\\]})]?)|${KEYWORD_VALUE_START}[^\\s"',;]{6,})`,
+  "gi",
+);
+/**
  * RK9-684: the prefix rule as it was before the RK9-690 keyword stop. A
  * keyword inside a random token (`ghp_tokenabc...`) now ends the prefix
  * value early; this full form runs on the original text (redaction union and
@@ -180,7 +190,7 @@ const KEYWORD_RX = new RegExp(
 const PREFIX_FULL_RX =
   /(?:gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)[A-Za-z0-9_-]{6,}/gi;
 /** Patterns applied whatever RK9_SESSIONS_SECRET_RX says. */
-const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX, PREFIX_FULL_RX];
+const ALWAYS_RX = [COORD_TOKEN_RX, KEYWORD_RX, KEYWORD_FULL_RX, PREFIX_FULL_RX];
 /**
  * The one bracketed value that stays: a JSON object of counters after
  * `token` or `tokens` (`"tokens": {"input": 1234, "output": 56}`, nested
@@ -287,36 +297,42 @@ const WHITESPACE_RX = /\s+/g;
 
 let cachedSource: string | undefined;
 let cachedRx: RegExp | null = null;
+let cachedAlternatives: RegExp[] | null = null;
 
-/** Drop the JWT alternative (matched by rk9CoordJwtSpans instead). */
-function withoutJwtBranch(source: string): string {
-  const parts = source.split("|");
-  // Only a top-level alternative that is exactly the branch; a pattern with
-  // the branch inside a group keeps it (an operator override, rare).
-  const kept: string[] = [];
+/**
+ * The top-level alternatives of a pattern source. RK9-684 item 10: a `(`,
+ * `)` or `|` inside a character class does not count.
+ */
+function topLevelAlternatives(source: string): string[] {
+  const alternatives: string[] = [];
   let depth = 0;
-  // RK9-684 item 10: a `(`, `)` or `|` inside a character class does not count.
   let inClass = false;
-  let piece: string[] = [];
-  for (const part of parts) {
-    piece.push(part);
-    for (let i = 0; i < part.length; i += 1) {
-      const ch = part[i];
-      if (ch === "\\") i += 1;
-      else if (inClass) inClass = ch !== "]";
-      else if (ch === "[") {
-        inClass = true;
-        if (part[i + 1] === "^") i += 1;
-      } else if (ch === "(") depth += 1;
-      else if (ch === ")") depth -= 1;
-    }
-    if (depth === 0 && !inClass) {
-      const alternative = piece.join("|");
-      if (alternative !== RK9_COORD_JWT_BRANCH) kept.push(alternative);
-      piece = [];
+  let start = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "\\") i += 1;
+    else if (inClass) inClass = ch !== "]";
+    else if (ch === "[") {
+      inClass = true;
+      if (source[i + 1] === "^") i += 1;
+    } else if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    else if (ch === "|" && depth === 0) {
+      alternatives.push(source.slice(start, i));
+      start = i + 1;
     }
   }
-  if (piece.length > 0) kept.push(piece.join("|"));
+  alternatives.push(source.slice(start));
+  return alternatives;
+}
+
+/**
+ * Drop the JWT alternative (matched by rk9CoordJwtSpans instead). Only a
+ * top-level alternative that is exactly the branch; a pattern with the
+ * branch inside a group keeps it (an operator override, rare).
+ */
+function withoutJwtBranch(source: string): string {
+  const kept = topLevelAlternatives(source).filter((alternative) => alternative !== RK9_COORD_JWT_BRANCH);
   return kept.length > 0 ? kept.join("|") : "(?!)";
 }
 
@@ -334,7 +350,32 @@ export function rk9CoordSecretRx(env: NodeJS.ProcessEnv = process.env): RegExp {
     cachedRx = new RegExp(withoutJwtBranch(RK9_COORD_SECRET_RX_DEFAULT), "gi");
   }
   cachedSource = source;
+  cachedAlternatives = null;
   return cachedRx;
+}
+
+/**
+ * Each top-level alternative of the active pattern compiled alone (RK9-684
+ * verifier round 1). In the full regex one match can eat the start of the
+ * next secret: the keyword value `//u:bearer` in `password://u:bearer <tok>`
+ * takes the `bearer` that the auth alternative needs. The union runs every
+ * alternative over the text by itself. An alternative that does not compile
+ * alone (a back reference to another alternative's group) is skipped.
+ */
+function rk9CoordSecretAlternatives(env: NodeJS.ProcessEnv): RegExp[] {
+  const rx = rk9CoordSecretRx(env);
+  if (cachedAlternatives) return cachedAlternatives;
+  const alternatives = topLevelAlternatives(rx.source);
+  cachedAlternatives = [];
+  if (alternatives.length < 2) return cachedAlternatives;
+  for (const alternative of alternatives) {
+    try {
+      cachedAlternatives.push(new RegExp(alternative, "gi"));
+    } catch {
+      // Covered by the full regex scan.
+    }
+  }
+  return cachedAlternatives;
 }
 
 /** Replace every secret-looking match with `[redacted]`; the rest of the text stays. */
@@ -385,28 +426,40 @@ function redactMatches(kind: RedactKind, view: string, env: NodeJS.ProcessEnv, s
   const add = (start: number, end: number) => {
     if (end > start || sequential) out.push([start, end]);
   };
+  const addAll = (rx: RegExp) => {
+    // matchAll copies lastIndex from the shared RegExp: start at 0.
+    rx.lastIndex = 0;
+    for (const match of view.matchAll(rx)) add(match.index, match.index + match[0].length);
+  };
   if (kind === "keyword") {
-    KEYWORD_RX.lastIndex = 0;
-    for (const match of view.matchAll(KEYWORD_RX)) {
-      const bracket = match[2];
-      // RK9-684 item 5: counter flags (true/false/null only) stay under every
-      // keyword name (`passphrase: {"cached": true}`); counts only under token(s).
-      if (bracket !== undefined && isRk9CoordCounterMap(bracket, !COUNTER_KEYWORD_RX.test(match[1]!))) continue;
-      add(match.index, match.index + match[0].length);
+    // The sequential step keeps the old rule exactly (RK9-684 verifier round
+    // 1); the stopped rule only adds in the union.
+    for (const rx of sequential ? [KEYWORD_FULL_RX] : [KEYWORD_FULL_RX, KEYWORD_RX]) {
+      rx.lastIndex = 0;
+      for (const match of view.matchAll(rx)) {
+        const bracket = match[2];
+        // RK9-684 item 5: counter flags (true/false/null only) stay under every
+        // keyword name (`passphrase: {"cached": true}`); counts only under token(s).
+        if (bracket !== undefined && isRk9CoordCounterMap(bracket, !COUNTER_KEYWORD_RX.test(match[1]!))) continue;
+        add(match.index, match.index + match[0].length);
+      }
     }
     return out;
   }
   if (kind === "pattern") {
-    for (const [start, end] of rk9CoordPatternMatches(rk9CoordSecretRx(env), view)) add(start, end);
+    const rx = rk9CoordSecretRx(env);
+    for (const [start, end] of rk9CoordPatternMatches(rx, view)) add(start, end);
     if (sequential) return out;
+    // RK9-684 verifier round 1: the plain regex scan (a JWT pick can end
+    // inside what the regex alone matches), each alternative alone, every
+    // JWT run and the prefix rule without its keyword stop.
+    addAll(rx);
+    for (const alternative of rk9CoordSecretAlternatives(env)) addAll(alternative);
     for (const [start, end] of rk9CoordJwtSpans(view)) add(start, end);
-    PREFIX_FULL_RX.lastIndex = 0;
-    for (const match of view.matchAll(PREFIX_FULL_RX)) add(match.index, match.index + match[0].length);
+    addAll(PREFIX_FULL_RX);
     return out;
   }
-  // matchAll copies lastIndex from the shared RegExp: start at 0.
-  COORD_TOKEN_RX.lastIndex = 0;
-  for (const match of view.matchAll(COORD_TOKEN_RX)) add(match.index, match.index + match[0].length);
+  addAll(COORD_TOKEN_RX);
   return out;
 }
 

@@ -57,6 +57,9 @@ import { assertRk9CoordNoSecretFields, ensureRk9CoordActorRow, rk9CoordJournalTr
 import { resolveRk9CoordPresenceTtlS } from "./rk9-coord-presence.js";
 import { toRk9CoordLine } from "./rk9-coord-text.js";
 
+/** The foreign keys to rk9_coord_actors (`<table>_<column>_rk9_coord_actors_id_fk`). */
+const ACTOR_FK_RX = /_rk9_coord_actors_id_fk\b/;
+
 export const RK9_COORD_LEASE_HEARTBEAT_S_DEFAULT = 60;
 export const RK9_COORD_LEASE_SWEEP_INTERVAL_MS_DEFAULT = 30_000;
 export const RK9_COORD_LEASE_STUCK_S_DEFAULT = 1_800;
@@ -830,7 +833,9 @@ export function rk9CoordLeaseService(db: Db, opts: Rk9CoordLeaseServiceOptions =
       try {
         return await acquireOnce(companyId, caller, input);
       } catch (err) {
-        if (!isForeignKeyViolation(err)) throw err;
+        // Only a reference to the pruned actor row (verifier round 1, Low 6);
+        // any other foreign key stays a 500.
+        if (!isForeignKeyViolation(err, ACTOR_FK_RX)) throw err;
         logger.warn(
           { event: "rk9_coord_lease_acquire_actor_pruned", companyId, actor: caller.actor.actorId, attempt },
           "lease acquire lost its actor row to the prune",

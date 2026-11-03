@@ -555,28 +555,37 @@ model is called.
   (before, `RSA PRIVATE KEY-----` stayed). The fuzz baseline has a canary
   inside a PEM header and also runs against the pattern string before
   RK9-684. (2) also takes each JWT run's first span and the prefix rule
-  without its keyword stop (`PREFIX_FULL_RX`, see below).
+  without its keyword stop (`PREFIX_FULL_RX`, see below). After the RK9-684
+  verifier round 1, (2) also runs the pattern without the JWT branch as a
+  plain regex, and each top-level alternative of the pattern alone. In one
+  leftmost-first pass a match can end inside the next secret: the keyword
+  value `//u:bearer` in `password://u:bearer <value>` takes the word that
+  the auth alternative needs, and a JWT pick can end inside a PEM header.
 - **The prefix value stops before a keyword (RK9-684, RK9-690).** The
   prefix branch (`ghp_`, `pcp_<x>_`, `qmk_`, `sk-`, `sk_live_`, `whsec_`,
-  ...) has the lookahead of the client's long `sk-` rule, so
-  `QMK_API_KEY=<value>`, `SK_LIVE_PASSWORD=<value>` and
+  ...) stops before a keyword and its separator (`=` or `:`; `pass` with
+  `=` only), so `QMK_API_KEY=<value>`, `SK_LIVE_PASSWORD=<value>` and
   `sk-...-password=<value>` leave the value to the keyword rule (before,
-  `[redacted]=<value>`). A keyword inside a random token
-  (`ghp_tokenABC...`) would end the value early, so the server also runs
-  the old prefix rule without the stop on the original text and in the
-  identifier check: no token that the old rule hid shows again. The
-  clients have only the stopped form (claude-config `coord-remote.md`,
-  "Tunnetut rajat").
+  `[redacted]=<value>`). A random token never holds `=` or `:`, so the
+  stop never cuts one (verifier round 1: a stop on the bare keyword cut
+  `ghp_tokensABC...` in the clients). The server also runs the old prefix
+  rule without the stop on the original text and in the identifier check:
+  no token that the old rule hid shows again.
 - **`token: Bearer <value>` (RK9-684 item 1).** The keyword value may start
-  with `Bearer` or `Basic` and whitespace, in the pattern string and in the
-  wider keyword rule. Before, the keyword match ended after `Bearer` and the
+  with any number of `Bearer` or `Basic` words and whitespace
+  (`token: Bearer Bearer <value>` too, verifier round 1), in the pattern
+  string and in the wider keyword rule. Before, the keyword match ended after `Bearer` and the
   value stayed visible (a single leftmost-first pass never tried the
   bearer branch inside it).
 - **One keyword value no longer eats the next keyword (RK9-684).** In the
   wider keyword rule, an unbracketed value stops before the next keyword
   that has a value of its own (`secret=1&secrets: <value>`). The stop
   needs a full match after it (a bracket, or 6+ value characters), so
-  `password=secret:abc` is still one match.
+  `password=secret:abc` is still one match. The stop can also end a value
+  at a keyword-like run inside it (`api_keys=Ab1pw=(1)`), so the old
+  keyword rule without the stop runs too: in the sequential step, in the
+  union and in the identifier check (verifier round 1). The stopped rule
+  only adds coverage.
 - The keyword rule is always applied in a wider form too (RK9-641): singular
   and plural keywords (`token`, `secrets`, `api_keys`, ...), the separators
   `=`, `:`, `->`, `=>` and URL-encoded `%3D` / `%3A`, and a JSON array or

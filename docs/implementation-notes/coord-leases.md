@@ -32,7 +32,9 @@ The field names follow the rk9 CLI (RK9-624, `~/.claude/bin/rk9`, `cmd_lease`).
   while an acquire for that actor waits on the row lock; the lease or
   waiter insert then fails on the foreign key. The acquire runs once more
   (a fresh actor row) and, if it loses again, answers 503
-  `rk9_coord_lease_retry` (retry the call), never 500.
+  `rk9_coord_lease_retry` (retry the call), never 500. Only a foreign key
+  to `rk9_coord_actors` (`*_rk9_coord_actors_id_fk`) is retried; any other
+  foreign key stays a 500.
 - Only the acquire answer that grants (or re-reports) the lease carries
   `fencing_token`. List and status rows, journal payloads, event summaries
   and inbox messages never show it; `activity_log` details keep it for
