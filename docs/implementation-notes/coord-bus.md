@@ -261,12 +261,18 @@ below say so too).
 A stub is an actor row without the presence marker
 `metadata.presence_registered_at`: the row that a non-peek delta, an inbox
 claim or another coord route inserts for an actor that never sent
-`PUT /actors/me` (agent runs, remote hosts). The last activity is the later
-of `last_seen_at` and the cursor's `updated_at`, so an actor that only
-reads the delta stays while its cursor moves. An actor that holds an
-unreleased, unexpired lease is never pruned this way. This bounds the
-growth from remote host tokens that mint new `cc:<host>:<random>` ids: each
-such id costs one actor row and one cursor row for at most 7 days.
+`PUT /actors/me` (agent runs, remote hosts). The last activity is the
+latest of `last_seen_at`, the cursor's `updated_at` (every non-peek delta
+touches it, also when nothing is new), the newest inbox claim of the
+actor and its newest lease acquire, renew or release. An actor is never
+pruned this way while it holds an unreleased lease (expired or not: the
+sweeper journals the expiry first), waits in a lease queue, or is the
+target of an undelivered, unexpired inbox row (the cascade would delete
+the message; that row is pruned after 30 days and the actor after it).
+The delete repeats the staleness test on the target row, so a concurrent
+presence refresh wins. This bounds the growth from remote host tokens that
+mint new `cc:<host>:<random>` ids: each such id costs one actor row and
+one cursor row for about 7 days.
 
 The prune deletes in batches of 5,000 by `id`. It does not wait for old
 cursors: an actor whose cursor points at a pruned event simply continues

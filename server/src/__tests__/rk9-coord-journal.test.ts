@@ -16,6 +16,7 @@ import {
   rk9CoordCursors,
   rk9CoordEvents,
   rk9CoordInbox,
+  rk9CoordLeaseWaiters,
   rk9CoordLeases,
 } from "@paperclipai/db";
 import { appendRk9CoordEventSchema } from "@paperclipai/shared";
@@ -958,6 +959,11 @@ if (!support.supported) {
         { companyId: cid, kind: "cc", actorRef: "cc:h:stub-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
         { companyId: cid, kind: "cc", actorRef: "cc:h:reg-8d", trust: "attributed", lastSeenAt: daysAgo(8), metadata: registered },
         { companyId: cid, kind: "cc", actorRef: "cc:h:reg-31d", trust: "attributed", lastSeenAt: daysAgo(31), metadata: registered },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-mail", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-waiter", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-expired-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-claimed", trust: "attributed", lastSeenAt: daysAgo(20) },
+        { companyId: cid, kind: "cc", actorRef: "cc:h:stub-old-lease", trust: "attributed", lastSeenAt: daysAgo(20) },
       ])
       .returning({ id: rk9CoordActors.id, ref: rk9CoordActors.actorRef });
     const id = (ref: string) => rows.find((row) => row.ref === ref)!.id;
@@ -969,16 +975,58 @@ if (!support.supported) {
       holderActorId: id("cc:h:stub-lease"),
       expiresAt: new Date(now.getTime() + 600_000),
     });
+    // An expired but unreleased lease (the sweeper has not journaled it yet),
+    // and a lease released 20 days ago (old activity: pruned).
+    await db.insert(rk9CoordLeases).values([
+      {
+        companyId: cid,
+        resource: "prod:rkq",
+        holderActorId: id("cc:h:stub-expired-lease"),
+        acquiredAt: daysAgo(20),
+        expiresAt: daysAgo(19),
+      },
+      {
+        companyId: cid,
+        resource: "prod:rkr",
+        holderActorId: id("cc:h:stub-old-lease"),
+        acquiredAt: daysAgo(21),
+        expiresAt: daysAgo(20),
+        releasedAt: daysAgo(20),
+        releaseReason: "released",
+      },
+    ]);
+    await db.insert(rk9CoordLeaseWaiters).values({ companyId: cid, resource: "prod:rkp", actorId: id("cc:h:stub-waiter") });
     await db.insert(rk9CoordInbox).values([
       { companyId: cid, toName: "x", fromActorRef: "orch:live", body: "pending-old", createdAt: daysAgo(31) },
       { companyId: cid, toName: "x", fromActorRef: "orch:live", body: "pending-new", createdAt: daysAgo(29) },
+      // A message to a not-live actor keeps the actor (and itself).
+      { companyId: cid, toActorId: id("cc:h:stub-mail"), fromActorRef: "orch:live", body: "for-stub", createdAt: daysAgo(1) },
+      // A claim 1 day ago is activity.
+      {
+        companyId: cid,
+        toName: "y",
+        fromActorRef: "orch:live",
+        body: "claimed",
+        deliveredAt: daysAgo(1),
+        deliveredToActorId: id("cc:h:stub-claimed"),
+      },
     ]);
 
-    await pruneRk9Coord(db, { now });
+    const result = await pruneRk9Coord(db, { now });
+    expect(result.actors).toBeGreaterThanOrEqual(3);
     const left = await db.select({ ref: rk9CoordActors.actorRef }).from(rk9CoordActors).where(eq(rk9CoordActors.companyId, cid));
-    expect(left.map((row) => row.ref).sort()).toEqual(["cc:h:reg-8d", "cc:h:stub-cursor", "cc:h:stub-lease", "cc:h:stub-new"]);
+    expect(left.map((row) => row.ref).sort()).toEqual([
+      "cc:h:reg-8d",
+      "cc:h:stub-claimed",
+      "cc:h:stub-cursor",
+      "cc:h:stub-expired-lease",
+      "cc:h:stub-lease",
+      "cc:h:stub-mail",
+      "cc:h:stub-new",
+      "cc:h:stub-waiter",
+    ]);
     const inbox = await db.select({ body: rk9CoordInbox.body }).from(rk9CoordInbox).where(eq(rk9CoordInbox.companyId, cid));
-    expect(inbox.map((row) => row.body)).toEqual(["pending-new"]);
+    expect(inbox.map((row) => row.body).sort()).toEqual(["claimed", "for-stub", "pending-new"]);
   });
 
   it("prunes old events, ended actors and old inbox rows idempotently and keeps decisions a year", async () => {

@@ -7,8 +7,10 @@
 // - never-ended actors (RK9-641): a stub that never registered (no
 //   presence marker: rows from ensureRk9CoordActorRow, agent_run stubs) 7
 //   days after its last activity, any other actor 30 days after it. Last
-//   activity is the later of last_seen_at and the cursor's updated_at. An
-//   actor that holds an unexpired lease is kept;
+//   activity is the latest of last_seen_at, the cursor's updated_at, an
+//   inbox claim and a lease acquire, renew or release. An actor that holds
+//   an unreleased lease, waits in a lease queue or has an undelivered,
+//   unexpired inbox row is kept;
 // - delivered inbox rows and expired undelivered ones: 30 days; undelivered
 //   rows without expires_at: 30 days after created_at (RK9-641);
 // - released leases: 30 days.
@@ -110,24 +112,53 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
   const staleCutoff = before(RK9_COORD_RETENTION.staleActorDays).toISOString();
   const nowIso = now.toISOString();
   const staleActors = await batched(async () => {
+    // Last activity: presence refresh, a delta call (every non-peek delta
+    // touches the cursor), an inbox claim, or a lease acquire, renew or
+    // release (GREATEST ignores NULLs). Kept whatever their age: holders of
+    // an unreleased lease (the sweeper journals its expiry first), queued
+    // waiters, and targets of an undelivered, unexpired inbox row (the
+    // cascade would delete the message; it is pruned after inboxDays and the
+    // actor after it). The outer WHERE repeats the staleness test on the
+    // target row, so a concurrent presence PUT that refreshes last_seen_at
+    // wins (Postgres re-checks it on the updated row).
     const result = await db.execute<{ id: string }>(sql`
-      delete from rk9_coord_actors
-      where id in (
+      delete from rk9_coord_actors t
+      where t.id in (
         select a.id
         from rk9_coord_actors a
         left join rk9_coord_cursors c on c.company_id = a.company_id and c.actor_id = a.id
         where a.ended_at is null
-          and greatest(a.last_seen_at, coalesce(c.updated_at, a.last_seen_at)) < case
+          and greatest(
+            a.last_seen_at,
+            c.updated_at,
+            (select max(i.delivered_at) from rk9_coord_inbox i where i.delivered_to_actor_id = a.id),
+            (
+              select max(greatest(l.acquired_at, l.renewed_at, l.released_at))
+              from rk9_coord_leases l
+              where l.holder_actor_id = a.id
+            )
+          ) < case
             when (a.metadata ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null then ${stubCutoff}::timestamptz
             else ${staleCutoff}::timestamptz
           end
           and not exists (
-            select 1 from rk9_coord_leases l
-            where l.holder_actor_id = a.id and l.released_at is null and l.expires_at > ${nowIso}::timestamptz
+            select 1 from rk9_coord_leases l where l.holder_actor_id = a.id and l.released_at is null
+          )
+          and not exists (select 1 from rk9_coord_lease_waiters w where w.actor_id = a.id)
+          and not exists (
+            select 1 from rk9_coord_inbox i
+            where i.to_actor_id = a.id
+              and i.delivered_at is null
+              and (i.expires_at is null or i.expires_at > ${nowIso}::timestamptz)
           )
         limit ${BATCH}
       )
-      returning id
+        and t.ended_at is null
+        and t.last_seen_at < case
+          when (t.metadata ->> ${RK9_COORD_REGISTERED_MARKER}::text) is null then ${stubCutoff}::timestamptz
+          else ${staleCutoff}::timestamptz
+        end
+      returning t.id
     `);
     return (Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])).length;
   });
@@ -180,7 +211,7 @@ export async function pruneRk9Coord(db: Db, opts: { now?: Date } = {}): Promise<
   });
 
   const result = { events, actors: actors + staleActors, inbox, leases };
-  if (events + actors + inbox + leases > 0) logger.info(result, "pruned rk9 coord bus rows");
+  if (result.events + result.actors + result.inbox + result.leases > 0) logger.info(result, "pruned rk9 coord bus rows");
   return result;
 }
 
