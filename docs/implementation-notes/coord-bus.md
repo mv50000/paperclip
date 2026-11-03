@@ -362,15 +362,19 @@ Rules:
   (`password1`); also read it with only the non-alphanumeric splits
   (`PassWords`, `apiKeys`). The name is a credential name when a segment is
   `token`, `secret`, `password`, `passwd`, `apikey`, `secretkey`,
-  `privatekey` or `passphrase` (plural too; `api` + `key` and `private` +
-  `key` count as one) and the next segment is not a harmless suffix
+  `privatekey`, `passphrase`, `pass`, `pw`, `credential` or `credentials`
+  (plural too; `api` + `key` and `private` + `key` count as one; `pass`,
+  `pw` and `credential(s)` since RK9-678) and the next segment is not a harmless suffix
   (`scan`, `policy`, `count`, `used`, `usage`, `limit`, `budget`, `type`,
   `name`, `ref`, `path`, `file`, `expiry`, `ttl`, `status`, ...; the
   full list is `HARMLESS_SUFFIXES` in `server/src/routes/rk9-coord-actors.ts`).
   `id` after `token` or `apikey` (`token_id`, `api_key_id`) names an
   identifier (RK9-665): its value passes only when it is a lower-case
   prefixed id (`tok_abcdef123`: 2-8 letters, `_`, up to 16 lower-case
-  alphanumerics), up to 20 digits or a lower-case UUID. Mixed case and
+  alphanumerics), up to 20 digits or a lower-case UUID. Under an
+  `api_key_id` a UUID is 422 (RK9-678): some providers issue UUID API keys,
+  so a UUID under an API key name is the key when the name is wrong. Send
+  the key's row id as `api_key_ref` instead. Mixed case and
   other opaque values are still 422. `secret_id` stays a full credential name, because a
   Vault AppRole `secret_id` is the credential itself.
   So `password`, `secrets`, `github_token`, `DB_PASSWORD`, `SECRET_KEY`,
@@ -384,7 +388,8 @@ Rules:
   and a credential name given as a value. Such a name is one word without
   whitespace or `/` (or an upper-case label of up to three words, `"DB
   PASSWORD"`) that either ends in a credential word (the key words plus
-  `authorization`) or `api`/`secret`/`access`/`private` + `key`, or is an
+  `authorization`, but not `pass` or `pw`: `"first-pass"` is a word) or
+  `api`/`secret`/`access`/`private` + `key`, or is an
   upper-case environment variable name or a command-line flag that the key
   rule accepts (`GITHUB_TOKEN_RW`, `API_KEY_PROD`, `PASSWORD1`,
   `VAULT_SECRET_ID`, `--token-value`; RK9-665; not `--token-file` or
@@ -393,7 +398,7 @@ Rules:
   lower-case word (`"secret"`, `"tokens"`) counts, but its value passes
   when every `_`/`-` part of it is on the known-word list `KNOWN_WORDS`
   (`important`, `billing`, `unlimited`, `reset`, `flow`, ...; RK9-665).
-  This applies to the second item of a two-item array (`["secret",
+  This applies to the item after the name in an array (`["secret",
   "important"]`, `["password", "reset_flow"]`) and to a pair object with a
   plural name (`{"name": "tokens", "value": "unlimited"}`), never after a
   `=` item and never to a singular name in a pair object. Any other value
@@ -404,13 +409,19 @@ Rules:
   the value entry of a name/value
   pair object (`{"name": "PASSWORD", "value": "..."}`, `{"Key": ...,
   "Value": ...}`, `{"k": ..., "v": ...}`, CloudFormation `ParameterKey` /
-  `ParameterValue`), the second item of a two-item array
-  (`["DB_PASSWORD", "..."]`) and the item after a credential flag or a `=`
+  `ParameterValue`), the item after the name in an array of any length
+  (`["DB_PASSWORD", "..."]`, `["PASSWORD", "...", "x"]`; before RK9-678
+  only a two-item array) and the item after a credential flag or a `=`
   item (`["--password", "..."]`, `["DB_PASSWORD", "=", "..."]`). The item
   after a credential flag is a secret at any length (`["--secret", "foo"]`)
-  unless it starts with `-`; then the usual 6-character rule applies. Under a credential key, a key whose value is a
-  scalar or empty is checked like a leaf (`{"password": {"<secret>":
-  true}}`). **Numbers are exempt:** a JSON number is never a secret, so
+  unless it starts with `-`; then the usual 6-character rule applies. Under a credential key, every key is checked like a
+  leaf, whatever its value (`{"password": {"<secret>": true}}`, and since
+  RK9-678 `{"password": {"<secret>": 1}}` and `{"secret_key":
+  {"<secret>": {"a": 1}}}` too). The one exemption is a counter key
+  (`COUNTER_WORDS`, as in the free-text counter map) whose nearest
+  credential ancestor is a `token`/`tokens` key, so `{"tokens": {"input":
+  1234, "cache_read": 12}}` passes and `{"tokens": {"hunterpass": 1}}` is
+  422. **Numbers are exempt:** a JSON number is never a secret, so
   token counts (`{"max_tokens": 200000}`, `{"tokens": {"input": 1234}}`)
   are accepted; a numeric password sent as a JSON number is accepted too,
   as a string it is 422 (operator decision 3.11.2026, RK9-665: numeric JSON
@@ -542,6 +553,16 @@ model is called.
   value, any other key or a digit in a key under
   `tokens` is redacted, and so is any bracketed value under `password`,
   `secret` or `api_key` and any array.
+- **Shared keyword set (RK9-678, operator decision 3.11.2026).** The
+  default pattern, the wider keyword rule and the client pattern in
+  `rk9-sessions.sh` also know `passphrase`, `private_key`, `credentials`
+  and `pw` (not after a letter, so `pwd=` stays), and `pass` with an `=`
+  separator only and not after a letter (`user=bob pass=<value>`; `pass:`
+  is prose, `second pass: refactoring`; `passed=3` and `compass=` stay).
+  Two other client copies (`pcp-headsup.sh`, `bin/rk9`) did not change in
+  RK9-678.
+- **Cap.** A cut that falls inside a `[redacted]` marker moves to the
+  marker start (RK9-678), so a capped line never ends in `[redac…`.
 - **Known prose false positive.** A keyword, a separator and one word of 6+
   characters is redacted: `Secrets: rotated today` is stored as
   `[redacted] today`. This is deliberate (fail closed): a rule that keeps

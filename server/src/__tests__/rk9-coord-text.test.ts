@@ -447,3 +447,70 @@ describe("RK9-676 linear JWT scan (parent decision)", () => {
     expect(RK9_COORD_SECRET_RX_DEFAULT).toContain(`|${RK9_COORD_JWT_BRANCH}|`);
   });
 });
+
+// RK9 Custom (RK9-678): the shared keyword set grew (operator decision
+// 3.11.2026) and a cap no longer cuts the marker. Leak and false-positive
+// fixtures side by side.
+describe("RK9-678 shared keyword set", () => {
+  const value = ["hunter2", "hunter"].join("");
+
+  it.each([
+    [`user=bob pass=${value}`, "user=bob [redacted]"],
+    [`DB_PASS=${value} ok`, "DB_[redacted] ok"],
+    [`pass%3D${value}`, "[redacted]"],
+    [`pw: ${value}`, "[redacted]"],
+    [`db_pw=${value}`, "db_[redacted]"],
+    [`credentials=${value}`, "[redacted]"],
+    [`credential: ${value}`, "[redacted]"],
+    [`passphrase=${value}`, "[redacted]"],
+    [`private_key: ${value}`, "[redacted]"],
+    [`PRIVATE-KEY=${value}`, "[redacted]"],
+    [`privatekeys=${value}`, "[redacted]"],
+  ])("redacts %j", (input, expected) => {
+    expect(redactRk9CoordText(input, env)).toBe(expected);
+    expect(toRk9CoordLine(input, 140, env)).toBe(expected);
+    expect(rk9CoordIdentifierHasSecret(input, env)).toBe(true);
+  });
+
+  it.each([
+    "cd ~ && pwd=/home/rk9admin",
+    "pwd: /home/rk9admin",
+    "tests passed=3 skipped=0",
+    "compass=northwest",
+    "bypass=enabled_mode",
+    "second pass: refactoring done",
+    "passes=1234567",
+    "first-pass-review",
+  ])("keeps %j", (input) => {
+    expect(redactRk9CoordText(input, env)).toBe(input);
+    expect(rk9CoordTextHasSecret(input, env)).toBe(false);
+  });
+
+  it("the default pattern itself has the new keywords (the bash copy)", () => {
+    const rx = new RegExp(RK9_COORD_SECRET_RX_DEFAULT.replace(`|${RK9_COORD_JWT_BRANCH}`, ""), "gi");
+    expect(`user=bob pass=${value}`.replace(rx, "[redacted]")).toBe("user=bob [redacted]");
+    expect(`pw=${value} passphrase=${value} private_key=${value} credentials=${value}`.replace(rx, "R")).toBe("R R R R");
+    expect(`pwd=/home/rk9admin compass=northwest second pass: refactoring`.replace(rx, "R")).toBe(
+      "pwd=/home/rk9admin compass=northwest second pass: refactoring",
+    );
+  });
+});
+
+describe("RK9-678 cap never cuts the marker", () => {
+  it("moves a cut inside `[redacted]` to the marker start", () => {
+    for (let pad = 125; pad <= 140; pad += 1) {
+      const line = toRk9CoordLine(`${"a".repeat(pad)} token=${canary}xyz tail`, 140, env)!;
+      expect(Array.from(line).length).toBeLessThanOrEqual(140);
+      expect(line).not.toContain(canary);
+      // Either the whole marker or none of it.
+      expect(line.replace("[redacted]", "")).not.toMatch(/\[r?e?d?a?c?t?e?d?…$|\[…$/);
+    }
+  });
+
+  it("keeps a marker that fits before the cut", () => {
+    const line = toRk9CoordLine(`${"a".repeat(100)} token=${canary}xyz ${"b".repeat(60)}`, 140, env)!;
+    expect(line).toContain(" [redacted] b");
+    expect(line.endsWith("…")).toBe(true);
+    expect(Array.from(line).length).toBe(140);
+  });
+});

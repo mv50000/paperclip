@@ -123,6 +123,10 @@ const CREDENTIAL_WORDS = new Set([
   "token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passwds", "apikey", "apikeys",
   // RK9-665: one-word compounds, like `apikey`
   "secretkey", "secretkeys", "privatekey", "privatekeys", "passphrase", "passphrases",
+  // RK9-678 (operator decision, the shared keyword set): `pass`, `pw` and
+  // `credentials` keys. As a value only an upper-case name or a flag counts
+  // (`DB_PASS`, `--pw`); a lower-case `pass` value is a word (VALUE_NAME_WORDS).
+  "pass", "pw", "credential", "credentials",
 ]);
 /** Words that form one credential word with a following `key`/`keys` segment. */
 const KEY_PREFIXES = new Set(["api", "private"]);
@@ -141,10 +145,18 @@ const HARMLESS_SUFFIXES = new Set([
 /**
  * Words whose `id` names the credential instead of being it (RK9-665 L2):
  * `token_id`, `api_key_id`. Their value is still checked, but a short
- * identifier or a UUID passes (ID_VALUE_RX). `secret_id` and `password_id`
- * stay credential names: a Vault AppRole `secret_id` is the credential.
+ * identifier passes (ID_VALUE_RX; a UUID only under a token id, see
+ * KEY_ID_WORDS). `secret_id` and `password_id` stay credential names: a
+ * Vault AppRole `secret_id` is the credential.
  */
 const ID_WORDS = new Set(["token", "tokens", "apikey", "apikeys"]);
+/**
+ * RK9-678: an `api_key_id` gets the `keyid` mode, in which a UUID does not
+ * pass: some providers issue UUID API keys, so a UUID under an API key name
+ * is the key when the name is wrong. A token id keeps the UUID shape (the
+ * RK9-665 L2 case, a token row id).
+ */
+const KEY_ID_WORDS = new Set(["apikey", "apikeys"]);
 
 function nameSegmentations(name: string): string[][] {
   const text = rk9CoordMatchText(name);
@@ -194,6 +206,8 @@ function credentialWordsOf(name: string): CredentialWord[] {
  * - `strong`: no exemption;
  * - `id`: the name is `token_id`-like, so an identifier shape passes
  *   (ID_VALUE_RX: `tok_abc123`, digits, a UUID);
+ * - `keyid`: the name is `api_key_id`-like: as `id`, but a UUID does not
+ *   pass (RK9-678, KEY_ID_VALUE_RX);
  * - `word`: the name is a bare lower-case word given as a value
  *   (`["secret", "important"]`, `{"name": "tokens", "value": "unlimited"}`),
  *   so a value made of KNOWN_WORDS passes.
@@ -202,7 +216,7 @@ function credentialWordsOf(name: string): CredentialWord[] {
  * array below an `id` or `word` name is checked in the `strong` mode.
  * RK9-665: a real secret's shape never passes.
  */
-type SecretMode = "none" | "id" | "word" | "strong";
+type SecretMode = "none" | "id" | "keyid" | "word" | "strong";
 
 function combineModes(a: SecretMode, b: SecretMode): SecretMode {
   if (a === "none") return b;
@@ -217,6 +231,8 @@ function combineModes(a: SecretMode, b: SecretMode): SecretMode {
  * full-strength secret.
  */
 const ID_VALUE_RX = /^(?:[a-z]{2,8}_[a-z0-9]{1,16}|[0-9]{1,20}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+/** ID_VALUE_RX without the UUID shape, for the `keyid` mode. */
+const KEY_ID_VALUE_RX = /^(?:[a-z]{2,8}_[a-z0-9]{1,16}|[0-9]{1,20})$/;
 /**
  * Known vocabulary after a bare credential word (tags, labels, settings).
  * A value passes in the `word` mode when every `_`/`-` part is on this
@@ -240,7 +256,8 @@ function isKnownVocabulary(value: string): boolean {
 function keyMode(key: string): SecretMode {
   const words = credentialWordsOf(key);
   if (words.length === 0) return "none";
-  return words.every((word) => word.id) ? "id" : "strong";
+  if (!words.every((word) => word.id)) return "strong";
+  return words.some((word) => KEY_ID_WORDS.has(word.word)) ? "keyid" : "id";
 }
 
 /**
@@ -273,7 +290,13 @@ const ARG_SEPARATOR_RX = /^[=:]$/;
  * Credential words that may end a credential name given as a value.
  * `authorization` names the HTTP header (`{"name": "Authorization", ...}`).
  */
-const VALUE_NAME_WORDS = new Set([...CREDENTIAL_WORDS, "authorization"]);
+const VALUE_NAME_WORDS = new Set(
+  // RK9-678: `pass` and `pw` end words such as `first-pass` and are no
+  // credential name as a lower-case value ("not the bare word"); the
+  // upper-case and flag forms (`DB_PASS`, `PW`, `--pass`) count through
+  // the key rule in valueNameMode().
+  [...CREDENTIAL_WORDS, "authorization"].filter((word) => word !== "pass" && word !== "pw"),
+);
 /** Words that end a credential name together with a final `key`. */
 const VALUE_KEY_PREFIXES = new Set(["api", "secret", "access", "private"]);
 /** Upper-case environment variable names: `GITHUB_TOKEN_RW`, `PASSWORD1`. */
@@ -337,13 +360,14 @@ function valueNameMode(value: unknown): SecretMode {
 function isSecretValue(mode: SecretMode, value: string): boolean {
   if (mode === "none" || !SECRET_VALUE_RX.test(value)) return false;
   if (mode === "id") return !ID_VALUE_RX.test(value);
+  if (mode === "keyid") return !KEY_ID_VALUE_RX.test(value);
   if (mode === "word") return !isKnownVocabulary(value);
   return true;
 }
 
-/** The mode for an object or array: the `id` and `word` exemptions cover a string only. */
+/** The mode for an object or array: the `id`, `keyid` and `word` exemptions cover a string only. */
 function structuredMode(mode: SecretMode): SecretMode {
-  return mode === "id" || mode === "word" ? "strong" : mode;
+  return mode === "id" || mode === "keyid" || mode === "word" ? "strong" : mode;
 }
 
 /** A plural credential word (`tokens`, `secrets`): a label, not one credential's name. */
@@ -352,9 +376,10 @@ function isPluralWord(text: string): boolean {
 }
 
 /**
- * The array items that hold a credential value, with their mode: the second
- * item of a two-item `[name, value]` pair, the item after a credential flag
- * (`--password`; `-p` is not covered) and the item after a `=`/`:`
+ * The array items that hold a credential value, with their mode: the item
+ * after a credential name (`[name, value]`, and in a longer list too:
+ * `["PASSWORD", "<secret>", "x"]`, RK9-678), the item after a credential
+ * flag (`--password`; `-p` is not covered) and the item after a `=`/`:`
  * separator item that follows a credential name. `flag` lists the items
  * after a strong credential flag that are not flags themselves: they are
  * secrets at any length (`["--secret", "foo"]`, RK9-665).
@@ -363,7 +388,6 @@ function credentialValueIndexes(items: unknown[]): { modes: Map<number, SecretMo
   const modes = new Map<number, SecretMode>();
   const flag = new Set<number>();
   const mark = (index: number, mode: SecretMode) => modes.set(index, combineModes(modes.get(index) ?? "none", mode));
-  if (items.length === 2) mark(1, valueNameMode(items[0]));
   items.forEach((item, index) => {
     const mode = valueNameMode(item);
     if (mode === "none" || typeof item !== "string") return;
@@ -373,7 +397,7 @@ function credentialValueIndexes(items: unknown[]): { modes: Map<number, SecretMo
     else if (item.startsWith("-")) {
       mark(index + 1, mode);
       if (mode === "strong" && typeof following === "string" && !following.startsWith("-")) flag.add(index + 1);
-    }
+    } else if (index + 1 < items.length) mark(index + 1, mode);
   });
   return { modes, flag };
 }
@@ -398,6 +422,12 @@ const TOKEN_COUNT_WORDS = new Set([
  * `cache_creation_input_tokens`): a bare `write_tokens` can be a credential.
  */
 const CACHE_COUNT_WORDS = new Set(["read", "write", "creation"]);
+
+/** A key whose credential words are all `token`/`tokens` (`tokens`, `usage_tokens`), not an id. */
+function isTokenKey(key: string): boolean {
+  const words = credentialWordsOf(key);
+  return words.length > 0 && words.every((word) => (word.word === "token" || word.word === "tokens") && !word.id);
+}
 
 /** A token-count key: `tokens` plus only TOKEN_COUNT_WORDS segments. */
 function isTokenCountKey(key: string): boolean {
@@ -496,8 +526,11 @@ function maskTokenCounts(value: unknown, credential: boolean, depth: number): un
  *   pair object ({"name": "PASSWORD", "value": "..."}), the second item of a
  *   two-item array (["DB_PASSWORD", "..."]) and the item after a credential
  *   flag or `=` item (["--password", "..."]) count as under a credential key;
- * - under a credential key, a key whose value is a scalar or empty is a leaf
- *   too ({"password": {"<secret>": true}});
+ * - under a credential key, every key is a leaf too ({"password":
+ *   {"<secret>": true}}, {"password": {"<secret>": 1}}, RK9-678: a number
+ *   or a non-empty branch no longer hides the key). The one exemption is a
+ *   counter key (isRk9CoordCounterKey) whose nearest credential ancestor is
+ *   a `token`/`tokens` key: {"tokens": {"cache_read": 12}};
  * - `key: value` per string leaf, with the full ancestor key path.
  *
  * Numbers are never secrets (RK9-642): `{"max_tokens": 200000}` and
@@ -526,7 +559,9 @@ export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boole
     }
     return hit;
   };
-  const walk = (value: unknown, path: string[], leafMode: SecretMode, depth: number) => {
+  // `counters`: the nearest credential context is a `token`/`tokens` key, so
+  // a counter key is no secret there (RK9-678).
+  const walk = (value: unknown, path: string[], leafMode: SecretMode, depth: number, counters: boolean) => {
     if (found) return;
     if (value === null || typeof value !== "object") {
       if (typeof value !== "string") return;
@@ -553,30 +588,33 @@ export function rk9CoordMetadataHasSecret(input: Record<string, unknown>): boole
       const { modes, flag } = credentialValueIndexes(value);
       value.forEach((item, index) => {
         if (flag.has(index) && typeof item === "string" && rk9CoordMatchText(item).length > 0) found = true;
-        walk(item, path, combineModes(mode, modes.get(index) ?? "none"), depth - 1);
+        const named = (modes.get(index) ?? "none") !== "none";
+        walk(item, path, combineModes(mode, modes.get(index) ?? "none"), depth - 1, counters && !named);
       });
       return;
     }
     const entries = Object.entries(value);
     const pairMode = pairModeOf(entries);
     for (const [key, item] of entries) {
-      // A key under a credential key may itself be the secret, unless it
-      // labels a number (a counter map) or a non-empty branch.
-      const branch = item !== null && typeof item === "object" && Object.keys(item).length > 0;
-      // RK9-676: a counter key with a boolean or null value is a counter
-      // flag (`{"tokens": {"output": null}}`), like a number. Under
-      // password, secret or api_key the JSON check above still rejects it.
-      const counterFlag = (item === null || typeof item === "boolean") && isRk9CoordCounterKey(key);
-      if (typeof item !== "number" && !counterFlag && !branch && isSecretValue(mode, key)) {
+      // A key under a credential key may itself be the secret, whatever it
+      // labels (RK9-678: `{"password": {"<secret>": 1}}`). Only a counter
+      // key below a token key passes (`{"tokens": {"output": null}}`,
+      // RK9-676 counter flags; `{"tokens": {"input": 12}}`).
+      if (!(counters && isRk9CoordCounterKey(key)) && isSecretValue(mode, key)) {
         found = true;
         return;
       }
-      let child = combineModes(mode, keyMode(key));
-      if (PAIR_VALUE_KEY_RX.test(rk9CoordMatchText(key))) child = combineModes(child, pairMode);
-      walk(item, [...path, key], child, depth - 1);
+      const ownMode = keyMode(key);
+      let child = combineModes(mode, ownMode);
+      let childCounters = ownMode === "none" ? counters : isTokenKey(key);
+      if (PAIR_VALUE_KEY_RX.test(rk9CoordMatchText(key)) && pairMode !== "none") {
+        child = combineModes(child, pairMode);
+        childCounters = false;
+      }
+      walk(item, [...path, key], child, depth - 1, childCounters);
     }
   };
-  walk(metadata, [], "none", RK9_COORD_METADATA_MAX_DEPTH + 1);
+  walk(metadata, [], "none", RK9_COORD_METADATA_MAX_DEPTH + 1, false);
   return found;
 }
 
