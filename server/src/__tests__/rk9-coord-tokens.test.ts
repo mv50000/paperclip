@@ -735,11 +735,14 @@ if (!support.supported) {
       expect(mine.map((e) => e.payload.action)).toEqual(["rk9_coord.token_issued"]);
       expect(JSON.stringify(mine)).not.toContain(issued.body.token);
 
-      // Rollback: no event for a token that does not exist.
+      // Rollback: rotate writes two audit rows (revoked, then rotated). The
+      // second insert fails, so the first row was already written in the
+      // transaction. If events were published inside the transaction instead
+      // of after the commit, a token_revoked event would leak out here.
       await db.execute(sql.raw(`
         CREATE FUNCTION rk9_test_live_fail() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-          IF NEW.entity_type = 'rk9_coord_token' AND NEW.details->>'principalName' = 'live-fail' THEN
+          IF NEW.action = 'rk9_coord.token_rotated' AND NEW.details->>'principalName' = 'live-evt' THEN
             RAISE EXCEPTION 'audit insert failed';
           END IF;
           RETURN NEW;
@@ -749,9 +752,11 @@ if (!support.supported) {
       `));
       try {
         const before = events.length;
-        const failed = await request(app).post(base).send({ principalKind: "host", principalName: "live-fail" });
+        const failed = await request(app).post(`${base}/${issued.body.record.id}/rotate`).send({});
         expect(failed.status).toBe(500);
         expect(events).toHaveLength(before);
+        const [still] = await db.select().from(rk9CoordTokens).where(eq(rk9CoordTokens.id, issued.body.record.id));
+        expect(still!.revokedAt).toBeNull();
       } finally {
         await db.execute(sql.raw(`
           DROP TRIGGER IF EXISTS rk9_test_live_fail_trg ON activity_log;
