@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-const failures = vi.hoisted(() => ({ close: false, rename: false }));
+const failures = vi.hoisted(() => ({ close: false, rename: false, writeFile: false, sync: false, chmod: false }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -14,6 +14,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
+      if (failures.writeFile) {
+        handle.writeFile = async () => {
+          throw new Error("ENOSPC: writeFile failed");
+        };
+      }
+      if (failures.sync) {
+        handle.sync = async () => {
+          throw new Error("EIO: sync failed");
+        };
+      }
       if (!failures.close) return handle;
       let failed = false;
       const realClose = handle.close.bind(handle);
@@ -25,6 +35,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         }
       };
       return handle;
+    },
+    chmod: async (...args: Parameters<typeof actual.chmod>) => {
+      if (failures.chmod) throw new Error("EPERM: chmod failed");
+      return actual.chmod(...args);
     },
     rename: async (...args: Parameters<typeof actual.rename>) => {
       if (failures.rename) throw new Error("EXDEV: rename failed");
@@ -54,7 +68,7 @@ describe("writeCoordEnvFile cleanup", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it.each(["close", "rename"] as const)("leaves no temp file when %s fails", async (step) => {
+  it.each(["close", "rename", "writeFile", "sync", "chmod"] as const)("leaves no temp file when %s fails", async (step) => {
     const sub = path.join(dir, step);
     await (await import("node:fs/promises")).mkdir(sub);
     failures[step] = true;

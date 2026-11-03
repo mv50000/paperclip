@@ -45,6 +45,21 @@ export type Rk9CoordTokenRecord = typeof rk9CoordTokens.$inferSelect;
  */
 export const RK9_COORD_TOKEN_MIN_LIFETIME_MS = 60_000;
 
+/**
+ * RK9-672: the minimum lifetime holds for every caller of the service, not
+ * only the HTTP route. A null or absent expiry (no expiry) is always allowed.
+ */
+function assertExplicitExpiry(expiresAt: Date | null | undefined) {
+  if (!expiresAt) return;
+  const remainingMs = expiresAt.getTime() - Date.now();
+  if (!(remainingMs > 0)) {
+    throw unprocessable("expiresAt must be in the future", { code: "rk9_coord_token_expiry_past" });
+  }
+  if (remainingMs < RK9_COORD_TOKEN_MIN_LIFETIME_MS) {
+    throw unprocessable("expiresAt must be at least 60 s in the future", { code: "rk9_coord_token_expiry_too_soon" });
+  }
+}
+
 /** Runs inside the token write's transaction; a throw rolls the write back. */
 export type Rk9CoordTokenAudit<T> = (tx: Db, result: T) => Promise<void>;
 
@@ -212,6 +227,7 @@ export function rk9CoordTokenService(db: Db) {
     }
     assertNotBoardHost(input.principalKind, input.principalName);
     assertRecallHostOnly(input.principalKind, scope);
+    assertExplicitExpiry(input.expiresAt);
     const token = generateRk9CoordToken();
     try {
       return await db.transaction(async (tx) => {
@@ -251,6 +267,7 @@ export function rk9CoordTokenService(db: Db) {
     expiresAt?: Date | null;
     createdByUserId?: string | null;
   }, audit?: Rk9CoordTokenAudit<Rk9CoordTokenRotateResult>): Promise<Rk9CoordTokenRotateResult> {
+    assertExplicitExpiry(input.expiresAt);
     const token = generateRk9CoordToken();
     return db.transaction(async (tx) => {
       const [old] = await tx
