@@ -228,6 +228,20 @@ This instance runs on the `mv50000/paperclip` fork. GitHub webhooks for auto-clo
 - **Upstream-worthy changes** (generic features, bug fixes applicable to all Paperclip users): create PRs against `paperclipai/paperclip` as usual, then cherry-pick to the fork after merge.
 - **Rule of thumb:** if the issue exists on the Paperclip board, the PR must merge on `mv50000/paperclip` for the webhook auto-close to fire.
 
+### Plugin-first rule (operator decision, 2026-11-03)
+
+Build a new RK9 feature as a plugin in `packages/plugins/`. Use RK9 Ads as the model. Every core change costs effort in every upstream sync, because upstream grows by about 250 commits per week.
+
+Put a feature in the core only if it needs one of these five plugin SDK limits:
+
+1. Interception of a core action, such as an approval gate on a tool call, a pre-checkout hook, or adapter env filtering.
+2. Creation of a core approval (`approvals`). A plugin can only read and decide approvals.
+3. A webhook with a non-JSON body, such as AWS SNS `text/plain`.
+4. A change to a core table, or a read of `activity_log`.
+5. Isolation. Plugin code is trusted and not sandboxed. A secret that a plugin must not see is a valid reason for the core.
+
+When a feature goes into the core, the plan and the PR description must state which limit applies and why a plugin cannot do the work. Check the five limits again after every upstream sync, because the SDK grows.
+
 ## Design system
 
 `DESIGN.md` at the repo root is the source of truth for UI design decisions. The token-only rule applies to all `ui/` changes: every color, spacing, radius, type, shadow, and motion value in `ui/src/components/**` and `ui/src/pages/**` comes from the token layer in `ui/src/index.css` — no hex, raw px, arbitrary Tailwind bracket values, or raw `font-size`/`fontSize` declarations in components, outside the documented allowlist in `ui/src/index.css`. Run `pnpm check:token-gates` (`scripts/check-token-gates.mjs`) before committing UI changes — it fails on any violation not covered by that allowlist.
