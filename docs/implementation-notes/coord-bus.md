@@ -1048,7 +1048,7 @@ The full view for an explicit `rk9 board`. Hook paths never call it. It
 returns live actors, active leases with holder phase and FIFO queue, the
 newest events (`?events=`, default 20) and the pending inbox. Unverified
 viewers (remote hosts, Grok) get the inbox without message bodies. An
-attributed `agent_run` viewer reads the `body` and `kind` of a message only
+`agent_run` viewer (attributed or verified) reads the `body` and `kind` of a message only
 when it is addressed to its own actor id (its actor row, or the id held as a
 name: the claim rule of GET /inbox/me). Other messages show only `id`,
 `from`, `to` and the times; `body` and `kind` are null (RK9-689, parent
@@ -1062,7 +1062,10 @@ not its text. RK9-689 (parent decision 3.11.2026) added `worktree` and
 `headless` claims on the board key: they now see on the board only their own
 questions, the same as their delta. An `orch` claim keeps every question,
 because the orchestrator answers questions on the operator's delegation
-(RK9_COORD_BOARD_ASK_HIDDEN_KINDS). Such a
+(RK9_COORD_BOARD_ASK_HIDDEN_KINDS). This filters what an honest client
+sees; it is not an access boundary. A session that holds the board key can
+leave out `X-RK9-Actor` (the operator's own view) or claim `orch:` or
+`cc:paperclip-01:` and read every question. Such a
 viewer gets an `ask-operator` row (also an answer) with only `id`, `type`,
 `issue`, `actor`, `actor_kind` and the times, and `summary` is the fixed
 text `[ask-operator]`. The `escalated` row of an unanswered question keeps
@@ -1096,7 +1099,13 @@ asker, so this is documented, not changed (RK9-689, Low 4).
 - The board's `escalations_attention` list (failed, suppressed and unacked
   escalations) shows `resource` and `issue` of an `ask_operator_unanswered`
   row to every viewer. It never shows the question text. The hidden event
-  view of the board shows the same `issue`, so the list reveals nothing new.
+  view of the board shows the same `issue`, but not the `resource`. The
+  hidden `escalated` row's summary also names the resource
+  (`ask_operator_unanswered <resource>, N min`). These are identifiers, not
+  question text.
+- `GET /escalations?nudges=true` shows the nudge row of a hidden ask with
+  its `resource`, `issue` and message (the message names the issue). The
+  decision left rows other than the ask escalation unchanged.
 - The inbox rule for `agent_run` covers the board only. `worktree` and
   `headless` claims still read every inbox body on the board: the parent
   decision limited the rule to agent runs. No code path puts question text

@@ -1075,7 +1075,7 @@ export function rk9CoordJournalService(db: Db) {
       /** The restricted viewer, for its own questions (agentId: an agent_run's agent, for sibling runs). */
       viewer?: { actorId: string; agentId: string | null } | null;
       /**
-       * RK9-689 (Low 3): set for an attributed `agent_run` viewer. It reads
+       * RK9-689 (Low 3): set for an `agent_run` viewer (attributed or verified). It reads
        * the body and kind of inbox messages addressed to this actor id only;
        * other messages show id, sender, recipient and times.
        */
