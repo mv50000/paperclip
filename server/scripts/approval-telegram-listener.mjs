@@ -1,6 +1,6 @@
 // approval-telegram-listener.mjs — Telegram approval gate for Paperclip
 // email_send approvals (RK9-85), outreach drafts (RK9-222) and voice_action
-// approvals (RK9-481). Mirrors the
+// approvals (RK9-481), plus a plain info card per inbound customer email (RK9-667). Mirrors the
 // sunspot-ig-listen pattern: pending items are posted to the operator's
 // Telegram chat with inline buttons, and a tap approves/rejects within ~1s
 // via a getUpdates long-poll.
@@ -28,6 +28,13 @@
 //   When the issue has an assignee agent, the card names it ("🔔 herättää"),
 //   because an approved action wakes that agent (operator decision, RK9-490).
 //
+// inbound customer email (RK9-667, info card only: no buttons, no callback prefix):
+//   A card for every new human inbound message at any company's support inbox, so
+//   the operator learns a customer wrote even when the agent closes the ticket
+//   without a reply. Automated mail and outreach replies (own watcher) are skipped.
+//   The first scan of a company only records a high-water mark; old mail is not
+//   posted. If Telegram refuses a card the mark stays put and the next scan retries.
+//
 // An approve that times out, loses its connection or gets a 5xx (RK9-502) is never sent
 // again. The listener reads the approval instead and puts its real state on
 // the card: the outcome comment once approved, a fresh card if still pending.
@@ -47,6 +54,7 @@
 //   TG_CHAT_ID          operator's chat id (only this chat may tap buttons)
 //   STATE_DIR           default /var/lib/paperclip/approval-telegram
 //   OUTREACH_TG_ENABLED default 1; "0" disables the outreach draft source
+//   INBOUND_TG_ENABLED  default 1; "0" disables the inbound customer email source
 //   OUTREACH_TG_MAX_OPEN default 5; open outreach draft cards at a time (≥ 1; use
 //                       OUTREACH_TG_ENABLED=0 to turn the source off, not 0 here)
 //
@@ -69,6 +77,7 @@ const APPROVE_OUTCOME_WAIT_MS = 30 * 60_000;
 // approval counts as "not recorded" only after this long.
 const APPROVE_PENDING_GRACE_MS = 60_000;
 const OUTREACH_ENABLED = (process.env.OUTREACH_TG_ENABLED ?? "1") !== "0";
+const INBOUND_ENABLED = (process.env.INBOUND_TG_ENABLED ?? "1") !== "0";
 const OUTREACH_MAX_OPEN = Math.max(1, Number.parseInt(process.env.OUTREACH_TG_MAX_OPEN ?? "5", 10) || 5);
 
 if (!PCP_TOKEN || !TG_TOKEN || !TG_CHAT) {
@@ -91,6 +100,8 @@ function loadState() {
   // RK9-222: outreach draft cards live in their own map, keyed by
   // outreach_messages.id; a pre-RK9-222 state.json simply lacks the key.
   state.postedOutreach ??= {};
+  // RK9-667: per-company ISO high-water mark of the inbound email already handled.
+  state.inboundSince ??= {};
   return state;
 }
 function saveState(state) {
@@ -360,6 +371,113 @@ async function scan() {
       await scanOutreach(companies);
     } catch (e) {
       console.error("scanOutreach:", e.message);
+    }
+  }
+
+  if (INBOUND_ENABLED) {
+    try {
+      await scanInbound(companies);
+    } catch (e) {
+      console.error("scanInbound:", e.message);
+    }
+  }
+}
+
+// ── RK9-667: inbound customer email — one info card per new human message ────
+const INBOUND_SNIPPET_MAX = 400;
+const INBOUND_REPLY_HEADER = /^(on\s.+\swrote:|.+\skirjoitti:?)\s*$/i;
+
+// The /body route returns the text wrapped in <untrusted_email_body ...> tags; show only the text.
+// Quoted lines and everything from the first reply header on are the customer's earlier thread.
+function inboundSnippet(wrapped) {
+  const lines = String(wrapped ?? "").split(/\r?\n/);
+  if (lines.length && /^<untrusted_email_body\b/.test(lines[0].trim())) lines.shift();
+  if (lines.length && lines[lines.length - 1].trim() === "</untrusted_email_body>") lines.pop();
+  const kept = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    // Gmail wraps long "On <date>, <name> <address> wrote:" headers over two lines.
+    const joined = /^\s*on\s/i.test(line) && i + 1 < lines.length ? `${line.trim()} ${lines[i + 1].trim()}` : line;
+    if (INBOUND_REPLY_HEADER.test(line.trim()) || INBOUND_REPLY_HEADER.test(joined.trim())) break;
+    if (line.trimStart().startsWith(">")) continue;
+    kept.push(line.trimEnd());
+  }
+  let text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (text.length > INBOUND_SNIPPET_MAX) text = text.slice(0, INBOUND_SNIPPET_MAX - 1).trimEnd() + "…";
+  return text;
+}
+
+function renderInboundCard(companyName, message, snippet, issue) {
+  const to = Array.isArray(message.toAddresses) && message.toAddresses.length ? message.toAddresses.join(", ") : "?";
+  const lines = [
+    `📧 ${companyName} · uusi asiakasviesti`,
+    `Lähettäjä: ${message.fromAddress ?? "?"}`,
+    `Vastaanottaja: ${to}`,
+    `Aihe: ${message.subject || "(ei aihetta)"}`,
+  ];
+  if (snippet) lines.push("", snippet);
+  lines.push("");
+  if (issue?.identifier) lines.push(`Tiketti ${issue.identifier} (${issue.status ?? "?"})`);
+  lines.push("ℹ️ Agentti käsittelee viestin. Jos se vastaa, luonnos tulee erillisenä hyväksyntäkorttina.");
+  const text = lines.join("\n");
+  return text.length > 4000 ? text.slice(0, 3999) + "…" : text;
+}
+
+async function scanInbound(companies) {
+  for (const company of companies) {
+    const mark = state.inboundSince[company.id];
+    if (!mark) {
+      // first run for this company: never flood old mail
+      state.inboundSince[company.id] = new Date().toISOString();
+      saveState(state);
+      continue;
+    }
+    const res = await pcp(
+      "GET",
+      `/companies/${company.id}/email/messages?direction=inbound&since=${encodeURIComponent(mark)}&limit=50`,
+    );
+    if (!res.ok || !Array.isArray(res.json)) continue;
+
+    for (const message of res.json) {
+      // createdAt (insert time) is the paging key of the list route; receivedAt can lag behind it.
+      const stamp = message.createdAt;
+      const advance = () => {
+        const t = Date.parse(stamp ?? "");
+        if (!Number.isNaN(t) && t > Date.parse(state.inboundSince[company.id])) state.inboundSince[company.id] = stamp;
+        saveState(state);
+      };
+      if (message.classification === "automated" || message.routeKey === "outreach") {
+        advance();
+        continue;
+      }
+
+      let snippet = "";
+      try {
+        const body = await pcp("GET", `/companies/${company.id}/email/messages/${message.id}/body`);
+        if (body.ok && typeof body.json?.wrapped === "string") snippet = inboundSnippet(body.json.wrapped);
+      } catch (e) {
+        console.error(`inbound body ${message.id}:`, e.message);
+      }
+      let issue = null;
+      if (message.issueId) {
+        try {
+          const r = await pcp("GET", `/issues/${message.issueId}`);
+          if (r.ok) issue = r.json;
+        } catch (e) {
+          console.error(`inbound issue ${message.issueId}:`, e.message);
+        }
+      }
+
+      const msg = await tg("sendMessage", {
+        chat_id: TG_CHAT,
+        text: renderInboundCard(company.name, message, snippet, issue),
+      });
+      if (!msg?.ok) {
+        console.error("sendMessage (inbound) failed:", msg?.description);
+        return; // Telegram unhappy — retry from this message next scan
+      }
+      advance();
+      console.log(`posted inbound ${message.id} (${company.name})`);
     }
   }
 }

@@ -1,5 +1,6 @@
 import express from "express";
 import request from "supertest";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockSendEmail = vi.hoisted(() => vi.fn(async () => ({
@@ -56,7 +57,41 @@ function makeDb(row: Record<string, unknown> | null) {
   };
 }
 
-async function createApp(db: ReturnType<typeof makeDb>, actor: Record<string, unknown>) {
+// RK9-667: list route chain is select().from().where().orderBy().limit(); capture each stage so the
+// tests can render the where clause to SQL and check the filters the route built.
+function makeListDb(rows: Array<Record<string, unknown>>) {
+  const captured: { where?: unknown; orderBy?: unknown[]; limit?: number; fields?: Record<string, unknown> } = {};
+  const chain = {
+    from: vi.fn(() => chain),
+    where: vi.fn((w: unknown) => {
+      captured.where = w;
+      return chain;
+    }),
+    orderBy: vi.fn((...o: unknown[]) => {
+      captured.orderBy = o;
+      return chain;
+    }),
+    limit: vi.fn(async (n: number) => {
+      captured.limit = n;
+      return rows;
+    }),
+  };
+  return {
+    select: vi.fn((fields: Record<string, unknown>) => {
+      captured.fields = fields;
+      return chain;
+    }),
+    update: vi.fn(),
+    __captured: captured,
+  };
+}
+
+const dialect = new PgDialect();
+const renderWhere = (db: ReturnType<typeof makeListDb>) => dialect.sqlToQuery(db.__captured.where as never);
+
+const boardActor = { type: "board", userId: "user-1", source: "local_implicit", isInstanceAdmin: true };
+
+async function createApp(db: ReturnType<typeof makeDb> | ReturnType<typeof makeListDb>, actor: Record<string, unknown>) {
   const { rk9EmailRoutes: emailRoutes } = await import("../routes/rk9-email.js");
   const app = express();
   app.use(express.json());
@@ -147,5 +182,85 @@ describe("email routes", () => {
       .expect(422);
 
     expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  describe("GET /companies/:companyId/email/messages (RK9-667)", () => {
+    const row = {
+      id: "email-message-1",
+      direction: "inbound",
+      fromAddress: "customer@example.com",
+      toAddresses: ["support@example.test"],
+      subject: "Need help",
+      status: "received",
+      classification: null,
+      routeKey: "support",
+      receivedAt: "2026-04-30T10:00:00.000Z",
+      sentAt: null,
+      createdAt: "2026-04-30T10:00:00.000Z",
+      issueId: "issue-1",
+      assignedAgentId: "agent-1",
+    };
+
+    it("lets a board actor list metadata only (no body)", async () => {
+      const db = makeListDb([row]);
+      const app = await createApp(db, boardActor);
+      const res = await request(app).get("/api/companies/company-1/email/messages").expect(200);
+      expect(res.body).toEqual([row]);
+      expect(Object.keys(db.__captured.fields ?? {}).sort()).toEqual(
+        [
+          "assignedAgentId", "classification", "createdAt", "direction", "fromAddress", "id", "issueId",
+          "receivedAt", "routeKey", "sentAt", "status", "subject", "toAddresses",
+        ].sort(),
+      );
+      expect(db.__captured.limit).toBe(50);
+      expect(db.__captured.orderBy).toHaveLength(2);
+      const { sql: where, params } = renderWhere(db);
+      expect(where).not.toContain("created_at");
+      expect(params).toEqual(["company-1"]);
+    });
+
+    it("rejects an agent actor", async () => {
+      const db = makeListDb([row]);
+      const app = await createApp(db, { type: "agent", companyId: "company-1", agentId: "agent-1" });
+      await request(app).get("/api/companies/company-1/email/messages").expect(403);
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
+    it("filters by direction and since", async () => {
+      const db = makeListDb([]);
+      const app = await createApp(db, boardActor);
+      await request(app)
+        .get("/api/companies/company-1/email/messages")
+        .query({ direction: "inbound", since: "2026-04-30T09:00:00Z", limit: "200" })
+        .expect(200);
+      const { sql: where, params } = renderWhere(db);
+      expect(where).toContain("created_at");
+      expect(where).not.toContain("received_at");
+      expect(where).toContain("> $");
+      expect(params).toEqual(["company-1", "inbound", "2026-04-30T09:00:00.000Z"]);
+      expect(db.__captured.limit).toBe(200);
+    });
+
+    it.each([
+      ["direction=sideways"],
+      ["since=not-a-date"],
+      ["since="],
+      ["limit=0"],
+      ["limit=201"],
+      ["limit=abc"],
+      ["limit=1.5"],
+    ])("rejects invalid query %s", async (qs) => {
+      const db = makeListDb([]);
+      const app = await createApp(db, boardActor);
+      await request(app).get(`/api/companies/company-1/email/messages?${qs}`).expect(422);
+      expect(db.select).not.toHaveBeenCalled();
+    });
+
+    it("does not shadow the single-message route", async () => {
+      const db = makeDb(makeInboundMessage());
+      const app = await createApp(db, boardActor);
+      const res = await request(app).get("/api/companies/company-1/email/messages/email-message-1").expect(200);
+      expect(res.body).toMatchObject({ id: "email-message-1", bodyLength: 4 });
+    });
   });
 });

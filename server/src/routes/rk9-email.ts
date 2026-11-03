@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { isUuidLike } from "@paperclipai/shared";
 import {
@@ -417,6 +417,68 @@ export function rk9EmailRoutes(db: Db) {
                   ? 503
                   : 502;
     res.status(status).json(result);
+  });
+
+  // RK9-667: metadata-only listing so the Telegram listener can notice new customer mail. The
+  // body stays behind the /body route (agents never reach this one: board only).
+  router.get("/companies/:companyId/email/messages", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    assertBoard(req);
+
+    const direction = typeof req.query.direction === "string" ? req.query.direction : undefined;
+    if (req.query.direction !== undefined && direction !== "inbound" && direction !== "outbound") {
+      throw unprocessable("direction must be inbound or outbound");
+    }
+    let since: Date | null = null;
+    if (req.query.since !== undefined) {
+      const raw = typeof req.query.since === "string" ? req.query.since : "";
+      since = new Date(raw);
+      if (!raw || Number.isNaN(since.getTime())) throw unprocessable("since must be an ISO timestamp");
+    }
+    let limit = 50;
+    if (req.query.limit !== undefined) {
+      const raw = typeof req.query.limit === "string" ? req.query.limit : "";
+      limit = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        throw unprocessable("limit must be an integer between 1 and 200");
+      }
+    }
+
+    // created_at is the insert time. received_at is the SES event time, which a late SNS redelivery
+    // (e.g. during a server restart) can put behind a caller's high-water mark, so never page on it.
+    const stamp = rk9EmailMessages.createdAt;
+    const rows = await db
+      .select({
+        id: rk9EmailMessages.id,
+        direction: rk9EmailMessages.direction,
+        fromAddress: rk9EmailMessages.fromAddress,
+        toAddresses: rk9EmailMessages.toAddresses,
+        subject: rk9EmailMessages.subject,
+        status: rk9EmailMessages.status,
+        classification: rk9EmailMessages.classification,
+        routeKey: rk9EmailMessages.routeKey,
+        receivedAt: rk9EmailMessages.receivedAt,
+        sentAt: rk9EmailMessages.sentAt,
+        createdAt: rk9EmailMessages.createdAt,
+        issueId: rk9EmailMessages.issueId,
+        assignedAgentId: rk9EmailMessages.assignedAgentId,
+      })
+      .from(rk9EmailMessages)
+      .where(
+        and(
+          eq(rk9EmailMessages.companyId, companyId),
+          direction ? eq(rk9EmailMessages.direction, direction) : undefined,
+          // Postgres keeps microseconds, the JSON the caller echoes back as `since` only milliseconds:
+          // truncate so a message at the caller's high-water mark is not returned again.
+          since
+            ? sql`date_trunc('milliseconds', ${stamp}) > ${since.toISOString()}::timestamptz`
+            : undefined,
+        ),
+      )
+      .orderBy(asc(stamp), asc(rk9EmailMessages.id))
+      .limit(limit);
+    res.json(rows);
   });
 
   router.get("/companies/:companyId/email/messages/:messageId", async (req, res) => {
