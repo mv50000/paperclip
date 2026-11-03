@@ -279,6 +279,33 @@ if (!support.supported) {
     expect(res.status).toBe(201);
   });
 
+  it("the host list leaves out a legacy cc row with a bad session, like the close check (RK9-683)", async () => {
+    const laptop = appFor(none, hostToken(companyId));
+    const good = await post(companyId, "cc:mv-laptop:sess-ok", {
+      type: "decision", title: "good session", rationale: "r", vault_note: note,
+    }, laptop);
+    expect(good.status).toBe(201);
+    // The API refuses this actor id; a legacy row can only exist from before the grammar.
+    const [legacy] = await db.insert(rk9CoordEvents).values({
+      companyId,
+      type: "decision",
+      actorRef: "cc:mv-laptop:bad session",
+      actorKind: "cc",
+      trust: "unverified",
+      summary: "legacy bad-session decision",
+      payload: { title: "legacy", rationale: "r" },
+      vaultPath: note,
+    }).returning();
+    const listed = await pending(companyId, "cc:mv-laptop:sess-new", "?limit=100", laptop);
+    const ids = listed.body.events.map((e: { id: number }) => e.id);
+    expect(ids).toContain(good.body.event.id);
+    expect(ids).not.toContain(legacy!.id);
+    const res = await post(companyId, "cc:mv-laptop:sess-new", {
+      type: "decision-vaulted", vault_path: note, commit: "abc1234", ref_event_id: legacy!.id,
+    }, laptop);
+    expect(res.status).toBe(403);
+  });
+
   it("an unverified caller gets 403 before any 404/409 existence answer (RK9-646)", async () => {
     const remote = appFor(none, hostToken(companyId));
     const theirs = await decision(companyId, "worktree:RK9-631", "oracle");
