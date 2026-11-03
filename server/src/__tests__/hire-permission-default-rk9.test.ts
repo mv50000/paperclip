@@ -8,7 +8,8 @@
 // services/agent-permissions.ts. After the lift the DB cases below fail with a TypeError, not on the
 // CEO assertion. In RK9-701 move them to the agent-lifecycle API / `prepareAgentHire` path and keep
 // the CEO case. The pure-function cases call the fork pin (`normalizeAgentPermissions` + role)
-// directly, so the CEO rule stays checked without the create path.
+// directly. They import the module lazily, so a lift that drops services/agent-permissions.ts fails
+// them with a clear "module not found" instead of breaking the whole file at load.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agents, companies, createDb } from "@paperclipai/db";
@@ -18,9 +19,12 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { agentService } from "../services/agents.ts";
 import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
-import { normalizeAgentPermissions } from "../services/agent-permissions.ts";
 
 describe("hire permission default as a pure function (RK9-317, RK9-707)", () => {
+  let normalizeAgentPermissions!: typeof import("../services/agent-permissions.ts").normalizeAgentPermissions;
+  beforeAll(async () => {
+    ({ normalizeAgentPermissions } = await import("../services/agent-permissions.ts"));
+  });
   const onCreate = (permissions: unknown, role: string) =>
     normalizeAgentPermissions(permissions, { context: "create", role }).canCreateAgents;
 

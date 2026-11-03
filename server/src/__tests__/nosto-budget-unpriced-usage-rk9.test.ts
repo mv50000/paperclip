@@ -21,7 +21,6 @@ import {
 import { eq } from "drizzle-orm";
 import { costService } from "../services/costs.ts";
 import { budgetService } from "../services/budgets.ts";
-import { resolveLedgerCostStatus } from "../services/heartbeat.ts";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -113,8 +112,11 @@ describeEmbeddedPostgres("unpriced claude_local usage never auto-pauses (RK9-693
     expect(block).toBeNull();
   }
 
-  it("a claude_local run with token usage and no price is stored as unpriced", () => {
+  it("a claude_local run with token usage and no price is stored as unpriced", async () => {
     // The precondition for the cases below: an unpriced run reaches the ledger as cost_status 'unpriced'.
+    // Imported lazily: 1023 moves the function to services/heartbeat/run-state.ts, and a missing
+    // export must fail only this case, not the budget cases.
+    const { resolveLedgerCostStatus } = await import("../services/heartbeat.ts");
     expect(
       resolveLedgerCostStatus({ costUsd: null, inputTokens: 5_000, cachedInputTokens: 0, outputTokens: 500 }),
     ).toBe("unpriced");

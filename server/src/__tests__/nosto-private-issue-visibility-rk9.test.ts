@@ -7,7 +7,9 @@
 // The inventory is open: the test scans server/src for files that query `issues` without the
 // condition, and every hit must be classified below. A new unfiltered fork file fails the test.
 // The upstream baseline is upstream code that the fork does not own; a lift that changes it fails
-// here too, and the RK9-701 step then re-classifies the files.
+// here too, and the RK9-701 step then re-classifies the files and moves FORK_BASE_COMMIT to the new
+// upstream base. The check works per file: one filtered query hides the file from the scan.
+// The git cross-check needs history; a shallow CI checkout skips it, so it runs on full clones only.
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -21,7 +23,13 @@ const repoRoot = path.resolve(root, "../..");
 const FORK_BASE_COMMIT = "dffc2b3ca1";
 
 const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt/;
-const QUERIES_ISSUES = /\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*issues\b/;
+const QUERY_CALL = String.raw`\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*`;
+
+/** True when the file queries the `issues` table, also through an import alias (`issues as issueRows`). */
+function queriesIssues(src: string): boolean {
+  const names = ["issues", ...Array.from(src.matchAll(/\bissues\s+as\s+(\w+)/g), (match) => match[1])];
+  return names.some((name) => new RegExp(`${QUERY_CALL}${name}\\b`).test(src));
+}
 
 /** Fork-only files that read or write `issues` with no visibleIssueCondition/hiddenAt filter. */
 const FORK_FILES_WITHOUT_VISIBILITY_FILTER = [
@@ -34,14 +42,17 @@ const FORK_FILES_WITHOUT_VISIBILITY_FILTER = [
   "services/rk9-coord-inbox.ts",
   "services/rk9-coord-presence.ts",
   "services/rk9-run-taint.ts",
+  "services/rk9-voice-action-deps.ts",
 ];
 
 /** Upstream files without the filter at the RK9-707 snapshot. Not fork code: listed only to classify scan hits. */
 const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "modules/run-dispatch/adapters/postgres.ts",
   "modules/wake-queue/adapters/queued-comment-postgres.ts",
+  "routes/agents.ts",
   "routes/cases.ts",
   "routes/execution-workspaces.ts",
+  "routes/issue-tree-control.ts",
   "services/access.ts",
   "services/activity-log.ts",
   "services/agent-conversations.ts",
@@ -101,6 +112,7 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/native-runtime/runner-semantic-authority.ts",
   "services/native-runtime/status-decision-committer.ts",
   "services/onboarding-seed.ts",
+  "services/plugin-host-services.ts",
   "services/project-tool-context.ts",
   "services/projects.ts",
   "services/question-response-delivery.ts",
@@ -130,7 +142,7 @@ function scanUnfilteredIssueQueries(): string[] {
         if (name !== "__tests__" && name !== "node_modules") walk(full);
       } else if (name.endsWith(".ts") && !name.endsWith(".test.ts")) {
         const src = readFileSync(full, "utf8");
-        if (QUERIES_ISSUES.test(src) && !VISIBILITY_FILTER.test(src)) {
+        if (queriesIssues(src) && !VISIBILITY_FILTER.test(src)) {
           hits.push(path.relative(root, full).split(path.sep).join("/"));
         }
       }
@@ -146,7 +158,7 @@ function forkAddedFiles(): Set<string> | null {
     execFileSync("git", ["cat-file", "-e", `${FORK_BASE_COMMIT}^{commit}`], { cwd: repoRoot, stdio: "ignore" });
     const out = execFileSync(
       "git",
-      ["diff", "--name-only", "--diff-filter=A", FORK_BASE_COMMIT, "HEAD", "--", "server/src"],
+      ["diff", "--name-only", "--no-renames", "--diff-filter=A", FORK_BASE_COMMIT, "HEAD", "--", "server/src"],
       { cwd: repoRoot, encoding: "utf8" },
     );
     return new Set(out.split("\n").filter(Boolean).map((file) => file.replace(/^server\/src\//, "")));
@@ -171,7 +183,7 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
       expect(existsSync(file), rel).toBe(true);
       const src = readFileSync(file, "utf8");
       // When a file gains the filter, drop it from its list (and activate the leak case for fork files).
-      expect(QUERIES_ISSUES.test(src) && !VISIBILITY_FILTER.test(src), rel).toBe(true);
+      expect(queriesIssues(src) && !VISIBILITY_FILTER.test(src), rel).toBe(true);
     }
   });
 
@@ -195,6 +207,7 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
     it.todo("rk9-coord-inbox: a hidden issue is not resolved by identifier or id");
     it.todo("rk9-coord-presence: a hidden issue is not joined into a run's presence row");
     it.todo("rk9-run-taint: a hidden issue does not taint a run");
+    it.todo("rk9-voice-action-deps: a voice action does not update a hidden issue");
     it.todo("email/escalation: a hidden issue is not joined into the escalation list");
     it.todo("email/inbound-router: an inbound reply does not reopen a hidden issue");
     it.todo("github-webhooks: a webhook does not match a hidden issue");
