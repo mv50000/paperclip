@@ -52,7 +52,8 @@ export function knowledgeRoutes(db: Db) {
         }
         actorFields = {
           actorType: "system",
-          actorId: `rk9_recall_token:${coordPrincipal.principalKind}:${coordPrincipal.principalName}`,
+          // The token id tells rotated tokens of one host apart in the audit trail.
+          actorId: `rk9_recall_token:${coordPrincipal.principalKind}:${coordPrincipal.principalName}:${coordPrincipal.tokenId}`,
           agentId: null,
           runId: null,
         };

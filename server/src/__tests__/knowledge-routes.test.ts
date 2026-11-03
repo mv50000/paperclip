@@ -159,7 +159,7 @@ describe("POST /companies/:companyId/knowledge/recall — recall-scope coord tok
       companyId: "company-1",
       allCollections: false,
       actorType: "system",
-      actorId: "rk9_recall_token:host:mv-laptop",
+      actorId: "rk9_recall_token:host:mv-laptop:t-recall",
       agentId: null,
       runId: null,
     });

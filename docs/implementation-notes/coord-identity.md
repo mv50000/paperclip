@@ -478,7 +478,13 @@ paperclip-01.
   gets 403 on the recall route. The route binds the token to its own company
   (403 `rk9_coord_wrong_company` otherwise). The call is read-only.
 - **Activity:** the recall row is logged with actor type `system` and actor
-  id `rk9_recall_token:<kind>:<name>`.
+  id `rk9_recall_token:<kind>:<name>:<tokenId>`.
+- **Server rollback:** a build before RK9-653 refuses every recall token
+  (401, fails closed). Provisioning deletes the legacy board-key files on the
+  hosts, so after such a rollback remote recall stops until the server is on
+  RK9-653 again. Roll forward rather than back, or reinstate a board-key file.
+- A `service` principal may also get a recall token (operator-only); the
+  provisioning script issues recall tokens for hosts only.
 - **`scope: "all"` (operator mode):** decided explicitly.
   - An instance-admin caller (session or board key) keeps it, as before.
   - A recall token gets it only when its `recall_all` flag is on. The flag

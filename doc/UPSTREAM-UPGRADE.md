@@ -30,9 +30,10 @@ Custom-migraatiot käyttävät **9000-sarjaa** (`9NNN_rk9_<feature>.sql`):
 | 9013   | Outreach: hyväksytyn sisällön tiiviste `approved_content_hash` (RK9-475) |
 | 9014   | Ajojen taint-merkinnät (`rk9_run_taints`, RK9-319) |
 | 9015   | Coord bus: kaikki `rk9_coord_*`-taulut (epic RK9-620) |
+| 9016   | Coord-tokenien `recall`-scope ja `recall_all`-lippu (RK9-653) |
 
-Seuraava vapaa numero: **9016** (tarkistettu 2026-11-03: `packages/db/src/migrations/`
-ei sisällä 9016+-tiedostoja). Uusi fork-migraatio noudattaa lukko-odotuksen kattoa, ks. "Lukko-odotuksen katto" alla.
+Seuraava vapaa numero: **9017** (tarkistettu 2026-11-03: `packages/db/src/migrations/`
+ei sisällä 9017+-tiedostoja). Uusi fork-migraatio noudattaa lukko-odotuksen kattoa, ks. "Lukko-odotuksen katto" alla.
 
 ### `email_messages`-törmäys (RK9-317, porras 916.1)
 

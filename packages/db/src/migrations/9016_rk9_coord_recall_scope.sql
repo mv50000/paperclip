@@ -16,9 +16,12 @@
 -- company-scoped. The flag is allowed only on a recall-scoped token.
 -- ADD COLUMN with a constant default is a catalog-only change (no rewrite).
 --
--- Startup safety: the runner applies this file in one transaction
--- (BEGIN ... COMMIT in client.ts). SET LOCAL caps every lock wait at 5 s for
--- this transaction only. If a long-running transaction holds a lock on
+-- Startup safety: on an existing database the runner applies this file in its
+-- own transaction (BEGIN ... COMMIT in client.ts), so SET LOCAL caps every
+-- lock wait at 5 s for this file only. On an empty database drizzle's
+-- migratePg runs all migrations in one transaction; the cap then also covers
+-- any later migration of that run, which is harmless (nothing else locks an
+-- empty database). If a long-running transaction holds a lock on
 -- rk9_coord_tokens, the migration fails with lock_not_available after 5 s,
 -- rolls back completely and records nothing; the next start retries it. The
 -- DDL is small and additive: a CHECK on a table of a few rows and an index

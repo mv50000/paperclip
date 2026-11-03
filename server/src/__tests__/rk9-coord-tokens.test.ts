@@ -490,7 +490,7 @@ if (!support.supported) {
         companyId,
         allCollections: false,
         actorType: "system",
-        actorId: "rk9_recall_token:host:htpc",
+        actorId: `rk9_recall_token:host:htpc:${recall.body.record.id}`,
         agentId: null,
         runId: null,
       }),
