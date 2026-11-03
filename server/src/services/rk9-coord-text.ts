@@ -41,11 +41,16 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   // RK9-684 item 1: `token: Bearer <value>` hides the value, not only the
   // word; any number of auth words (`token: Bearer Bearer <value>`).
   "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?(?:(?:bearer|basic)\\s+)*" +
-  // RK9-684 verifier round 2: the value may not itself start with a keyword
-  // that has a full value of its own (`credentials:\n  password: <value>`);
-  // the scan then takes that keyword. A short tail (`password=secret:abc`)
-  // stays one match.
-  "(?!(?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|pw)[\"']?\\s*[=:]|pass[\"']?\\s*=)\\s*[\"']?[^\\s\"',;]{6})[^\\s\"',;]{6,}";
+  // RK9-684 verifier round 2, and the independent verify of the client PR:
+  // the value stops before a keyword that has a full value of its own, at
+  // any character (`credentials:\n  password: <value>`,
+  // `{credentials: {password: <value>}}`, `pass=eyJtoken: <value>`); the scan
+  // then takes that keyword. A short tail (`password=secret:abc`) stays one
+  // match.
+  "(?:(?!(?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]|(?<![A-Za-z])pass[\"']?\\s*=)\\s*[\"']?[^\\s\"',;]{6})[^\\s\"',;]){6,}" +
+  // A credential flag with a space (`--password <value>`, `--api-key <value>`)
+  // and a curl user (`-u alice:<value>`, `--user alice:<value>`).
+  "|(?<![A-Za-z0-9_-])--?(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|pw|pass)\\s+[\"']?[^\\s\"',;-][^\\s\"',;]{5,}|(?<![A-Za-z0-9_-])(?:-u\\s+|--user[\\s=]+)[\"']?[^\\s:\"'@/]+:[^\\s\"',;@]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
 

@@ -579,10 +579,17 @@ model is called.
   with any number of `Bearer` or `Basic` words and whitespace
   (`token: Bearer Bearer <value>` too, verifier round 1), in the pattern
   string and in the wider keyword rule. Verifier round 2: in the pattern
-  string the value may not itself start with a keyword that has a full
-  value of its own (`credentials:\n  password: <value>`, `pass=secret:
-  <value>`); the scan then takes the inner keyword. A short tail
-  (`password=secret:abc`) stays one match. Before, the keyword match ended after `Bearer` and the
+  string the value stops before a keyword that has a full value of its
+  own, at any character (`credentials:\n  password: <value>`,
+  `{credentials: {password: <value>}}`, `pass=eyJtoken: <value>`); the scan
+  then takes the inner keyword. A short tail (`password=secret:abc`) stays
+  one match. The pattern also hides a credential flag with a space
+  (`--password <value>`, `--api-key <value>`) and a curl user
+  (`-u alice:<value>`, `--user alice:<value>`, 6+ characters after the
+  colon). The server already hid the bracket shapes through the wider
+  keyword rule; the flags and `-u` showed on the server before this change
+  (and on origin/master). The client copies are byte-identical (claude-config
+  `coord-remote.md`). Before, the keyword match ended after `Bearer` and the
   value stayed visible (a single leftmost-first pass never tried the
   bearer branch inside it).
 - **One keyword value no longer eats the next keyword (RK9-684).** In the

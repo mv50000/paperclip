@@ -651,6 +651,34 @@ describe("RK9-684 redaction follow-ups", () => {
     expect("password=secret:abc".replace(rx, "[redacted]")).toBe("[redacted]");
   });
 
+  // Independent verify of the client PR: a keyword value that runs into the next keyword, CLI flags, curl -u.
+  const pw = ["Hunter2", "Hunter2"].join("");
+  it.each([
+    [`{credentials: {password: '${pw}'}}`, "{credentials: {[redacted]'}}"],
+    [`db:\n  credentials: {user: app, password: ${pw}}`, "db:\n  [redacted] app, [redacted]"],
+    [`pass=eyJtoken: ${pw}`, "pass=eyJ[redacted]"],
+    [`private_key: tokenpassword: ${pw}`, "private_key: token[redacted]"],
+    [`--password ${pw}`, "[redacted]"],
+    [`curl -u alice:${pw} https://x`, "curl [redacted] https://x"],
+    [`docker run --user 1000:1000 img`, "docker run --user 1000:1000 img"],
+    ["sort -u names.txt --token-file path", "sort -u names.txt --token-file path"],
+  ])("the pattern string alone: %j", (input, expected) => {
+    expect(input.replace(new RegExp(RK9_COORD_SECRET_RX_DEFAULT, "gi"), "[redacted]")).toBe(expected);
+  });
+
+  it.each([
+    [`{credentials: {password: '${pw}'}}`],
+    [`auth: {credentials: {token: ${pw}}}`],
+    [`pass=eyJtoken: ${pw}`],
+    [`--password ${pw}`],
+    [`--api-key "${pw}"`],
+    [`curl -u alice:${pw}`],
+    [`credentials:\n  password:  authorization=password=\n${pw}`],
+  ])("the server hides the value: %j", (input) => {
+    expect(redactRk9CoordText(input, env)).not.toContain(pw);
+    expect(toRk9CoordLine(input, 500, env)).not.toContain(pw);
+  });
+
   it("verifier round 1: an identifier with a stopped keyword value still has a secret (H1)", () => {
     expect(rk9CoordIdentifierHasSecret("secrets=abctoken->ABCDEFGH", env)).toBe(true);
   });
