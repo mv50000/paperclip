@@ -32,7 +32,8 @@
 //    the claim's host must be that host. A read without a claim defaults to
 //    the token's own actor (remote:<host> or the service name).
 // 6. A mutation (any method other than GET/HEAD/OPTIONS) needs an actor id. A
-//    present but malformed X-RK9-Actor header is 400 on every method.
+//    present but malformed X-RK9-Actor header is 400 on every method
+//    (RK9-663: for a board caller the credential checks run first, so 403 wins).
 
 import type { Request, RequestHandler } from "express";
 import { eq } from "drizzle-orm";

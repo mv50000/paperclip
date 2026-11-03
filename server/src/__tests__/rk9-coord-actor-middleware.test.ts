@@ -74,4 +74,10 @@ describe("resolveRk9CoordActor header vs pin order (RK9-663)", () => {
       }),
     ).rejects.toMatchObject({ status: 403, details: { code: "rk9_coord_board_key_not_allowed" } });
   });
+
+  it("returns 403 before 400 for a non-admin session with a malformed header", async () => {
+    await expect(
+      resolveRk9CoordActor({ ...base, actor: session("u", false), actorHeader: "!!bad!!" }),
+    ).rejects.toMatchObject({ status: 403, details: { code: "rk9_coord_untrusted_principal" } });
+  });
 });
