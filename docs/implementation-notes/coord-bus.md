@@ -586,7 +586,11 @@ model is called.
   one match. The pattern also hides a credential flag with a space
   (`--password <value>`, `--api-key <value>`) and a curl user
   (`-u alice:<value>`, `--user alice:<value>`, 6+ characters after the
-  colon). The server already hid the bracket shapes through the wider
+  colon). `--user` takes one separator (whitespace or a single `=`) and the
+  user part has no `=`: the first form let both parts take the same `=`,
+  and `--user` plus a long `=` run backtracked quadratically (about 0.5 s
+  at the 4000-character field cap, re-verify of the fix PR). A vitest timing
+  test pins these inputs under 100 ms. The server already hid the bracket shapes through the wider
   keyword rule; the flags and `-u` showed on the server before this change
   (and on origin/master). The client copies are byte-identical (claude-config
   `coord-remote.md`). Before, the keyword match ended after `Bearer` and the
