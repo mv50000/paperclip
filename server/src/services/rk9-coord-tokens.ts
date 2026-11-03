@@ -155,13 +155,20 @@ function isUniqueViolation(err: unknown, constraint: string): boolean {
 const ACTIVE_PRINCIPAL_UQ = "rk9_coord_tokens_active_principal_uq";
 
 /**
- * RK9-676: no host token for the board host. The board key already speaks for
+ * RK9-676, RK9-673: no host token for the board host or its short alias. The board key already speaks for
  * that host; a host token named `paperclip-01` would claim `cc:paperclip-01:*`
  * ids that share actor rows and the per-host actor budget with the board-key
  * sessions. Applies to issue and rotate (an old such token can only be revoked).
  */
+export function rk9CoordBoardHostNames(boardHost: string = resolveRk9CoordBoardHost()): string[] {
+  // RK9-673: the board host's short name too. The client maps the machine name `paperclip` to
+  // `paperclip-01`, so a token for `paperclip` would post unmarked as the board host.
+  const short = boardHost.replace(/-\d+$/, "");
+  return short && short !== boardHost ? [boardHost, short] : [boardHost];
+}
+
 function assertNotBoardHost(principalKind: string, principalName: string) {
-  if (principalKind === "host" && principalName.trim().toLowerCase() === resolveRk9CoordBoardHost()) {
+  if (principalKind === "host" && rk9CoordBoardHostNames().includes(principalName.trim().toLowerCase())) {
     throw unprocessable("The board host uses the board key, not a host token; revoke this token", {
       code: "rk9_coord_token_board_host",
     });

@@ -33,6 +33,31 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
+/**
+ * The RK9-673 client copy of the filter, derived from the server default step by step. With
+ * `rk9678`, the long sk- value also stops before the RK9-678 keywords (claude-config#205).
+ */
+const RK9_673_SK_STOP = "(?!token|secret|passw|api[_-]?key|apikey)";
+const RK9_678_SK_STOP =
+  "(?!token|secret|passw|passphrase|private[_-]?key|credential|api[_-]?key|apikey|(?<![A-Za-z])pw[\"']?\\s*[=:]|(?<![A-Za-z])pass[\"']?\\s*=)";
+function rk9673ClientVariant(rk9678 = false): string {
+  const steps: Array<[string, string]> = [
+    ["|qmk_|sk-|", "|qmk_|(?<![A-Za-z0-9_])sk-|"],
+    ["[A-Za-z0-9_-]{6,}|AKIA", `[A-Za-z0-9_-]{6,}|sk-(?=[A-Za-z_-]{0,64}[0-9])(?:${rk9678 ? RK9_678_SK_STOP : RK9_673_SK_STOP}[A-Za-z0-9_-]){20,}|AKIA`],
+    [
+      "|(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{8,}",
+      "|(bearer|basic)\\s+(?=[A-Za-z]{0,19}[0-9._~+/=-]|[A-Za-z]{20})[A-Za-z0-9._~+/=-]{8,}" +
+        "|authorization[\"']?\\s*(:|=>?)\\s*[\"']?(bearer|basic)\\s+[A-Za-z0-9._~+/=-]{4,}",
+    ],
+  ];
+  let rx = RK9_COORD_SECRET_RX_DEFAULT;
+  for (const [from, to] of steps) {
+    if (!rx.includes(from)) throw new Error(`RK9-673 step does not apply: ${from}`);
+    rx = rx.replace(from, to);
+  }
+  return rx;
+}
+
 describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
   const env = {} as NodeJS.ProcessEnv;
 
@@ -44,7 +69,18 @@ describe("coord redaction (RK9_SESSIONS_SECRET_RX port)", () => {
     const line = script.split("\n").find((l) => l.startsWith("export RK9_SESSIONS_SECRET_RX="));
     expect(line).toBeDefined();
     const quoted = line!.slice(line!.indexOf(":-'") + 3, line!.lastIndexOf("'}"));
-    expect(quoted.replaceAll(`'"'"'`, "'")).toBe(RK9_COORD_SECRET_RX_DEFAULT);
+    // RK9-673: claude-config loosened the client copy (sk- word boundary, bearer/basic value needs a
+    // non-letter or 20+ letters, plus a 20+ sk- key with a digit that stops before a keyword, and quoted
+    // Authorization forms). The server copy stays stricter on purpose. The old client copy or exactly one
+    // of these variants (RK9-673, or RK9-673 with the RK9-678 sk- stop list) passes.
+    expect([RK9_COORD_SECRET_RX_DEFAULT, rk9673ClientVariant(), rk9673ClientVariant(true)]).toContain(
+      quoted.replaceAll(`'"'"'`, "'"),
+    );
+  });
+
+  it("derives the RK9-673 client variant from the server default (every step applies)", () => {
+    expect(rk9673ClientVariant()).not.toBe(RK9_COORD_SECRET_RX_DEFAULT);
+    expect(rk9673ClientVariant(true)).not.toBe(rk9673ClientVariant());
   });
 
   it.each([

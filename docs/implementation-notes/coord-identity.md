@@ -122,6 +122,10 @@ RK9-676: no host token for the board host (`RK9_COORD_BOARD_HOST`, default
 `paperclip-01`). Issue and rotate answer 422 `rk9_coord_token_board_host`;
 an old such token can only be revoked. Its `cc:paperclip-01:*` claims would
 share actor rows and the per-host actor budget with the board-key sessions.
+RK9-673: the board host's short name (`paperclip` for `paperclip-01`, the
+host name without a `-NN` suffix) is refused the same way. The client maps
+the machine name `paperclip` to `paperclip-01`, so such a token would post
+unmarked as the board host.
 
 ### Actor kinds and actor_id grammar
 
