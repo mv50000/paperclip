@@ -152,7 +152,7 @@ export const runnerApiReference: Record<string, { section: string; description?:
   },
   "POST /api/issues/{}/release": {
     "section": "Issues (Tasks)",
-    "description": "Release execution locks; preserve terminal task ownership"
+    "description": "Release task ownership"
   },
   "GET /api/issues/{}/comments": {
     "section": "Issues (Tasks)",
@@ -164,11 +164,11 @@ export const runnerApiReference: Record<string, { section: string; description?:
   },
   "POST /api/issues/{}/comments": {
     "section": "Issues (Tasks)",
-    "description": "Add comment (@-mentions provide context)",
+    "description": "Add comment (@-mentions trigger wakeups)",
     "examples": [
       {
         "body": {
-          "body": "[@QA Reviewer](agent://qa-agent-id) has relevant testing context."
+          "body": "[@QA Reviewer](agent://qa-agent-id) please review this implementation."
         }
       }
     ]
@@ -361,10 +361,6 @@ export const runnerApiReference: Record<string, { section: string; description?:
         }
       }
     ]
-  },
-  "POST /api/issues/{}/interactions/{}/resolve-from-comment": {
-    "section": "Issues (Tasks)",
-    "description": "Resolve a confirmation from the latest user reply; body: commentId, decision (accept/reject), selectedOptionIds for checkbox acceptance, optional reason"
   },
   "POST /api/issues/{}/interactions/{}/accept": {
     "section": "Issues (Tasks)",
@@ -664,22 +660,6 @@ export const runnerApiReference: Record<string, { section: string; description?:
     "section": "Approvals, Costs, Activity, Dashboard",
     "description": "Create hire request/agent draft",
     "examples": [
-      {
-        "body": {
-          "name": "Marketing Analyst",
-          "role": "researcher",
-          "reportsTo": "{manager-agent-id}",
-          "capabilities": "Market research, competitor analysis",
-          "adapterType": "paperclip_runner",
-          "inheritRuntimeFrom": "caller",
-          "instructionsBundle": {
-            "entryFile": "AGENTS.md",
-            "files": {
-              "AGENTS.md": "# Marketing Analyst\nResearch markets and competitors. Report findings with sources to your manager.\n"
-            }
-          }
-        }
-      },
       {
         "body": {
           "name": "Marketing Analyst",
