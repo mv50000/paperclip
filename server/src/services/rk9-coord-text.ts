@@ -19,11 +19,14 @@ import { logger } from "../middleware/logger.js";
 
 /** Port of the RK9_SESSIONS_SECRET_RX default (Python `re.I` -> JS `gi`). */
 export const RK9_COORD_SECRET_RX_DEFAULT =
-  // RK9-684 (RK9-690): the prefix value stops before a keyword, with the
-  // lookahead of the client's long `sk-` rule, so `QMK_API_KEY=<value>` and
-  // `sk-...-password=<value>` leave the value to the keyword rule.
+  // RK9-684 (RK9-690): the prefix value stops before a keyword that the
+  // keyword rule below takes (the keyword and its separator), so
+  // `QMK_API_KEY=<value>` and `sk-...-password=<value>` leave the value to
+  // the keyword rule. A random token never holds `=` or `:`, so it is never
+  // cut (verifier round 1: a bare keyword stop cut `ghp_tokens...`).
   "(gh[opusr]_|github_pat_|pcp_[a-z]+_|vck_|qmk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|xox[abpors]-|glpat-)" +
-  "(?:(?!token|secret|passw|passphrase|private[_-]?key|credential|api[_-]?key|apikey|(?<![A-Za-z])pw[\"']?\\s*[=:]|(?<![A-Za-z])pass[\"']?\\s*=)[A-Za-z0-9_-]){6,}" +
+  "(?:(?!(?:token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]" +
+  "|(?<![A-Za-z])pass[\"']?\\s*=)[A-Za-z0-9_-]){6,}" +
   "|AKIA[0-9A-Z]{12,}" +
   "|AIza[0-9A-Za-z_-]{20,}" +
   // RK9-676: not compiled as a regex on the server; see RK9_COORD_JWT_BRANCH.
@@ -35,8 +38,9 @@ export const RK9_COORD_SECRET_RX_DEFAULT =
   // and `pw` (not after a letter: `pwd` and `compass` stay), and `pass` with
   // `=` only (`user=bob pass=<value>`; `pass:` is prose: `second pass: ...`).
   "|((token|secret|password|passwd|passphrase|private[_-]?key|credentials?|api[_-]?key|apikey|(?<![A-Za-z])pw)[\"']?\\s*[=:]\\s*" +
-  // RK9-684 item 1: `token: Bearer <value>` hides the value, not only the word.
-  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?(?:(?:bearer|basic)\\s+)?[^\\s\"',;]{6,}";
+  // RK9-684 item 1: `token: Bearer <value>` hides the value, not only the
+  // word; any number of auth words (`token: Bearer Bearer <value>`).
+  "|(?<![A-Za-z])pass[\"']?\\s*=\\s*)[\"']?(?:(?:bearer|basic)\\s+)*[^\\s\"',;]{6,}";
 
 export const RK9_COORD_REDACTED = "[redacted]";
 
@@ -155,7 +159,7 @@ const COORD_TOKEN_RX = /rk9_coord_[A-Za-z0-9_-]{6,}/gi;
 const KEYWORD_NAME =
   String.raw`(?:(?:token|secret|password|passwd|passphrase|private[_-]?key|credential|api[_-]?key|apikey)s?|(?<![A-Za-z])pw)["']?\s*(?:[=:]|->|=>|%3[ad])\s*` +
   String.raw`|(?<![A-Za-z])pass["']?\s*(?:=|%3d)\s*`;
-const KEYWORD_VALUE_START = String.raw`["']?(?:(?:bearer|basic)\s+)?`;
+const KEYWORD_VALUE_START = String.raw`["']?(?:(?:bearer|basic)\s+)*`;
 /**
  * RK9-684: an unbracketed value stops before the next keyword that has a
  * value of its own (`secret=1&secrets: <value>`). Before, the first match
