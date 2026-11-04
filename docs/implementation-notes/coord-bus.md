@@ -767,7 +767,7 @@ required field is 400. Common optional fields: `client_event_id`,
 |---|---|---|---|
 | `decision` | `title`, `rationale` | `issue`, `vault_note` (stored in `vault_path`) | title |
 | `decision-vaulted` | `ref_event_id`, `vault_path`, `commit` | `pushed` | `#<ref> -> <path> @<commit7>` (see "Decision vault") |
-| `deploy` | `app`, `sha` (7–40 hex), `result` (`started`, `success`, `failure`, `rolled_back`) | `issue` | `<app> <sha7> <result>` |
+| `deploy` | `app`, `sha` (7–40 hex), `result` (`started`, `success`, `failure`, `rolled_back`) | `issue`, `note` (≤1000, one-lined, RK9-719) | `<app> <sha7> <result>` |
 | `handoff` | `issue`, `summary` | `to` | `-> <to>: <summary>` |
 | `blocker` | `issue`, `what` | | what |
 | `done` | `issue` | `pr` (number or URL) | `PR #<n>` |

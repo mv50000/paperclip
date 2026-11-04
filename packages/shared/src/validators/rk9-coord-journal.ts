@@ -79,6 +79,8 @@ const deploySchema = z.object({
   app: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "app must be a short app name"),
   sha: z.string().regex(/^[0-9a-fA-F]{7,40}$/, "sha must be 7-40 hex characters"),
   result: z.enum(RK9_COORD_DEPLOY_RESULTS),
+  /** RK9-719: why, e.g. the reason of a maintenance-window override. Optional, so old clients still work. */
+  note: freeText(1000).optional(),
 });
 
 const handoffSchema = z.object({

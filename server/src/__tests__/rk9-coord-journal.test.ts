@@ -685,6 +685,23 @@ if (!support.supported) {
     expect(normal.status).toBe(201);
   });
 
+  it("stores an optional deploy note, one-lined and redacted, and rejects one over 1000 characters (RK9-719)", async () => {
+    const base0 = { type: "deploy", app: "bk", sha: "abcdef1", result: "success" };
+    expect(appendRk9CoordEventSchema.safeParse({ ...base0, note: "x".repeat(1000) }).success).toBe(true);
+    expect(appendRk9CoordEventSchema.safeParse({ ...base0, note: "x".repeat(1001) }).success).toBe(false);
+    expect(appendRk9CoordEventSchema.safeParse({ ...base0, note: "   " }).success).toBe(false);
+    const withNote = await post(companyId, "worktree:RK9-626", { ...base0, note: "force window:\nhotfix token=supersecretvalue" });
+    expect(withNote.status).toBe(201);
+    expect(withNote.body.event.payload.note).toMatch(/^force window: hotfix /);
+    expect(withNote.body.event.payload.note).not.toContain("supersecretvalue");
+    expect(withNote.body.event.payload).toMatchObject({ app: "bk", result: "success" });
+    const tooLong = await post(companyId, "worktree:RK9-626", { ...base0, note: "x".repeat(1001) });
+    expect(tooLong.status).toBe(400);
+    const without = await post(companyId, "worktree:RK9-626", base0);
+    expect(without.status).toBe(201);
+    expect(without.body.event.payload).toEqual({ app: "bk", sha: "abcdef1", result: "success" });
+  });
+
   it("has no PATCH, PUT or DELETE route for events", async () => {
     const created = await post(companyId, "worktree:RK9-626", { type: "blocker", issue: "RK9-626", what: "x" });
     const id = created.body.event.id;

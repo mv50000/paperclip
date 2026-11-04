@@ -466,9 +466,12 @@ export function buildRk9CoordEvent(input: AppendRk9CoordEvent, actorId: string):
     }
     case "deploy": {
       const sha = input.sha.toLowerCase();
+      const payload: Record<string, unknown> = { app: input.app, sha, result: input.result };
+      const note = line(input.note, 1000);
+      if (note) payload.note = note;
       return {
         summary: `${input.app} ${sha.slice(0, 7)} ${input.result}`,
-        payload: { app: input.app, sha, result: input.result },
+        payload,
         vaultPath: null,
         refEventId: null,
       };
