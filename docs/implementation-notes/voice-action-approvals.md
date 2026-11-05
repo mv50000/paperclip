@@ -11,7 +11,7 @@ Grok-connectorin vaihe 2, taso B. Ääniavustaja ehdottaa sisäistä tikettitoim
 
 Palvelin lisää tallennettuun payloadiin kentät `issueStatusAtProposal` ja `assigneeAgentIdAtProposal` tiketin nykytilasta (RK9-490). Ehdotuksen lähettämät arvot ohitetaan.
 
-- Skeema: `voiceActionApprovalPayloadSchema` (`packages/shared/src/validators/approval.ts`). Tuntematon kenttä pudotetaan pois, koska Slack-forwarder kirjoittaa payloadiin `slackMessageRef`in luonnin jälkeen.
+- Skeema: `voiceActionApprovalPayloadSchema` (`packages/shared/src/validators/approval.ts`). Tuntematon kenttä pudotetaan pois, koska vanhoissa payloadeissa voi olla `slackMessageRef` (Slack-forwarder kirjoitti sen luonnin jälkeen; forwarder poistettiin RK9-697:ssä).
 - `body` on 1–1000 merkkiä. `status` on `todo`, `backlog`, `blocked`, `done` tai `cancelled`.
 - `identifier` näkyy hyväksyntäkortissa, joten sen täytyy nimetä sama tiketti kuin `issueId`.
 - `body` hylätään, jos `redactEventPayload` muuttaisi sitä (esim. JWT tai credential-tyyppinen teksti). Hyväksyntänäkymä näyttää payloadin redaktoituna, joten operaattori ei muuten näkisi tarkkaa tekstiä.

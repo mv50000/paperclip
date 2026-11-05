@@ -362,7 +362,7 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
     expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").at(-1)?.body.text).toMatch(/vanhentunut/);
     expect(approvals[3].status).toBe("pending");
 
-    // a payload key the card does not show (Slack's slackMessageRef) does not re-post
+    // a payload key the card does not show (legacy slackMessageRef) does not re-post
     const cards = sentCards().length;
     approvals[3].payload = { ...approvals[3].payload, slackMessageRef: { ts: "1" } };
     const run2 = await runOnce();

@@ -9,6 +9,7 @@ import type { instanceSettingsService } from "./instance-settings.js";
 
 const CACHE_TTL_MS = 10_000;
 
+// Extension point: no caller passes hooks since the Slack notifier was removed (RK9-697).
 export interface SystemPauseHooks {
   onPaused?: (state: InstanceSystemPauseState) => void | Promise<void>;
   onResumed?: (previous: InstanceSystemPauseState) => void | Promise<void>;

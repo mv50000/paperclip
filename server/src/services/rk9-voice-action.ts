@@ -105,8 +105,8 @@ export async function resolveVoiceAction(
   companyId: string,
   rawPayload: unknown,
 ): Promise<ResolvedVoiceAction> {
-  // Unknown keys are dropped, not rejected: the Slack forwarder writes
-  // `slackMessageRef` into the stored payload after create.
+  // Unknown keys are dropped, not rejected: payloads stored while the Slack
+  // forwarder existed (removed in RK9-697) may still carry `slackMessageRef`.
   const parsed = voiceActionApprovalPayloadSchema.safeParse(rawPayload);
   if (!parsed.success) {
     const detail = parsed.error.issues
