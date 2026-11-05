@@ -41,6 +41,11 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
         status: "failed", runtimeMode: "legacy", processPid: action === "queued_interrupt" ? process.pid : 999999999,
         responsibleUserId: issue.responsibleUserId, errorCode: "process_lost", error: "Server restarted during startup",
         startedAt: new Date(Date.now() - 10_000), finishedAt: new Date(Date.now() - 5_000),
+        // --- RK9 Custom (RK9-524): the inbox lists only an agent's latest run when it failed. Creating the
+        // assigned issue enqueues an assignment run asynchronously, and under CI load that run can be
+        // inserted after this seed. It then becomes the latest run (cancelled), the inbox shows no Retry
+        // row, and the click waits until the test timeout. Order the historical run last explicitly. ---
+        ...(action === "inbox_retry" ? { createdAt: new Date(Date.now() + 30_000) } : {}),
         contextSnapshot: { issueId: issue.id },
       });
       await db.insert(issueRecoveryActions).values({ companyId: company.id, sourceIssueId: issue.id,
