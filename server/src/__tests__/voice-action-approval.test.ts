@@ -661,7 +661,7 @@ describe("voice_action approve executes the stored payload", () => {
     expect(approvalComment()).toContain("see server log");
   });
 
-  it("executes a payload that the Slack forwarder extended with slackMessageRef", async () => {
+  it("executes a legacy payload that still carries slackMessageRef (Slack forwarder removed)", async () => {
     approve({ ...commentPayload, slackMessageRef: { channel: "C1", ts: "1.2" } });
     const app = await createApp();
 
