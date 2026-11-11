@@ -391,15 +391,19 @@ test("pr.yml keeps a stable aggregate check named e2e over the shard matrix", ()
     shardLabel: match.groups.shardLabel,
   }));
 
-  assert.equal(matrixEntries.length, SHARD_COUNT, "the shard matrix must define exactly SHARD_COUNT entries");
+  // RK9 Custom (RK9-699): upstream 1005 raised its trusted-workflow SHARD_COUNT to 8; the fork
+  // pr.yml keeps its own matrix size, so the matrix is checked against its own declared count.
+  const forkShardCount = matrixEntries[0]?.shardCount ?? 0;
+  assert.ok(forkShardCount > 0, "the shard matrix must declare a shard_count");
+  assert.equal(matrixEntries.length, forkShardCount, "the shard matrix must define exactly shard_count entries");
   assert.deepEqual(
     matrixEntries.map((entry) => entry.shardIndex).sort((a, b) => a - b),
-    Array.from({ length: SHARD_COUNT }, (_, index) => index),
+    Array.from({ length: forkShardCount }, (_, index) => index),
     "the shard matrix must define each shard index exactly once",
   );
   for (const entry of matrixEntries) {
-    assert.equal(entry.shardCount, SHARD_COUNT, "each shard matrix entry must use the same SHARD_COUNT");
-    assert.equal(entry.shardLabel, `${entry.shardIndex + 1}/${SHARD_COUNT}`, "each shard label must match its index");
+    assert.equal(entry.shardCount, forkShardCount, "each shard matrix entry must use the same shard_count");
+    assert.equal(entry.shardLabel, `${entry.shardIndex + 1}/${forkShardCount}`, "each shard label must match its index");
   }
 });
 

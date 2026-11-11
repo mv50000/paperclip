@@ -443,7 +443,8 @@ test("Runner eval workflows pin actions and gate paid live execution", { skip: !
 });
 
 
-test("direct Grok qualification installs the pinned binary and scopes the selected credential", () => {
+// --- RK9 Custom (RK9-699): runner-protocol-live-evals.yml is upstream-only and removed from the fork ---
+test("direct Grok qualification installs the pinned binary and scopes the selected credential", { skip: !existsSync(path.join(repoRoot, ".github/workflows/runner-protocol-live-evals.yml")) }, () => {
   const workflow = readWorkflow("runner-protocol-live-evals.yml");
   assert.ok(workflow.includes("XAI_API_KEY: ${{ matrix.credentialName == 'XAI_API_KEY' && secrets.XAI_API_KEY || '' }}"));
   assert.ok(workflow.includes("if [ -f packages/paperclip-runner/scripts/provision-grok.mjs ]; then"));
@@ -452,7 +453,8 @@ test("direct Grok qualification installs the pinned binary and scopes the select
   assert.equal((workflow.match(/secrets\.GROK_AUTH_JSON/gu) ?? []).length, 1);
 });
 
-test("direct protocol concurrency override only lowers the configured ceiling", () => {
+// --- RK9 Custom (RK9-699): runner-protocol-live-evals.yml is upstream-only and removed from the fork ---
+test("direct protocol concurrency override only lowers the configured ceiling", { skip: !existsSync(path.join(repoRoot, ".github/workflows/runner-protocol-live-evals.yml")) }, () => {
   const workflow = readWorkflow("runner-protocol-live-evals.yml");
   const start = workflow.indexOf('          if [ -n "${REQUESTED_MAX_PARALLEL:-}" ]; then');
   const end = workflow.indexOf("          node packages/paperclip-runner/scripts/runner-protocol-eval-campaign.mjs catalog", start);

@@ -244,7 +244,7 @@ jobs:
       # one commit instead of the full history. Keep the SHA in sync with the test.
       # RK9_REQUIRE_FORK_BASE on the test step makes a missing commit fail, not skip.
       - name: Fetch fork base commit for the issue visibility inventory
-        run: git fetch --no-tags --depth=1 origin dffc2b3ca1b9e88fa21cb17493083e682dffd1ca
+        run: git fetch --no-tags --depth=1 origin 467125fafb47a8520856504fecc48d6e32055db1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6

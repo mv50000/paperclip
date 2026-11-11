@@ -277,6 +277,16 @@ describe("agent auth middleware", () => {
   ])("does not bypass actor authentication for %s", async (path) => {
     const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });
     const res = await request(createApp(db)).post(path).set("Authorization", "Bearer routine-secret");
+    // --- RK9 Custom (RK9-699): the fork hands a non-JWT bearer to the route as an anonymous actor
+    // (RK9-316, RK9-317), so a lookalike path is not a 401 here. It must still carry no identity:
+    // the test app's fire route echoes the actor, and the other paths have no route. ---
+    if (res.status === 200) {
+      expect(res.body).toEqual({ reachedWebhook: true, actorType: "none" });
+    } else {
+      expect(res.status).toBe(404);
+    }
+    return;
+    // --- /RK9 Custom ---
     expect(res.status).toBe(401);
   });
 

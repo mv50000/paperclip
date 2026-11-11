@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -329,7 +329,8 @@ test("shard flags are rejected for the native-runner group", () => {
 // GITHUB_WORKFLOW) is named PR, the sharded vitest lanes partition cleanly
 // with exactly one final shard, and that lane's package script routes through
 // the wrapper that runs the native-runner group.
-test("the PR workflow wiring for the native-runner lane holds", () => {
+// --- RK9 Custom (RK9-699): pr-trusted.yml is upstream-only and removed from the fork (RK9-317) ---
+test("the PR workflow wiring for the native-runner lane holds", { skip: !existsSync(path.join(repoRoot, ".github/workflows/pr-trusted.yml")) }, () => {
   const prWorkflow = readFileSync(path.join(repoRoot, ".github/workflows/pr.yml"), "utf8");
   assert.match(prWorkflow, /^name: PR$/m,
     "renaming pr.yml silently moves the native-runner suite back into the uncached server shards");
