@@ -388,6 +388,6 @@ jobs:
           subject-digest: ${{ steps.standard.outputs.digest }}
           push-to-registry: true
 
-  # --- RK9 Custom (RK9-317) --- upstreamin build-and-push-cloud (docker-cloud.yml) ja
-  # promote_canary_channel ovat vain upstreamille: fork ei aja cloud-kuvia eikä canary-kanavaa.
-  # docker-cloud.yml on poistettu forkista. Ks. doc/CI-RUNNER.md.
+  # --- RK9 Custom (RK9-317, RK9-699) --- upstreamin canary-kanavan siirtojobi (promote_canary_channel)
+  # on vain upstreamille: fork ei aja cloud-kuvia eikä canary-kanavaa. Upstreamin pilvikuvan
+  # workflow on poistettu forkista. Ks. doc/CI-RUNNER.md.
