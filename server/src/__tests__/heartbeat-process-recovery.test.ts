@@ -6227,10 +6227,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const result = await heartbeat.reconcileStrandedAssignedIssues();
     expect(result.continuationRequeued).toBe(0);
     expect(result.successfulContinuationObserved).toBe(0);
-    expect(result.escalated).toBe(1);
-    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
-    expect(action).toMatchObject({ kind: "deliberate_wait_without_target", ownerType: "board", attemptCount: 1 });
-    expect(action.evidence).toMatchObject({ latestRunId: runId, sourceMaxAttempts: 1 });
+    // --- RK9 Custom (RK9-87, RK9-699): an in_progress issue skips upstream's legacy disposition
+    // repair, so the exhausted handoff still escalates through the successful-run handoff path. ---
+    expect(result.successfulRunHandoffEscalated).toBe(1);
+    void companyId;
+    void runId;
+    // --- /RK9 Custom ---
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
   });
 
@@ -14381,7 +14383,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(await hasCommittedNativeBoardResponseWait(db, fixture)).toBe(true);
     } else {
       const recovery = await heartbeatService(db).reconcileStrandedAssignedIssues();
-      expect(recovery.escalated + recovery.continuationRequeued).toBe(1);
+      // --- RK9 Custom (RK9-87, RK9-699): the fork skips an in_progress issue whose latest run
+      // succeeded, so the unfinished native Board wait is not reconsidered (native runner is off). ---
+      expect(recovery.escalated + recovery.continuationRequeued).toBe(0);
+      // --- /RK9 Custom ---
     }
   });
 

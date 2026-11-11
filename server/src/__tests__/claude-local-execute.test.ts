@@ -2047,10 +2047,13 @@ describe("claude execute: host ANTHROPIC_API_KEY is not inherited (RK9-228)", ()
   });
 
   it("passes the configured model through unchanged", async () => {
-    const { captured } = await runWithHostEnv({}, { model: "claude-opus-5-5" });
+    // RK9-699: upstream 1005 checks `claude --version` before running claude-opus-5-5 on the CLI
+    // lane (minimumClaudeCliVersionForModel). The capture stub prints no version, so this test uses
+    // a model without a minimum CLI version.
+    const { captured } = await runWithHostEnv({}, { model: "claude-sonnet-5-5" });
 
     const modelIndex = captured.argv.indexOf("--model");
     expect(modelIndex).toBeGreaterThanOrEqual(0);
-    expect(captured.argv[modelIndex + 1]).toBe("claude-opus-5-5");
+    expect(captured.argv[modelIndex + 1]).toBe("claude-sonnet-5-5");
   });
 });

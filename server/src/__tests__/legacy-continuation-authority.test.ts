@@ -247,8 +247,9 @@ describe("legacy continuation persisted authority", () => {
   it("the delayed sweep ignores old diagnostic labels and uses the same repair path", async () => {
     const f = await fixture();
     await f.createRecovery().reconcileStrandedAssignedIssues({ companyId: f.companyId });
-    expect(await f.runs()).toHaveLength(2);
-    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
-    expect(repair.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 1 } });
+    // --- RK9 Custom (RK9-87, RK9-699): the sweep skips an in_progress issue whose latest run
+    // succeeded. The legacy repair still runs at run finalization (reconcileLegacyContinuation). ---
+    expect(await f.runs()).toHaveLength(1);
+    // --- /RK9 Custom ---
   });
 });
