@@ -99,7 +99,13 @@ Proxyketju paperclip-01:llä (todennettu 2026-09-26, `/etc/nginx/sites-enabled/p
 Operaattorin päätös "luotetaan vain edgeen 192.168.1.17" toteutuu siksi kahdessa kerroksessa:
 paikallinen nginx luottaa edgeen, ja Express luottaa vain paikalliseen nginxiin.
 
-- Aseta `TRUST_PROXY=loopback`. Arvo `192.168.1.17` ei toimi, koska edge ei ole Expressin
+> **Tuotannon tila (todennettu 2026-10-03):** `TRUST_PROXY` on prodissa asettamatta.
+> Operaattori päätti 2026-09-28 (RK9-303) jättää sen asettamatta, koska 916.1:n
+> trusted-origin-guard hyväksyy selaimen board-mutaation ilman sitä (`PAPERCLIP_PUBLIC_URL`-origin,
+> kommentti paperclip.rk9.fi:n kautta → 201) ja `X-Forwarded-Host`-väärennys saa 403.
+> Alla oleva ohje kuvaa, miten arvo asetetaan, jos sitä myöhemmin tarvitaan.
+
+- Jos asetat arvon, käytä `TRUST_PROXY=loopback`. Arvo `192.168.1.17` ei toimi, koska edge ei ole Expressin
   välitön vertainen. Älä käytä arvoa `true` äläkä hop-lukua.
 - Suorat LAN-pyynnöt porttiin 3100 (`0.0.0.0:3100`) tulevat muusta kuin loopback-osoitteesta.
   Express ei luota niiden `X-Forwarded-*`-otsakkeisiin.
@@ -379,8 +385,8 @@ agentille eri oikeudet. Oletuksen muutoksen huomaa vain yllä oleva laukaisintes
 |---|---|
 | Muutos | v2026.916.0:sta alkaen `board-mutation-guard.ts` lukee `X-Forwarded-Host`-otsakkeen vain, kun välitön vertaisosoite läpäisee Expressin `trust proxy fn`:n. Muuten guard käyttää `Host`-otsaketta. |
 | Upstream-oletus | `TRUST_PROXY` asettamatta, joten `X-Forwarded-Host` ohitetaan kaikilta |
-| RK9-arvo | `TRUST_PROXY=loopback` (asetettu jo portaassa 720.0, ks. proxyketju), `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, `PAPERCLIP_PUBLIC_URL=https://paperclip.rk9.fi` |
-| Sijainti | kaikki kolme `export`-riveinä käynnistysskriptissä `paperclip-start.sh` |
+| RK9-arvo | `TRUST_PROXY` asettamatta (operaattorin päätös 2026-09-28, RK9-303; todennettu prodista 2026-10-03), `PAPERCLIP_ALLOWED_HOSTNAMES` sisältää `paperclip.rk9.fi`:n, `PAPERCLIP_PUBLIC_URL=https://paperclip.rk9.fi` |
+| Sijainti | molemmat asetetut arvot `export`-riveinä käynnistysskriptissä `paperclip-start.sh` |
 
 Nykytila 2026-09-26:
 
