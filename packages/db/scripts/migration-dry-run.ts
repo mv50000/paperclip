@@ -502,6 +502,11 @@ async function main(): Promise<void> {
     // RK9 Custom (RK9-317): a renamed fork table is counted under its new name after the run.
     const forkDeltas = [...forkTables].map((t) => {
       const renamed = FORK_TABLE_RENAMES[t] && afterCounts.has(FORK_TABLE_RENAMES[t].to) ? FORK_TABLE_RENAMES[t].to : null;
+      // RK9 Custom (RK9-699): once the rename has run in prod, the old name belongs to upstream
+      // (0 rows), so the fork table is counted under its new name before the run too.
+      if (renamed && !renamedBeforeUpstream.has(t) && before.has(renamed)) {
+        return { table: renamed, before: before.get(renamed) ?? 0, after: afterCounts.get(renamed) ?? 0 };
+      }
       return { table: renamed ? `${t} -> ${renamed}` : t, before: before.get(t) ?? 0, after: afterCounts.get(renamed ?? t) ?? 0 };
     });
     const renamedForkTargets = new Set(Object.values(FORK_TABLE_RENAMES).map((rename) => rename.to));

@@ -517,6 +517,40 @@ SET experimental = experimental || '{"enableNativeRunner": false}'::jsonb
 WHERE NOT (experimental ? 'enableNativeRunner');
 ```
 
+## Porras v2026.1005.0 (RK9-699)
+
+### Full-auto-oletukset (#13686, #13693)
+
+Upstream antaa kaikille legacy-harnesseille ja yhdistetyille työkaluille saman full-auto-oletuksen kuin natiivirunnerille.
+Prodissa elävät adapterit ovat vain `claude_local` (26) ja `human_proxy` (19), mitattu 11.11.2026 prod-kannasta (vain luku).
+
+- `claude_local` paikallisesti: `dangerouslySkipPermissions` oli jo oletuksena `true`, joten paikallinen ajo ei muutu.
+  `--disallowedTools` välittyy edelleen (`execute.ts`, `buildClaudeArgs`); kuudella agentilla se on asetettu.
+- Etäkohteen kiinteä `--allowedTools`-lista poistui. Fork ei aja `claude_local`ia etäkohteissa.
+- `IS_SANDBOX=1` asetetaan vain hallitulle sandbox-kohteelle, ei hostiajolle.
+- Codex-, OpenCode- ja Gemini-oletukset koskevat adaptereita, joita prodissa ei ole.
+
+### Clauden CLI:n minimiversio
+
+`minimumClaudeCliVersionForModel` estää ajon, jos CLI on liian vanha mallille: `claude-opus-5-5` vaatii version 2.1.280.
+Prodin `/usr/bin/claude` on 2.1.319, ja agenttien mallit ovat `claude-opus-5-5` (17) ja `claude-sonnet-5-5` (9). Kovennusta ei tarvita.
+Jos CLI päivitetään alaspäin, opus-agentit epäonnistuvat ennen ajoa selkeällä virheellä.
+
+### `experimental`-avaimet
+
+| Avain | Oletus | Vaikutus forkissa |
+|---|---|---|
+| `enableMcpAggregators` | aina `true` (tallennettu arvo ohitetaan) | Apps-katalogi näyttää MCP-aggregaattoriliittimet. Yhteys vaatii boardin konfiguraation ja tunnukset, joten pelkkä oletus ei avaa mitään. Ajonaikaista vaikutusta ei todennettu (todentamatta, ks. `routes/tool-access.ts`). |
+| `enableMemoryConnectors` | `false` | Muistiliittimet piilossa. Ei toimenpidettä. |
+| `keyboardShortcuts` | poistui (0284 lisää, 0289 poistaa sarakkeen) | UI-osio poistui; ei dataa. |
+| `enableNativeRunner` | prodissa jo `false` | Pre-deploy-SQL:ää ei tarvita (prodin `experimental`-rivi 11.11.2026). |
+
+### Recovery: legacy disposition repair
+
+Upstream korvasi onnistuneen ajon handoff-ajon legacy disposition repairilla (`reconcileLegacyContinuation`).
+Ajon finalisoinnissa fork käyttää upstreamin polkua. Stranded-sweepissä `in_progress`-issue ohittaa repairin (RK9 Custom, RK9-87),
+joten sweep ei luo uutta ajoa issuelle, jonka viimeisin ajo onnistui. Recoveryn siirto upstreamin malliin tehdään erikseen (RK9-702).
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on

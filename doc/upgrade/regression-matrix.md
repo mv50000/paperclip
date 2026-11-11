@@ -787,6 +787,44 @@ Markkerit: 326 → 432 (`git grep -c 'RK9 Custom' -- . ':!doc'`). Markkerimuutok
   pysyvät. Forkin merkitty `instanceSettingsService`-import poistui, koska upstream lisäsi saman
   importin tiedoston alkuun. Markkereita 10 → 16.
 
+## Konfliktit portaassa 1005 (`origin/master` `1493923d8` + `v2026.1005.0`, RK9-699)
+
+Porras 1 (1005 → 1023 → …). 46 konfliktitiedostoa ja 14 upstream-migraatiota (0280–0293).
+Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 1493923d8 v2026.1005.0`.
+Jäädytys koskee vain repoa mv50000/paperclip (operaattori 3.11.2026).
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0293 + slot `0126` omalla paikallaan, sitten `9000`–`9016` (idx 294–310). 310 entryä = 310 tiedostoa. |
+| `packages/db/src/client.ts` | upstream poisti `transient-write-retry`n, joten sen import poistui. RK9-348- ja RK9-635-lohkot (`withRk9MigrationLock`) ennallaan. |
+| `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `validators/index.ts` | upstreamin uudet exportit ensin, forkin RK9 Custom -lohko perässä |
+| `packages/db/package.json`, `package.json` | forkin typecheck (myös `tsconfig.scripts.json`) ja `prepare` + upstreamin `prune:snapshots` ja lifecycle-baseline-skriptit |
+| `pnpm-lock.yaml` | upstreamin lockfile + `pnpm install`; forkin `@aws-sdk/client-sesv2` 3.1141.0, `mailparser` 3.9.28 ja `@types/mailparser` 3.4.6 pinnattu takaisin masterin versioihin |
+| `packages/adapters/claude-local/src/server/execute.ts` | forkin knowledge- ja turn budget -lohkot siirtyivät upstreamin `runAttempt`in sisään (`joinPromptSections`, `promptMetrics.knowledgeContextChars`). `--disallowedTools` välittyy edelleen. |
+| `packages/adapters/claude-local/src/index.ts`, `quota.ts` | forkin mallilista ilman tuplia; molemmat importit (`spawn`, `createHash`) |
+| `packages/adapters/cursor-local/src/server/parse.test.ts` (add/add) | molempien testit, yhdistetty import |
+| `server/src/app.ts` | upstreamin distribution-plugin-importit + forkin `SystemPauseService`; `githubWebhookRoutes(db)` ennen upstreamin browser-use- ja tool-gateway-reittejä |
+| `server/src/middleware/auth.ts` | upstreamin julkisen routine-webhookin ohitus ensin, sitten forkin `runIdHeader`-UUID-vartija. Peruutetun ajon 403 on upstreamin logiikka parametrilla `res`. |
+| `server/src/services/heartbeat.ts` | `markRunIfTaintingContext` (RK9-319) ennen upstreamin `setWakeupStatus`ia; claim-silmukka käyttää forkin `effectiveSlots`ia upstreamin `isPermanentClaimRejection`/`isDeferrableClaimRejection`-käsittelyn kanssa |
+| `server/src/services/recovery/service.ts` | forkin `logCandidate`-kirjaukset + upstreamin `retryExhausted`-eskalaatio. Upstreamin stranded-sweep vie jokaisen onnistuneen ei-natiivin ajon legacy disposition repairiin (uusi ajo). RK9 Custom (RK9-87): `in_progress`-issue ohittaa sen ja päätyy handoff-eskalaatioon ja RK9-87-ohitukseen. Ajon finalisoinnin `reconcileLegacyContinuation` on upstreamin (korvaa masterin handoff-ajon). |
+| `server/src/services/routines.ts` | `systemPause?.assertNotPaused()` `firePublicTrigger`in alussa, sitten upstreamin transaktionaalinen webhook-koodi |
+| `server/src/services/built-in-agents.ts`, `server/src/routes/agents.ts` | molemmat importit |
+| `ui/src/pages/InstanceGeneralSettings.tsx` | upstream poisti pikanäppäinosion (0289); forkin globaali rinnakkaisuus säilyi |
+| `skills/paperclip/SKILL.md` | RK9-125-lohko + upstreamin "Name provisional tasks early" |
+| `doc/run-log-events.md` | upstreamin ACP-osio + forkin Tainted Run Event |
+| `packages/paperclip-runner/spec/capability/capabilities.yaml` ja generoidut | upstreamin versio; SKILL.md-rivinumerot päivitetty käsin (eval-korpusta ei ole forkissa), docs ja contract renderöity specistä. `check:capability-inventory` ja `check:capability-contract` OK. |
+| `.github/workflows/*` | upstream-only-workflowt pysyvät poistettuina (pr-trusted, cloud-*, docker-runner-check, runner-*-evals, runner-full-stack-e2e, storybook-deploy). `docker.yml`: upstreamin digest-, verify- ja attest-askeleet (vain paperclipai-repossa), `promote_canary_channel` pois. Uusi `sentry-contract.yml` sai runner-vivun. `pr.yml`:n RK9-709-fetch osoittaa `467125fa`:han. |
+| `.github/scripts/tests/*`, `scripts/__tests__/*`, `scripts/preview-artifacts.test.mjs` | upstreamin testit + existsSync-vartijat poistetuille workflowille; e2e-shardin testi lukee forkin `shard_count`in |
+
+Testisovitukset:
+
+- `heartbeat-process-recovery.test.ts`: upstreamin kaksi uutta legacy repair -testiä ajetaan `it.skip`-aliaksella (RK9-87). Exhausted handoff odottaa `successfulRunHandoffEscalated` 1. Natiivi Board wait (`superseded=false`) odottaa 0, koska RK9-87 ohittaa sen ja natiivirunner on pois.
+- `legacy-continuation-authority.test.ts`: sweep ei luo repair-ajoa `in_progress`-issuelle (RK9-87).
+- `agent-auth-middleware.test.ts`: lookalike-routine-polku sallii forkin anonyymin ei-JWT-bearerin (`actorType: "none"`) tai 404:n.
+- `nosto-private-issue-visibility-rk9.test.ts`: `FORK_BASE_COMMIT = "467125fafb"`, 17 uutta upstream-tiedostoa baselineen.
+- `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-sonnet-5-5`:tä, koska `claude-opus-5-5` vaatii CLI ≥ 2.1.280 ja testin fake-CLI ei raportoi versiota.
+- `redacts opaque environment-bound credentials … : result` kaatuu paikallisesti, jos ympäristössä on `EDITOR=vi`: upstreamin redaktio poistaa jokaisen ei-julkisen env-arvon, myös sanan "service" keskeltä. CI:ssä ei ole muuttujaa. Seuranta: lyhyiden env-arvojen redaktio upstreamissa.
+
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
 Näille commiteille ei ole masterilla omaa testiä. Ne tarkistetaan manuaalisesti yllä olevan
