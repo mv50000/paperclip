@@ -9814,7 +9814,12 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       // --- RK9 Custom: an assigned backlog issue starts as todo ---
-      if (issueData.status === "backlog" && (data.assigneeAgentId || data.assigneeUserId)) {
+      // RK9-699: the native runner's create_task with an explicit backlog status is a
+      // deliberate "save for later" hold (upstream v2026.1005.0), so it stays backlog.
+      const runnerBacklogHold =
+        typeof issueData.originId === "string" &&
+        issueData.originId.startsWith("paperclip-runner:create-task:");
+      if (issueData.status === "backlog" && (data.assigneeAgentId || data.assigneeUserId) && !runnerBacklogHold) {
         issueData.status = "todo";
       }
       // --- end RK9 Custom ---

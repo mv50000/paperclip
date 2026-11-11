@@ -549,7 +549,7 @@ Jos CLI päivitetään alaspäin, opus-agentit epäonnistuvat ennen ajoa selkeä
 
 Upstream teki agentin maininnasta pelkän kontekstin. Kommentti tai issue-päivitys, joka mainitsee agentin, ei herätä sitä,
 ja heartbeat hylkää vanhan `issue_comment_mentioned`-syyn ennen ajon luontia. Assignee herää kommentista kuten ennen.
-Prodissa mention-herätteitä oli 2 kpl 35 päivässä (11.11.2026, molemmat agenttien lähettämiä). Päätös: hyväksytään.
+Prodissa mention-herätteitä oli 2 kpl 35 päivässä, molemmat agenttien lähettämiä. Mittaus 11.11.2026 kyselyllä `select count(*) from agent_wakeup_requests where reason = 'issue_comment_mentioned' and created_at > now() - interval '35 days'` (vain luku). Päätös (RK9-699, PR #295): hyväksytään, koska käyttö on vähäistä ja upstream hylkää herätteen joka tapauksessa.
 Agentin herättäminen toiselle issuelle tehdään osoituksella tai review-pyynnöllä. Forkin voice action sovitettiin samaan malliin.
 
 ### Recovery: legacy disposition repair

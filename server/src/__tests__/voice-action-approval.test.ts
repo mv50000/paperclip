@@ -476,6 +476,17 @@ describe("voice_action approve executes the stored payload", () => {
     expect(approvalComment()).toContain("active recovery action");
   });
 
+  // --- RK9 Custom (RK9-699): the mention lookup is gone, so a failing reference sync proves
+  // that a failed afterComment step still lets the assignee wake and is reported. ---
+  it("still wakes the assignee when a comment side effect fails", async () => {
+    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
+    mockDeps.issueReferences.syncComment.mockRejectedValue(new Error("reference sync failed"));
+    await approveAndRun({ ...commentPayload, ...assignedSnapshot });
+
+    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`]);
+    expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
+  });
+
   it("refuses cancelled while the issue's execution run is running, also without an assignee", async () => {
     mockIssuesSvc.getById.mockResolvedValue({ ...issue, executionRunId: "run-1" });
     mockDeps.heartbeat.getRun.mockResolvedValue({ id: "run-1", status: "running" });
