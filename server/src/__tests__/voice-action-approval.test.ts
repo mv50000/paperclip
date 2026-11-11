@@ -258,13 +258,15 @@ describe("voice_action approve executes the stored payload", () => {
     );
   });
 
-  it("wakes the assignee and the mentioned agents once each", async () => {
+  // --- RK9 Custom (RK9-699): upstream v2026.1005.0 (#14577) makes a mention context only,
+  // so only the assignee wakes and the mention lookup is gone. ---
+  it("wakes only the assignee when the comment mentions agents", async () => {
     mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
     mockIssuesSvc.findMentionedAgents.mockResolvedValue([AGENT_ID, "agent-9"]);
     await approveAndRun({ ...commentPayload, ...assignedSnapshot });
 
-    // The assignee is also mentioned; the first wake (issue_commented) wins.
-    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`, "agent-9:issue_comment_mentioned"]);
+    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`]);
+    expect(mockIssuesSvc.findMentionedAgents).not.toHaveBeenCalled();
     expect(mockDeps.heartbeat.wakeup).toHaveBeenCalledWith(
       AGENT_ID,
       expect.objectContaining({
@@ -472,15 +474,6 @@ describe("voice_action approve executes the stored payload", () => {
 
     expect(mockIssuesSvc.addComment).not.toHaveBeenCalled();
     expect(approvalComment()).toContain("active recovery action");
-  });
-
-  it("still wakes the assignee when the mention lookup fails", async () => {
-    mockIssuesSvc.getById.mockResolvedValue(assignedIssue);
-    mockIssuesSvc.findMentionedAgents.mockRejectedValue(new Error("mention lookup failed"));
-    await approveAndRun({ ...commentPayload, ...assignedSnapshot });
-
-    expect(wakeReasons()).toEqual([`${AGENT_ID}:issue_commented`]);
-    expect(approvalComment()).toContain("sivuvaikutukset epäonnistuivat");
   });
 
   it("refuses cancelled while the issue's execution run is running, also without an assignee", async () => {

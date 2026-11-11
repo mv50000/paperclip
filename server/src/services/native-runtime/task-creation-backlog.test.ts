@@ -7,6 +7,11 @@ import { documentService } from "../documents.js";
 import { issueService } from "../issues.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 
+// --- RK9 Custom (RK9-699): the fork turns an assigned backlog issue into todo at creation
+// (services/issues.ts, "an assigned backlog issue starts as todo"), so the runner's explicit
+// backlog hold does not apply. The native runner is off in the fork. ---
+const itUpstreamBacklogHold = it.skip;
+
 describe("runner backlog task creation", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
@@ -28,7 +33,7 @@ describe("runner backlog task creation", () => {
     return { companyId, agentId, issueId, runId, binding, enqueueWakeup, authority: new PaperclipRunnerToolAuthority(db, binding) };
   }
 
-  it.each([false, true])("persists the plan without waking an assigned backlog task (conversation=%s)", async conversation => {
+  itUpstreamBacklogHold.each([false, true])("persists the plan without waking an assigned backlog task (conversation=%s)", async conversation => {
     const f = await fixture(conversation);
     const call = { tool: "create_task", callId: "save-later", arguments: { idempotencyKey: "save-later", title: "Plan for later", status: "backlog", initialPlan: "1. Check status.\n2. Save the plan.\n3. Confirm creation." } };
     const receipt = await f.authority.execute(call) as { task: { id: string } };
@@ -49,7 +54,7 @@ describe("runner backlog task creation", () => {
     expect(events[0]!.details).toMatchObject({ status: "backlog" });
   });
 
-  it.each(["todo", "done"])("keeps an explicit backlog hold with a %s prerequisite", async status => {
+  itUpstreamBacklogHold.each(["todo", "done"])("keeps an explicit backlog hold with a %s prerequisite", async status => {
     const f = await fixture(true);
     const blockerId = randomUUID();
     await db.insert(issues).values({ id: blockerId, companyId: f.companyId, title: "Prerequisite", status });

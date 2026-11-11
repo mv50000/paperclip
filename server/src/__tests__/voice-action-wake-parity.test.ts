@@ -282,7 +282,9 @@ describe("voice_action wakes match the issue routes", () => {
     resetMocks();
   });
 
-  it("wakes the assignee and a mentioned agent like a board comment", async () => {
+  // --- RK9 Custom (RK9-699): upstream v2026.1005.0 (#14577) makes an agent mention context only:
+  // the route and the voice action wake the assignee and not the mentioned agent. ---
+  it("wakes only the assignee when a board comment mentions an agent", async () => {
     const existing = makeIssue();
     const body = "Testattu autossa, katso @Reviewer";
     const comment = {
@@ -303,7 +305,7 @@ describe("voice_action wakes match the issue routes", () => {
     arrange();
     const res = await request(await createApp()).post(`/api/issues/${ISSUE_ID}/comments`).send({ body });
     expect(res.status).toBe(201);
-    const routeWakes = await settledWakeCalls(2);
+    const routeWakes = await settledWakeCalls(1);
 
     resetMocks();
     arrange();
@@ -317,7 +319,8 @@ describe("voice_action wakes match the issue routes", () => {
     });
     expect(outcome).toContain("✅");
     expect(wakeCalls()).toEqual(routeWakes);
-    expect(routeWakes.map((call) => call.wakeup.reason)).toEqual(["issue_commented", "issue_comment_mentioned"]);
+    expect(routeWakes.map((call) => call.wakeup.reason)).toEqual(["issue_commented"]);
+    expect(routeWakes.map((call) => call.agentId)).toEqual([ASSIGNEE_AGENT_ID]);
   });
 
   it("wakes the dependent and the parent like a board PATCH to done", async () => {

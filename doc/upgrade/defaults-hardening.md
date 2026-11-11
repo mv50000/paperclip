@@ -545,6 +545,13 @@ Jos CLI päivitetään alaspäin, opus-agentit epäonnistuvat ennen ajoa selkeä
 | `keyboardShortcuts` | poistui (0284 lisää, 0289 poistaa sarakkeen) | UI-osio poistui; ei dataa. |
 | `enableNativeRunner` | prodissa jo `false` | Pre-deploy-SQL:ää ei tarvita (prodin `experimental`-rivi 11.11.2026). |
 
+### @mention ei enää herätä agenttia (#14577)
+
+Upstream teki agentin maininnasta pelkän kontekstin. Kommentti tai issue-päivitys, joka mainitsee agentin, ei herätä sitä,
+ja heartbeat hylkää vanhan `issue_comment_mentioned`-syyn ennen ajon luontia. Assignee herää kommentista kuten ennen.
+Prodissa mention-herätteitä oli 2 kpl 35 päivässä (11.11.2026, molemmat agenttien lähettämiä). Päätös: hyväksytään.
+Agentin herättäminen toiselle issuelle tehdään osoituksella tai review-pyynnöllä. Forkin voice action sovitettiin samaan malliin.
+
 ### Recovery: legacy disposition repair
 
 Upstream korvasi onnistuneen ajon jatkopolun legacy disposition repairilla (`reconcileLegacyContinuation`).
