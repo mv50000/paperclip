@@ -69,3 +69,8 @@ b51112798f1794776adf837982be58d231d5ac3d:ui/src/pages/apps/gateways/ConnectClien
 889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-github-private-attachment-authority.md:generic-api-key:107
 889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-chat-queue-and-webhook-repair.md:discord-api-token:3585
 889947c238c088a09c39d2783bc5e3521a8d1d8d:doc/plans/chat-adapters/2026-09-08-chat-queue-and-webhook-repair.md:generic-api-key:6669
+# Upstream v2026.1005.0 test fixtures (RK9-699): fake JWT, fixture SSH host key, curl example, PEM placeholder.
+e8c8ba3c19c7e0fbd5ae138cb28684e283c04e36:server/src/__tests__/remote-mcp-redaction.test.ts:jwt:16
+6fe8e306251cd3d59d0fa7b9cf6b3e0aae362a54:server/src/__tests__/railway-ssh.test.ts:private-key:12
+11921075a4462cb27032512ff8736e572402e9f7:tests/runner-e2e/first-task.test.ts:curl-auth-header:931
+d08abcba15233de375a655d21d743022d7842e94:tests/e2e/chat-adapters-ui.shared.ts:private-key:23
