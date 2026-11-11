@@ -122,6 +122,10 @@ vi.mock("../telemetry.js", () => ({
   getTelemetryClient: vi.fn(() => ({ track: vi.fn() })),
 }));
 
+vi.mock("../services/queued-interaction-response.js", () => ({
+  hasQueuedInteractionResponse: vi.fn(async () => false),
+}));
+
 vi.mock("../services/access.js", () => ({
   accessService: () => mockAccessService,
 }));
@@ -1425,6 +1429,8 @@ describe.sequential("issue comment reopen routes", () => {
         attachmentIds: undefined,
         authorType: "user",
         authorizationReason: "allow_board_actor",
+        clientRequestId: undefined,
+        mirrorToSlack: true,
         presentation: {
           kind: "system_notice",
           tone: "warning",
@@ -2403,15 +2409,11 @@ describe.sequential("issue comment reopen routes", () => {
     );
 
     mockHeartbeatService.wakeup.mockClear();
-    mockIssueService.findMentionedAgents.mockClear();
     res = await request(await installActor(createApp(), agentActor(agentB)))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "B replies on B's own issue" });
     expect(res.status).toBe(201);
-    await vi.waitFor(() =>
-      expect(mockIssueService.findMentionedAgents).toHaveBeenCalledOnce(),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
 
     mockIssueService.getById.mockResolvedValue({

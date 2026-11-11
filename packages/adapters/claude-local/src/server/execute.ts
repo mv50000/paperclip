@@ -1,3 +1,4 @@
+import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,12 +44,10 @@ import {
   isPaperclipRuntimeEnvKey,
   refreshPaperclipWorkspaceEnvForExecution,
   renderTemplate,
-  renderPaperclipWakePrompt,
+  selectPaperclipPromptSections,
   isPaperclipRecoveryWakePayload,
-  selectPaperclipTaskMarkdown,
   rewriteWorkspaceCwdEnvVarsForExecution,
   shapePaperclipWorkspaceEnvForExecution,
-  stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -99,7 +98,7 @@ import {
   resolveClaudeEffectiveEnv,
 } from "./host-env.js";
 import { prepareClaudePromptBundle } from "./prompt-cache.js";
-import { buildClaudeExecutionPermissionArgs } from "./permissions.js";
+import { buildClaudeExecutionPermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import {
   createClaudeAcpExecutor,
@@ -256,7 +255,6 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   const linkedIssueIds = Array.isArray(context.issueIds)
     ? context.issueIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
-  const wakePayloadJson = stringifyPaperclipWakePayload(context.paperclipWake);
   const issueWorkMode = readPaperclipIssueWorkModeFromContext(context);
 
   if (wakeTaskId) {
@@ -279,9 +277,6 @@ async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<Cl
   }
   if (linkedIssueIds.length > 0) {
     env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
-  }
-  if (wakePayloadJson) {
-    env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
   }
   applyPaperclipWorkspaceEnv(env, {
     workspaceCwd: shapedWorkspaceEnv.workspaceCwd,
@@ -420,6 +415,7 @@ export async function runClaudeLogin(input: {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const engineSelection = await resolveClaudeExecutionEngineForRun(ctx);
   if (engineSelection.unavailableReason) {
     return {
@@ -518,6 +514,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     graceSec,
     extraArgs,
   } = runtimeConfig;
+  Object.assign(env, claudeSandboxPermissionEnv({ dangerouslySkipPermissions, targetIsSandbox: executionTargetIsSandbox }));
   let loggedEnv = initialLoggedEnv;
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   const terminalResultCleanupGraceMs = Math.max(
@@ -887,53 +884,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     run: { id: runId, source: "on_demand" },
     context,
   };
-  const renderedBootstrapPrompt =
-    !sessionId && bootstrapPromptTemplate.trim().length > 0
-      ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
-      : "";
-  const taskContextNote = selectPaperclipTaskMarkdown(context, { resumedSession: Boolean(sessionId) });
-  const wakePrompt = renderPaperclipWakePrompt(context.paperclipWake, {
-    resumedSession: Boolean(sessionId),
-    conversationMode: context.conversationMode === true,
-    // The task-context markdown is the authoritative brief on this lane; keep
-    // the wake prompt's description copy out so the prompt carries it once.
-    suppressIssueDescription: taskContextNote.length > 0,
-  });
-  const shouldUseResumeDeltaPrompt = Boolean(sessionId) && wakePrompt.length > 0;
-  const renderedPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
-    ? ""
-    : renderTemplate(promptTemplate, templateData);
-  const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
-  // --- RK9 Custom ---
-  // RK9-18 (C6): knowledge-recall preamble, injected by the server (see knowledge-injection.ts).
-  const knowledgeContextNote = asString(context.paperclipKnowledgeContext, "").trim();
-  // Runs that hit --max-turns end as failures with no closing comment, and the
-  // server then re-wakes the agent to write one. Telling the agent its budget
-  // lets it land a status comment before the cap instead.
-  const configuredMaxTurns = asNumber(config.maxTurnsPerRun, 0);
-  const turnBudgetNote =
-    configuredMaxTurns > 0
-      ? `Turn budget: this run is capped at ${configuredMaxTurns} tool turns. Leave a status comment with the next action on your issue before the last two turns; a run that hits the cap loses its closing comment.`
-      : "";
-  // --- /RK9 Custom ---
-  const prompt = joinPromptSections([
-    renderedBootstrapPrompt,
-    wakePrompt,
-    sessionHandoffNote,
-    taskContextNote,
-    knowledgeContextNote,
-    renderedPrompt,
-    turnBudgetNote,
-  ]);
-  const promptMetrics = {
-    promptChars: prompt.length,
-    bootstrapPromptChars: renderedBootstrapPrompt.length,
-    wakePromptChars: wakePrompt.length,
-    sessionHandoffChars: sessionHandoffNote.length,
-    taskContextChars: taskContextNote.length,
-    knowledgeContextChars: knowledgeContextNote.length,
-    heartbeatPromptChars: renderedPrompt.length,
-  };
   const passesConfiguredModel = Boolean(
     model && (!isBedrockAuth(modelEnv) || isBedrockModelId(model)),
   );
@@ -994,6 +944,48 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const runAttempt = async (resumeSessionId: string | null) => {
+    const renderedBootstrapPrompt =
+      !resumeSessionId && bootstrapPromptTemplate.trim().length > 0
+        ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
+        : "";
+    const { taskContextNote, wakePrompt } = selectPaperclipPromptSections(context, {
+      resumedSession: Boolean(resumeSessionId),
+    });
+    const shouldUseResumeDeltaPrompt = Boolean(resumeSessionId) && wakePrompt.length > 0;
+    const renderedPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
+      ? ""
+      : renderTemplate(promptTemplate, templateData);
+    const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+    // --- RK9 Custom ---
+    // RK9-18 (C6): knowledge-recall preamble, injected by the server (see knowledge-injection.ts).
+    const knowledgeContextNote = asString(context.paperclipKnowledgeContext, "").trim();
+    // Runs that hit --max-turns end as failures with no closing comment, and the
+    // server then re-wakes the agent to write one. Telling the agent its budget
+    // lets it land a status comment before the cap instead.
+    const configuredMaxTurns = asNumber(config.maxTurnsPerRun, 0);
+    const turnBudgetNote =
+      configuredMaxTurns > 0
+        ? `Turn budget: this run is capped at ${configuredMaxTurns} tool turns. Leave a status comment with the next action on your issue before the last two turns; a run that hits the cap loses its closing comment.`
+        : "";
+    // --- /RK9 Custom ---
+    const prompt = joinPromptSections([
+      renderedBootstrapPrompt,
+      wakePrompt,
+      sessionHandoffNote,
+      taskContextNote,
+      knowledgeContextNote,
+      renderedPrompt,
+      turnBudgetNote,
+    ]);
+    const promptMetrics = {
+      promptChars: prompt.length,
+      bootstrapPromptChars: renderedBootstrapPrompt.length,
+      wakePromptChars: wakePrompt.length,
+      sessionHandoffChars: sessionHandoffNote.length,
+      taskContextChars: taskContextNote.length,
+      knowledgeContextChars: knowledgeContextNote.length,
+      heartbeatPromptChars: renderedPrompt.length,
+    };
     const attemptInstructionsFilePath = resumeSessionId ? undefined : effectiveInstructionsFilePath;
     const args = buildClaudeArgs(resumeSessionId, attemptInstructionsFilePath);
     const commandNotes: string[] = [];
@@ -1002,7 +994,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     if (dangerouslySkipPermissions && executionTargetIsRemote) {
       commandNotes.push(
-        "Using a broad --allowedTools whitelist for remote execution so hosted targets do not inherit local Claude bypass permissions.",
+        "Using full Claude permission bypass for remote execution, including connected tools.",
       );
     }
     if (attemptInstructionsFilePath && !resumeSessionId) {
@@ -1035,6 +1027,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
+      onProcessStopped: providerStop.beginInvocation(),
       cwd,
       env,
       stdin: prompt,
@@ -1358,7 +1351,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ? `detected ${detectedCliVersion}`
           : "could not determine the installed version";
         const errorMessage =
-          `Claude Fable 5.1 requires Claude Code ${minimumCliVersion} or newer on the CLI lane; ${detected}. ` +
+          `${model} requires Claude Code ${minimumCliVersion} or newer on the CLI lane; ${detected}. ` +
           "Upgrade Claude Code or restore the default ACP lane before retrying.";
         await onLog("stderr", `[paperclip] ${errorMessage}\n`);
         return {
@@ -1432,15 +1425,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
   } finally {
-    if (paperclipBridge) {
-      await paperclipBridge.stop();
-    }
-    if (restoreRemoteWorkspace) {
-      await onLog(
-        "stdout",
-        `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`,
-      );
-      await restoreRemoteWorkspace();
+    try {
+      await providerStop.collectBeforeRestore();
+    } finally {
+      if (paperclipBridge) {
+        await paperclipBridge.stop();
+      }
+      if (restoreRemoteWorkspace) {
+        await onLog(
+          "stdout",
+          `[paperclip] Restoring workspace changes from ${describeAdapterExecutionTarget(executionTarget)}.\n`,
+        );
+        await restoreRemoteWorkspace();
+      }
     }
   }
 }

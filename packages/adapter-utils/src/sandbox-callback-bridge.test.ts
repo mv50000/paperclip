@@ -435,6 +435,8 @@ describe("sandbox callback bridge", () => {
     const queueDir = path.posix.join(rootDir, "queue");
     const directories = sandboxCallbackBridgeDirectories(queueDir);
     const processed: string[] = [];
+    let signalStarted!: () => void;
+    const started = new Promise<void>(resolve => { signalStarted = resolve; });
 
     const worker = await startSandboxCallbackBridgeWorker({
       client: createFileSystemSandboxCallbackBridgeQueueClient(),
@@ -442,6 +444,7 @@ describe("sandbox callback bridge", () => {
       authorizeRequest: async () => null,
       handleRequest: async (request) => {
         processed.push(request.id);
+        signalStarted();
         await new Promise((resolve) => setTimeout(resolve, 100));
         return {
           status: 200,
@@ -477,9 +480,9 @@ describe("sandbox callback bridge", () => {
       "utf8",
     );
 
-    for (let attempt = 0; attempt < 50 && processed.length === 0; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+    // Begin the short drain deadline only after the first handler has started.
+    // A fixed 250ms polling window can expire during a loaded test run.
+    await started;
 
     await worker.stop({ drainTimeoutMs: 10 });
 

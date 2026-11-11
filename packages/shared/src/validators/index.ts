@@ -424,6 +424,8 @@ export {
 
 export {
   createIssueSchema,
+  setIssueTitleSchema,
+  type SetIssueTitle,
   createIssueInputSchema,
   createChildIssueSchema,
   createAcceptedPlanDecompositionSchema,
@@ -440,6 +442,7 @@ export {
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,
   resolveIssueRecoveryActionSchema,
+  retryWorkspaceExportSchema,
   issueReviewRequestSchema,
   issueExecutionWorkspaceSettingsSchema,
   checkoutIssueSchema,
@@ -487,6 +490,8 @@ export {
   requestItemVerdictsResultSchema,
   createIssueThreadInteractionSchema,
   acceptIssueThreadInteractionSchema,
+  resolveConfirmationFromCommentSchema,
+  type ResolveConfirmationFromComment,
   rejectIssueThreadInteractionSchema,
   cancelIssueThreadInteractionSchema,
   skipIssueThreadInteractionSchema,
@@ -1030,8 +1035,13 @@ export * from "./skill-policy.js";
 export * from "./provider-trace.js";
 export * from "./app-definition.js";
 export * from "./chat-channels.js";
+export * from "./chat-github.js";
 
 export * from "./email.js";
+
+export { restoreAgentInstructionSchema } from "./agent.js";
+
+export * from "./skill-source.js";
 
 // --- RK9 Custom (RK9-621) ---
 export * from "./rk9-coord.js";
