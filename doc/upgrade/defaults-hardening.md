@@ -547,9 +547,18 @@ Jos CLI päivitetään alaspäin, opus-agentit epäonnistuvat ennen ajoa selkeä
 
 ### Recovery: legacy disposition repair
 
-Upstream korvasi onnistuneen ajon handoff-ajon legacy disposition repairilla (`reconcileLegacyContinuation`).
-Ajon finalisoinnissa fork käyttää upstreamin polkua. Stranded-sweepissä `in_progress`-issue ohittaa repairin (RK9 Custom, RK9-87),
-joten sweep ei luo uutta ajoa issuelle, jonka viimeisin ajo onnistui. Recoveryn siirto upstreamin malliin tehdään erikseen (RK9-702).
+Upstream korvasi onnistuneen ajon jatkopolun legacy disposition repairilla (`reconcileLegacyContinuation`).
+Repair luo enintään 2 uutta ajoa ja siirtää issuen sitten `blocked`-tilaan. Se ei ohita kommenttiherätteitä, `todo`-issueita
+eikä forkin `recoveryStrictInProgressOnly`-asetusta (prodissa `true`).
+
+Fork pitää masterin käytöksen (RK9 Custom, RK9-87 ja RK9-699):
+
+- Ajon finalisointi kutsuu masterin tavoin `handleRunLivenessContinuation`ia ja `handleSuccessfulRunHandoff`ia (1 yritys).
+  Vakio `RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false` (`services/heartbeat.ts`) ohittaa upstreamin repairin.
+- Stranded-sweep ei vie `todo`- eikä `in_progress`-issueita legacy-lohkoon. `todo` menee forkin todo-haaraan
+  (strict-tilan ohitus, onnistuneen ajon ohitus, handed-back-dispatch), `in_progress` handoff-eskalaatioon ja RK9-87-ohitukseen.
+
+Recoveryn siirto upstreamin malliin tehdään erikseen (RK9-702), kun upstreamin käytös on arvioitu.
 
 ## Preflight — tarkistuslista RK9-307:lle
 

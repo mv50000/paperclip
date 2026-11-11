@@ -4546,10 +4546,16 @@ export function recoveryService(
       }
 
       // --- RK9 Custom (RK9-87, RK9-699): upstream v2026.1005.0 sends every succeeded
-      // non-native run to the legacy disposition repair, which spawns a new run. RK9 does
-      // not spawn a continuation for an in_progress issue whose latest run succeeded, so an
-      // in_progress issue falls through to the handoff escalation and the RK9-87 skip below. ---
-      if (latestRun?.status === "succeeded" && issue.status !== "in_review" && issue.status !== "in_progress") {
+      // non-native run to the legacy disposition repair, which spawns a new run. The fork keeps
+      // master's sweep: a todo issue goes to the todo branch (strict-mode skip, succeeded-run
+      // skip, handed-back dispatch) and an in_progress issue to the handoff escalation and the
+      // RK9-87 skip. Sweep candidates are todo, in_progress and in_review, so this block is off. ---
+      if (
+        latestRun?.status === "succeeded" &&
+        issue.status !== "in_review" &&
+        issue.status !== "in_progress" &&
+        issue.status !== "todo"
+      ) {
         const [source] = await db.select({ runtimeMode: heartbeatRuns.runtimeMode }).from(heartbeatRuns).where(eq(heartbeatRuns.id, latestRun.id)).limit(1);
         if (source?.runtimeMode !== "native") {
           const outcome = await reconcileLegacyContinuation(latestRun.id);

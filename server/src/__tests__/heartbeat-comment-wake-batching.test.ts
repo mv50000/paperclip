@@ -3603,10 +3603,10 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
       await gateway.close();
     }
   }, 120_000);
+  // --- RK9 Custom (RK9-699): master's version; the fork keeps master's successful-run handoff at run
+  // finalization instead of upstream's legacy disposition repair. ---
   it("treats the automatic run summary as fallback-only when the run already posted a comment", async () => {
-    const gateway = await createControlledGatewayServer(async turn => {
-      if (turn === 2) await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
-    });
+    const gateway = await createControlledGatewayServer();
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
@@ -3704,10 +3704,30 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
       expect(sourceRun?.issueCommentStatus).toBe("satisfied");
       expect(sourceRun?.issueCommentSatisfiedByCommentId).not.toBeNull();
 
-      await waitFor(async () => (await db.select().from(agentWakeupRequests)
-        .where(eq(agentWakeupRequests.companyId, companyId)))
-        .some(wake => wake.reason === "issue_disposition_repair"));
-      await heartbeat.drainActiveRunExecutions();
+      await waitFor(async () => {
+        const comments = await db
+          .select()
+          .from(issueComments)
+          .where(eq(issueComments.issueId, issueId));
+        const wakeups = await db
+          .select()
+          .from(agentWakeupRequests)
+          .where(
+            and(
+              eq(agentWakeupRequests.companyId, companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+            ),
+          );
+
+        const hasHandoffComment = comments.some(
+          (comment) =>
+            comment.body === SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
+        );
+        const hasHandoffWake = wakeups.some(
+          (wakeup) => wakeup.reason === "finish_successful_run_handoff",
+        );
+        return hasHandoffComment && hasHandoffWake;
+      });
 
       const comments = await db
         .select()
@@ -3721,7 +3741,12 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
             comment.body === "Manual completion comment from the run.",
         ),
       ).toBe(true);
-      expect(comments.some(comment => comment.body === SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY)).toBe(false);
+      expect(
+        comments.some(
+          (comment) =>
+            comment.body === SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
+        ),
+      ).toBe(true);
       expect(
         comments.every((comment) => !comment.body.startsWith("## Run summary")),
       ).toBe(true);
@@ -3741,7 +3766,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
       ).toBe(false);
       expect(
         wakeups.some(
-          (wakeup) => wakeup.reason === "issue_disposition_repair",
+          (wakeup) => wakeup.reason === "finish_successful_run_handoff",
         ),
       ).toBe(true);
     } finally {

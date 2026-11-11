@@ -655,6 +655,9 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import type { SystemPauseService } from "./system-pause.js";
 import { serverVersion } from "../version.js";
 
+// --- RK9 Custom (RK9-699): off = the fork keeps master's run-finalization path (liveness
+// continuation + bounded successful-run handoff) instead of upstream's legacy disposition repair. ---
+const RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false;
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
 const MAX_RUN_EVENT_PAYLOAD_STRING_CHARS = 16 * 1024;
@@ -25872,7 +25875,11 @@ export function heartbeatService(
           });
           if (!conversationSettled) {
             await handleIssueReviewPathDisposition(livenessRun);
-            if (livenessRun.runtimeMode !== "native") {
+            // --- RK9 Custom (RK9-87, RK9-699): upstream v2026.1005.0 sends every non-native run
+            // to the legacy disposition repair (up to 2 new runs, then blocked) instead of the
+            // liveness continuation and the bounded successful-run handoff. The fork keeps
+            // master's path for every run until recovery moves to upstream (RK9-702). ---
+            if (RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE && livenessRun.runtimeMode !== "native") {
               await recovery.reconcileLegacyContinuation(livenessRun.id);
             } else {
               await handleRunLivenessContinuation(livenessRun);

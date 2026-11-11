@@ -334,13 +334,16 @@ describeEmbeddedPostgres("heartbeat responsible-user invariant", () => {
     const runs = await db.select().from(heartbeatRuns);
     const handoffs = runs.filter((run) => !sourceRunIds.includes(run.id));
     expect(handoffs).toHaveLength(3);
+    // --- RK9 Custom (RK9-699): the fork keeps master's successful-run handoff at run
+    // finalization instead of upstream's legacy disposition repair. ---
     expect(
-      handoffs.map((run) => run.contextSnapshot?.retryOfRunId).sort(),
+      handoffs.map((run) => run.contextSnapshot?.parentRunId).sort(),
     ).toEqual(sourceRunIds.sort());
     for (const handoff of handoffs) {
       expect(handoff.contextSnapshot?.wakeReason).toBe(
-        "issue_disposition_repair",
+        "finish_successful_run_handoff",
       );
+      // --- /RK9 Custom ---
       expect(handoff.responsibleUserId).toBe(issueResponsibleUserId);
       expect(handoff.status).toBe("succeeded");
     }

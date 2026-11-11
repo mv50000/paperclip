@@ -806,7 +806,7 @@ Jäädytys koskee vain repoa mv50000/paperclip (operaattori 3.11.2026).
 | `server/src/app.ts` | upstreamin distribution-plugin-importit + forkin `SystemPauseService`; `githubWebhookRoutes(db)` ennen upstreamin browser-use- ja tool-gateway-reittejä |
 | `server/src/middleware/auth.ts` | upstreamin julkisen routine-webhookin ohitus ensin, sitten forkin `runIdHeader`-UUID-vartija. Peruutetun ajon 403 on upstreamin logiikka parametrilla `res`. |
 | `server/src/services/heartbeat.ts` | `markRunIfTaintingContext` (RK9-319) ennen upstreamin `setWakeupStatus`ia; claim-silmukka käyttää forkin `effectiveSlots`ia upstreamin `isPermanentClaimRejection`/`isDeferrableClaimRejection`-käsittelyn kanssa |
-| `server/src/services/recovery/service.ts` | forkin `logCandidate`-kirjaukset + upstreamin `retryExhausted`-eskalaatio. Upstreamin stranded-sweep vie jokaisen onnistuneen ei-natiivin ajon legacy disposition repairiin (uusi ajo). RK9 Custom (RK9-87): `in_progress`-issue ohittaa sen ja päätyy handoff-eskalaatioon ja RK9-87-ohitukseen. Ajon finalisoinnin `reconcileLegacyContinuation` on upstreamin (korvaa masterin handoff-ajon). |
+| `server/src/services/recovery/service.ts`, `server/src/services/heartbeat.ts` (finalisointi) | forkin `logCandidate`-kirjaukset + upstreamin `retryExhausted`-eskalaatio. Upstream vie onnistuneen ei-natiivin ajon legacy disposition repairiin sekä finalisoinnissa että stranded-sweepissä. RK9 Custom (RK9-87, RK9-699): finalisointi käyttää masterin liveness continuationia ja successful-run handoffia (`RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false`), ja sweep ohjaa `todo`- ja `in_progress`-issuet masterin haaroihin (strict-tila, RK9-87). |
 | `server/src/services/routines.ts` | `systemPause?.assertNotPaused()` `firePublicTrigger`in alussa, sitten upstreamin transaktionaalinen webhook-koodi |
 | `server/src/services/built-in-agents.ts`, `server/src/routes/agents.ts` | molemmat importit |
 | `ui/src/pages/InstanceGeneralSettings.tsx` | upstream poisti pikanäppäinosion (0289); forkin globaali rinnakkaisuus säilyi |
@@ -818,7 +818,8 @@ Jäädytys koskee vain repoa mv50000/paperclip (operaattori 3.11.2026).
 
 Testisovitukset:
 
-- `heartbeat-process-recovery.test.ts`: upstreamin kaksi uutta legacy repair -testiä ajetaan `it.skip`-aliaksella (RK9-87). Exhausted handoff odottaa `successfulRunHandoffEscalated` 1. Natiivi Board wait (`superseded=false`) odottaa 0, koska RK9-87 ohittaa sen ja natiivirunner on pois.
+- `heartbeat-process-recovery.test.ts`: upstreamin kaksi uutta legacy repair -testiä ajetaan `it.skip`-aliaksella (RK9-87). Viisi finalisointitestiä (finish-handoff, corrective wake cancelled, artifact-producing, secret-bearing progress, plan-only continuation) on masterin versioita. Handed-back-`todo` odottaa masterin `dispatchRequeued` 1:tä. Uusi testi: onnistuneen ajon `todo`-issue ei saa uutta ajoa (strict pois ja päällä).
+- `heartbeat-responsible-user-invariant.test.ts` ja `heartbeat-comment-wake-batching.test.ts`: odottavat masterin `finish_successful_run_handoff`-herätettä. Exhausted handoff odottaa `successfulRunHandoffEscalated` 1. Natiivi Board wait (`superseded=false`) odottaa 0, koska RK9-87 ohittaa sen ja natiivirunner on pois.
 - `legacy-continuation-authority.test.ts`: sweep ei luo repair-ajoa `in_progress`-issuelle (RK9-87).
 - `agent-auth-middleware.test.ts`: lookalike-routine-polku sallii forkin anonyymin ei-JWT-bearerin (`actorType: "none"`) tai 404:n.
 - `nosto-private-issue-visibility-rk9.test.ts`: `FORK_BASE_COMMIT = "467125fafb"`, 17 uutta upstream-tiedostoa baselineen.
