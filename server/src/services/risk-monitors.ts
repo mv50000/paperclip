@@ -1,4 +1,5 @@
-import { and, desc, eq, gte, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, lt, ne, not, or, sql } from "drizzle-orm";
+import { notRk9HeldPausedAgentCondition } from "./rk9-agent-pause.js"; // RK9 Custom (RK9-701)
 import { visibleIssueCondition } from "./issue-visibility.js";
 import type { Db } from "@paperclipai/db";
 import {
@@ -433,7 +434,9 @@ export function riskMonitorService(db: Db) {
             // RK9 Custom (RK9-701): hidden issues raise no dead-agent alert.
             visibleIssueCondition(),
             inArray(issues.status, ["todo", "in_progress"]),
-            inArray(agents.status, ["terminated", "paused"]),
+            // RK9 Custom (RK9-701): a new hire the 1023 lifecycle is still preparing is
+            // status "paused" but not dead; only a held pause or termination alerts.
+            or(eq(agents.status, "terminated"), not(notRk9HeldPausedAgentCondition())),
           ));
 
         for (const task of deadAgentTasks) {

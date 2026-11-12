@@ -4,7 +4,11 @@
 // pause, so a new hire stays visible and assignable while it is prepared.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { agents, companies, createDb } from "@paperclipai/db";
+import { createAgentLifecycle } from "../services/agent-lifecycle.ts";
+import { riskIncidentService } from "../services/risk-incidents.ts";
+import { riskRegistryService } from "../services/risk-registry.ts";
 import { isRk9HeldPausedAgent } from "../services/rk9-agent-pause.ts";
 import { agentService } from "../services/agents.ts";
 import {
@@ -23,6 +27,9 @@ describe("isRk9HeldPausedAgent", () => {
     expect(isRk9HeldPausedAgent({ status: "paused", lifecycleState: "verifying" })).toBe(false);
     expect(isRk9HeldPausedAgent({ status: "paused", lifecycleState: "resuming" })).toBe(false);
     expect(isRk9HeldPausedAgent({ status: "idle", lifecycleState: "ready" })).toBe(false);
+    // A hold wins over preparation, as in upstream isAgentAwaitingSetup.
+    expect(isRk9HeldPausedAgent({ status: "paused", lifecycleState: "preparing", lifecycleHolds: ["budget"] })).toBe(true);
+    expect(isRk9HeldPausedAgent({ status: "paused", lifecycleState: "preparing", lifecycleHolds: [] })).toBe(false);
   });
 });
 
@@ -55,11 +62,48 @@ describeEmbeddedPostgres("agents.list hides only held paused agents (RK9-701)", 
       { ...base, name: "Active", status: "idle", lifecycleState: "ready" },
       { ...base, name: "Preparing", status: "paused", lifecycleState: "preparing" },
       { ...base, name: "Held", status: "paused", lifecycleState: "paused", pauseReason: "manual" },
+      { ...base, name: "PreparingHeld", status: "paused", lifecycleState: "preparing", lifecycleHolds: ["budget"] },
     ]);
 
     const names = (await agentService(db).list(companyId)).map((agent) => agent.name).sort();
     expect(names).toEqual(["Active", "Preparing"]);
     const all = (await agentService(db).list(companyId, { includePaused: true })).map((agent) => agent.name).sort();
-    expect(all).toEqual(["Active", "Held", "Preparing"]);
+    expect(all).toEqual(["Active", "Held", "Preparing", "PreparingHeld"]);
+  });
+
+  // Verifier round 1 (RK9-701): the risk playbook pause used to write status "paused" directly.
+  // Under 1023 that leaves lifecycleState "ready" with no hold, so the board resume is a no-op.
+  it("pauses a crash-looping agent through the lifecycle so the board can resume it", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Risk Co",
+      issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Looper", role: "engineer", status: "idle", lifecycleState: "ready",
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    const entry = await riskRegistryService(db).upsertMonitorRisk(companyId, "AGENT_CRASH_LOOP", "agent", agentId, {});
+
+    await riskIncidentService(db).createIncident(companyId, {
+      riskEntryId: entry.id,
+      title: "Crash loop",
+      severity: "sev2",
+      playbookCode: "AGENT_CRASH_LOOP",
+      autoActionTypes: ["pause_agent"],
+    });
+
+    const read = () => db.select().from(agents).where(eq(agents.id, agentId)).then((rows) => rows[0]!);
+    const paused = await read();
+    expect(paused.status).toBe("paused");
+    expect(paused.lifecycleHolds).toContain("system");
+    expect(["pausing", "paused"]).toContain(paused.lifecycleState);
+    expect(isRk9HeldPausedAgent(paused)).toBe(true);
+
+    await createAgentLifecycle(db).resumeAgent(agentId, "user");
+    expect((await read()).lifecycleHolds).not.toContain("system");
   });
 });
