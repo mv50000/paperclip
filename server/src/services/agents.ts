@@ -1,6 +1,7 @@
 import { type BudgetServiceHooks } from "./budgets.js";
 
 import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { notRk9HeldPausedAgentCondition } from "./rk9-agent-pause.js";
 import type { Db } from "@paperclipai/db";
 import { agents, agentConfigRevisions, agentApiKeys, heartbeatRuns } from "@paperclipai/db";
 import { isUuidLike, normalizeAgentApiKeyScope, normalizeAgentUrlKey, type AgentApiKeyScope } from "@paperclipai/shared";
@@ -39,8 +40,9 @@ export function agentService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         conditions.push(ne(agents.status, "terminated"));
       }
       // RK9 Custom (52b995085): paused agents are hidden unless the caller asks for them.
+      // RK9-701: only held pauses; an agent the 1023 lifecycle is still preparing stays visible.
       if (!options?.includePaused) {
-        conditions.push(ne(agents.status, "paused"));
+        conditions.push(notRk9HeldPausedAgentCondition());
       }
       const [rows, allCompanyRows] = await Promise.all([
         db.select().from(agents).where(and(...conditions)),

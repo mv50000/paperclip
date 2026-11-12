@@ -290,6 +290,7 @@ import { decisionTrainingService } from "../services/decision-training.js";
 import { feedbackService } from "../services/feedback.js";
 // --- RK9 Custom: human-proxy agents ---
 import { isHumanProxyAgent } from "../services/human-proxy.js";
+import { isRk9HeldPausedAgent } from "../services/rk9-agent-pause.js"; // RK9 Custom (RK9-701)
 import { instanceSettingsService } from "../services/instance-settings.js";
 import {
   ISSUE_BLOCKER_DIAGNOSTICS_MAX_BLOCKERS,
@@ -7710,7 +7711,9 @@ export function issueRoutes(
     if (resolved.agent.status === "pending_approval") {
       throw conflict("Cannot assign work to pending approval agents");
     }
-    if (resolved.agent.status === "paused" || resolved.agent.status === "terminated") {
+    // RK9-701: a paused agent that the 1023 lifecycle is still preparing (every new hire) is
+    // assignable; only a held pause is refused.
+    if (isRk9HeldPausedAgent(resolved.agent) || resolved.agent.status === "terminated") {
       throw conflict(
         `Cannot assign issue to ${resolved.agent.status} agent "${resolved.agent.name}". ` +
           `Assign to an active agent or to "AI" for heavy implementation work.`,

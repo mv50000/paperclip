@@ -693,6 +693,34 @@ Mallivalitsimen järjestys on upstreamin (#14917, Fable 5.1 ensin). Oletusmalli 
 Prodin `experimental`-rivi ei muutu (12.11.2026: `enableNativeRunner = false`, `recoveryStrictInProgressOnly = true`). Pre-deploy-SQL:ää ei tarvita.
 Migraatiot 0294–0305 ovat lisääviä. `0298` täyttää oletusohjeet muisti-integraatioille, mutta prodissa `tool_connections` on tyhjä (0 riviä).
 
+## Porras v2026.1023.0 (RK9-701)
+
+### Budjetti: hinnoittelematon käyttö pysäyttää oletuksena (0312)
+
+Migraatio `0312` lisää `budget_policies.unpriced_usage_policy`-sarakkeen oletuksella `block`. Sarake tulee myös olemassa oleville politiikoille.
+Kova pysäytys laukeaa nyt kolmesta syystä: kulut ≥ budjetti, ikkunassa on `cost_status = 'unpriced'` -rivi (ei `subscription_included`) tai ikkunassa on päättynyt ajo, jonka kirjanpito on kesken (`heartbeat_runs.cost_accounting_pending`).
+Rahasummat vertaillaan `numeric(24,7)`-tarkkuudella (`cost_events.cost_cents`, `budget_incidents.amount_observed`).
+
+Vaikutus prodiin mitattiin dry-runissa prod-kopiolla 12.11.2026. Kopiossa on 13 aktiivista kovaa politiikkaa (11 agentti-, 2 yritystasoista), ja yhtäkään ei pysäytetä: hinnoittelemattomia rivejä on 0 ja kesken jääneitä kirjanpitoajoja on 0. Viimeisen 30 vuorokauden 413 kulurivistä kaikki ovat `subscription_included`.
+Päätös: fork pitää upstreamin oletuksen `block`. Se on turvallinen suunta, eikä se muuta nykytilaa. Jos uusi adapteri tuottaa hinnoittelemattomia rivejä, scope pysähtyy, ja board joko hinnoittelee käytön tai asettaa politiikalle `allow`.
+Lukitsee: `budgets-boundary-rk9.test.ts` (100 %-raja, 99,99 ja 100,01 senttiä, sekä `block`/`allow`/`subscription_included`).
+
+### Uusi agentti syntyy tilaan `paused` + `preparing`
+
+Upstream luo jokaisen uuden agentin (myös hyväksytyn hiren) tilaan `status: "paused"`, `lifecycleState: "preparing"`, ja lifecycle-worker vie sen valmiiksi.
+Forkin sääntö `52b995085` piilottaa pausetut agentit listasta ja hylkää ne assigneena. RK9-701 rajaa säännön pitoon (`server/src/services/rk9-agent-pause.ts`): pausettu agentti, jonka `lifecycleState` on `preparing`, `verifying` tai `resuming`, näkyy listassa ja on assignoitavissa.
+Muut pausetut agentit pysyvät piilossa (fail closed). Lukitsee: `rk9-agent-pause.test.ts`.
+
+### Muut käytösmuutokset
+
+- Yksityiset tehtävät ja projektit (0313): `issues.visibility` ja `projects.visibility` ovat oletuksena `open`. Uusia tauluja ovat `issue_access_grants` ja `project_access_members`. Olemassa olevat issuet pysyvät avoimina. Forkin kyselyt suodattavat piilotetut issuet (`visibleIssueCondition()`, ks. regressiomatriisi).
+- Agentin lifecycle (0320) täyttää `lifecycle_state`-sarakkeen kaikille agenteille. Mukana tulevat lifecycle-pidot (holds) ja agentin identiteettiavaimet (`agent_identity_keys`, 0308).
+- `cost_events.agent_id` on nullattava (0316), ja `cost_events.subscription_id` on uusi sarake (0322). Forkin `risk-monitors.ts` ohittaa agentittomat rivit.
+- `issue_comments.origin` (0331) on uusi sarake. Indeksit `0313` (`heartbeat_runs`, `issues`, `projects`) ja `0332` (`agent_wakeup_requests`) luodaan `CONCURRENTLY`. `0333` luo `cost_events`- ja `heartbeat_runs`-indeksit tavallisesti; dry-runissa se kesti alle 0,02 s.
+- Uudet `experimental`-avaimet `enableGitHubReviewBots`, `enableOpenAiDot` ja `enableFastResponses` ovat oletuksena `false`. Fork ei kirjoita niitä.
+- Idle sleep -turvatilan lukema ja pluginien drain ovat uusia. Fork ei käytä host-sleepiä.
+- Upstreamin `skills/paperclip` otettiin käyttöön (operaattorin päätös 3.11.2026). @-maininta ei herätä agenttia, `/interactions`-reitit ja `questionSet` ovat dokumentoidut. RK9-433-, RK9-125- ja RK9-315-lohkot säilyvät.
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on
