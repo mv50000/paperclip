@@ -1,6 +1,7 @@
 import { and, eq, gte, isNotNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, issues } from "@paperclipai/db";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import { notFound } from "../errors.js";
 import { companyService } from "./companies.js";
 
@@ -71,13 +72,16 @@ export function agentMetricsService(db: Db) {
       const completedRows = await db
         .select({
           agentId: issues.assigneeAgentId,
-          done: sql<number>`count(*) filter (where ${issues.status} = 'done' and ${issues.completedAt} >= ${since})::int`,
-          cancelled: sql<number>`count(*) filter (where ${issues.status} = 'cancelled' and ${issues.cancelledAt} >= ${since})::int`,
+          // RK9 Custom (RK9-701): a raw Date in a sql template makes postgres-js throw ERR_INVALID_ARG_TYPE; pass an ISO string.
+          done: sql<number>`count(*) filter (where ${issues.status} = 'done' and ${issues.completedAt} >= ${since.toISOString()})::int`,
+          cancelled: sql<number>`count(*) filter (where ${issues.status} = 'cancelled' and ${issues.cancelledAt} >= ${since.toISOString()})::int`,
         })
         .from(issues)
         .where(
           and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues do not count in agent workload.
+            visibleIssueCondition(),
             isNotNull(issues.assigneeAgentId),
             or(
               and(eq(issues.status, "done"), gte(issues.completedAt, since)),
@@ -96,6 +100,8 @@ export function agentMetricsService(db: Db) {
         .where(
           and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues do not count in agent workload.
+            visibleIssueCondition(),
             isNotNull(issues.assigneeAgentId),
             eq(issues.status, "in_progress"),
             lt(issues.updatedAt, staleCutoff),

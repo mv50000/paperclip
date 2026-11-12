@@ -16,6 +16,7 @@
 // the DB on every request.
 
 import { and, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { visibleIssueCondition } from "../issue-visibility.js";
 import type { Db } from "@paperclipai/db";
 import {
   companyEmailConfig,
@@ -421,7 +422,8 @@ export function createInboundRouter(
         await tx
           .update(issues)
           .set({ updatedAt: new Date() })
-          .where(eq(issues.id, thread.issue.id));
+          // RK9 Custom (RK9-701): never touch a hidden issue.
+          .where(and(eq(issues.id, thread.issue.id), visibleIssueCondition()));
         return { kind: "reply", messageId: persisted.id, issue: thread.issue };
       }
 
@@ -600,7 +602,8 @@ export function createInboundRouter(
         status: issues.status,
       })
       .from(issues)
-      .where(eq(issues.id, parent.issueId));
+      // RK9 Custom (RK9-701): a reply to a hidden issue's thread is not matched to that issue.
+      .where(and(eq(issues.id, parent.issueId), visibleIssueCondition()));
     if (!issue) return null;
     if (issue.status === "done" || issue.status === "cancelled") return null;
 

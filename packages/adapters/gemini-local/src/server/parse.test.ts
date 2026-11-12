@@ -180,8 +180,9 @@ describe("parseGeminiJsonl", () => {
     const parsed = parseGeminiJsonl(stdout);
     expect(parsed.sessionId).toBe("gem_sess_1");
     expect(parsed.summary).toBe("Hello from Gemini");
+    // RK9-701: upstream #14991 counts input as uncached input (prompt 100 - cached 20).
     expect(parsed.usage).toEqual({
-      inputTokens: 100,
+      inputTokens: 80,
       cachedInputTokens: 20,
       outputTokens: 50,
     });
@@ -241,7 +242,8 @@ describe("parseGeminiJsonl", () => {
     ].join("\n");
 
     const parsed = parseGeminiJsonl(stdout);
-    expect(parsed.usage.inputTokens).toBe(100);
+    // RK9-701: upstream #14991 counts input as uncached input ((80 - 15) + (20 - 5)).
+    expect(parsed.usage.inputTokens).toBe(80);
     expect(parsed.usage.cachedInputTokens).toBe(20);
     expect(parsed.usage.outputTokens).toBe(50);
   });

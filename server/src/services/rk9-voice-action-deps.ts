@@ -19,6 +19,7 @@ import {
   taskWatchdogService,
 } from "./index.js";
 import { issueService } from "./issues.js";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import { runnerGoalService } from "./runner-goals.js";
 import type { VoiceActionDeps } from "./rk9-voice-action.js";
 
@@ -49,7 +50,8 @@ export function createVoiceActionDeps(
       await db
         .update(issueRows)
         .set({ blockedOwnerNotifiedAt: notifiedAt })
-        .where(and(eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId)));
+        // RK9 Custom (RK9-701): a voice action never updates a hidden issue.
+        .where(and(eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId), visibleIssueCondition()));
     },
   };
 }

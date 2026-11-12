@@ -610,7 +610,8 @@ describeEmbeddedPostgres("built-in agents", () => {
   // --- RK9 Custom (RK9-314): default grant sync is insert-only ---
   it("keeps a suspended membership and an operator-scoped root CEO grant on reconcile", async () => {
     const companyId = await seedCompany({ requireApproval: false });
-    const root = await agentService(db).create(companyId, {
+    // RK9-701: upstream 1023 creates agents through the agent-lifecycle API.
+    const root = await createAgentLifecycle(db).requestHire(companyId, {
       name: "CEO",
       role: "ceo",
       status: "idle",

@@ -109,3 +109,8 @@ ui/src/components/RunTaintNotice.test.tsx
 server/src/__tests__/email-suppression-routes.test.ts
 # RK9-700: uusi agentti ei saa #15283:n yhdeksää laajentavaa oletusgranttia (RK9_WITHHELD_NEW_AGENT_GRANT_KEYS).
 server/src/__tests__/agent-default-configure-grants.test.ts
+# RK9-701 (porras 1023): heartbeat-porttien portit, budjetin 100 %-raja DB-testeinä
+server/src/__tests__/heartbeat-rk9-gates.test.ts
+server/src/__tests__/budgets-boundary-rk9.test.ts
+server/src/__tests__/nosto-private-issue-visibility-rk9.test.ts
+server/src/__tests__/nosto-private-issue-visibility-leaks-rk9.test.ts

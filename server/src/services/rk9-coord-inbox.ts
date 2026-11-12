@@ -37,6 +37,7 @@ import { logger } from "../middleware/logger.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { issueReferenceService } from "./issue-references.js";
 import { issueService } from "./issues.js";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import { issueTreeControlService } from "./issue-tree-control.js";
 import {
   assertRk9CoordNoSecretFields,
@@ -189,7 +190,8 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
         conversationAgentId: issues.conversationAgentId,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier)))
+      // RK9 Custom (RK9-701): a hidden issue is not resolved by identifier.
+      .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier), visibleIssueCondition()))
       .limit(1);
     return row ?? null;
   }
@@ -203,7 +205,8 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
         conversationAgentId: issues.conversationAgentId,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+      // RK9 Custom (RK9-701): a hidden issue is not resolved by id.
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), visibleIssueCondition()))
       .limit(1);
     return row ?? null;
   }

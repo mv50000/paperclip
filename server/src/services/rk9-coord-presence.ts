@@ -18,6 +18,7 @@
 import { and, desc, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, rk9CoordActors } from "@paperclipai/db";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import {
   parseRk9CoordActorId,
   RK9_COORD_PHASE_MAX,
@@ -388,6 +389,8 @@ export function rk9CoordPresenceService(db: Db, opts: Rk9CoordPresenceOptions = 
             issues,
             and(
               eq(issues.companyId, heartbeatRuns.companyId),
+              // RK9 Custom (RK9-701): a hidden issue is not joined in (ON, so the run row survives).
+              visibleIssueCondition(),
               // Guarded cast: a non-UUID context value never breaks the list.
               sql`${issues.id} = case when ${contextIssueId} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (${contextIssueId})::uuid end`,
             ),

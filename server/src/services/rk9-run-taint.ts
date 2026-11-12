@@ -199,6 +199,8 @@ export async function taintingSourcesForRun(db: Db, run: RunLike): Promise<Rk9Ru
     .where(
       and(
         eq(issues.companyId, run.companyId),
+        // RK9 Custom (RK9-701): intentionally no visibleIssueCondition(). Taint is a safety
+        // gate: a hidden issue that carries inbound mail still taints the run that holds it.
         or(eq(issues.checkoutRunId, run.id), eq(issues.executionRunId, run.id)),
       ),
     )

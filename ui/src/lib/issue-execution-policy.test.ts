@@ -83,6 +83,7 @@ describe("buildExecutionPolicy", () => {
       mode: "normal",
       commentRequired: true,
       stages: [],
+      outcomeRequirements: [], // RK9 Custom: the fork always emits outcome requirements (SEC-91)
       monitor: monitorOnlyPolicy.monitor,
     });
   });
@@ -132,6 +133,7 @@ describe("buildExecutionPolicy", () => {
     const existingPolicy: IssueExecutionPolicy = {
       mode: "normal", commentRequired: true, maxReviewRounds: 4,
       authorizationPolicy: { trustPreset: "standard" },
+      outcomeRequirements: [], // RK9 Custom: fork outcome requirements
       stages: [{ id: STAGE_ID, type: "review", approvalsNeeded: 1, participants: [
         { id: PARTICIPANT_ID, type: "agent", agentId: AGENT_ID, userId: null },
       ] }],
@@ -154,6 +156,7 @@ describe("buildExecutionPolicy", () => {
     const existingPolicy = {
       mode: "normal", commentRequired: true, stages: [],
       authorizationPolicy: { trustPreset: "standard" },
+      outcomeRequirements: [], // RK9 Custom: fork outcome requirements
     } as IssueExecutionPolicy;
     expect(buildExecutionPolicy({ existingPolicy, reviewerValues: [], approverValues: [] }))
       .toEqual(existingPolicy);
@@ -166,12 +169,13 @@ describe("buildExecutionPolicy", () => {
     ] }] },
   ])("retains an independent review-round limit when no participants remain: %j", (existingPolicy) => {
     expect(buildExecutionPolicy({ existingPolicy: existingPolicy as IssueExecutionPolicy, reviewerValues: [], approverValues: [] }))
-      .toEqual({ mode: "normal", commentRequired: true, stages: [], maxReviewRounds: 4 });
+      // RK9 Custom: the fork always emits outcome requirements (SEC-91).
+      .toEqual({ mode: "normal", commentRequired: true, stages: [], outcomeRequirements: [], maxReviewRounds: 4 });
   });
 
   it("still clears a policy with no participants, monitor, or other settings", () => {
     expect(buildExecutionPolicy({
-      existingPolicy: { mode: "normal", commentRequired: true, stages: [] },
+      existingPolicy: { mode: "normal", commentRequired: true, stages: [], outcomeRequirements: [] },
       reviewerValues: [], approverValues: [],
     })).toBeNull();
   });

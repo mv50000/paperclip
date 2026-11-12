@@ -1,4 +1,5 @@
 import { and, desc, eq, gte, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -404,6 +405,8 @@ export function riskMonitorService(db: Db) {
           .from(issues)
           .where(and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues raise no orphan alert.
+            visibleIssueCondition(),
             inArray(issues.status, ["todo", "in_progress", "in_review"]),
             sql`${issues.assigneeAgentId} IS NULL`,
             sql`${issues.assigneeUserId} IS NULL`,
@@ -427,6 +430,8 @@ export function riskMonitorService(db: Db) {
           .innerJoin(agents, eq(issues.assigneeAgentId, agents.id))
           .where(and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues raise no dead-agent alert.
+            visibleIssueCondition(),
             inArray(issues.status, ["todo", "in_progress"]),
             inArray(agents.status, ["terminated", "paused"]),
           ));
@@ -467,6 +472,8 @@ export function riskMonitorService(db: Db) {
           .from(issues)
           .where(and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues raise no stale-blocker alert.
+            visibleIssueCondition(),
             eq(issues.status, "blocked"),
             lt(issues.updatedAt, staleCutoff),
           ));

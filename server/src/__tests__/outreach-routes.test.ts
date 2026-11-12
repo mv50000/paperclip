@@ -77,7 +77,7 @@ async function requestApp(app: express.Express, build: (baseUrl: string) => requ
   }
 }
 
-describe.sequential("outreach routes", () => {
+describe("outreach routes", { sequential: true }, () => {
   beforeEach(() => {
     for (const mock of Object.values(mockOutreach)) mock.mockReset();
     mockLogActivity.mockReset();

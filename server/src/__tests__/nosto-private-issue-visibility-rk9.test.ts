@@ -1,8 +1,7 @@
 // RK9-693 (nosto prep), RK9-707: issue visibility. Upstream v2026.1023 filters hidden issues and
 // harness containers with `visibleIssueCondition()` (services/issue-visibility.ts). Fork-only
-// services that query the `issues` table without it would leak hidden issues after the lift. The
-// leak tests cannot run green on the current fork, so the cases are `it.todo` and get activated in
-// the RK9-701 step.
+// services that query the `issues` table without it would leak hidden issues after the lift. RK9-701
+// added the filter to the ten fork files and activated the leak cases (nosto-private-issue-visibility-leaks-rk9.test.ts).
 //
 // The inventory is open: the test scans server/src for files that query `issues` without the
 // condition, and every hit must be classified below. A new unfiltered fork file fails the test.
@@ -20,8 +19,8 @@ import { describe, expect, it } from "vitest";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(root, "../..");
 
-/** Upstream merge base of the fork (v2026.1012.0 since RK9-700; v2026.1005.0 467125fafb in RK9-699; was dffc2b3ca1, the RK9-693 merge base). */
-const FORK_BASE_COMMIT = "bba6a45f0d";
+/** Upstream merge base of the fork (v2026.1023.0 since RK9-701; v2026.1012.0 bba6a45f0d in RK9-700; v2026.1005.0 467125fafb in RK9-699; was dffc2b3ca1, the RK9-693 merge base). */
+const FORK_BASE_COMMIT = "1b4c803816";
 
 const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt|hidden_at/;
 const QUERY_CALL = String.raw`\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*`;
@@ -64,50 +63,49 @@ function lacksVisibilityFilter(src: string): boolean {
 }
 
 /** Fork-only files that read or write `issues` with no visibleIssueCondition/hiddenAt filter. */
-const FORK_FILES_WITHOUT_VISIBILITY_FILTER = [
-  "routes/github-webhooks.ts",
-  "services/agent-metrics.ts",
-  "services/email/escalation.ts",
-  "services/email/inbound-router.ts",
-  "services/risk-incidents.ts",
-  "services/risk-monitors.ts",
-  "services/rk9-coord-inbox.ts",
-  "services/rk9-coord-presence.ts",
+const FORK_FILES_WITHOUT_VISIBILITY_FILTER: string[] = [
+  // Intentional (RK9-701): taint is a safety gate and fails safe, so hidden issues still taint.
   "services/rk9-run-taint.ts",
-  "services/rk9-voice-action-deps.ts",
 ];
 
-/** Upstream files without the filter at the RK9-707 snapshot, re-classified at v2026.1005.0 (RK9-699) and v2026.1012.0 (RK9-700). Not fork code: listed only to classify scan hits. */
+/** Upstream files without the filter at the RK9-707 snapshot, re-classified at v2026.1005.0 (RK9-699), v2026.1012.0 (RK9-700) and v2026.1023.0 (RK9-701). Not fork code: listed only to classify scan hits. */
 const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "modules/run-dispatch/adapters/postgres.ts",
   "modules/wake-queue/adapters/queued-comment-postgres.ts",
+  "realtime/live-events-ws.ts",
   "routes/agents.ts",
+  "routes/assets.ts",
   "routes/browser-use.ts",
   "routes/cases.ts",
   "routes/execution-workspaces.ts",
   "routes/issue-tree-control.ts",
   "services/access.ts",
   "services/activity-log.ts",
+  "services/agent-commentary.ts",
   "services/agent-conversations.ts",
-  "services/agents.ts",
+  "services/agent-deletion.ts",
   "services/authorization.ts",
   "services/browser-use.ts",
   "services/built-in-agents.ts",
   "services/chat-channels.ts",
   "services/chat-completion-delivery.ts",
+  "services/chat-github-response-comments.ts",
   "services/chat-github-reviews.ts",
   "services/chat-interaction-publications.ts",
   "services/chat-run-publications.ts",
   "services/chat-teams-file-publication.ts",
   "services/companies.ts",
+  "services/company-deletion.ts",
   "services/confirmation-comment-resolution.ts",
   "services/connection-intent-delivery.ts",
   "services/connection-intents.ts",
   "services/conversation-confirmation-context.ts",
+  "services/decision-models.ts",
   "services/decision-retention.ts",
   "services/decision-training.ts",
   "services/decisions.ts",
   "services/documents.ts",
+  "services/dot-runner-broker.ts",
   "services/email-channels.ts",
   "services/environments.ts",
   "services/execution-blocker.ts",
@@ -120,16 +118,28 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/external-objects.ts",
   "services/feedback.ts",
   "services/github-operation-credentials.ts",
+  "services/heartbeat-run-privacy.ts",
+  "services/heartbeat.ts",
+  "services/heartbeat/recovery.ts",
+  "services/heartbeat/retries.ts",
+  "services/heartbeat/run-completion.ts",
+  "services/heartbeat/run-control.ts",
+  "services/heartbeat/run-preparation.ts",
+  "services/heartbeat/run-state.ts",
+  "services/heartbeat/workspaces.ts",
   "services/human-directed-work.ts",
+  "services/idle-sleep-safety.ts",
   "services/issue-approvals.ts",
   "services/issue-continuation-summary.ts",
   "services/issue-creation-origin.ts",
+  "services/issue-creation-source.ts",
   "services/issue-prefix.ts",
   "services/issue-references.ts",
   "services/issue-thread-interactions.ts",
   "services/issue-title.ts",
   "services/issue-tree-control.ts",
   "services/legacy-execution-recovery.ts",
+  "services/legacy-shutdown-workspace-settlement.ts",
   "services/low-trust-runtime-containment.ts",
   "services/native-runtime/automatic-completion-reviews.ts",
   "services/native-runtime/chat-attachment-reuse.ts",
@@ -165,10 +175,14 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/plugin-host-services.ts",
   "services/project-tool-context.ts",
   "services/projects.ts",
+  "services/public-mcp/file-transfers.ts",
   "services/question-response-delivery.ts",
   "services/recovery-observability.ts",
+  "services/recovery/review-path-recovery-escalation.ts",
+  "services/run-cost-accounting.ts",
   "services/run-identity.ts",
   "services/runner-goals.ts",
+  "services/satisfied-connection-intents.ts",
   "services/secret-proposals.ts",
   "services/secrets.ts",
   "services/slack-board-messages.ts",
@@ -180,6 +194,7 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/tool-action-delivery.ts",
   "services/tool-action-review.ts",
   "services/tool-gateway.ts",
+  "services/voice/voice-session-service.ts",
   "services/workspace-file-resources.ts",
   "services/workspace-readiness.ts",
   "services/workspace-runtime.ts",
@@ -227,7 +242,7 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
   it("classifies every file that queries issues without the visibility condition", () => {
     const known = new Set([...FORK_FILES_WITHOUT_VISIBILITY_FILTER, ...UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER]);
     const unclassified = scanUnfilteredIssueQueries().filter((file) => !known.has(file));
-    // A new hit: add visibleIssueCondition() to the file, or list it above and add an it.todo leak case.
+    // A new hit: add visibleIssueCondition() to the file, or list it above and add a leak case to the leaks test file.
     expect(unclassified).toEqual([]);
   });
 
@@ -236,7 +251,7 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
       const file = path.join(root, rel);
       expect(existsSync(file), rel).toBe(true);
       const src = readFileSync(file, "utf8");
-      // When a file gains the filter, drop it from its list (and activate the leak case for fork files).
+      // When a file gains the filter, drop it from its list (and add a leak case for fork files).
       expect(lacksVisibilityFilter(src), rel).toBe(true);
     }
   });
@@ -294,16 +309,5 @@ describe("issue visibility inventory (RK9-693, RK9-707)", () => {
     expect(src).toContain("isNull(issues.harnessKind)");
   });
 
-  describe("leak when the condition is missing (activate in RK9-701)", () => {
-    it.todo("agent-metrics: a hidden issue is not counted in agent workload");
-    it.todo("risk-monitors: a hidden unassigned issue raises no stalled-work alert");
-    it.todo("risk-incidents: reassign_tasks does not move a hidden in_progress issue to backlog");
-    it.todo("rk9-coord-inbox: a hidden issue is not resolved by identifier or id");
-    it.todo("rk9-coord-presence: a hidden issue is not joined into a run's presence row");
-    it.todo("rk9-run-taint: a hidden issue does not taint a run");
-    it.todo("rk9-voice-action-deps: a voice action does not update a hidden issue");
-    it.todo("email/escalation: a hidden issue is not joined into the escalation list");
-    it.todo("email/inbound-router: an inbound reply does not reopen a hidden issue");
-    it.todo("github-webhooks: a webhook does not match a hidden issue");
-  });
+  // The leak cases for the former fork-only files live in nosto-private-issue-visibility-leaks-rk9.test.ts (RK9-701).
 });

@@ -31,6 +31,14 @@ const mockApprovalSvc = vi.hoisted(() => ({
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
 const mockWakeup = vi.hoisted(() => vi.fn(async () => ({ id: "run-9" })));
 
+// RK9-701: upstream v2026.1023.0 checks approval read access in approvalRoutes' id param
+// (canActorReadApproval queries the db). This route test has no database; upstream's own
+// approval route tests mock the check the same way.
+vi.mock("../services/authorization.js", async (importActual) => ({
+  ...await importActual<typeof import("../services/authorization.js")>(),
+  canActorReadApproval: async () => true,
+}));
+
 vi.mock("../services/index.js", () => ({
   accessService: vi.fn(() => ({
     decide: vi.fn(async (input: { action: string }) => ({

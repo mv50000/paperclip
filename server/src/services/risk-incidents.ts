@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, approvals, issues, riskEntries, riskIncidents } from "@paperclipai/db";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import type { RiskIncidentSeverity, RiskIncidentStatus } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logActivity } from "./activity-log.js";
@@ -116,6 +117,8 @@ export function riskIncidentService(db: Db) {
               .where(
                 and(
                   eq(issues.companyId, companyId),
+                  // RK9 Custom (RK9-701): reassign_tasks never touches a hidden issue.
+                  visibleIssueCondition(),
                   eq(issues.assigneeAgentId, entry.scopeId),
                   inArray(issues.status, ["in_progress"]),
                 ),
