@@ -179,7 +179,9 @@ test("workspaces-c runs the db project alone and workspaces-b no longer carries 
   const workspacesB = dryRunJson(["--mode", "general", "--group", "general-workspaces-b"]);
   assert.ok(!workspacesB.workspaceProjects.includes("@paperclipai/db"), "db must not run twice");
   assert.ok(workspacesB.workspaceProjects.length > 0, "workspaces-b must still run its other projects");
-  for (const workflow of ["pr-trusted.yml", "release-verify.yml"]) {
+  // --- RK9 Custom (RK9-701): the fork removed pr-trusted.yml (RK9-317); its PR matrix lives in pr.yml ---
+  const prWorkflow = existsSync(path.join(repoRoot, ".github/workflows/pr-trusted.yml")) ? "pr-trusted.yml" : "pr.yml";
+  for (const workflow of [prWorkflow, "release-verify.yml"]) {
     const entries = matrixEntries(readFileSync(path.join(repoRoot, ".github", "workflows", workflow), "utf8"));
     // The parser must demonstrably see shard keys in this workflow, otherwise
     // the unsharded assertions below could pass for the wrong reason.

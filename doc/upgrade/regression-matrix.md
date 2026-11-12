@@ -918,6 +918,9 @@ Testisovitukset:
 - `heartbeat/queue.test.ts`, `heartbeat/scheduling.test.ts`: avoimet portit (`__tests__/helpers/rk9-heartbeat-gates.ts`) ja `skipWhenIdle: false`.
 - `packages/adapters/gemini-local/src/server/parse.test.ts`: upstream #14991 laskee `inputTokens`in ilman välimuistitokeneita (80, ei 100).
 - `ui/src/lib/issue-execution-policy.test.ts`: fork palauttaa aina `outcomeRequirements`-kentän (SEC-91, kuten masterilla).
+- `packages/db/src/heartbeat-run-issue-privacy-migration.test.ts`: upstream 1023 lisäsi migraatioajoon oman `paperclip:migrations`-lukon. Forkin RK9-635-lukko (`rk9-migration-lock.ts`, avain `rk9mig`) on sen ulkopuolella, joten kilpaileva migraattori odottaa forkin lukossa. Testi hyväksyy kummankin lukon odotuksen; sarjallistus pysyy, ja molemmat lukot pollaavat `pg_try_advisory_lock`illa (ei snapshot-deadlockia `CREATE INDEX CONCURRENTLY`n kanssa).
+- `scripts/__tests__/run-vitest-stable-shard.test.mjs`: fork poisti `pr-trusted.yml`:n (RK9-317), joten workspaces-lanejen matriisi tarkistetaan `pr.yml`:stä.
+- `.github/workflows/pr.yml`: uusi `general-workspaces-c`-lane. `run-vitest-stable.mjs` siirsi db-projektin omaan laneensa, eikä forkin PR-CI ajanut `@paperclipai/db`-testejä lainkaan (puute oli jo masterilla). Paikallisesti 55/55 tiedostoa, 259 testiä.
 - Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10), `rk9-agent-pause.test.ts` (lifecycle-pito ja riskin pause/resume). Lisätty `fork-tests.txt`:iin.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä

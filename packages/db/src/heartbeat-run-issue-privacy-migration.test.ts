@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { applyPendingMigrations } from "./client.js";
+import { RK9_MIGRATION_LOCK_KEY } from "./rk9-migration-lock.js"; // RK9 Custom (RK9-701)
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -227,13 +228,21 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
       }, { timeout: 10_000 }).toBe(1000);
       // The session lock survives batch commits and blocks another migrator.
       contender = applyPendingMigrations(database.connectionString).then(() => null, error => error);
+      // --- RK9 Custom (RK9-701): the fork wraps applyPendingMigrations in its own RK9-635
+      // advisory lock (`rk9-migration-lock.ts`, key "rk9mig", polled with pg_try_advisory_lock).
+      // The contender therefore waits on that outer lock and never reaches the upstream
+      // 'paperclip:migrations' try-lock. Either wait proves the second migrator is blocked.
       await expect.poll(async () => {
         const [row] = await sql`SELECT count(*)::int AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND query LIKE '%SELECT pg_try_advisory_lock%'
+          WHERE datname = current_database() AND query ILIKE '%SELECT pg_try_advisory_lock%'
             AND query NOT LIKE '%FROM pg_stat_activity%'
-            AND strpos(query, 'paperclip:migrations') > 0`;
+            AND (strpos(query, 'paperclip:migrations') > 0 OR strpos(query, '::bigint') > 0)
+            AND pid <> (SELECT l.pid FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
+              AND l.classid = ${Number(BigInt(RK9_MIGRATION_LOCK_KEY) >> 32n)}
+              AND l.objid = ${Number(BigInt(RK9_MIGRATION_LOCK_KEY) & 0xffffffffn)} LIMIT 1)`;
         return row.n;
       }, { timeout: 10_000 }).toBe(1);
+      // --- /RK9 Custom ---
       expect(await sql`SELECT hash FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`).toHaveLength(0);
       await sql`SET lock_timeout = '500ms'`;
       await sql`UPDATE heartbeat_runs SET context_snapshot = context_snapshot || '{"probe":"visible"}'::jsonb

@@ -233,6 +233,11 @@ jobs:
             shard_count: 2
           - group: general-workspaces-b
             group_label: workspaces-b
+          # --- RK9 Custom (RK9-701): run-vitest-stable moved the db project out of
+          # workspaces-b into its own workspaces-c lane (upstream, step 1012/1023).
+          # Without this entry the fork PR CI never ran @paperclipai/db tests.
+          - group: general-workspaces-c
+            group_label: workspaces-c
 
     steps:
       - name: Checkout repository
