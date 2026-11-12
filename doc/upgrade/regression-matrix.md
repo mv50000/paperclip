@@ -864,7 +864,11 @@ Testisovitukset:
 - `public-mcp.test.ts`: (1) MCP-token välitetään reitille anonyyminä (`type: "none"`, 200), koska fork päästää JWT:tä muistuttamattoman bearerin läpi forkin staattisten avainten takia (v2026.831.1:stä lähtien). Token ei ole board- eikä agent-tunniste. (2) Assignointi pausetulle agentille hylätään 409:llä (forkin "paused/terminated assignee guard"). `enablePublicMcp` on pois päältä.
 - `budgets-service.test.ts`: forkin 100 %-rajan testien stub palauttaa agenttirivin, koska upstream (#15280) lukitsee ja lukee rivin ennen budjettipausea. Upstream sovitti omat testinsä samoin.
 - `nosto-private-issue-visibility-rk9.test.ts`: `FORK_BASE_COMMIT = "bba6a45f0d"` (v2026.1012.0), ja baselineen lisättiin 3 uutta upstream-tiedostoa (`human-directed-work.ts`, `native-session-handoff.ts`, `owner-chat-instruction-authority.ts`). `pr.yml` hakee saman commitin (RK9-709).
-- Paikallisesti punaiset, CI:n ratkaistavat: `workspace-runtime.test.ts`:n 6 provisiointitestiä kaatuvat paperclip-01:llä, koska koneen globaali `paperclipai` (`/usr/local/bin`) ajetaan testin minimiconfigia vasten. Samat testit ovat masterilla ja olivat vihreät portaan 1 CI:ssä.
+- Paikallisesti punaiset: `workspace-runtime.test.ts`:n 6 provisiointitestiä kaatuvat paperclip-01:llä, koska koneen globaali `paperclipai` (`/usr/local/bin`) ajetaan testin minimiconfigia vasten. CI:ssä (PR #298) ne menevät läpi.
+- `low-trust-red-team-routes.test.ts`: board luo backlog-issuen ilman assigneeta ja assignoi sen PATCHilla, koska fork muuttaa assignoidun backlog-luonnin tilaan `todo` (ks. `defaults-hardening.md`).
+- `tests/e2e/plan-task-fixture.spec.ts` (uusi upstream-e2e): agentteja ei pauseteta, koska fork piilottaa pausetut agentit listasta ja estää niille assignoinnin (`52b995085`). `wakeOnDemand: false` estää ajot, ja testin "ei heartbeat-ajoja" -ehto pysyy.
+- `packages/paperclip-runner/src/backends/native-instruction-measurement.test.ts`: odottaa forkin oletus-`AGENTS.md`:n ensimmäistä virkettä.
+- `packages/plugins/plugin-rk9-ads/schemas/creative-manifest.v1.schema.json`: generoitu uudelleen zod 4.6.5:llä.
 - `built-in-agents.test.ts`: palautettu forkin masterin odotus (root-agentilla ei ole `*:suggest-changes`-granttia), koska fork jättää kaikki 14 oletusavainta pois.
 - `agent-skills-routes.test.ts`: CEO saa forkin neljän tiedoston paketin, muut roolit forkin default-ohjeen.
 

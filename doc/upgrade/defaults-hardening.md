@@ -634,6 +634,20 @@ Prodissa agentit palkataan hyväksynnän kautta, joten muutos hyväksytään.
 Lukitsevat testit: `agent-default-configure-grants.test.ts` (sovitettu), `invite-join-grants.test.ts` ja
 `permissions-upgrade-boundary-routes.test.ts` (assignoimaton luonti ja subtask 201, assignoitu subtask vertaiselle 403, tyhjä kohde ilman merkkiä kielletään).
 
+### Boardin backlog-assignoinnin kuitti (human-directed work)
+
+Upstream 1012 kirjaa kuitin (`agentWakeupRequests`, reason `issue_human_assignment`), kun board-käyttäjä assignoi backlog-issuen agentille
+(`server/src/services/human-directed-work.ts`). Low-trust-agentti saa kuitin perusteella laajemman oikeuden työhön, jonka ihminen on ohjannut sille.
+Forkin masterin sääntö muuttaa assignoidun backlog-issuen luonnissa tilaan `todo` (`services/issues.ts`), joten luonnissa kuittia ei synny.
+PATCH, joka assignoi olemassa olevan backlog-issuen, kirjaa kuitin. Suunta on turvallinen: ilman kuittia low-trust-agentti jää suppeampaan oikeuteen.
+Lukitsee: `low-trust-red-team-routes.test.ts` (sovitettu).
+
+### RK9 Adsin zod 4.4.3 → 4.6.5
+
+Lockfile deduplikoi pluginin zodin upstreamin versioon 4.6.5, joka mahtuu rajaukseen `^4.4.3`. `z.iso.datetime({ offset: true })` vaatii nyt sekunnit,
+joten creative-manifestin `validUntil` ilman sekunteja (`2026-12-01T10:00+02:00`) hylätään. Plugin muodostaa arvon `Date`-oliosta (`toISOString`), jossa sekunnit ovat aina mukana.
+Commitattu `schemas/creative-manifest.v1.schema.json` generoitiin uudelleen (`pnpm run schema:generate`).
+
 ### Oletusohjeet (#14948, #14985)
 
 - **Uuden agentin ohjepaketti:** upstream lyhensi CEO:n `AGENTS.md`:n yhteen virkkeeseen ja muiden roolien `AGENTS.md`:n kahdeksaan sanaan.

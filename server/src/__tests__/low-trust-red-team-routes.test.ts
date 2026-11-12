@@ -993,9 +993,17 @@ describeEmbeddedPostgres(
       await db.update(agents).set({ runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } })
         .where(eq(agents.id, fixture.agents.lowTrust.id));
       const board = createApp(db, boardActor(fixture));
-      const created = await request(board).post(`/api/companies/${fixture.company.id}/issues`)
-        .send({ title: "Human backlog assignment", status: "backlog", assigneeAgentId: fixture.agents.lowTrust.id });
-      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      // --- RK9 Custom (RK9-700): the fork turns an assigned backlog create into todo (services/issues.ts,
+      // "an assigned backlog issue starts as todo"), so the board creates the backlog issue first and
+      // assigns it with a PATCH, which records the same human-assignment receipt. ---
+      const draft = await request(board).post(`/api/companies/${fixture.company.id}/issues`)
+        .send({ title: "Human backlog assignment", status: "backlog" });
+      expect(draft.status, JSON.stringify(draft.body)).toBe(201);
+      const created = await request(board).patch(`/api/issues/${draft.body.id}`)
+        .send({ assigneeAgentId: fixture.agents.lowTrust.id });
+      expect(created.status, JSON.stringify(created.body)).toBe(200);
+      expect(created.body.status).toBe("backlog");
+      // --- /RK9 Custom ---
       const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, fixture.company.id));
       expect(receipts.filter(w => w.payload?.issueId === created.body.id)).toEqual([expect.objectContaining({
         reason: "issue_human_assignment", status: "completed", runId: null, requestedByActorId: "board-user",

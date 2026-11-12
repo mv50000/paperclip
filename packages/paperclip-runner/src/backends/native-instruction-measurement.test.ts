@@ -117,7 +117,8 @@ describe("native instruction payload measurement", () => {
         const turn = captured.calls.find(call => call.method === "turn/start")!.params;
         const instructions = setup.developerInstructions ?? setup.baseInstructions;
         expect(instructions).toContain(PAPERCLIP_EXECUTION_PROMPT);
-        expect(instructions).toContain("You are an agent in a Paperclip company.");
+        // RK9 Custom (RK9-700): the fork keeps its own default AGENTS.md (server/src/onboarding-assets/default).
+        expect(instructions).toContain("You are an agent at Paperclip company.");
         const deliveredTools = setup.dynamicTools as Array<{ name: string; description: string }>;
         expect(deliveredTools.filter(tool => tool.name === "paperclip_finish")).toEqual([
           expect.objectContaining({ description: PRP_COMPLETION_TOOL_DESCRIPTION }),

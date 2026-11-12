@@ -11,11 +11,13 @@ test("planning fixture creates the exact assignment through the current composer
     for (const name of ["A Different Owner", "Planning Fixture Lead"]) {
       const response = await request.post(`/api/companies/${company.id}/agents`, { data: {
         name, role: "general", adapterType: "process", adapterConfig: { command: "false" },
-        runtimeConfig: { heartbeat: { enabled: false } },
+        // RK9 Custom (RK9-700): the fork hides paused agents from the agent list and rejects
+        // assignment to them, so the fixture keeps the agents active and disables on-demand
+        // wakes instead of pausing them. The empty heartbeat-run check below still holds.
+        runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } },
       } });
       expect(response.ok()).toBe(true);
       const agent = await response.json();
-      expect((await request.post(`/api/agents/${agent.id}/pause`)).ok()).toBe(true);
       lead = agent;
     }
     const prompt = "Plan the work briefly, then carry it out. Verify a sample order and save the requested result.";
