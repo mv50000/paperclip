@@ -589,6 +589,71 @@ Orkestroijan riippumaton verifier löysi headista `4ad8fc1fc` nämä upstream-mu
    ja `handleSuccessfulRunHandoff`. Masterissa liveness oli ensin. Funktiot ovat samat kuin masterissa, ja review-path koskee vain `in_review`-issueita.
    Upstreamin legacy disposition repair ei aja (`RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false`).
 
+## Porras v2026.1012.0 (RK9-700)
+
+Mittaukset 12.11.2026 prod-kannasta (vain luku, `sudo -u paperclip psql`). Elävät adapterit ovat yhä `claude_local` (26) ja `human_proxy` (19).
+
+### Uusien agenttien oletusgrantit (#15283) — kovennettu
+
+Upstream antaa jokaiselle uudelle standard-trust-agentille 14 suoraa granttia luonnissa, hyväksynnän aktivoinnissa ja kutsun hyväksynnässä.
+Yhdeksän niistä laajentaa sitä, mitä agentti voi muuttaa ilman hyväksyntää:
+
+- `agents:configure` (vertaisagentin konfiguraatio),
+- `tasks:assign`, `tasks:assign_scope` ja `tasks:manage_active_checkouts` (ohittaisi RK9-313:n tehtävänantosäännön, koska grantti on eksplisiittinen),
+- `tools:use` (rajaamaton grantti ohittaa työkaluprofiilin tarkistuksen, `explicitGrant` tiedostossa `tool-access-policy.ts`),
+- `tools:manage_connections`, `tools:manage_profiles`, `tools:manage_runtime` ja `inbox:manage`.
+
+RK9 Custom (`server/src/services/agent-permissions.ts`, `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS`) jättää nämä yhdeksän pois.
+Uusi agentti saa vain avaimet `agents:suggest-changes`, `skills:create`, `skills:suggest-changes`, `tools:view_audit` ja `audit:view_agent_actions`.
+Ne vain ehdottavat muutoksia tai lukevat audit-dataa. Board voi antaa pois jätetyt avaimet eksplisiittisesti agenttikohtaisesti.
+Olemassa olevat agentit eivät muutu kummassakaan versiossa (upstreamissa ei ole backfill-migraatiota).
+Lukitsee: `agent-default-configure-grants.test.ts` (sovitettu) ja `invite-join-grants.test.ts`.
+
+### Oletusohjeet (#14948, #14985)
+
+- **Uuden agentin ohjepaketti:** upstream lyhensi CEO:n `AGENTS.md`:n yhteen virkkeeseen ja muiden roolien `AGENTS.md`:n kahdeksaan sanaan.
+  Fork pitää omat pakettinsa (`server/src/onboarding-assets/ceo`, `cto`, `default`), koska CEO:n paketissa on RK9:n delegointireititys.
+  Lukitsee: `agent-skills-routes.test.ts` (sovitettu). Koskee vain uusia agentteja; tallennetut ohjeet eivät muutu.
+- **Heartbeat-promptin oletuspohja muuttuu, hyväksytty.** `DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE` (`packages/adapter-utils/src/server-utils.ts`)
+  menetti "Execution contract" -listan; jäljelle jää agentin tunniste ja yhteysohje. Resume-delta ei enää liitä sopimusta.
+  Prodissa 25 / 26 `claude_local`-agentilla ei ole omaa `promptTemplate`a, joten muutos koskee niitä kaikkia.
+  Sama ohjeistus tulee yhä forkin `skills/paperclip/SKILL.md`:stä (heartbeat-proseduuri ja final disposition) ja agentin tallennetusta `AGENTS.md`:stä.
+  Seuranta noston jälkeen: dispositiottomat ajot ja recoveryn jatkoajot 48 h ajan. Vipu ilman koodimuutosta: aseta agentille `adapterConfig.promptTemplate`.
+
+### Hiljaisen ajon raja (#14979)
+
+`ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS` laski 1 h → 5 min ja kriittinen raja 4 h → 15 min. Raja on informatiivinen: `scanSilentActiveRuns`
+(`server/src/modules/active-run-watchdog/application/use-cases.ts`) ei luo uusia arviointi-issueita, vaan taittaa vain ajon, jonka lähde-issue on jo
+terminaalitilassa saman ajon todisteella. Jaetun työtilan pitäjän raja pysyy 1 h:ssa. UI näyttää varoituksen aiemmin. Ei toimenpidettä.
+
+### Työkalugrantit tulkitaan kirjaimellisesti (#14915)
+
+Grantti, jonka `scope.allow` ei osu työkaluun, tai jonka valitsin on tuntematon, kieltää eikä valu laajempaan politiikkaan.
+Prodissa ei ole yhtään rajattua `tools:*`-granttia (kaikki 158 rivillä `scope` on NULL) eikä `scope.allow`-granttia. Ei vaikutusta.
+
+### Restore-lukot (#14869)
+
+Työtilan restore-lukot ovat nyt SQLite-tiedostolukkoja hakemistossa `<instance root>/locks/directory-merge/`. Vanha ja uusi versio eivät saa kirjoittaa
+samaan instanssiin yhtä aikaa. Cutoverissa palvelu pysäytetään kokonaan ennen käynnistystä (runbookin vaihe 4), joten rinnakkaisajoa ei synny.
+Prodin instanssissa `default` ei ole vanhoja `<hash>.lock/`-hakemistoja (12.11.2026). Sama koskee rollbackia.
+
+### Clauden CLI ja mallit
+
+`claude-sonnet-5-5` vaatii nyt CLI:n 2.1.284 (#14993, ennen ei rajaa); `claude-opus-5-5` vaatii yhä 2.1.280.
+Prodin `/usr/bin/claude` on 2.1.319. Mallit: `claude-opus-5-5` 17 ja `claude-sonnet-5-5` 9 agenttia. Kovennusta ei tarvita.
+Mallivalitsimen järjestys on upstreamin (#14917, Fable 5.1 ensin). Oletusmalli on yhä `DEFAULT_CLAUDE_LOCAL_MODEL`, ja jokaisella agentilla on oma malli.
+
+### `experimental`-avaimet ja migraatiot
+
+| Avain | Oletus | Vaikutus forkissa |
+|---|---|---|
+| `enablePublicMcp` | `false` | Julkinen MCP-päätepiste (ulkoiset assistentit) pysyy kiinni. Ei kirjoiteta. |
+| `enableCombinedInboxTasks` | `false` | UI-asetus. Ei kirjoiteta. |
+| `enableAiConnectionRouters` | `false` | AI-yhteyspoolit pois. Ei kirjoiteta. |
+
+Prodin `experimental`-rivi ei muutu (12.11.2026: `enableNativeRunner = false`, `recoveryStrictInProgressOnly = true`). Pre-deploy-SQL:ää ei tarvita.
+Migraatiot 0294–0305 ovat lisääviä. `0298` täyttää oletusohjeet muisti-integraatioille, mutta prodissa `tool_connections` on tyhjä (0 riviä).
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on

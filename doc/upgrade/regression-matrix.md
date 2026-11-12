@@ -830,6 +830,35 @@ Testisovitukset:
 - `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-sonnet-5-5`:tä, koska `claude-opus-5-5` vaatii CLI ≥ 2.1.280 ja testin fake-CLI ei raportoi versiota.
 - `redacts opaque environment-bound credentials … : result` kaatuu paikallisesti, jos ympäristössä on `EDITOR=vi`: upstreamin redaktio poistaa jokaisen ei-julkisen env-arvon, myös sanan "service" keskeltä. CI:ssä ei ole muuttujaa. Seuranta: lyhyiden env-arvojen redaktio upstreamissa.
 
+## Konfliktit portaassa 1012 (`origin/master` `4e81bed92` + `v2026.1012.0`, RK9-700)
+
+Porras 2 (1005 → 1012 → 1023). 25 konfliktitiedostoa ja 12 upstream-migraatiota (0294–0305). RK9-675:n arvio (58) laskettiin ennen porrasta 1.
+Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 4e81bed92 v2026.1012.0`.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0305 + slot `0126` omalla paikallaan, sitten `9000`–`9016` (idx 306–322). 322 entryä = 322 tiedostoa. |
+| `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts` | upstreamin uudet exportit ensin, forkin RK9 Custom -lohko perässä |
+| `server/package.json`, `pnpm-lock.yaml` | upstreamin versiot + forkin `@aws-sdk/client-sesv2`, `mailparser`, `@types/mailparser`; lockfile upstreamista + `pnpm install`, forkin SES- ja mailparser-versiot pinnattu masterin versioihin (3.1141.0, 3.9.28, 3.4.6). `tsx` ja RK9 Adsin `zod` deduplikoituivat upstreamin versioihin (4.23.15, 4.6.5). |
+| `server/src/services/approvals.ts` | upstream siirsi hyväksynnän ja hylkäyksen transaktioon; forkin `approval.decided`-live-event lähtee commitin jälkeen |
+| `server/src/services/tool-access-policy.ts` | RK9-319:n taint-portti käärii upstreamin välimuistillisen `decide`n; `decideLoaded` saa erän välimuistin parametrina |
+| `server/src/services/agents.ts` | molemmat importit; upstreamin oletusgrantit tulevat forkin suodatetusta listasta (ks. alla) |
+| `server/src/services/agent-permissions.ts` (ei konfliktia) | RK9 Custom: `NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS` jättää pois `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS`in yhdeksän avainta (RK9-313, ks. `defaults-hardening.md`) |
+| `server/src/onboarding-assets/ceo/AGENTS.md`, `default/AGENTS.md`, `services/default-agent-instructions.ts` | forkin versiot (CEO:n neljän tiedoston paketti, CTO-paketti, forkin default-ohje); upstreamin `first-task/chief-of-staff` hyväksytty |
+| `server/src/middleware/auth.ts` | upstreamin `database-retry`-import ja re-export + forkin coord-token-import |
+| `packages/adapters/claude-local/src/index.ts`, `server/src/__tests__/adapter-models.test.ts` | upstreamin mallijärjestys (#14917); forkin "Opus 5.5 ensin" oli vain testisovitus |
+| `packages/adapter-utils/src/acpx-engine/execute.test.ts`, `execution-target-sandbox.test.ts`, `server/src/__tests__/chat-project-tools.test.ts` | molempien importit |
+| `packages/paperclip-runner/spec/capability/capabilities.yaml` ja generoidut | upstreamin versio; 29 SKILL.md-otsikon rivinumerot siirretty forkin riveille, contract ja docs renderöity specistä. `check:capability-inventory` ja `check:capability-contract` OK. |
+| `.github/workflows/cloud-migrator-artifacts.yml`, `runner-full-stack-e2e.yml`, `runner-protocol-live-evals.yml`, `storybook-deploy.yml` (modify/delete) | pysyvät poistettuina |
+| `.gitleaksignore` | 41 upstreamin `doc/plans`-JSONin sha256-tiivistettä (`apiState`), ei salaisuuksia |
+
+Testisovitukset:
+
+- `hire-permission-default-rk9.test.ts`: siivous poistaa `principal_permission_grants`-rivit, koska #15283 kirjoittaa niitä agentin luonnissa.
+- `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-opus-4-8`:aa, koska `claude-sonnet-5-5` vaatii nyt CLI:n ≥ 2.1.284.
+- `agent-default-configure-grants.test.ts`: odottaa forkin viittä oletusavainta; yhdeksän pois jätettyä puuttuvat, ja vertaisagentin konfiguraatio kielletään. Lisätty `fork-tests.txt`:iin.
+- `agent-skills-routes.test.ts`: CEO saa forkin neljän tiedoston paketin, muut roolit forkin default-ohjeen.
+
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
 Näille commiteille ei ole masterilla omaa testiä. Ne tarkistetaan manuaalisesti yllä olevan

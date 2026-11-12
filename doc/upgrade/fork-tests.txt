@@ -107,3 +107,5 @@ server/src/__tests__/approval-telegram-listener-taint.test.ts
 ui/src/components/RunTaintNotice.test.tsx
 # RK9-488: sähköpostin suppression-poisto vain boardille; lisäys ja poisto kirjoittavat activity_logiin.
 server/src/__tests__/email-suppression-routes.test.ts
+# RK9-700: uusi agentti ei saa #15283:n yhdeksää laajentavaa oletusgranttia (RK9_WITHHELD_NEW_AGENT_GRANT_KEYS).
+server/src/__tests__/agent-default-configure-grants.test.ts
