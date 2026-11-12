@@ -181,7 +181,7 @@ Skripti tekee nämä:
 - asentaa root-omisteisen job-started-hookin (ks. [Turvamalli](#turvamalli)); vaatii `jq`:n ja `pkill`in
 - lataa actions/runnerin kiinnitetyllä versiolla ja tarkistaa SHA256:n
 - rekisteröi runnerin labeleilla `self-hosted, Linux, X64, paperclip-ci`
-- kirjoittaa `.env`:iin hookin, `NODE_OPTIONS=--max-old-space-size=2560`,
+- kirjoittaa `.env`:iin hookin, `NODE_OPTIONS=--max-old-space-size=4096`,
   `PAPERCLIP_CI_NO_SUDO=1` ja rootless-`DOCKER_HOST`in
 - asentaa rootless Dockerin käyttäjän user-sessioon (linger päällä)
 - rajaa rootless Dockerin muistin: `user-<uid>.slice` saa `MemoryHigh=5G`, `MemoryMax=6G`
@@ -189,8 +189,10 @@ Skripti tekee nämä:
 - kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` (`KillMode=mixed`) drop-inillä
   `Slice=ci-runners.slice`, `MemoryHigh=3584M`, `MemoryMax=4G`, `Restart=on-failure`,
   `OOMPolicy=continue`. builder-02:ssa on 6 G muistia, joten runnerin katto on 4 G (RK9-782).
-  Noden heap (2,5 G) jää katon alle, koska jobin muut prosessit (runner, pnpm, Playwright)
-  käyttävät samaa kattoa.
+  Katto on mittaamatta. `NODE_OPTIONS` rajaa jokaisen Node-prosessin erikseen, ja
+  `doc/UPSTREAM-UPGRADE.md` kirjaa 27.9.2026, että clin `pnpm -r typecheck` tarvitsi
+  builder-02:lla 6144 M heapin. Mittaa vaiheessa 6 `systemctl show -p MemoryPeak <unit>`
+  `verify`-, `e2e`- ja `release-verify`-ajon jälkeen.
 
 Skripti on idempotentti. Uusi ajo ohittaa rekisteröinnin, jos runneri on jo rekisteröity,
 ja päivittää hookin, `.env`:n ja unitin. Keskeneräinen asennus (hakemisto ilman `.runner`ia)

@@ -305,8 +305,7 @@ write_runner_env() {
     {
       echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook"
       # Node mitoittaa heapin VM:n muistista, ei slotin cgroup-rajasta (policy-note, 4.8.2026).
-      # Heap jää runner-unitin 4 G:n katon alle (RK9-782: builder-02:ssa on 6 G muistia).
-      echo "NODE_OPTIONS=--max-old-space-size=2560"
+      echo "NODE_OPTIONS=--max-old-space-size=4096"
       # Workflow ohittaa playwright --with-deps -asennuksen (vaatisi sudon).
       echo "PAPERCLIP_CI_NO_SUDO=1"
       if [ -n "$docker_host" ]; then echo "DOCKER_HOST=$docker_host"; fi
