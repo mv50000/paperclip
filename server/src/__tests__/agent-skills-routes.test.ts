@@ -1124,7 +1124,7 @@ describe("agent skill routes", () => {
 
   it.each(["claude_local", "paperclip_runner"].flatMap((adapterType) =>
     ["agents", "agent-hires"].map((route) => ({ adapterType, route })),
-  ))("materializes only the CEO entry file for $adapterType via $route", async ({ adapterType, route }) => {
+  ))("RK9: materializes the fork CEO bundle for $adapterType via $route", async ({ adapterType, route }) => {
     mockInstanceSettingsService.getExperimental.mockResolvedValue({
       enableBetaSkills: false,
       enableNativeRunner: true,
@@ -1140,10 +1140,17 @@ describe("agent skill routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const createdAgentId = expectResponseId(route === "agents" ? res.body.id : res.body.agent.id);
-    const entry = await readFile(new URL("../onboarding-assets/ceo/AGENTS.md", import.meta.url), "utf8");
+    // RK9 Custom (RK9-700): upstream 1012 (#14985) cut the CEO bundle to one AGENTS.md line. The
+    // fork keeps its four-file CEO bundle with the RK9 delegation routing.
+    const ceoFile = (name: string) => readFile(new URL(`../onboarding-assets/ceo/${name}`, import.meta.url), "utf8");
     expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ id: createdAgentId, role: "ceo", adapterType }),
-      { "AGENTS.md": entry },
+      {
+        "AGENTS.md": await ceoFile("AGENTS.md"),
+        "HEARTBEAT.md": await ceoFile("HEARTBEAT.md"),
+        "SOUL.md": await ceoFile("SOUL.md"),
+        "TOOLS.md": await ceoFile("TOOLS.md"),
+      },
       { entryFile: "AGENTS.md", replaceExisting: false },
     );
   });
@@ -1184,7 +1191,7 @@ describe("agent skill routes", () => {
     expect(returnedAgent.adapterConfig).not.toHaveProperty("promptTemplate");
   });
 
-  it("materializes minimal default instructions for non-CEO agents with no prompt template", async () => {
+  it("RK9: materializes the fork default instructions for non-CEO agents with no prompt template", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
       .post("/api/companies/company-1/agents")
       .send({
@@ -1203,8 +1210,9 @@ describe("agent skill routes", () => {
           role: "engineer",
           adapterType: "claude_local",
         }),
+        // RK9 Custom (RK9-700): the fork keeps its default AGENTS.md (#14948 reduced upstream's to one line).
         expect.objectContaining({
-          "AGENTS.md": "You are an agent in a Paperclip company.\n",
+          "AGENTS.md": expect.stringContaining("## Execution Contract"),
         }),
         { entryFile: "AGENTS.md", replaceExisting: false },
       );

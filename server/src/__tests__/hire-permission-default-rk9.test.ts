@@ -12,7 +12,7 @@
 // them with a clear "module not found" instead of breaking the whole file at load.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, principalPermissionGrants } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -67,6 +67,8 @@ describeEmbeddedPostgres("new agent hire permission default (RK9-317)", () => {
 
   afterEach(async () => {
     await db.delete(activityLog);
+    // RK9-700: upstream 1012 (#15283) writes direct grants for every new standard agent.
+    await db.delete(principalPermissionGrants);
     await db.delete(agents);
     await db.delete(companies);
   });

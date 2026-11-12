@@ -11,22 +11,27 @@ import { agentJoinGrantsFromDefaults } from "../services/invite-grants.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
+// --- RK9 Custom (RK9-700): the fork withholds the nine escalating keys of #15283
+// (RK9_WITHHELD_NEW_AGENT_GRANT_KEYS). New agents get only the suggest and audit-read keys. ---
 const expectedNewAgentGrantKeys: PermissionKey[] = [
-  "agents:configure",
   "agents:suggest-changes",
   "skills:create",
   "skills:suggest-changes",
-  "tools:manage_connections",
-  "tools:manage_profiles",
   "tools:view_audit",
   "audit:view_agent_actions",
+].sort();
+const withheldNewAgentGrantKeys: PermissionKey[] = [
+  "agents:configure",
+  "tools:manage_connections",
+  "tools:manage_profiles",
   "tools:use",
   "tools:manage_runtime",
   "inbox:manage",
   "tasks:assign",
   "tasks:assign_scope",
   "tasks:manage_active_checkouts",
-].sort();
+];
+// --- end RK9 Custom ---
 
 describeDatabase("new agent configuration defaults", () => {
   let db!: ReturnType<typeof createDb>;
@@ -42,7 +47,7 @@ describeDatabase("new agent configuration defaults", () => {
     await cleanup?.();
   });
 
-  it("grants standard new agents direct peer configuration, but keeps restricted agents narrow", async () => {
+  it("RK9: grants standard new agents only the non-escalating defaults, and keeps restricted agents narrow", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -72,10 +77,9 @@ describeDatabase("new agent configuration defaults", () => {
     for (const agent of [standard, peer]) {
       expect(grants.filter((grant) => grant.principalId === agent.id)
         .map((grant) => grant.permissionKey).sort()).toEqual(expectedNewAgentGrantKeys);
-      expect(grants.find((grant) => grant.principalId === agent.id && grant.permissionKey === "tasks:assign_scope")?.scope)
-        .toEqual({ subtreeRootAgentId: agent.id });
-      expect(grants.find((grant) => grant.principalId === agent.id && grant.permissionKey === "inbox:manage")?.scope)
-        .toEqual({ responsibleUserOnly: true });
+      for (const permissionKey of withheldNewAgentGrantKeys) {
+        expect(grants.some((grant) => grant.principalId === agent.id && grant.permissionKey === permissionKey)).toBe(false);
+      }
     }
     for (const agent of [lowTrust, bundled]) {
       expect(grants.filter((grant) => grant.principalId === agent.id)).toEqual([]);
@@ -90,8 +94,11 @@ describeDatabase("new agent configuration defaults", () => {
     });
 
     for (const permissionKey of expectedNewAgentGrantKeys) {
-      if (permissionKey === "tasks:assign_scope" || permissionKey === "inbox:manage") continue; // These grants require a target scope or the responsible-user inbox path.
       expect(await accessService(db).hasPermission(companyId, "agent", standard.id, permissionKey)).toBe(true);
+    }
+    for (const permissionKey of withheldNewAgentGrantKeys) {
+      if (permissionKey === "tasks:assign_scope" || permissionKey === "inbox:manage") continue; // These need a target scope; the grant rows are checked above.
+      expect(await accessService(db).hasPermission(companyId, "agent", standard.id, permissionKey)).toBe(false);
     }
     expect(await authorizationService(db).decidePrincipalGrant({
       companyId,
@@ -100,15 +107,7 @@ describeDatabase("new agent configuration defaults", () => {
       action: "tasks:assign",
       permissionKey: "tasks:assign_scope",
       scope: { assigneeAgentId: standard.id },
-    })).toMatchObject({ allowed: true });
-    expect(await authorizationService(db).decidePrincipalGrant({
-      companyId,
-      principalType: "agent",
-      principalId: standard.id,
-      action: "tasks:assign",
-      permissionKey: "tasks:assign_scope",
-      scope: { assigneeAgentId: peer.id },
-    })).toMatchObject({ allowed: false, reason: "deny_scope" });
+    })).toMatchObject({ allowed: false });
     for (const permissionKey of [
       "agents:create", "environments:manage", "tools:admin", "users:invite",
       "users:manage_permissions", "pipelines:write", "joins:approve",
@@ -122,7 +121,8 @@ describeDatabase("new agent configuration defaults", () => {
       resource: { type: "agent", agentId: peer.id, companyId },
       scope: { requiresChangeGrant: true },
     });
-    expect(decision).toMatchObject({ allowed: true, reason: "allow_direct_change" });
+    // RK9: without agents:configure a new agent cannot make protected changes to a peer.
+    expect(decision).toMatchObject({ allowed: false });
 
     // A later ordinary self-update must not recreate a grant removed by an operator.
     await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, standard.id));
