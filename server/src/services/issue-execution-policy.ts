@@ -420,7 +420,8 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     outcomeRequirements.length === 0 &&
     !monitor &&
     !reviewPreset &&
-    !authorizationPolicy
+    !authorizationPolicy &&
+    parsed.data.maxReviewRounds == null
   ) return null;
 
   return {

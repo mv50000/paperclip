@@ -28,6 +28,7 @@ import { logger } from "./logger.js";
 import { captureRunIdentity } from "../services/run-identity.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
+import { beginIdleTrackedWork } from "../services/task-admission.js";
 
 export {
   isTransientDbConnectionError,
@@ -239,7 +240,8 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
   // --- RK9 Custom (RK9-623) ---
   const resolveRk9CoordToken = opts.resolveRk9CoordToken ?? defaultRk9CoordTokenResolver(db);
   // --- /RK9 Custom ---
-  return async (req, res, next) => {
+  // RK9 Custom: the handler sends the fork's 400 (run-id UUID guard) and the cancelled-run 403 itself.
+  const authenticate: RequestHandler = async (req, res, next) => {
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {
@@ -542,6 +544,22 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     };
 
     next();
+  };
+  return async (req, res, next) => {
+    // Health and task-drain requests bypass tenant admission, but resolving
+    // their actor can still write users, companies, memberships and key usage.
+    // Finish all authentication before entering the next handler: the report
+    // must count concurrent authentication, without counting its own auth.
+    const finish = beginIdleTrackedWork();
+    let continueRequest: (() => void) | undefined;
+    try {
+      await authenticate(req, res, (error?: unknown) => {
+        continueRequest = () => next(error);
+      });
+    } finally {
+      finish();
+    }
+    continueRequest?.();
   };
 }
 

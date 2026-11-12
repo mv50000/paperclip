@@ -182,6 +182,8 @@ export interface HeartbeatRun {
   id: string;
   companyId: string;
   agentId: string;
+  scopeKind: "company" | "issue";
+  issueId: string | null;
   invocationSource: HeartbeatInvocationSource;
   triggerDetail: WakeupTriggerDetail | null;
   status: HeartbeatRunStatus;
@@ -246,6 +248,10 @@ export interface HeartbeatRun {
   contextSnapshot: Record<string, unknown> | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Metadata-only company-list row for a run bound to an unreadable private issue. */
+  redacted?: boolean;
+  durationMs?: number | null;
+  costUsd?: number | null;
   outputSilence?: HeartbeatRunOutputSilence;
   // --- RK9 Custom (RK9-319) ---
   /** Set by the server when the run received untrusted external content. Only on the run detail read. */

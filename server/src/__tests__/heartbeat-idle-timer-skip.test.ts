@@ -8,6 +8,7 @@ import {
   agentWakeupRequests,
   companySkills,
   companies,
+  costEvents,
   createDb,
   documentRevisions,
   documents,
@@ -94,6 +95,8 @@ describeEmbeddedPostgres("heartbeat timer idle precheck", () => {
     for (let attempt = 0; ; attempt += 1) {
       await db.delete(heartbeatRunEvents);
       await db.delete(activityLog);
+      // Upstream v2026.1023.0 accounting writes a cost_events row per finished run.
+      await db.delete(costEvents);
       try {
         await db.delete(heartbeatRuns);
         break;

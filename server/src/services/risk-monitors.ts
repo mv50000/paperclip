@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, lt, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -332,8 +332,11 @@ export function riskMonitorService(db: Db) {
         .where(and(
           eq(costEvents.companyId, companyId),
           gte(costEvents.occurredAt, sevenDaysAgo),
+          // RK9 Custom (RK9-701): upstream 0316 made cost_events.agent_id nullable.
+          isNotNull(costEvents.agentId),
         ))
-        .groupBy(costEvents.agentId);
+        .groupBy(costEvents.agentId)
+        .then((rows) => rows.filter((row): row is { agentId: string; totalCents: number } => row.agentId !== null));
 
       const todayCosts = await db
         .select({
@@ -344,8 +347,11 @@ export function riskMonitorService(db: Db) {
         .where(and(
           eq(costEvents.companyId, companyId),
           gte(costEvents.occurredAt, today),
+          // RK9 Custom (RK9-701): upstream 0316 made cost_events.agent_id nullable.
+          isNotNull(costEvents.agentId),
         ))
-        .groupBy(costEvents.agentId);
+        .groupBy(costEvents.agentId)
+        .then((rows) => rows.filter((row): row is { agentId: string; totalCents: number } => row.agentId !== null));
 
       const todayMap = new Map(todayCosts.map((c) => [c.agentId, c.totalCents]));
       const daysElapsed = Math.max(1, Math.ceil((now.getTime() - sevenDaysAgo.getTime()) / (24 * 60 * 60 * 1000)));

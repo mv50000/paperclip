@@ -2140,117 +2140,313 @@
     {
       "idx": 306,
       "version": "7",
+      "when": 1791308714862,
+      "tag": "0306_familiar_titania",
+      "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1791311441769,
+      "tag": "0307_cool_naoko",
+      "breakpoints": true
+    },
+    {
+      "idx": 308,
+      "version": "7",
+      "when": 1791312251106,
+      "tag": "0308_whole_steel_serpent",
+      "breakpoints": true
+    },
+    {
+      "idx": 309,
+      "version": "7",
+      "when": 1791313098905,
+      "tag": "0309_loving_the_hood",
+      "breakpoints": true
+    },
+    {
+      "idx": 310,
+      "version": "7",
+      "when": 1791314887096,
+      "tag": "0310_agent_commentary",
+      "breakpoints": true
+    },
+    {
+      "idx": 311,
+      "version": "7",
+      "when": 1791321362665,
+      "tag": "0311_mcp_file_transfers",
+      "breakpoints": true
+    },
+    {
+      "idx": 312,
+      "version": "7",
+      "when": 1791336871975,
+      "tag": "0312_easy_eternity",
+      "breakpoints": true
+    },
+    {
+      "idx": 313,
+      "version": "7",
+      "when": 1791371746435,
+      "tag": "0313_private_task_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 314,
+      "version": "7",
+      "when": 1791371819805,
+      "tag": "0314_private_task_draft_assets",
+      "breakpoints": true
+    },
+    {
+      "idx": 315,
+      "version": "7",
+      "when": 1791390905429,
+      "tag": "0315_rapid_emma_frost",
+      "breakpoints": true
+    },
+    {
+      "idx": 316,
+      "version": "7",
+      "when": 1791400295370,
+      "tag": "0316_premium_slayback",
+      "breakpoints": true
+    },
+    {
+      "idx": 317,
+      "version": "7",
+      "when": 1791416259455,
+      "tag": "0317_messy_famine",
+      "breakpoints": true
+    },
+    {
+      "idx": 318,
+      "version": "7",
+      "when": 1791456875836,
+      "tag": "0318_strong_blacklash",
+      "breakpoints": true
+    },
+    {
+      "idx": 319,
+      "version": "7",
+      "when": 1791490887468,
+      "tag": "0319_heavy_captain_midlands",
+      "breakpoints": true
+    },
+    {
+      "idx": 320,
+      "version": "7",
+      "when": 1791497222457,
+      "tag": "0320_daily_onslaught",
+      "breakpoints": true
+    },
+    {
+      "idx": 321,
+      "version": "7",
+      "when": 1791568503477,
+      "tag": "0321_acoustic_human_fly",
+      "breakpoints": true
+    },
+    {
+      "idx": 322,
+      "version": "7",
+      "when": 1791572660423,
+      "tag": "0322_reflective_kree",
+      "breakpoints": true
+    },
+    {
+      "idx": 323,
+      "version": "7",
+      "when": 1791578748368,
+      "tag": "0323_petite_shockwave",
+      "breakpoints": true
+    },
+    {
+      "idx": 324,
+      "version": "7",
+      "when": 1791578748369,
+      "tag": "0324_long_franklin_storm",
+      "breakpoints": true
+    },
+    {
+      "idx": 325,
+      "version": "7",
+      "when": 1791578748370,
+      "tag": "0325_aberrant_machine_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 326,
+      "version": "7",
+      "when": 1791578748371,
+      "tag": "0326_blushing_screwball",
+      "breakpoints": true
+    },
+    {
+      "idx": 327,
+      "version": "7",
+      "when": 1791578748372,
+      "tag": "0327_sad_proteus",
+      "breakpoints": true
+    },
+    {
+      "idx": 328,
+      "version": "7",
+      "when": 1791578748373,
+      "tag": "0328_chunky_mentallo",
+      "breakpoints": true
+    },
+    {
+      "idx": 329,
+      "version": "7",
+      "when": 1791578748374,
+      "tag": "0329_free_wolf_cub",
+      "breakpoints": true
+    },
+    {
+      "idx": 330,
+      "version": "7",
+      "when": 1791578748375,
+      "tag": "0330_spooky_white_tiger",
+      "breakpoints": true
+    },
+    {
+      "idx": 331,
+      "version": "7",
+      "when": 1791642049733,
+      "tag": "0331_panoramic_spyke",
+      "breakpoints": true
+    },
+    {
+      "idx": 332,
+      "version": "7",
+      "when": 1791693159075,
+      "tag": "0332_little_night_nurse",
+      "breakpoints": true
+    },
+    {
+      "idx": 333,
+      "version": "7",
+      "when": 1791781882729,
+      "tag": "0333_normal_wild_pack",
+      "breakpoints": true
+    },
+    {
+      "idx": 334,
+      "version": "7",
       "when": 1777196451044,
       "tag": "9000_rk9_email_messages_park_upstream",
       "breakpoints": true
     },
     {
-      "idx": 307,
+      "idx": 335,
       "version": "7",
       "when": 1777196451045,
       "tag": "9001_rk9_risk_management",
       "breakpoints": true
     },
     {
-      "idx": 308,
+      "idx": 336,
       "version": "7",
       "when": 1777325153203,
       "tag": "9002_rk9_resend_email",
       "breakpoints": true
     },
     {
-      "idx": 309,
+      "idx": 337,
       "version": "7",
       "when": 1777351911226,
       "tag": "9003_rk9_email_escalation",
       "breakpoints": true
     },
     {
-      "idx": 310,
+      "idx": 338,
       "version": "7",
       "when": 1777629600000,
       "tag": "9004_rk9_resolve_stale_incidents",
       "breakpoints": true
     },
     {
-      "idx": 311,
+      "idx": 339,
       "version": "7",
       "when": 1785322800000,
       "tag": "9005_rk9_email_support_desk",
       "breakpoints": true
     },
     {
-      "idx": 312,
+      "idx": 340,
       "version": "7",
       "when": 1789290000000,
       "tag": "9006_rk9_outreach",
       "breakpoints": true
     },
     {
-      "idx": 313,
+      "idx": 341,
       "version": "7",
       "when": 1789307684000,
       "tag": "9007_rk9_outreach_enrichment",
       "breakpoints": true
     },
     {
-      "idx": 314,
+      "idx": 342,
       "version": "7",
       "when": 1789399200000,
       "tag": "9008_rk9_outreach_sender",
       "breakpoints": true
     },
     {
-      "idx": 315,
+      "idx": 343,
       "version": "7",
       "when": 1789485600000,
       "tag": "9009_rk9_outreach_metrics",
       "breakpoints": true
     },
     {
-      "idx": 316,
+      "idx": 344,
       "version": "7",
       "when": 1789572000000,
       "tag": "9010_rk9_outreach_inbound_routes",
       "breakpoints": true
     },
     {
-      "idx": 317,
+      "idx": 345,
       "version": "7",
       "when": 1790000000000,
       "tag": "9011_rk9_email_messages_split",
       "breakpoints": true
     },
     {
-      "idx": 318,
+      "idx": 346,
       "version": "7",
       "when": 1790086400000,
       "tag": "9012_rk9_outreach_sender_reply_routes_backfill",
       "breakpoints": true
     },
     {
-      "idx": 319,
+      "idx": 347,
       "version": "7",
       "when": 1790172800000,
       "tag": "9013_rk9_outreach_approved_content_hash",
       "breakpoints": true
     },
     {
-      "idx": 320,
+      "idx": 348,
       "version": "7",
       "when": 1790259200000,
       "tag": "9014_rk9_run_taints",
       "breakpoints": true
     },
     {
-      "idx": 321,
+      "idx": 349,
       "version": "7",
       "when": 1790345600000,
       "tag": "9015_rk9_coord",
       "breakpoints": true
     },
     {
-      "idx": 322,
+      "idx": 350,
       "version": "7",
       "when": 1790432000000,
       "tag": "9016_rk9_coord_recall_scope",

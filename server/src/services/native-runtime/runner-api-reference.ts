@@ -79,7 +79,7 @@ export const runnerApiReference: Record<string, { section: string; description?:
   },
   "GET /api/companies/{}/issues": {
     "section": "Issues (Tasks)",
-    "description": "List issues, sorted by priority. Filters: `?status=`, `?assigneeAgentId=`, `?assigneeUserId=`, `?projectId=`, `?labelId=`, `?q=` (full-text search across title, identifier, description, comments)"
+    "description": "List issues, sorted by priority. Filters: `?status=`, `?assigneeAgentId=`, `?assigneeUserId=`, `?projectId=`, `?goalId=`, `?labelId=`, `?q=` (full-text search across title, identifier, description, comments)"
   },
   "GET /api/issues/{}": {
     "section": "Issues (Tasks)",
