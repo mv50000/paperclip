@@ -26,7 +26,10 @@ type SelectResult = unknown[];
 
 function createDbStub(selectResults: SelectResult[]) {
   const pendingSelects = [...selectResults];
-  const selectWhere = vi.fn(async () => pendingSelects.shift() ?? []);
+  const selectWhere = vi.fn(() => {
+    const query = Promise.resolve(pendingSelects.shift() ?? []);
+    return Object.assign(query, { for: () => query });
+  });
   const selectThen = vi.fn((resolve: (value: unknown[]) => unknown) => Promise.resolve(resolve(pendingSelects.shift() ?? [])));
   const selectOrderBy = vi.fn(async () => pendingSelects.shift() ?? []);
   const selectFrom = vi.fn(() => ({
@@ -62,6 +65,7 @@ function createDbStub(selectResults: SelectResult[]) {
       select,
       insert,
       update,
+      transaction: async (callback: (db: unknown) => Promise<unknown>) => callback({ select, insert, update }),
     },
     queueInsert: (rows: unknown[]) => {
       pendingInserts.push(rows);
@@ -105,6 +109,7 @@ describe("budgetService", () => {
         status: "running",
         pauseReason: null,
       }],
+      [{ id: "agent-1", companyId: "company-1", status: "running" }],
     ]);
 
     dbStub.queueInsert([{
@@ -260,6 +265,8 @@ describe("budgetService", () => {
           status: "running",
           pauseReason: null,
         }],
+        // RK9-700: upstream 1012 (#15280) locks and reads the agent row before the budget pause.
+        [{ id: "agent-1", companyId: "company-1", status: "running" }],
       ]);
 
       dbStub.queueInsert([{
@@ -351,6 +358,8 @@ describe("budgetService", () => {
           status: "running",
           pauseReason: null,
         }],
+        // RK9-700: upstream 1012 (#15280) locks and reads the agent row before the budget pause.
+        [{ id: "agent-1", companyId: "company-1", status: "running" }],
       ]);
 
       dbStub.queueInsert([{

@@ -20,8 +20,8 @@ import { describe, expect, it } from "vitest";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(root, "../..");
 
-/** Upstream merge base of the fork (v2026.1005.0 since RK9-699; was dffc2b3ca1, the RK9-693 merge base). */
-const FORK_BASE_COMMIT = "467125fafb";
+/** Upstream merge base of the fork (v2026.1012.0 since RK9-700; v2026.1005.0 467125fafb in RK9-699; was dffc2b3ca1, the RK9-693 merge base). */
+const FORK_BASE_COMMIT = "bba6a45f0d";
 
 const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt|hidden_at/;
 const QUERY_CALL = String.raw`\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*`;
@@ -77,7 +77,7 @@ const FORK_FILES_WITHOUT_VISIBILITY_FILTER = [
   "services/rk9-voice-action-deps.ts",
 ];
 
-/** Upstream files without the filter at the RK9-707 snapshot, re-classified at v2026.1005.0 (RK9-699). Not fork code: listed only to classify scan hits. */
+/** Upstream files without the filter at the RK9-707 snapshot, re-classified at v2026.1005.0 (RK9-699) and v2026.1012.0 (RK9-700). Not fork code: listed only to classify scan hits. */
 const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "modules/run-dispatch/adapters/postgres.ts",
   "modules/wake-queue/adapters/queued-comment-postgres.ts",
@@ -120,6 +120,7 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/external-objects.ts",
   "services/feedback.ts",
   "services/github-operation-credentials.ts",
+  "services/human-directed-work.ts",
   "services/issue-approvals.ts",
   "services/issue-continuation-summary.ts",
   "services/issue-creation-origin.ts",
@@ -150,6 +151,7 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/native-runtime/native-runner-file-handoff.ts",
   "services/native-runtime/native-safe-replacement.ts",
   "services/native-runtime/native-session-executor.ts",
+  "services/native-runtime/native-session-handoff.ts",
   "services/native-runtime/native-workspace-export-recovery.ts",
   "services/native-runtime/native-workspace-export-retry.ts",
   "services/native-runtime/native-workspace-finalizer.ts",
@@ -159,6 +161,7 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/native-runtime/runner-semantic-authority.ts",
   "services/native-runtime/status-decision-committer.ts",
   "services/onboarding-seed.ts",
+  "services/owner-chat-instruction-authority.ts",
   "services/plugin-host-services.ts",
   "services/project-tool-context.ts",
   "services/projects.ts",

@@ -33,7 +33,7 @@ declare global {
         runId?: string;
         onBehalfOfUserId?: string | null;
         identityContextId?: string | null;
-        source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant" | "cloud_control" | "none";
+        source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "mcp_oauth" | "cloud_tenant" | "cloud_control" | "none";
       };
       // --- RK9 Custom (RK9-621): coordination bus ---
       /** Coord token principal; set only by RK9-623's auth hook. */

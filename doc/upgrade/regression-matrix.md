@@ -830,6 +830,48 @@ Testisovitukset:
 - `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-sonnet-5-5`:tä, koska `claude-opus-5-5` vaatii CLI ≥ 2.1.280 ja testin fake-CLI ei raportoi versiota.
 - `redacts opaque environment-bound credentials … : result` kaatuu paikallisesti, jos ympäristössä on `EDITOR=vi`: upstreamin redaktio poistaa jokaisen ei-julkisen env-arvon, myös sanan "service" keskeltä. CI:ssä ei ole muuttujaa. Seuranta: lyhyiden env-arvojen redaktio upstreamissa.
 
+## Konfliktit portaassa 1012 (`origin/master` `4e81bed92` + `v2026.1012.0`, RK9-700)
+
+Porras 2 (1005 → 1012 → 1023). 25 konfliktitiedostoa ja 12 upstream-migraatiota (0294–0305). RK9-675:n arvio (58) laskettiin ennen porrasta 1.
+Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 4e81bed92 v2026.1012.0`.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0305 + slot `0126` omalla paikallaan, sitten `9000`–`9016` (idx 306–322). 322 entryä = 322 tiedostoa. |
+| `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts` | upstreamin uudet exportit ensin, forkin RK9 Custom -lohko perässä |
+| `server/package.json`, `pnpm-lock.yaml` | upstreamin versiot + forkin `@aws-sdk/client-sesv2`, `mailparser`, `@types/mailparser`; lockfile upstreamista + `pnpm install`, forkin SES- ja mailparser-versiot pinnattu masterin versioihin (3.1141.0, 3.9.28, 3.4.6). `tsx` ja RK9 Adsin `zod` deduplikoituivat upstreamin versioihin (4.23.15, 4.6.5). |
+| `server/src/services/approvals.ts` | upstream siirsi hyväksynnän ja hylkäyksen transaktioon; forkin `approval.decided`-live-event lähtee commitin jälkeen |
+| `server/src/services/tool-access-policy.ts` | RK9-319:n taint-portti käärii upstreamin välimuistillisen `decide`n; `decideLoaded` saa erän välimuistin parametrina |
+| `server/src/services/agents.ts` | molemmat importit; oletusgrantit tulevat forkin tyhjästä listasta, tyhjä insert ohitetaan (luonti ja aktivointi) |
+| `server/src/services/agent-permissions.ts`, `invite-grants.ts`, `authorization.ts`, `routes/issues.ts` (ei konfliktia) | RK9 Custom: `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS` jättää pois kaikki 14 upstreamin oletusavainta; kutsulla liittyvä agentti saa yhä `tasks:assign`in; assignoimaton issue ja subtask eivät vaadi granttia (#14870 + RK9-313). Ks. `defaults-hardening.md`. |
+| `server/src/onboarding-assets/ceo/AGENTS.md`, `default/AGENTS.md`, `services/default-agent-instructions.ts` | forkin versiot (CEO:n neljän tiedoston paketti, CTO-paketti, forkin default-ohje); upstreamin `first-task/chief-of-staff` hyväksytty |
+| `server/src/middleware/auth.ts` | upstreamin `database-retry`-import ja re-export + forkin coord-token-import |
+| `packages/adapters/claude-local/src/index.ts`, `server/src/__tests__/adapter-models.test.ts` | upstreamin mallijärjestys (#14917); forkin "Opus 5.5 ensin" oli vain testisovitus |
+| `packages/adapter-utils/src/acpx-engine/execute.test.ts`, `execution-target-sandbox.test.ts`, `server/src/__tests__/chat-project-tools.test.ts` | molempien importit |
+| `packages/paperclip-runner/spec/capability/capabilities.yaml` ja generoidut | upstreamin versio; 29 SKILL.md-otsikon rivinumerot siirretty forkin riveille, contract ja docs renderöity specistä. `check:capability-inventory` ja `check:capability-contract` OK. |
+| `.github/workflows/cloud-migrator-artifacts.yml`, `runner-full-stack-e2e.yml`, `runner-protocol-live-evals.yml`, `storybook-deploy.yml` (modify/delete) | pysyvät poistettuina |
+| `.gitleaksignore` | 41 upstreamin `doc/plans`-JSONin sha256-tiivistettä (`apiState`), ei salaisuuksia |
+
+Testisovitukset:
+
+- `hire-permission-default-rk9.test.ts`: siivous poistaa `principal_permission_grants`-rivit, koska #15283 kirjoittaa niitä agentin luonnissa.
+- `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-opus-4-8`:aa, koska `claude-sonnet-5-5` vaatii nyt CLI:n ≥ 2.1.284.
+- `agent-default-configure-grants.test.ts`: odottaa tyhjää oletuslistaa; kaikki 14 avainta puuttuvat, kutsu antaa vain `tasks:assign`in, ja vertaisagentin konfiguraatio kielletään syyllä `deny_no_grant`. Lisätty `fork-tests.txt`:iin.
+- `invite-join-grants.test.ts`: kutsun oletusgrantit sisältävät `tasks:assign`in (forkin käytös ennen 1012:ta).
+- `permissions-upgrade-boundary-routes.test.ts` (fork-testi): uusi testi, jossa agentti ilman granttia luo assignoimattoman issuen ja subtaskin (201) mutta ei assignoitua subtaskia vertaiselle (403); tyhjä kohde ilman `rk9IssueCreate`-merkkiä (esim. status-kortit) kielletään.
+- `chat-project-tools.test.ts`: fixture-agentti saa aktiivisen jäsenyyden ja `tasks:assign`-grantin. Upstream 1012 tarkistaa `tasks:assign`in myös natiivin `create_task`-työkalun itselle assignoinnissa, ja forkin RK9-313/RK9-317-sääntö vaatii siihen grantin. Prodissa `enableNativeRunner = false`. Low-trust-rajaustestit pysyvät ennallaan ja todistavat, ettei grantti ohita rajausta.
+- `paperclip-runner-tool-authority.test.ts`, `runner-api.integration.test.ts`: agentti saa jäsenyyden ja `tasks:assign`-grantin samasta syystä kuin `chat-project-tools.test.ts` (natiivi `create_task` assignoi oletuksena itselle).
+- `public-mcp.test.ts`: (1) MCP-token välitetään reitille anonyyminä (`type: "none"`, 200), koska fork päästää JWT:tä muistuttamattoman bearerin läpi forkin staattisten avainten takia (v2026.831.1:stä lähtien). Token ei ole board- eikä agent-tunniste. (2) Assignointi pausetulle agentille hylätään 409:llä (forkin "paused/terminated assignee guard"). `enablePublicMcp` on pois päältä.
+- `budgets-service.test.ts`: forkin 100 %-rajan testien stub palauttaa agenttirivin, koska upstream (#15280) lukitsee ja lukee rivin ennen budjettipausea. Upstream sovitti omat testinsä samoin.
+- `nosto-private-issue-visibility-rk9.test.ts`: `FORK_BASE_COMMIT = "bba6a45f0d"` (v2026.1012.0), ja baselineen lisättiin 3 uutta upstream-tiedostoa (`human-directed-work.ts`, `native-session-handoff.ts`, `owner-chat-instruction-authority.ts`). `pr.yml` hakee saman commitin (RK9-709).
+- Paikallisesti punaiset: `workspace-runtime.test.ts`:n 6 provisiointitestiä kaatuvat paperclip-01:llä, koska koneen globaali `paperclipai` (`/usr/local/bin`) ajetaan testin minimiconfigia vasten. CI:ssä (PR #298) ne menevät läpi.
+- `low-trust-red-team-routes.test.ts`: board luo backlog-issuen ilman assigneeta ja assignoi sen PATCHilla, koska fork muuttaa assignoidun backlog-luonnin tilaan `todo` (ks. `defaults-hardening.md`).
+- `tests/e2e/plan-task-fixture.spec.ts` (uusi upstream-e2e): agentteja ei pauseteta, koska fork piilottaa pausetut agentit listasta ja estää niille assignoinnin (`52b995085`). `wakeOnDemand: false` estää ajot, ja testin "ei heartbeat-ajoja" -ehto pysyy.
+- `packages/paperclip-runner/src/backends/native-instruction-measurement.test.ts`: odottaa forkin oletus-`AGENTS.md`:n ensimmäistä virkettä.
+- `packages/plugins/plugin-rk9-ads/schemas/creative-manifest.v1.schema.json`: generoitu uudelleen zod 4.6.5:llä.
+- `built-in-agents.test.ts`: palautettu forkin masterin odotus (root-agentilla ei ole `*:suggest-changes`-granttia), koska fork jättää kaikki 14 oletusavainta pois.
+- `agent-skills-routes.test.ts`: CEO saa forkin neljän tiedoston paketin, muut roolit forkin default-ohjeen.
+
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
 Näille commiteille ei ole masterilla omaa testiä. Ne tarkistetaan manuaalisesti yllä olevan

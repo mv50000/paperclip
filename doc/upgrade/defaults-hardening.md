@@ -589,6 +589,110 @@ Orkestroijan riippumaton verifier löysi headista `4ad8fc1fc` nämä upstream-mu
    ja `handleSuccessfulRunHandoff`. Masterissa liveness oli ensin. Funktiot ovat samat kuin masterissa, ja review-path koskee vain `in_review`-issueita.
    Upstreamin legacy disposition repair ei aja (`RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false`).
 
+## Porras v2026.1012.0 (RK9-700)
+
+Mittaukset 12.11.2026 prod-kannasta (vain luku, `sudo -u paperclip psql`). Elävät adapterit ovat yhä `claude_local` (26) ja `human_proxy` (19).
+
+### Uusien agenttien oletusgrantit (#15283) — kovennettu
+
+Upstream antaa jokaiselle uudelle standard-trust-agentille 14 suoraa granttia luonnissa, hyväksynnän aktivoinnissa ja kutsun hyväksynnässä.
+Fork jättää kaikki 14 pois. RK9 Custom on tiedostossa `server/src/services/agent-permissions.ts` (`RK9_WITHHELD_NEW_AGENT_GRANT_KEYS`).
+Uusi agentti saa siis saman oikeustason kuin ennen 1012:ta: ei yhtään oletusgranttia luonnissa eikä aktivoinnissa.
+
+Miksi kaikki 14 eikä vain laajimmat:
+
+- `agents:configure`, `tasks:assign`, `tasks:assign_scope` ja `tasks:manage_active_checkouts` ohittaisivat RK9-313:n tehtävänantosäännön ja vertaiskonfiguraation rajan.
+- `tools:use` on rajaamaton grantti, joka ohittaa työkaluprofiilin tarkistuksen (`explicitGrant` tiedostossa `tool-access-policy.ts`).
+- `tools:manage_*` ja `inbox:manage` laajentavat hallintaa.
+- Myös "lievät" avaimet vaikuttavat: `agents:suggest-changes` avaa vertaisagentin konfiguraation lukemisen,
+  `skills:create` sallii skillien suoran päivityksen, ja oman konfiguraation muokkaus vaihtuu tilaan `deny_missing_consent`.
+  Verifier löysi nämä kierroksella 1 (RK9-700), joten fork ei anna niitäkään.
+
+Board antaa avaimet tarvittaessa agenttikohtaisesti. Olemassa olevat agentit eivät muutu (upstreamissa ei ole backfill-migraatiota).
+`agents.ts` ohittaa tyhjän grant-insertin molemmissa kohdissa (luonti ja aktivointi), koska tyhjä insert kaatuu.
+
+**Kutsulla liittyvä agentti pitää `tasks:assign`in.** Ennen 1012:ta `agentJoinGrantsFromDefaults` antoi sen aina.
+Upstream luki sen nyt oletuslistasta, joka forkissa on tyhjä. RK9 Custom tiedostossa `server/src/services/invite-grants.ts` lisää sen, jos se puuttuu.
+
+**Agentti saa luoda assignoimattoman issuen ja subtaskin ilman granttia (#14870).** Upstream ajaa nyt `assertCanAssignTasks`in
+jokaiselle agentin luomalle issuelle. Forkin RK9-313-sääntö vaatii grantin vain, kun luonti assignoi jonkun.
+RK9 Custom tiedostossa `server/src/services/authorization.ts` sallii issue-resurssin, jolla ei ole `issueId`tä eikä assigneeta.
+Poikkeus koskee vain kutsuja, joiden scopessa on merkki `rk9IssueCreate`. Merkin asettavat vain issuen ja subtaskin luontireitit (`routes/issues.ts`).
+Muut tyhjän kohteen kutsujat pitävät grant-tarkistuksen: status-kortit (luovat Summarizerille assignoidun issuen), skill-testiajot ja pluginien esikatselu.
+Low-trust-rajaus tarkistetaan ennen tätä poikkeusta. Olemassa olevan issuen assignointi tai assignoinnin poisto vaatii yhä grantin.
+Projektissa, jolla on rajattu assignointipolitiikka, assignoimaton luonti vaatii grantin (upstreamin käytös, tiukempi kuin ennen 1012:ta).
+
+**Natiivin runnerin `create_task` vaatii grantin.** Upstream 1012 lisäsi työkaluun `tasks:assign`-tarkistuksen
+(`server/src/services/native-runtime/paperclip-runner-tool-authority.ts`). Työkalu assignoi tehtävän oletuksena agentille itselleen,
+ja forkin RK9-313/RK9-317-sääntö vaatii grantin myös siihen, kuten HTTP-reitillä jo masterilla. Prodissa `enableNativeRunner = false`, joten vaikutusta ei ole.
+
+**Agentin avain ei voi asettaa `*_local`-adapterin isäntäkomentoa.** `assertNoAgentLocalAdapterHostCommandMutation` (#15283) estää agentin
+avaimella kentät `cwd`, `env`, `args` ja `command` paikallisissa adaptereissa. Skillin `paperclip-create-agent` esimerkki
+(`skills/paperclip-create-agent/SKILL.md`) ei siis toimi agentin avaimella sellaisenaan; board-käyttäjä tai hyväksyntä asettaa nämä kentät.
+Prodissa agentit palkataan hyväksynnän kautta, joten muutos hyväksytään.
+
+Lukitsevat testit: `agent-default-configure-grants.test.ts` (sovitettu), `invite-join-grants.test.ts` ja
+`permissions-upgrade-boundary-routes.test.ts` (assignoimaton luonti ja subtask 201, assignoitu subtask vertaiselle 403, tyhjä kohde ilman merkkiä kielletään).
+
+### Boardin backlog-assignoinnin kuitti (human-directed work)
+
+Upstream 1012 kirjaa kuitin (`agentWakeupRequests`, reason `issue_human_assignment`), kun board-käyttäjä assignoi backlog-issuen agentille
+(`server/src/services/human-directed-work.ts`). Low-trust-agentti saa kuitin perusteella laajemman oikeuden työhön, jonka ihminen on ohjannut sille.
+Forkin masterin sääntö muuttaa assignoidun backlog-issuen luonnissa tilaan `todo` (`services/issues.ts`), joten luonnissa kuittia ei synny.
+PATCH, joka assignoi olemassa olevan backlog-issuen, kirjaa kuitin. Suunta on turvallinen: ilman kuittia low-trust-agentti jää suppeampaan oikeuteen.
+Lukitsee: `low-trust-red-team-routes.test.ts` (sovitettu).
+
+### RK9 Adsin zod 4.4.3 → 4.6.5
+
+Lockfile deduplikoi pluginin zodin upstreamin versioon 4.6.5, joka mahtuu rajaukseen `^4.4.3`. `z.iso.datetime({ offset: true })` vaatii nyt sekunnit,
+joten creative-manifestin `validUntil` ilman sekunteja (`2026-12-01T10:00+02:00`) hylätään. Plugin muodostaa arvon `Date`-oliosta (`toISOString`), jossa sekunnit ovat aina mukana.
+Commitattu `schemas/creative-manifest.v1.schema.json` generoitiin uudelleen (`pnpm run schema:generate`).
+
+### Oletusohjeet (#14948, #14985)
+
+- **Uuden agentin ohjepaketti:** upstream lyhensi CEO:n `AGENTS.md`:n yhteen virkkeeseen ja muiden roolien `AGENTS.md`:n kahdeksaan sanaan.
+  Fork pitää omat pakettinsa (`server/src/onboarding-assets/ceo`, `cto`, `default`), koska CEO:n paketissa on RK9:n delegointireititys.
+  Lukitsee: `agent-skills-routes.test.ts` (sovitettu). Koskee vain uusia agentteja; tallennetut ohjeet eivät muutu.
+- **Heartbeat-promptin oletuspohja muuttuu, hyväksytty.** `DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE` (`packages/adapter-utils/src/server-utils.ts`)
+  menetti "Execution contract" -listan; jäljelle jää agentin tunniste ja yhteysohje. Resume-delta ei enää liitä sopimusta.
+  Prodissa 25 / 26 `claude_local`-agentilla ei ole omaa `promptTemplate`a, joten muutos koskee niitä kaikkia.
+  Sama ohjeistus tulee yhä forkin `skills/paperclip/SKILL.md`:stä (heartbeat-proseduuri ja final disposition) ja agentin tallennetusta `AGENTS.md`:stä.
+  Seuranta noston jälkeen: dispositiottomat ajot ja recoveryn jatkoajot 48 h ajan. Vipu ilman koodimuutosta: aseta agentille `adapterConfig.promptTemplate`.
+
+### Hiljaisen ajon raja (#14979)
+
+`ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS` laski 1 h → 5 min ja kriittinen raja 4 h → 15 min. Raja on informatiivinen: `scanSilentActiveRuns`
+(`server/src/modules/active-run-watchdog/application/use-cases.ts`) ei luo uusia arviointi-issueita, vaan taittaa vain ajon, jonka lähde-issue on jo
+terminaalitilassa saman ajon todisteella. Jaetun työtilan pitäjän raja pysyy 1 h:ssa. UI näyttää varoituksen aiemmin. Ei toimenpidettä.
+
+### Työkalugrantit tulkitaan kirjaimellisesti (#14915)
+
+Grantti, jonka `scope.allow` ei osu työkaluun, tai jonka valitsin on tuntematon, kieltää eikä valu laajempaan politiikkaan.
+Prodissa ei ole yhtään rajattua `tools:*`-granttia (kaikki 158 rivillä `scope` on NULL) eikä `scope.allow`-granttia. Ei vaikutusta.
+
+### Restore-lukot (#14869)
+
+Työtilan restore-lukot ovat nyt SQLite-tiedostolukkoja hakemistossa `<instance root>/locks/directory-merge/`. Vanha ja uusi versio eivät saa kirjoittaa
+samaan instanssiin yhtä aikaa. Cutoverissa palvelu pysäytetään kokonaan ennen käynnistystä (runbookin vaihe 4), joten rinnakkaisajoa ei synny.
+Prodin instanssissa `default` ei ole vanhoja `<hash>.lock/`-hakemistoja (12.11.2026). Sama koskee rollbackia.
+
+### Clauden CLI ja mallit
+
+`claude-sonnet-5-5` vaatii nyt CLI:n 2.1.284 (#14993, ennen ei rajaa); `claude-opus-5-5` vaatii yhä 2.1.280.
+Prodin `/usr/bin/claude` on 2.1.319. Mallit: `claude-opus-5-5` 17 ja `claude-sonnet-5-5` 9 agenttia. Kovennusta ei tarvita.
+Mallivalitsimen järjestys on upstreamin (#14917, Fable 5.1 ensin). Oletusmalli on yhä `DEFAULT_CLAUDE_LOCAL_MODEL`, ja jokaisella agentilla on oma malli.
+
+### `experimental`-avaimet ja migraatiot
+
+| Avain | Oletus | Vaikutus forkissa |
+|---|---|---|
+| `enablePublicMcp` | `false` | Julkinen MCP-päätepiste (ulkoiset assistentit) pysyy kiinni. Ei kirjoiteta. |
+| `enableCombinedInboxTasks` | `false` | UI-asetus. Ei kirjoiteta. |
+| `enableAiConnectionRouters` | `false` | AI-yhteyspoolit pois. Ei kirjoiteta. |
+
+Prodin `experimental`-rivi ei muutu (12.11.2026: `enableNativeRunner = false`, `recoveryStrictInProgressOnly = true`). Pre-deploy-SQL:ää ei tarvita.
+Migraatiot 0294–0305 ovat lisääviä. `0298` täyttää oletusohjeet muisti-integraatioille, mutta prodissa `tool_connections` on tyhjä (0 riviä).
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on

@@ -156,6 +156,8 @@ sudo systemctl restart paperclip.service
 
 `fetch` hakee remotesta `origin` (tuotannossa `mv50000/paperclip`; `paperclip-update.sh` tunnistaa remoten URL:llä). Palvelin ajaa odottavat migraatiot käynnistyksessä (`applyPendingMigrations`, `server/src/index.ts`). Seuraa lokia: `sudo tail -f /var/log/paperclip.log`.
 
+**Porras v2026.1012.0 ja myöhemmät (#14869):** restore-lukot ovat SQLite-tiedostolukkoja, eivätkä vanha ja uusi versio saa kirjoittaa samaan instanssiin yhtä aikaa. `systemctl restart` pysäyttää koko palvelun cgroupin, myös `agents/`-lehden agenttiprosessit (`doc/upgrade/agent-cgroup.md`), ennen uuden version käynnistystä. Älä käynnistä toista palvelinta tai workeria samalla `PAPERCLIP_HOME`lla ikkunan aikana. Tarkista ennen restarttia, ettei hakemistossa `~paperclip/.paperclip/instances/default/locks/directory-merge/` ole vanhoja `<hash>.lock/`-hakemistoja (12.11.2026: ei yhtään). Sama koskee rollbackia.
+
 `ExecStartPre` ajaa preflightin jokaisella käynnistyksellä. Jos se epäonnistuu, palvelu ei käynnisty, ja `journalctl -u paperclip.service` näyttää rivin `[paperclip-preflight] FAIL <tunniste>`. Tunnisteet ja poistumiskoodit: 11 branch, 12 ankkuritiedosto puuttuu, 13 migraatio 9010 puuttuu, 14 host-env-suodatin puuttuu, 15 Node < 24.11, 16 git ei lue repoa.
 
 **Go**, kun `systemctl is-active paperclip.service` on `active` ja `curl -fsS $API/api/health` palauttaa 200 viimeistään 5 min restartin jälkeen.

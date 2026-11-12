@@ -36,6 +36,7 @@ vi.mock("../services/issue-assignment-wakeup.js", () => ({
 
 import { activityRoutes } from "../routes/activity.js";
 import { issueRoutes } from "../routes/issues.js";
+import { authorizationService } from "../services/authorization.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -354,5 +355,47 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
       .send({ title: "Different private target stays denied", assigneeAgentId: otherPrivateTargetAgent.id });
     expect(deniedOutsideScope.status).toBe(403);
     expect(deniedOutsideScope.body.error).toContain("private");
+  });
+
+  it("lets an agent without a grant create unassigned issues and subtasks after 1012 (RK9-700)", async () => {
+    // RK9 Custom (RK9-700): upstream v2026.1012 (#14870) runs the tasks:assign check for every
+    // agent-created issue. The fork rule (RK9-313) needs a grant only when the create assigns someone.
+    const company = await seedCompany(db, "Unassigned create");
+    const actorAgent = await seedAgent(db, company.id);
+    const peerAgent = await seedAgent(db, company.id);
+    const app = await createApp(db, agentActor(company.id, actorAgent.id));
+
+    const unassigned = await request(app)
+      .post(`/api/companies/${company.id}/issues`)
+      .send({ title: "Unassigned by an agent without a grant" });
+    expect(unassigned.status, JSON.stringify(unassigned.body)).toBe(201);
+
+    const child = await request(app)
+      .post(`/api/issues/${unassigned.body.id}/children`)
+      .send({ title: "Unassigned subtask" });
+    expect(child.status, JSON.stringify(child.body)).toBe(201);
+
+    const assignedChild = await request(app)
+      .post(`/api/issues/${unassigned.body.id}/children`)
+      .send({ title: "Assigned subtask", assigneeAgentId: peerAgent.id });
+    expect(assignedChild.status, JSON.stringify(assignedChild.body)).toBe(403);
+    expect(assignedChild.body.error).toContain("tasks:assign");
+
+    // Only the issue create routes set the marker. An empty target from another caller
+    // (status cards create issues for the Summarizer) keeps the RK9-313 grant check.
+    const emptyTargetDecision = await authorizationService(db).decide({
+      actor: agentActor(company.id, actorAgent.id),
+      action: "tasks:assign",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: null,
+        projectId: null,
+        parentIssueId: null,
+        assigneeAgentId: null,
+        assigneeUserId: null,
+      },
+    });
+    expect(emptyTargetDecision.allowed).toBe(false);
   });
 });
