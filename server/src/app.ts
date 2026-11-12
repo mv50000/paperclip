@@ -1,8 +1,13 @@
+import { browserUseRoutes } from "./routes/browser-use.js";
+import { browserUseService } from "./services/browser-use.js";
+import { slackToolRoutes } from "./routes/slack-tools.js";
+import { agentAvatarRoutes } from "./routes/agent-avatars.js";
 import { aiConnectionRoutes } from "./routes/ai-connections.js";
 import { projectToolRoutes } from "./routes/project-tools.js";
 import { emailChannelService } from "./services/email-channels.js";
 import { emailRoutes, emailWebhookRoutes } from "./routes/email.js";
 import { toolActionDeliveryService } from "./services/tool-action-delivery.js";
+import { registerAssignedMcpGateway } from "./services/native-runtime/assigned-mcp-tools.js";
 import express, { Router, type Request as ExpressRequest } from "express";
 import {
   createServer as createHttpServer,
@@ -140,7 +145,6 @@ import { unsubscribeRoutes } from "./routes/unsubscribe.js";
 import { resendInboundRoutes } from "./routes/resend-inbound.js";
 import { sesInboundRoutes } from "./routes/ses-inbound.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
-import { injectCloudUiSnippet } from "./cloud-ui-snippet.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
 import { staticUiCacheControl } from "./static-ui-cache.js";
 import { applyUiBranding } from "./ui-branding.js";
@@ -152,11 +156,16 @@ import {
 } from "./services/plugin-loader.js";
 import {
   SELF_HOSTED_AUTO_INSTALL_KEYS,
+  BUNDLED_PLUGIN_CATALOG,
   ensureBundledPlugins,
   resolveBundledCatalogRoot,
   resolveBundledPluginInstalls,
 } from "./services/bundled-plugins.js";
-import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
+import { readDistributionPluginCatalog, distributionPluginActivationGuard } from "./services/distribution-plugin-catalog.js";
+import {
+  createPluginWorkerManager,
+  type PluginWorkerManager,
+} from "./services/plugin-worker-manager.js";
 // --- RK9 Custom: system pause ---
 import type { SystemPauseService } from "./services/system-pause.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
@@ -632,15 +641,25 @@ export async function createApp(
   const emailChannels = emailChannelService(db, { heartbeat: connectionIntentHeartbeat, storage: opts.storageService, publicBaseUrl: opts.chatWebhookPublicBaseUrl ?? opts.authPublicBaseUrl });
   app.use(emailWebhookRoutes(emailChannels));
   app.use(chatWebhookRoutes(chatChannels));
+  // The instance validates single-use registration state and its trusted
+  // current origin. This exact GET is the only public setup return.
+  app.get("/api/chat-github/manifest/callback", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.set("Referrer-Policy", "no-referrer");
+    const redirect = await chatChannels.completeGitHubRegistration(String(req.query.state ?? ""), String(req.query.code ?? ""));
+    res.redirect(303, redirect);
+  });
   const managedAutoInstallKeys = opts.managedPluginAutoInstall ?? null;
   const bundledCatalogRoot =
     opts.bundledPluginCatalogRoot ?? resolveBundledCatalogRoot(process.env);
+  const distributionPlugins = readDistributionPluginCatalog(bundledCatalogRoot, BUNDLED_PLUGIN_CATALOG);
   const bundledPluginInstalls = resolveBundledPluginInstalls(
     managedAutoInstallKeys ?? SELF_HOSTED_AUTO_INSTALL_KEYS,
     {
       catalogRoot: bundledCatalogRoot,
       env: process.env,
       enforceCatalogRoot: managedAutoInstallKeys !== null,
+      distributionPlugins,
     },
   );
   const managedBundledPluginKeys =
@@ -663,6 +682,8 @@ export async function createApp(
 
   // Mount API routes
   const api = Router();
+  const agentAvatars = agentAvatarRoutes();
+  api.use(agentAvatars.router);
   api.use(boardMutationGuard());
   api.use(
     "/health",
@@ -781,7 +802,7 @@ export async function createApp(
   api.use(projectToolRoutes(db));
   api.use(projectRoutes(db));
   api.use(caseRoutes(db, opts.storageService));
-  api.use(issueTreeControlRoutes(db));
+  api.use(issueTreeControlRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(fileResourceRoutes(db));
   // --- RK9 Custom: system pause ---
   api.use(routineRoutes(db, { pluginWorkerManager: workerManager, systemPause: opts.systemPause }));
@@ -886,7 +907,9 @@ export async function createApp(
     approveToolActionRequest: (input) => toolGateway.approveActionRequest(input),
     declineToolActionRequest: (input) => toolGateway.declineActionRequest(input),
   }));
+  api.use(slackToolRoutes(db, opts.authPublicBaseUrl));
   app.locals.toolGateway = toolGateway;
+  registerAssignedMcpGateway(db, toolGateway);
   app.locals.toolActionDeliveries = toolActionDeliveries;
   app.use(mcpGatewayProtocolRoutes(toolGateway));
   api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost }));
@@ -926,6 +949,7 @@ export async function createApp(
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
       migrationDb: opts.pluginMigrationDb,
+      assertPackageActivation: distributionPluginActivationGuard(bundledCatalogRoot, distributionPlugins, managedAutoInstallKeys),
     },
     {
       workerManager,
@@ -968,9 +992,11 @@ export async function createApp(
   runtimePluginLoader = loader;
   // --- RK9 Custom: GitHub webhooks ---
   api.use(githubWebhookRoutes(db));
-  api.use(
-    toolGatewayRoutes(db, toolGateway),
-  );
+  const browserUse = browserUseService(db, undefined,
+    { cancelWorkForScope: heartbeatService(db, { pluginWorkerManager: workerManager }).cancelBudgetScopeWork },
+    (session, run) => toolGateway.browserUseSessionAuthorized({ ...session, runId: run.heartbeatRunId, invocationId: run.invocationId }));
+  api.use(browserUseRoutes(db, browserUse));
+  api.use(toolGatewayRoutes(db, toolGateway));
   api.use(
     pluginRoutes(
       db,
@@ -1156,7 +1182,7 @@ export async function createApp(
     viteHtmlRenderer = createCachedViteHtmlRenderer({
       vite,
       uiRoot,
-      brandHtml: (html) => injectCloudUiSnippet(applyUiBranding(html)),
+      brandHtml: applyUiBranding,
     });
     const renderViteHtml = viteHtmlRenderer;
 
@@ -1272,6 +1298,9 @@ export async function createApp(
         );
       });
   };
+  const browserUseTimer = setInterval(() => { void browserUse.sweep().catch(() => logger.warn("Browser Use reconciliation failed; retrying.")); }, 3000);
+  browserUseTimer.unref?.();
+  void browserUse.sweep().catch(() => logger.warn("Browser Use startup reconciliation failed; retrying."));
   let importTransferSweepTimer: ReturnType<typeof setInterval> | null =
     setInterval(
       sweepImportTransferSpools,
@@ -1344,7 +1373,8 @@ export async function createApp(
     { registry: pluginRegistry, loader, lifecycle, logger },
     // Managed mode reinstalls soft-uninstalled bundles (the control plane
     // owns provisioning); self-hosted leaves an operator's uninstall alone.
-    // Operator-DISABLED plugins are never touched in either mode.
+    // Disabled plugins never start automatically. Added distribution permissions
+    // still enter upgrade_pending so enabling them requires an operator decision.
     { reinstallUninstalled: managedAutoInstallKeys !== null },
   )
     .then(() => loader.loadAll())
@@ -1379,6 +1409,7 @@ export async function createApp(
         chatPublicationTimer = null;
       }
       await chatReconciliation.drain();
+      clearInterval(browserUseTimer);
       if (importTransferSweepTimer) {
         clearInterval(importTransferSweepTimer);
         importTransferSweepTimer = null;
@@ -1391,6 +1422,9 @@ export async function createApp(
       hostServiceCleanup.teardown();
       await emailChannels.shutdown();
       await chatChannels.shutdown();
+      // End the avatar worker pool, if a request ever started one, so no
+      // render outlives the HTTP teardown.
+      await agentAvatars.close();
       // Cancel every live setup-token login session and AWAIT the cancellation,
       // so each direct child stops and the server releases each lease before the
       // caller stops the database and the provider. A lease release that

@@ -53,9 +53,8 @@ jobs:
   # ten master commits sampled that day never produced an image at all.
   #
   # Each platform now builds on a runner of its own architecture and pushes by
-  # digest; `merge` assembles the manifest list. arm64 is kept rather than
-  # dropped (the cloud variant below dropped it and is amd64-only) because
-  # this is the self-hosted image, and ARM hosts consume it.
+  # digest; `merge` assembles the manifest list. Both architectures remain
+  # available to self-hosted installations and downstream image composers.
   build-and-push:
     strategy:
       # Independent legs: one architecture failing should still publish
@@ -218,6 +217,7 @@ jobs:
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
+            type=raw,value=sha-${{ github.sha }},enable=${{ github.repository == 'paperclipai/paperclip' && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           labels: |
             io.github.paperclipai.schema.last-migration=${{ steps.schema.outputs.last }}
             io.github.paperclipai.schema.migration-count=${{ steps.schema.outputs.count }}
@@ -281,6 +281,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       # Checked out for `packages/db` (schema labels) and the orphan-reaping
       # script the verification step pipes in.
@@ -334,6 +336,7 @@ jobs:
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
+            type=raw,value=sha-${{ github.sha }},enable=${{ github.repository == 'paperclipai/paperclip' && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
           labels: |
             io.github.paperclipai.schema.last-migration=${{ steps.schema.outputs.last }}
             io.github.paperclipai.schema.migration-count=${{ steps.schema.outputs.count }}
@@ -351,7 +354,7 @@ jobs:
       # until the cgroup pid limit is exhausted and every fork() in the
       # container fails. Run against the pushed manifest rather than a local
       # build: the legs push by digest, so nothing is loaded into this
-      # runner's daemon. The independent cloud workflow checks its own image.
+      # runner's daemon.
       - name: Verify PID 1 reaps orphaned processes
         env:
           # Through the environment, not interpolated into the script body, so
@@ -364,6 +367,27 @@ jobs:
           echo "Verifying orphan reaping in $image"
           docker run --rm -i --pull always "$image" sh -s < scripts/assert-orphan-reaping.sh
 
-  # --- RK9 Custom (RK9-317) --- upstreamin build-and-push-cloud (docker-cloud.yml) ja
-  # promote_canary_channel ovat vain upstreamille: fork ei aja cloud-kuvia eikä canary-kanavaa.
-  # docker-cloud.yml on poistettu forkista. Ks. doc/CI-RUNNER.md.
+      # This generic contract is useful to any downstream image composer. Only
+      # canonical master pushes own the full-SHA tag and its signed provenance.
+      # Capture exact registry bytes; both the smoke and attestation use their
+      # digest, so later tag movement cannot change what was verified.
+      - name: Resolve standard image digest
+        id: standard
+        if: github.repository == 'paperclipai/paperclip' && github.repository_id == '1170821064' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: node scripts/standard-image-contract.mjs --resolve "$GITHUB_SHA"
+      - name: Verify the immutable standard image
+        if: steps.standard.outputs.digest != ''
+        env:
+          IMAGE_DIGEST: ${{ steps.standard.outputs.digest }}
+        run: docker run --rm -i --pull always "ghcr.io/paperclipai/paperclip@$IMAGE_DIGEST" sh -s < scripts/assert-orphan-reaping.sh
+      - name: Attest the standard production image
+        if: steps.standard.outputs.digest != ''
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ghcr.io/paperclipai/paperclip
+          subject-digest: ${{ steps.standard.outputs.digest }}
+          push-to-registry: true
+
+  # --- RK9 Custom (RK9-317, RK9-699) --- upstreamin canary-kanavan siirtojobi (promote_canary_channel)
+  # on vain upstreamille: fork ei aja cloud-kuvia eikä canary-kanavaa. Upstreamin pilvikuvan
+  # workflow on poistettu forkista. Ks. doc/CI-RUNNER.md.

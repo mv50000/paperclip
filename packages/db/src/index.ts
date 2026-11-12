@@ -6,6 +6,7 @@ export { and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, not, or, sql } from 
 
 export {
   createDb,
+  withDedicatedDbConnection,
   closeRegisteredClients,
   getPostgresDataDirectory,
   ensurePostgresDatabase,

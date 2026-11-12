@@ -64,7 +64,6 @@ export type VoiceActionDeps = {
     | "addComment"
     | "update"
     | "getDependencyReadiness"
-    | "findMentionedAgents"
     | "listWakeableBlockedDependents"
     | "getWakeableParentAfterChildCompletion"
     | "getCurrentScheduledRetry"
@@ -411,11 +410,8 @@ async function afterComment(
     const ids = expired.map((interaction) => interaction.id).sort();
     lostReviewPathRef = ids.length === 1 ? ids[0]! : `interactions:${ids.join(",")}`;
   });
-  // A failed mention lookup must not drop the assignee wake.
-  let mentionedIds: string[] = [];
-  await attempt("mention_lookup", async () => {
-    mentionedIds = await issuesSvc.findMentionedAgents(issue.companyId, comment.body);
-  });
+  // Upstream v2026.1005.0 (#14577): an agent mention is context only and wakes nobody,
+  // so the voice action wakes only the assignee, like the comment route (RK9-699).
   await attempt("wakes", async () => {
     const batch = createWakeBatch(deps, issue, actor, "first_wins");
     // The assignee may have changed while the comment was written.
@@ -452,24 +448,6 @@ async function afterComment(
           source: "issue.comment",
           wakeReason: "issue_commented",
           ...reviewPath,
-        },
-      });
-    }
-    for (const mentionedId of mentionedIds) {
-      batch.add(mentionedId, {
-        source: "automation",
-        triggerDetail: "system",
-        reason: "issue_comment_mentioned",
-        payload: { issueId: issue.id, commentId: comment.id },
-        requestedByActorType: actor.actorType,
-        requestedByActorId: actor.actorId,
-        contextSnapshot: {
-          issueId: issue.id,
-          taskId: issue.id,
-          commentId: comment.id,
-          wakeCommentId: comment.id,
-          wakeReason: "issue_comment_mentioned",
-          source: "comment.mention",
         },
       });
     }

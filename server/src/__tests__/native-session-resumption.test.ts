@@ -40,6 +40,7 @@ import {
 } from "../vendor/paperclip-runner/testing.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { waitForPendingRunFailureReports } from "../services/run-failure-report.js";
 import {
   claimNativeSessionResumptions,
   dispatchNativeSessionResumptions,
@@ -563,18 +564,11 @@ describe("P6-25 pre-result native session recovery", () => {
     const captureCallsBefore = mockCaptureRunFailure.mock.calls.length;
 
     await claimNativeSessionResumptions({ db, runnerInstanceId: "reaper", runIds: [freshRunId] });
-    // The Sentry report fires without an await inside the reconciler, so a
-    // follow-up round trip to the real database gives that fire-and-forget
-    // call room to complete before this test reads the spy.
-    await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, freshRunId));
-    // --- RK9 Custom (RK9-317): one round trip did not always let the report finish on the
-    // builder; drain the pending reports with the shutdown helper instead. ---
-    const { waitForPendingRunFailureReports } = await import("../services/run-failure-report.js");
+    // The reconciler reports asynchronously; an unrelated database round trip
+    // does not guarantee that callback has completed.
     await waitForPendingRunFailureReports();
-    // --- /RK9 Custom ---
-
+    expect(mockCaptureRunFailure.mock.calls.slice(captureCallsBefore)).toHaveLength(1);
     const newCaptures = mockCaptureRunFailure.mock.calls.slice(captureCallsBefore);
-    expect(newCaptures).toHaveLength(1);
     expect(newCaptures[0]?.[0]).toMatchObject({ runId: freshRunId, runStatus: "failed" });
   });
 
@@ -606,7 +600,7 @@ describe("P6-25 pre-result native session recovery", () => {
     const captureCallsBefore = mockCaptureRunFailure.mock.calls.length;
 
     await claimNativeSessionResumptions({ db, runnerInstanceId: "reaper", runIds: [freshRunId] });
-    await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, freshRunId));
+    await waitForPendingRunFailureReports();
 
     expect(mockCaptureRunFailure.mock.calls.slice(captureCallsBefore)).toHaveLength(0);
   });
@@ -1397,6 +1391,11 @@ describe.each(["unchanged", "newer_active", "stale_idle"] as const)(
         status: "in_progress",
         assigneeAgentId: agentId,
         workMode: "standard",
+      });
+      const directExecute = legacyAdapterExecute.getMockImplementation()!;
+      legacyAdapterExecute.mockImplementationOnce(async () => {
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, freshIssueId));
+        return directExecute();
       });
       const fresh = await heartbeat.wakeup(agentId, {
         source: "automation",

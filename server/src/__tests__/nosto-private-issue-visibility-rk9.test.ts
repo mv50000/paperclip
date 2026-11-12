@@ -20,8 +20,8 @@ import { describe, expect, it } from "vitest";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(root, "../..");
 
-/** Last upstream commit before the fork's own server files (RK9-693 merge base). */
-const FORK_BASE_COMMIT = "dffc2b3ca1";
+/** Upstream merge base of the fork (v2026.1005.0 since RK9-699; was dffc2b3ca1, the RK9-693 merge base). */
+const FORK_BASE_COMMIT = "467125fafb";
 
 const VISIBILITY_FILTER = /visibleIssueCondition|executionIssueCondition|visibleIssueSql|hiddenAt|hidden_at/;
 const QUERY_CALL = String.raw`\b(?:from|join|leftJoin|innerJoin|rightJoin|fullJoin|update|delete)\(\s*`;
@@ -77,11 +77,12 @@ const FORK_FILES_WITHOUT_VISIBILITY_FILTER = [
   "services/rk9-voice-action-deps.ts",
 ];
 
-/** Upstream files without the filter at the RK9-707 snapshot. Not fork code: listed only to classify scan hits. */
+/** Upstream files without the filter at the RK9-707 snapshot, re-classified at v2026.1005.0 (RK9-699). Not fork code: listed only to classify scan hits. */
 const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "modules/run-dispatch/adapters/postgres.ts",
   "modules/wake-queue/adapters/queued-comment-postgres.ts",
   "routes/agents.ts",
+  "routes/browser-use.ts",
   "routes/cases.ts",
   "routes/execution-workspaces.ts",
   "routes/issue-tree-control.ts",
@@ -90,14 +91,19 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/agent-conversations.ts",
   "services/agents.ts",
   "services/authorization.ts",
+  "services/browser-use.ts",
   "services/built-in-agents.ts",
   "services/chat-channels.ts",
+  "services/chat-completion-delivery.ts",
+  "services/chat-github-reviews.ts",
   "services/chat-interaction-publications.ts",
   "services/chat-run-publications.ts",
   "services/chat-teams-file-publication.ts",
   "services/companies.ts",
+  "services/confirmation-comment-resolution.ts",
   "services/connection-intent-delivery.ts",
   "services/connection-intents.ts",
+  "services/conversation-confirmation-context.ts",
   "services/decision-retention.ts",
   "services/decision-training.ts",
   "services/decisions.ts",
@@ -115,32 +121,40 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/feedback.ts",
   "services/github-operation-credentials.ts",
   "services/issue-approvals.ts",
-  "services/issue-creation-origin.ts",
   "services/issue-continuation-summary.ts",
+  "services/issue-creation-origin.ts",
   "services/issue-prefix.ts",
   "services/issue-references.ts",
   "services/issue-thread-interactions.ts",
+  "services/issue-title.ts",
   "services/issue-tree-control.ts",
   "services/legacy-execution-recovery.ts",
   "services/low-trust-runtime-containment.ts",
   "services/native-runtime/automatic-completion-reviews.ts",
   "services/native-runtime/chat-attachment-reuse.ts",
+  "services/native-runtime/child-review-outcomes.ts",
   "services/native-runtime/continuation-contract.ts",
   "services/native-runtime/current-wake-comments.ts",
   "services/native-runtime/external-chat-question-response-input.ts",
+  "services/native-runtime/handoff-plan-context.ts",
   "services/native-runtime/native-chat-review-presentation.ts",
   "services/native-runtime/native-chat-workspace.ts",
   "services/native-runtime/native-completion-feedback.ts",
   "services/native-runtime/native-finalization-reconciler.ts",
   "services/native-runtime/native-interaction-bridge.ts",
   "services/native-runtime/native-restart-recovery.ts",
+  "services/native-runtime/native-review-dispatch.ts",
+  "services/native-runtime/native-review-participant.ts",
+  "services/native-runtime/native-run-coordinator-store.ts",
   "services/native-runtime/native-run-finalizer.ts",
   "services/native-runtime/native-runner-file-handoff.ts",
   "services/native-runtime/native-safe-replacement.ts",
   "services/native-runtime/native-session-executor.ts",
+  "services/native-runtime/native-workspace-export-recovery.ts",
+  "services/native-runtime/native-workspace-export-retry.ts",
   "services/native-runtime/native-workspace-finalizer.ts",
   "services/native-runtime/obsolete-policy-reviews.ts",
-  "services/native-runtime/paperclip-runner-tool-authority.ts",
+  "services/native-runtime/paperclip-control-plane-port.ts",
   "services/native-runtime/runner-prp-coordinator.ts",
   "services/native-runtime/runner-semantic-authority.ts",
   "services/native-runtime/status-decision-committer.ts",
@@ -154,6 +168,8 @@ const UPSTREAM_BASELINE_WITHOUT_VISIBILITY_FILTER = [
   "services/runner-goals.ts",
   "services/secret-proposals.ts",
   "services/secrets.ts",
+  "services/slack-board-messages.ts",
+  "services/slack-conversation-state.ts",
   "services/task-plan-context.ts",
   "services/task-watchdog-scope.ts",
   "services/tool-access-policy.ts",

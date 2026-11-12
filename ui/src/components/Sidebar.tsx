@@ -20,6 +20,7 @@ import {
   // --- RK9 Custom: Risks nav ---
   Shield,
   MessagesSquare,
+  MessageCircle,
   GanttChartSquare,
   LayoutGrid,
   Users,
@@ -31,7 +32,6 @@ import { SidebarNavItem } from "./SidebarNavItem";
 import { SidebarAgents } from "./SidebarAgents";
 import { SidebarProjects } from "./SidebarProjects";
 import { SidebarStarredProjects } from "./SidebarStarredProjects";
-import { SidebarAgentChats } from "./SidebarAgentChats";
 import { useAgentChatEnabled } from "@/hooks/useAgentChatEnabled";
 import { SidebarRecentTasks } from "./SidebarRecentTasks";
 import { useDialogActions } from "../context/DialogContext";
@@ -177,6 +177,7 @@ export function Sidebar({ children }: { children?: ReactNode }) {
             badgeTone={inboxBadge.failedRuns > 0 ? "danger" : "default"}
             alert={inboxBadge.failedRuns > 0}
           />
+          {agentChatEnabled && <SidebarNavItem to="/chats" label="Chat" icon={MessageCircle} />}
           {showDecisions ? (
             <SidebarNavItem
               to="/decisions"
@@ -252,7 +253,6 @@ export function Sidebar({ children }: { children?: ReactNode }) {
         ) : null}
 
         {children}
-        {agentChatEnabled && !children && <SidebarAgentChats />}
 
         {streamlinedUiEnabled ? (
           <SidebarRecentTasks companyId={selectedCompanyId} liveIssueIds={liveIssueIds} />

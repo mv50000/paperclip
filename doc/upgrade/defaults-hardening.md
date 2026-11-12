@@ -517,6 +517,78 @@ SET experimental = experimental || '{"enableNativeRunner": false}'::jsonb
 WHERE NOT (experimental ? 'enableNativeRunner');
 ```
 
+## Porras v2026.1005.0 (RK9-699)
+
+### Full-auto-oletukset (#13686, #13693)
+
+Upstream antaa kaikille legacy-harnesseille ja yhdistetyille työkaluille saman full-auto-oletuksen kuin natiivirunnerille.
+Prodissa elävät adapterit ovat vain `claude_local` (26) ja `human_proxy` (19), mitattu 11.11.2026 prod-kannasta (vain luku).
+
+- `claude_local` paikallisesti: `dangerouslySkipPermissions` oli jo oletuksena `true`, joten paikallinen ajo ei muutu.
+  `--disallowedTools` välittyy edelleen (`execute.ts`, `buildClaudeArgs`); kuudella agentilla se on asetettu.
+- Etäkohteen kiinteä `--allowedTools`-lista poistui. Fork ei aja `claude_local`ia etäkohteissa.
+- `IS_SANDBOX=1` asetetaan vain hallitulle sandbox-kohteelle, ei hostiajolle.
+- Codex-, OpenCode- ja Gemini-oletukset koskevat adaptereita, joita prodissa ei ole.
+
+### Clauden CLI:n minimiversio
+
+`minimumClaudeCliVersionForModel` estää ajon, jos CLI on liian vanha mallille: `claude-opus-5-5` vaatii version 2.1.280.
+Prodin `/usr/bin/claude` on 2.1.319, ja agenttien mallit ovat `claude-opus-5-5` (17) ja `claude-sonnet-5-5` (9). Kovennusta ei tarvita.
+Jos CLI päivitetään alaspäin, opus-agentit epäonnistuvat ennen ajoa selkeällä virheellä.
+
+### `experimental`-avaimet
+
+| Avain | Oletus | Vaikutus forkissa |
+|---|---|---|
+| `enableMcpAggregators` | aina `true` (tallennettu arvo ohitetaan) | Apps-katalogi näyttää MCP-aggregaattoriliittimet. Yhteys vaatii boardin konfiguraation ja tunnukset, joten pelkkä oletus ei avaa mitään. Ajonaikaista vaikutusta ei todennettu (todentamatta, ks. `routes/tool-access.ts`). |
+| `enableMemoryConnectors` | `false` | Muistiliittimet piilossa. Ei toimenpidettä. |
+| `keyboardShortcuts` | poistui (0284 lisää, 0289 poistaa sarakkeen) | UI-osio poistui; ei dataa. |
+| `enableNativeRunner` | prodissa jo `false` | Pre-deploy-SQL:ää ei tarvita (prodin `experimental`-rivi 11.11.2026). |
+
+### @mention ei enää herätä agenttia (#14577)
+
+Upstream teki agentin maininnasta pelkän kontekstin. Kommentti tai issue-päivitys, joka mainitsee agentin, ei herätä sitä,
+ja heartbeat hylkää vanhan `issue_comment_mentioned`-syyn ennen ajon luontia. Assignee herää kommentista kuten ennen.
+Prodissa mention-herätteitä oli 2 kpl 35 päivässä, molemmat agenttien lähettämiä. Mittaus 11.11.2026 kyselyllä `select count(*) from agent_wakeup_requests where reason = 'issue_comment_mentioned' and created_at > now() - interval '35 days'` (vain luku). Päätös (RK9-699, PR #295): hyväksytään, koska käyttö on vähäistä ja upstream hylkää herätteen joka tapauksessa.
+Agentin herättäminen toiselle issuelle tehdään osoituksella tai review-pyynnöllä. Forkin voice action sovitettiin samaan malliin.
+
+### Recovery: legacy disposition repair
+
+Upstream korvasi onnistuneen ajon jatkopolun legacy disposition repairilla (`reconcileLegacyContinuation`).
+Repair luo enintään 2 uutta ajoa ja siirtää issuen sitten `blocked`-tilaan. Se ei ohita kommenttiherätteitä, `todo`-issueita
+eikä forkin `recoveryStrictInProgressOnly`-asetusta (prodissa `true`).
+
+Fork pitää masterin käytöksen (RK9 Custom, RK9-87 ja RK9-699):
+
+- Ajon finalisointi kutsuu samoja funktioita kuin master, `handleRunLivenessContinuation`ia ja `handleSuccessfulRunHandoff`ia (1 yritys), mutta review-path ajetaan ensin (ks. alla, kohta 6).
+  Vakio `RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false` (`services/heartbeat.ts`) ohittaa upstreamin repairin.
+- Stranded-sweep ei vie `todo`- eikä `in_progress`-issueita legacy-lohkoon. `todo` menee forkin todo-haaraan
+  (strict-tilan ohitus, onnistuneen ajon ohitus, handed-back-dispatch), `in_progress` handoff-eskalaatioon ja RK9-87-ohitukseen.
+
+Recoveryn siirto upstreamin malliin tehdään erikseen (RK9-702), kun upstreamin käytös on arvioitu.
+
+### Listaamattomat käytösmuutokset (verifier 12.11.2026)
+
+Orkestroijan riippumaton verifier löysi headista `4ad8fc1fc` nämä upstream-muutokset. Ne eivät olleet yllä olevissa kohdissa.
+
+1. **Uusintojen jälkeen `blocked` (upstream #14046, #13888).** Recovery siirtää jumissa olevan `in_progress`- tai `in_review`-issuen
+   tilaan `blocked` ja kirjoittaa "No live execution path" -kommentin, kun epäonnistuneen ajon rajatut uusinnat on käytetty eikä
+   aktiivista suorituspolkua ole (`server/src/services/recovery/service.ts`, `retryExhausted`-haarat in_progress- ja review-kaistalla).
+   `recoveryStrictInProgressOnly` kattaa vain `todo`n. Orkestroijan mittaama yläraja prodissa 12.11.2026: 8 agentille osoitettua issueta
+   (AUR-20, OLL-557, QUA-1207, QUA-1261, QUA-1262, RK9-198, RK9-619, SAA-2129). Hyväksytty: tilamuutos on palautettavissa, eikä se koske ajossa olevia järjestelmiä.
+2. **Plan-only-poikkeus kapeni.** Poikkeuksen antaa vain `workMode = "planning"` tai tallennettu plan-revisio (`server/src/services/run-liveness.ts`, `planExempt`).
+   Tehtävä, jonka nimi viittaa suunnitteluun tai raporttiin, voi saada enintään 2 liveness-jatkoajoa (`handleRunLivenessContinuation`, `services/heartbeat.ts`).
+   Ajomäärää seurataan noston jälkeen.
+3. **Restartin keskeyttämä handoff ajetaan uudelleen (upstream #14028).** Restartin keskeyttämä korjaava handoff-ajo saa yhden uusinnan,
+   joten restartin jälkeen tulee muutama ylimääräinen ajo.
+4. **`PAPERCLIP_WAKE_PAYLOAD_JSON` ei enää asetu (upstream #13891).** Skills-releaset v0 ja v7-roster neuvovat yhä lukemaan sen. API-varareitti
+   (`heartbeat-context` ja kommenttihaku) toimii.
+5. **Peruutetun ajon token.** Peruutetun ajon agenttitoken saa vastauksen 403 `agent_run_cancelled` kaikista kirjoittavista pyynnöistä
+   (`server/src/middleware/auth.ts`, `agentRunWritesRevoked`). Lukupyynnöt toimivat.
+6. **Finalisoinnin järjestys.** Ei-natiivin ajon finalisointi kutsuu nyt järjestyksessä `handleIssueReviewPathDisposition`, `handleRunLivenessContinuation`
+   ja `handleSuccessfulRunHandoff`. Masterissa liveness oli ensin. Funktiot ovat samat kuin masterissa, ja review-path koskee vain `in_review`-issueita.
+   Upstreamin legacy disposition repair ei aja (`RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false`).
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on

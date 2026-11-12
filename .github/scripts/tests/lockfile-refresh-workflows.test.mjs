@@ -7,9 +7,8 @@ const workflows = [
   '.github/workflows/refresh-lockfile.yml',
   '.github/workflows/pr-trusted.yml',
   '.github/workflows/docker.yml',
-  '.github/workflows/docker-cloud.yml',
 ].filter(
-  // --- RK9 Custom (RK9-317): pr-trusted.yml and docker-cloud.yml are upstream-only and removed
+  // --- RK9 Custom (RK9-317): pr-trusted.yml is upstream-only and removed
   // from the fork; check the workflows the fork keeps. ---
   (workflow) => existsSync(workflow),
 );

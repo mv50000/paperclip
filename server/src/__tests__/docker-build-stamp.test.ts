@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -21,12 +21,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dockerfile = readFileSync(path.join(repoRoot, "Dockerfile"), "utf8");
 const workflow = readFileSync(path.join(repoRoot, ".github", "workflows", "docker.yml"), "utf8");
-// --- RK9 Custom (RK9-317): docker-cloud.yml is upstream-only and removed from the fork
-// (doc/CI-RUNNER.md). Checks that need it skip when it is absent. ---
-const cloudWorkflowPath = path.join(repoRoot, ".github", "workflows", "docker-cloud.yml");
-const hasCloudWorkflow = existsSync(cloudWorkflowPath);
-const cloudWorkflow = hasCloudWorkflow ? readFileSync(cloudWorkflowPath, "utf8") : "";
-// --- /RK9 Custom ---
+const previewWorkflow = readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8");
 
 /**
  * Return the text of the Dockerfile stage that starts at the named target.
@@ -34,7 +29,7 @@ const cloudWorkflow = hasCloudWorkflow ? readFileSync(cloudWorkflowPath, "utf8")
  */
 function stageBody(source: string, stageName: string): string {
   const froms = [...source.matchAll(/^FROM .*$/gm)];
-  const startIdx = froms.findIndex((m) => new RegExp(`\\bAS ${stageName}\\b`).test(m[0]));
+  const startIdx = froms.findIndex((m) => new RegExp(`\\bAS ${stageName}\\s*$`).test(m[0]));
   expect(startIdx, `Dockerfile must declare a '${stageName}' stage`).toBeGreaterThanOrEqual(0);
   const start = froms[startIdx].index ?? 0;
   const end = froms[startIdx + 1]?.index ?? source.length;
@@ -73,12 +68,11 @@ describe("docker build-stamp wiring", () => {
     ).toBeLessThan(serverBuildIdx);
   });
 
-  it("passes PAPERCLIP_BUILD_COMMIT as a build-arg for both image targets", () => {
-    const argLines = [...`${workflow}\n${cloudWorkflow}`.matchAll(/^\s*PAPERCLIP_BUILD_COMMIT=.*$/gm)];
-    expect(
-      argLines.length,
-      "the docker workflow must pass PAPERCLIP_BUILD_COMMIT for the production and cloud builds",
-    ).toBeGreaterThanOrEqual(hasCloudWorkflow ? 2 : 1);
+  it("passes PAPERCLIP_BUILD_COMMIT as a build-arg for standard and explicit preview builds", () => {
+    for (const [name, source] of [["standard", workflow], ["preview", previewWorkflow]]) {
+      expect(source, `${name} must pass the source commit into the image build`)
+        .toMatch(/^\s*PAPERCLIP_BUILD_COMMIT=\$\{\{ (?:github.sha|inputs.source_ref) \}\}$/m);
+    }
   });
 });
 
@@ -108,5 +102,25 @@ describe("Docker Rust dependency cache", () => {
     }
     expect(native).toContain("cargo build --release --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd");
     expect(stageBody(dockerfile, "build")).toContain("FROM runner-build AS build");
+  });
+});
+
+
+describe("Cloud remote provider pack", () => {
+  it("ships a build-owned pack without provisioning Grok on the controller", () => {
+    const pack = stageBody(dockerfile, "cloud-provider-pack");
+    const cloud = stageBody(dockerfile, "cloud");
+    expect(pack).toContain('PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}"');
+    expect(pack).toContain("build-provider-pack.mjs /provider-pack");
+    expect(pack).toContain('if [ -n "${PAPERCLIP_BUILD_COMMIT}" ]; then');
+    expect(pack).toContain("mkdir -p /provider-pack");
+    expect(pack).toContain("Skipping remote provider pack");
+    expect(cloud).toContain("--from=cloud-provider-pack /provider-pack /opt/paperclip-runner/provider-pack");
+    expect(cloud).not.toContain("--chown=node:node --from=cloud-provider-pack");
+    expect(cloud).toContain("chmod -R a+rX /opt/paperclip-runner/provider-pack");
+    expect(cloud).toContain("gosu 65534:65534 node");
+    expect(cloud).toContain("Object.values(manifest.payload.artifacts)");
+    expect(cloud).toContain("PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH=/opt/paperclip-runner/provider-pack");
+    expect(dockerfile).not.toContain("provision-grok.mjs");
   });
 });

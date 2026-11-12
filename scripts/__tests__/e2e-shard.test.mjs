@@ -17,7 +17,7 @@ const prCallerWorkflow = path.join(repoRoot, ".github", "workflows", "pr.yml");
 const trustedPrWorkflowPath = ".github/workflows/pr-trusted.yml";
 const trustedPrWorkflow = path.join(repoRoot, trustedPrWorkflowPath);
 
-const SHARD_COUNT = 3;
+const SHARD_COUNT = 8;
 
 function runShard(args) {
   const result = spawnSync(process.execPath, [script, ...args], { cwd: repoRoot, encoding: "utf8" });
@@ -323,24 +323,26 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", { skip: !has
     "resolution-only policy must not restore or save a dependency store",
   );
   assert.match(
-    workflow,
+    policy,
     /pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile/,
     "the policy job must resolve the complete merge tree without rewriting platform metadata",
   );
-  assert.match(
-    workflow,
-    /cmp -s "\$RUNNER_TEMP\/pnpm-lock\.before\.yaml" pnpm-lock\.yaml/,
-    "the policy job must upload a lockfile only when regeneration changed it",
-  );
 
-  const restoreSteps = workflow.match(
-    /- name: Restore regenerated PR lockfile \(if policy uploaded one\)\n        if: needs\.policy\.outputs\.lockfile_regenerated == '1'/g,
+  // Test lanes no longer wait on a policy-job artifact: each install step
+  // resolves a stale lockfile inline, so a manifest-changing or stacked PR
+  // still installs while the policy job validates resolution in parallel.
+  const fallbackInstalls = workflow.match(
+    /if ! pnpm install --frozen-lockfile; then\n[\s\S]{0,240}?pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile\n\s+pnpm install --frozen-lockfile\n\s+fi/g,
   ) ?? [];
-  assert.equal(restoreSteps.length, 7, "every downstream install job must restore a required regenerated artifact");
+  assert.equal(
+    fallbackInstalls.length,
+    7,
+    "every downstream install job must resolve a stale lockfile inline",
+  );
   assert.doesNotMatch(
     workflow,
-    /- name: Restore regenerated PR lockfile \(if policy uploaded one\)[\s\S]{0,220}continue-on-error:/,
-    "a missing artifact must fail after the policy job says it uploaded one",
+    /Restore regenerated PR lockfile|lockfile_regenerated|name: pr-lockfile/,
+    "the policy lockfile artifact chain must stay removed; it put the policy job on every lane's critical path",
   );
 });
 
@@ -389,15 +391,19 @@ test("pr.yml keeps a stable aggregate check named e2e over the shard matrix", ()
     shardLabel: match.groups.shardLabel,
   }));
 
-  assert.equal(matrixEntries.length, SHARD_COUNT, "the shard matrix must define exactly SHARD_COUNT entries");
+  // RK9 Custom (RK9-699): upstream 1005 raised its trusted-workflow SHARD_COUNT to 8; the fork
+  // pr.yml keeps its own matrix size, so the matrix is checked against its own declared count.
+  const forkShardCount = matrixEntries[0]?.shardCount ?? 0;
+  assert.ok(forkShardCount > 0, "the shard matrix must declare a shard_count");
+  assert.equal(matrixEntries.length, forkShardCount, "the shard matrix must define exactly shard_count entries");
   assert.deepEqual(
     matrixEntries.map((entry) => entry.shardIndex).sort((a, b) => a - b),
-    Array.from({ length: SHARD_COUNT }, (_, index) => index),
+    Array.from({ length: forkShardCount }, (_, index) => index),
     "the shard matrix must define each shard index exactly once",
   );
   for (const entry of matrixEntries) {
-    assert.equal(entry.shardCount, SHARD_COUNT, "each shard matrix entry must use the same SHARD_COUNT");
-    assert.equal(entry.shardLabel, `${entry.shardIndex + 1}/${SHARD_COUNT}`, "each shard label must match its index");
+    assert.equal(entry.shardCount, forkShardCount, "each shard matrix entry must use the same shard_count");
+    assert.equal(entry.shardLabel, `${entry.shardIndex + 1}/${forkShardCount}`, "each shard label must match its index");
   }
 });
 
