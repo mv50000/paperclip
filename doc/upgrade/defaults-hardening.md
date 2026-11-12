@@ -560,12 +560,34 @@ eikä forkin `recoveryStrictInProgressOnly`-asetusta (prodissa `true`).
 
 Fork pitää masterin käytöksen (RK9 Custom, RK9-87 ja RK9-699):
 
-- Ajon finalisointi kutsuu masterin tavoin `handleRunLivenessContinuation`ia ja `handleSuccessfulRunHandoff`ia (1 yritys).
+- Ajon finalisointi kutsuu samoja funktioita kuin master, `handleRunLivenessContinuation`ia ja `handleSuccessfulRunHandoff`ia (1 yritys), mutta review-path ajetaan ensin (ks. alla, kohta 6).
   Vakio `RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false` (`services/heartbeat.ts`) ohittaa upstreamin repairin.
 - Stranded-sweep ei vie `todo`- eikä `in_progress`-issueita legacy-lohkoon. `todo` menee forkin todo-haaraan
   (strict-tilan ohitus, onnistuneen ajon ohitus, handed-back-dispatch), `in_progress` handoff-eskalaatioon ja RK9-87-ohitukseen.
 
 Recoveryn siirto upstreamin malliin tehdään erikseen (RK9-702), kun upstreamin käytös on arvioitu.
+
+### Listaamattomat käytösmuutokset (verifier 12.11.2026)
+
+Orkestroijan riippumaton verifier löysi headista `4ad8fc1fc` nämä upstream-muutokset. Ne eivät olleet yllä olevissa kohdissa.
+
+1. **Uusintojen jälkeen `blocked` (upstream #14046, #13888).** Recovery siirtää jumissa olevan `in_progress`- tai `in_review`-issuen
+   tilaan `blocked` ja kirjoittaa "No live execution path" -kommentin, kun epäonnistuneen ajon rajatut uusinnat on käytetty eikä
+   aktiivista suorituspolkua ole (`server/src/services/recovery/service.ts`, `retryExhausted`-haarat in_progress- ja review-kaistalla).
+   `recoveryStrictInProgressOnly` kattaa vain `todo`n. Orkestroijan mittaama yläraja prodissa 12.11.2026: 8 agentille osoitettua issueta
+   (AUR-20, OLL-557, QUA-1207, QUA-1261, QUA-1262, RK9-198, RK9-619, SAA-2129). Hyväksytty: tilamuutos on palautettavissa, eikä se koske ajossa olevia järjestelmiä.
+2. **Plan-only-poikkeus kapeni.** Poikkeuksen antaa vain `workMode = "planning"` tai tallennettu plan-revisio (`server/src/services/run-liveness.ts`, `planExempt`).
+   Tehtävä, jonka nimi viittaa suunnitteluun tai raporttiin, voi saada enintään 2 liveness-jatkoajoa (`handleRunLivenessContinuation`, `services/heartbeat.ts`).
+   Ajomäärää seurataan noston jälkeen.
+3. **Restartin keskeyttämä handoff ajetaan uudelleen (upstream #14028).** Restartin keskeyttämä korjaava handoff-ajo saa yhden uusinnan,
+   joten restartin jälkeen tulee muutama ylimääräinen ajo.
+4. **`PAPERCLIP_WAKE_PAYLOAD_JSON` ei enää asetu (upstream #13891).** Skills-releaset v0 ja v7-roster neuvovat yhä lukemaan sen. API-varareitti
+   (`heartbeat-context` ja kommenttihaku) toimii.
+5. **Peruutetun ajon token.** Peruutetun ajon agenttitoken saa vastauksen 403 `agent_run_cancelled` kaikista kirjoittavista pyynnöistä
+   (`server/src/middleware/auth.ts`, `agentRunWritesRevoked`). Lukupyynnöt toimivat.
+6. **Finalisoinnin järjestys.** Ei-natiivin ajon finalisointi kutsuu nyt järjestyksessä `handleIssueReviewPathDisposition`, `handleRunLivenessContinuation`
+   ja `handleSuccessfulRunHandoff`. Masterissa liveness oli ensin. Funktiot ovat samat kuin masterissa, ja review-path koskee vain `in_review`-issueita.
+   Upstreamin legacy disposition repair ei aja (`RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false`).
 
 ## Preflight — tarkistuslista RK9-307:lle
 

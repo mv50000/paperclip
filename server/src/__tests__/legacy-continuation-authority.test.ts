@@ -248,7 +248,8 @@ describe("legacy continuation persisted authority", () => {
     const f = await fixture();
     await f.createRecovery().reconcileStrandedAssignedIssues({ companyId: f.companyId });
     // --- RK9 Custom (RK9-87, RK9-699): the sweep skips an in_progress issue whose latest run
-    // succeeded. The legacy repair still runs at run finalization (reconcileLegacyContinuation). ---
+    // succeeded. Run finalization does not run the legacy repair either
+    // (RK9_LEGACY_DISPOSITION_REPAIR_AT_FINALIZE = false); only direct calls reach it. ---
     expect(await f.runs()).toHaveLength(1);
     // --- /RK9 Custom ---
   });
