@@ -305,7 +305,8 @@ write_runner_env() {
     {
       echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook"
       # Node mitoittaa heapin VM:n muistista, ei slotin cgroup-rajasta (policy-note, 4.8.2026).
-      echo "NODE_OPTIONS=--max-old-space-size=4096"
+      # Heap jää runner-unitin 4 G:n katon alle (RK9-782: builder-02:ssa on 6 G muistia).
+      echo "NODE_OPTIONS=--max-old-space-size=3072"
       # Workflow ohittaa playwright --with-deps -asennuksen (vaatisi sudon).
       echo "PAPERCLIP_CI_NO_SUDO=1"
       if [ -n "$docker_host" ]; then echo "DOCKER_HOST=$docker_host"; fi
@@ -399,8 +400,8 @@ EOF
       echo "Slice=ci-runners.slice"
     fi
     echo "Nice=10"
-    echo "MemoryHigh=6G"
-    echo "MemoryMax=7G"
+    echo "MemoryHigh=3584M"
+    echo "MemoryMax=4G"
     echo "Restart=on-failure"
     echo "RestartSec=60"
     # Yhden prosessin OOM-kill ei saa pysäyttää koko runner-palvelua (RK9-216).
