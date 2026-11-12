@@ -903,6 +903,9 @@ Fork-koodin sovitukset (ei konfliktia):
 - Issue-näkyvyys (RK9-707:n todo-tapaukset): `visibleIssueCondition()` lisättiin forkin kyselyihin tiedostoissa `routes/github-webhooks.ts`, `agent-metrics.ts`, `email/escalation.ts`, `email/inbound-router.ts`, `risk-incidents.ts`, `risk-monitors.ts`, `rk9-coord-inbox.ts`, `rk9-coord-presence.ts` ja `rk9-voice-action-deps.ts`. LEFT JOINeissa ehto on ON-lausekkeessa. `rk9-run-taint.ts` jää tarkoituksella ilman ehtoa: taint on turvaportti, ja piilotettu issue taintaa yhä ajon (fail-safe). Testit: `nosto-private-issue-visibility-leaks-rk9.test.ts` (10 tapausta). Käsin tehty grep (`schema.issues`, `const t = issues`, taulu apufunktiolle, `.insert(issues)`, yksi `hiddenAt` piilottaa muut): ei uusia vuotoja forkin tiedostoissa.
 - `risk-monitors.ts`: 0316 teki `cost_events.agent_id`:stä nullattavan; agentittomat rivit ohitetaan.
 - `agent-metrics.ts`: `sql`-templaatti saa ISO-merkkijonon raa'an `Date`n sijaan (postgres-js heitti `ERR_INVALID_ARG_TYPE`).
+- Lifecycle (paused + preparing): forkin pausettujen agenttien piilotus ja assignee-esto koskevat vain pidossa olevia agentteja (`rk9-agent-pause.ts`, `agents.ts`, `routes/issues.ts`). Riskin `pause_agent` kutsuu `createAgentLifecycle(db).pauseAgent(id, "system")`, jotta board-resume toimii. Ks. `defaults-hardening.md`.
+- Tunnettu käytös 1 (ei korjattu): kun yritys on pausella claim-hetkellä, ajo merkitään `cancelled` mutta wakeup `skipped` (ei `cancelled`). Sama kuin masterilla.
+- Tunnettu käytös 2 (ei korjattu): sähköpostivastaus piilotetun issuen ketjuun ei löydä issueta ja kulkee normaalin reitityksen kautta (`email/inbound-router.ts`). Piilotettu issue ei vuoda, mutta vastaus voi luoda uuden issuen.
 
 Testisovitukset:
 
@@ -915,7 +918,7 @@ Testisovitukset:
 - `heartbeat/queue.test.ts`, `heartbeat/scheduling.test.ts`: avoimet portit (`__tests__/helpers/rk9-heartbeat-gates.ts`) ja `skipWhenIdle: false`.
 - `packages/adapters/gemini-local/src/server/parse.test.ts`: upstream #14991 laskee `inputTokens`in ilman välimuistitokeneita (80, ei 100).
 - `ui/src/lib/issue-execution-policy.test.ts`: fork palauttaa aina `outcomeRequirements`-kentän (SEC-91, kuten masterilla).
-- Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10). Lisätty `fork-tests.txt`:iin.
+- Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10), `rk9-agent-pause.test.ts` (lifecycle-pito ja riskin pause/resume). Lisätty `fork-tests.txt`:iin.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

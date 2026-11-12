@@ -710,6 +710,13 @@ Lukitsee: `budgets-boundary-rk9.test.ts` (100 %-raja, 99,99 ja 100,01 senttiä, 
 Upstream luo jokaisen uuden agentin (myös hyväksytyn hiren) tilaan `status: "paused"`, `lifecycleState: "preparing"`, ja lifecycle-worker vie sen valmiiksi.
 Forkin sääntö `52b995085` piilottaa pausetut agentit listasta ja hylkää ne assigneena. RK9-701 rajaa säännön pitoon (`server/src/services/rk9-agent-pause.ts`): pausettu agentti, jonka `lifecycleState` on `preparing`, `verifying` tai `resuming`, näkyy listassa ja on assignoitavissa.
 Muut pausetut agentit pysyvät piilossa (fail closed). Lukitsee: `rk9-agent-pause.test.ts`.
+Pito voittaa valmistelun: jos pausetulla agentilla on yksikin `lifecycleHolds`-pito, agentti on piilossa ja hylätään assigneena, vaikka `lifecycleState` olisi `preparing`. Sama ehto pätee `risk-monitors.ts`:n kuolleen agentin hälytykseen.
+
+### Riskin `pause_agent` kulkee lifecyclen kautta
+
+Ennen 1023:a riski-playbookin `pause_agent` kirjoitti suoraan `status: "paused"`. 1023:ssa board-resume poistaa vain pitoja, joten suora kirjoitus ilman pitoa teki resumesta tyhjän toimen.
+RK9-701 kutsuu nyt `createAgentLifecycle(db).pauseAgent(id, "system")` (`server/src/services/risk-incidents.ts`). Agentti saa pidon `system`, ja board-resume (`reason: "user"`) poistaa sen.
+Käytösmuutos: `pending_approval`-, `terminated`- tai `rejected`-tilassa olevaa agenttia ei voi enää pausettaa playbookilla. Toimenpide kirjataan tulokseksi `success: false`. Lukitsee: `rk9-agent-pause.test.ts`.
 
 ### Muut käytösmuutokset
 
