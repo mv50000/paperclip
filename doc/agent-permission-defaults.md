@@ -1,5 +1,9 @@
 # Agent permission defaults
 
+> **RK9 fork (RK9-700):** the fork withholds all 14 direct grants listed below. A new standard agent on the fork gets no default grant rows.
+> An agent that joins through an invitation still gets `tasks:assign`. An agent can create an unassigned issue or subtask without a grant.
+> The board grants other keys explicitly. See `doc/upgrade/defaults-hardening.md`, section "Porras v2026.1012.0".
+
 This document describes the server defaults for an ordinary, standard trust agent. An agent must belong to the same company and be active where the action requires active membership. A responsible user's authority, project or run trust policy, scope rules, and approval gates can narrow these defaults.
 
 ## Granted by default

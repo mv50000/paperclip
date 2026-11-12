@@ -355,4 +355,29 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
     expect(deniedOutsideScope.status).toBe(403);
     expect(deniedOutsideScope.body.error).toContain("private");
   });
+
+  it("lets an agent without a grant create unassigned issues and subtasks after 1012 (RK9-700)", async () => {
+    // RK9 Custom (RK9-700): upstream v2026.1012 (#14870) runs the tasks:assign check for every
+    // agent-created issue. The fork rule (RK9-313) needs a grant only when the create assigns someone.
+    const company = await seedCompany(db, "Unassigned create");
+    const actorAgent = await seedAgent(db, company.id);
+    const peerAgent = await seedAgent(db, company.id);
+    const app = await createApp(db, agentActor(company.id, actorAgent.id));
+
+    const unassigned = await request(app)
+      .post(`/api/companies/${company.id}/issues`)
+      .send({ title: "Unassigned by an agent without a grant" });
+    expect(unassigned.status, JSON.stringify(unassigned.body)).toBe(201);
+
+    const child = await request(app)
+      .post(`/api/issues/${unassigned.body.id}/children`)
+      .send({ title: "Unassigned subtask" });
+    expect(child.status, JSON.stringify(child.body)).toBe(201);
+
+    const assignedChild = await request(app)
+      .post(`/api/issues/${unassigned.body.id}/children`)
+      .send({ title: "Assigned subtask", assigneeAgentId: peerAgent.id });
+    expect(assignedChild.status, JSON.stringify(assignedChild.body)).toBe(403);
+    expect(assignedChild.body.error).toContain("tasks:assign");
+  });
 });

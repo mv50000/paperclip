@@ -53,6 +53,13 @@ export function agentJoinGrantsFromDefaults(
       grants.push({ permissionKey, scope: newStandardAgentGrantScope(permissionKey, agentId) });
     }
   }
+  // --- RK9 Custom (RK9-700): before 1012 an invite-joined agent always got an unscoped
+  // tasks:assign (agentJoinGrantsFromDefaults in routes/access.ts). The fork default list above is
+  // empty, so the invite path keeps that grant explicitly. ---
+  if (!grants.some((grant) => grant.permissionKey === "tasks:assign")) {
+    grants.push({ permissionKey: "tasks:assign", scope: null });
+  }
+  // --- end RK9 Custom ---
   return grants;
 }
 

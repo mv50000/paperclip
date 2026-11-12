@@ -19,24 +19,15 @@ const UPSTREAM_NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS = [
 ] as const satisfies readonly PermissionKey[];
 
 // --- RK9 Custom (RK9-700): upstream v2026.1012 (#15283) gives every new standard agent 14 direct
-// grants. Nine of them widen what the agent can change without an approval: agents:configure (peer
-// agent config), tasks:assign / tasks:assign_scope / tasks:manage_active_checkouts (bypasses the
+// grants at create, approval activation and invite join. Several widen what the agent can do without
+// an approval: agents:configure (peer agent config), tasks:assign / tasks:assign_scope (bypasses the
 // RK9-313 task-assignment rule), tools:use (an unscoped grant passes the tool-profile check),
-// tools:manage_connections / tools:manage_profiles / tools:manage_runtime and inbox:manage.
-// The fork keeps new agents at the pre-1012 level for those keys: they come only from an explicit
-// grant by the board. The remaining keys only suggest changes or read audit data.
+// agents:suggest-changes (reads every peer's config and instructions), skills:create (direct skill
+// changes). A partial set also changes self-edit decisions (suggest-changes without configure turns
+// allow_self into deny_missing_consent). The fork therefore keeps new agents at the level of existing
+// agents: no default direct grants. The board grants keys explicitly per agent.
 // See doc/upgrade/defaults-hardening.md, "Porras v2026.1012.0". ---
-export const RK9_WITHHELD_NEW_AGENT_GRANT_KEYS: readonly PermissionKey[] = [
-  "agents:configure",
-  "tools:manage_connections",
-  "tools:manage_profiles",
-  "tools:use",
-  "tools:manage_runtime",
-  "inbox:manage",
-  "tasks:assign",
-  "tasks:assign_scope",
-  "tasks:manage_active_checkouts",
-];
+export const RK9_WITHHELD_NEW_AGENT_GRANT_KEYS: readonly PermissionKey[] = UPSTREAM_NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS;
 
 export const NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS: readonly PermissionKey[] =
   UPSTREAM_NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.filter(

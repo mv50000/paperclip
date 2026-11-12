@@ -842,8 +842,8 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 4e81bed92 v2
 | `server/package.json`, `pnpm-lock.yaml` | upstreamin versiot + forkin `@aws-sdk/client-sesv2`, `mailparser`, `@types/mailparser`; lockfile upstreamista + `pnpm install`, forkin SES- ja mailparser-versiot pinnattu masterin versioihin (3.1141.0, 3.9.28, 3.4.6). `tsx` ja RK9 Adsin `zod` deduplikoituivat upstreamin versioihin (4.23.15, 4.6.5). |
 | `server/src/services/approvals.ts` | upstream siirsi hyväksynnän ja hylkäyksen transaktioon; forkin `approval.decided`-live-event lähtee commitin jälkeen |
 | `server/src/services/tool-access-policy.ts` | RK9-319:n taint-portti käärii upstreamin välimuistillisen `decide`n; `decideLoaded` saa erän välimuistin parametrina |
-| `server/src/services/agents.ts` | molemmat importit; upstreamin oletusgrantit tulevat forkin suodatetusta listasta (ks. alla) |
-| `server/src/services/agent-permissions.ts` (ei konfliktia) | RK9 Custom: `NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS` jättää pois `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS`in yhdeksän avainta (RK9-313, ks. `defaults-hardening.md`) |
+| `server/src/services/agents.ts` | molemmat importit; oletusgrantit tulevat forkin tyhjästä listasta, tyhjä insert ohitetaan (luonti ja aktivointi) |
+| `server/src/services/agent-permissions.ts`, `invite-grants.ts`, `authorization.ts` (ei konfliktia) | RK9 Custom: `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS` jättää pois kaikki 14 upstreamin oletusavainta; kutsulla liittyvä agentti saa yhä `tasks:assign`in; assignoimaton issue ja subtask eivät vaadi granttia (#14870 + RK9-313). Ks. `defaults-hardening.md`. |
 | `server/src/onboarding-assets/ceo/AGENTS.md`, `default/AGENTS.md`, `services/default-agent-instructions.ts` | forkin versiot (CEO:n neljän tiedoston paketti, CTO-paketti, forkin default-ohje); upstreamin `first-task/chief-of-staff` hyväksytty |
 | `server/src/middleware/auth.ts` | upstreamin `database-retry`-import ja re-export + forkin coord-token-import |
 | `packages/adapters/claude-local/src/index.ts`, `server/src/__tests__/adapter-models.test.ts` | upstreamin mallijärjestys (#14917); forkin "Opus 5.5 ensin" oli vain testisovitus |
@@ -856,7 +856,9 @@ Testisovitukset:
 
 - `hire-permission-default-rk9.test.ts`: siivous poistaa `principal_permission_grants`-rivit, koska #15283 kirjoittaa niitä agentin luonnissa.
 - `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-opus-4-8`:aa, koska `claude-sonnet-5-5` vaatii nyt CLI:n ≥ 2.1.284.
-- `agent-default-configure-grants.test.ts`: odottaa forkin viittä oletusavainta; yhdeksän pois jätettyä puuttuvat, ja vertaisagentin konfiguraatio kielletään. Lisätty `fork-tests.txt`:iin.
+- `agent-default-configure-grants.test.ts`: odottaa tyhjää oletuslistaa; kaikki 14 avainta puuttuvat, kutsu antaa vain `tasks:assign`in, ja vertaisagentin konfiguraatio kielletään syyllä `deny_no_grant`. Lisätty `fork-tests.txt`:iin.
+- `invite-join-grants.test.ts`: kutsun oletusgrantit sisältävät `tasks:assign`in (forkin käytös ennen 1012:ta).
+- `permissions-upgrade-boundary-routes.test.ts` (fork-testi): uusi testi, jossa agentti ilman granttia luo assignoimattoman issuen ja subtaskin (201) mutta ei assignoitua subtaskia vertaiselle (403).
 - `agent-skills-routes.test.ts`: CEO saa forkin neljän tiedoston paketin, muut roolit forkin default-ohjeen.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä

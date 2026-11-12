@@ -596,18 +596,36 @@ Mittaukset 12.11.2026 prod-kannasta (vain luku, `sudo -u paperclip psql`). Eläv
 ### Uusien agenttien oletusgrantit (#15283) — kovennettu
 
 Upstream antaa jokaiselle uudelle standard-trust-agentille 14 suoraa granttia luonnissa, hyväksynnän aktivoinnissa ja kutsun hyväksynnässä.
-Yhdeksän niistä laajentaa sitä, mitä agentti voi muuttaa ilman hyväksyntää:
+Fork jättää kaikki 14 pois. RK9 Custom on tiedostossa `server/src/services/agent-permissions.ts` (`RK9_WITHHELD_NEW_AGENT_GRANT_KEYS`).
+Uusi agentti saa siis saman oikeustason kuin ennen 1012:ta: ei yhtään oletusgranttia luonnissa eikä aktivoinnissa.
 
-- `agents:configure` (vertaisagentin konfiguraatio),
-- `tasks:assign`, `tasks:assign_scope` ja `tasks:manage_active_checkouts` (ohittaisi RK9-313:n tehtävänantosäännön, koska grantti on eksplisiittinen),
-- `tools:use` (rajaamaton grantti ohittaa työkaluprofiilin tarkistuksen, `explicitGrant` tiedostossa `tool-access-policy.ts`),
-- `tools:manage_connections`, `tools:manage_profiles`, `tools:manage_runtime` ja `inbox:manage`.
+Miksi kaikki 14 eikä vain laajimmat:
 
-RK9 Custom (`server/src/services/agent-permissions.ts`, `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS`) jättää nämä yhdeksän pois.
-Uusi agentti saa vain avaimet `agents:suggest-changes`, `skills:create`, `skills:suggest-changes`, `tools:view_audit` ja `audit:view_agent_actions`.
-Ne vain ehdottavat muutoksia tai lukevat audit-dataa. Board voi antaa pois jätetyt avaimet eksplisiittisesti agenttikohtaisesti.
-Olemassa olevat agentit eivät muutu kummassakaan versiossa (upstreamissa ei ole backfill-migraatiota).
-Lukitsee: `agent-default-configure-grants.test.ts` (sovitettu) ja `invite-join-grants.test.ts`.
+- `agents:configure`, `tasks:assign`, `tasks:assign_scope` ja `tasks:manage_active_checkouts` ohittaisivat RK9-313:n tehtävänantosäännön ja vertaiskonfiguraation rajan.
+- `tools:use` on rajaamaton grantti, joka ohittaa työkaluprofiilin tarkistuksen (`explicitGrant` tiedostossa `tool-access-policy.ts`).
+- `tools:manage_*` ja `inbox:manage` laajentavat hallintaa.
+- Myös "lievät" avaimet vaikuttavat: `agents:suggest-changes` avaa vertaisagentin konfiguraation lukemisen,
+  `skills:create` sallii skillien suoran päivityksen, ja oman konfiguraation muokkaus vaihtuu tilaan `deny_missing_consent`.
+  Verifier löysi nämä kierroksella 1 (RK9-700), joten fork ei anna niitäkään.
+
+Board antaa avaimet tarvittaessa agenttikohtaisesti. Olemassa olevat agentit eivät muutu (upstreamissa ei ole backfill-migraatiota).
+`agents.ts` ohittaa tyhjän grant-insertin molemmissa kohdissa (luonti ja aktivointi), koska tyhjä insert kaatuu.
+
+**Kutsulla liittyvä agentti pitää `tasks:assign`in.** Ennen 1012:ta `agentJoinGrantsFromDefaults` antoi sen aina.
+Upstream luki sen nyt oletuslistasta, joka forkissa on tyhjä. RK9 Custom tiedostossa `server/src/services/invite-grants.ts` lisää sen, jos se puuttuu.
+
+**Agentti saa luoda assignoimattoman issuen ja subtaskin ilman granttia (#14870).** Upstream ajaa nyt `assertCanAssignTasks`in
+jokaiselle agentin luomalle issuelle. Forkin RK9-313-sääntö vaatii grantin vain, kun luonti assignoi jonkun.
+RK9 Custom tiedostossa `server/src/services/authorization.ts` sallii issue-resurssin, jolla ei ole `issueId`tä eikä assigneeta.
+Low-trust-rajaus tarkistetaan ennen tätä poikkeusta. Olemassa olevan issuen assignointi tai assignoinnin poisto vaatii yhä grantin.
+
+**Agentin avain ei voi asettaa `*_local`-adapterin isäntäkomentoa.** `assertNoAgentLocalAdapterHostCommandMutation` (#15283) estää agentin
+avaimella kentät `cwd`, `env`, `args` ja `command` paikallisissa adaptereissa. Skillin `paperclip-create-agent` esimerkki
+(`skills/paperclip-create-agent/SKILL.md`) ei siis toimi agentin avaimella sellaisenaan; board-käyttäjä tai hyväksyntä asettaa nämä kentät.
+Prodissa agentit palkataan hyväksynnän kautta, joten muutos hyväksytään.
+
+Lukitsevat testit: `agent-default-configure-grants.test.ts` (sovitettu), `invite-join-grants.test.ts` ja
+`permissions-upgrade-boundary-routes.test.ts` (assignoimaton luonti ja subtask 201, assignoitu subtask vertaiselle 403).
 
 ### Oletusohjeet (#14948, #14985)
 

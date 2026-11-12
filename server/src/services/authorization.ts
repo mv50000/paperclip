@@ -2216,6 +2216,22 @@ export function authorizationService(db: Db | DbTransaction) {
       // Upstream v2026.609.0 lets every active agent assign in simple mode. The fork
       // (v2026.512.0 assertCanAssignTasks) required an explicit tasks:assign grant or
       // legacy creator authority (CEO or canCreateAgents). doc/upgrade/defaults-hardening.md.
+      // RK9-700: upstream v2026.1012 (#14870) runs this check for every agent-created issue,
+      // also without an assignee. Before 1012 the fork checked only assigned creates, so an
+      // unassigned create (no existing issue, no assignee) needs no grant. Low-trust scope was
+      // already checked above (decideLowTrustAccess); an unassign of an existing issue is not exempt.
+      if (
+        input.resource.type === "issue" &&
+        !input.resource.issueId &&
+        !input.resource.assigneeAgentId &&
+        !input.resource.assigneeUserId
+      ) {
+        return allow({
+          action: input.action,
+          reason: "allow_company_agent",
+          explanation: "Allowed: an unassigned issue needs no task-assignment grant (RK9-313, RK9-700).",
+        });
+      }
       const rk9GrantDecision = await decideWithTaskAssignmentGrants("agent", actorAgentId);
       if (rk9GrantDecision.allowed) return rk9GrantDecision;
       if (canCreateAgentsLegacy(actorAgent)) {

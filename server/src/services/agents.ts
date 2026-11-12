@@ -968,7 +968,9 @@ export function agentService(db: Db) {
           .then((rows) => rows[0]);
         // New standard agents receive the standard direct grants at activation.
         // Low-trust and bundled agents keep their explicit, narrower grants.
-        if (created.status !== "pending_approval" && !permissionsImplyLowTrust(normalizedPermissions) &&
+        // RK9 Custom (RK9-700): the fork list is empty (agent-permissions.ts), and an empty insert throws.
+        if (NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.length > 0 &&
+            created.status !== "pending_approval" && !permissionsImplyLowTrust(normalizedPermissions) &&
             !readBuiltInAgentMarker(created.metadata)) {
           await tx.insert(principalPermissionGrants).values(
             NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.map((permissionKey) => ({
@@ -1196,7 +1198,9 @@ export function agentService(db: Db) {
           });
         }
         await syncAgentSecretBindings(updated, txDb, existing.adapterConfig);
-        if (!permissionsImplyLowTrust(updated.permissions) && !readBuiltInAgentMarker(updated.metadata)) {
+        // RK9 Custom (RK9-700): the fork list is empty (agent-permissions.ts), and an empty insert throws.
+        if (NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.length > 0 &&
+            !permissionsImplyLowTrust(updated.permissions) && !readBuiltInAgentMarker(updated.metadata)) {
           await tx.insert(principalPermissionGrants).values(
             NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.map((permissionKey) => ({
               companyId: updated.companyId,

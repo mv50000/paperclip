@@ -11,10 +11,15 @@ import {
 import { NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS, newStandardAgentGrantScope } from "../services/agent-permissions.js";
 
 const invitedAgentId = "agent-1";
-const defaultAgentGrants = NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.map((permissionKey) => ({
-  permissionKey,
-  scope: newStandardAgentGrantScope(permissionKey, invitedAgentId),
-}));
+// RK9 Custom (RK9-700): the fork default list is empty, and the invite path keeps the pre-1012
+// unscoped tasks:assign grant.
+const defaultAgentGrants: Array<{ permissionKey: string; scope: Record<string, unknown> | null }> = [
+  ...NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.map((permissionKey) => ({
+    permissionKey,
+    scope: newStandardAgentGrantScope(permissionKey, invitedAgentId),
+  })),
+  { permissionKey: "tasks:assign", scope: null },
+];
 
 describe("agentJoinGrantsFromDefaults", () => {
   it("adds all new-agent grants when invite defaults do not specify grants", () => {
