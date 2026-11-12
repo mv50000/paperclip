@@ -265,6 +265,8 @@ describe("budgetService", () => {
           status: "running",
           pauseReason: null,
         }],
+        // RK9-700: upstream 1012 (#15280) locks and reads the agent row before the budget pause.
+        [{ id: "agent-1", companyId: "company-1", status: "running" }],
       ]);
 
       dbStub.queueInsert([{
@@ -356,6 +358,8 @@ describe("budgetService", () => {
           status: "running",
           pauseReason: null,
         }],
+        // RK9-700: upstream 1012 (#15280) locks and reads the agent row before the budget pause.
+        [{ id: "agent-1", companyId: "company-1", status: "running" }],
       ]);
 
       dbStub.queueInsert([{

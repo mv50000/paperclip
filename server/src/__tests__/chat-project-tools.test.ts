@@ -4,7 +4,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, issues, heartbeatRuns, projects, companyMemberships, executionWorkspaces } from "@paperclipai/db";
+import { agents, issues, heartbeatRuns, projects, companyMemberships, executionWorkspaces, principalPermissionGrants } from "@paperclipai/db";
 import { startRunnerApiTestServer } from "./helpers/runner-api-server.js";
 import { issueService } from "../services/issues.js";
 import { documentService } from "../services/documents.js";
@@ -18,10 +18,27 @@ const support = await getEmbeddedPostgresTestSupport();
   const originalSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
   beforeAll(async () => { process.env.PAPERCLIP_AGENT_JWT_SECRET = randomUUID(); server = await startRunnerApiTestServer(); }, 60_000);
   afterAll(async () => { await server?.close(); if (originalSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET; else process.env.PAPERCLIP_AGENT_JWT_SECRET = originalSecret; });
+  // --- RK9 Custom (RK9-700): the fork RK9-313 rule needs a tasks:assign grant or legacy creator
+  // authority for every agent assignment, self-assignment included (RK9-317). Upstream 1012 gives new
+  // agents tasks:assign by default (#15283) and checks it in the native create_task tool; the fork
+  // withholds it, so the fixture agent gets an active membership and the grant explicitly. Low-trust
+  // boundaries still apply. ---
+  const fixture = async (options?: Parameters<typeof server.fixture>[0]) => {
+    const f = await server.fixture(options);
+    await server.db.insert(companyMemberships).values({
+      companyId: f.companyId, principalType: "agent", principalId: f.agentId, status: "active", membershipRole: "member",
+    });
+    await server.db.insert(principalPermissionGrants).values({
+      companyId: f.companyId, principalType: "agent", principalId: f.agentId,
+      permissionKey: "tasks:assign", scope: null, grantedByUserId: null,
+    });
+    return f;
+  };
+  // --- /RK9 Custom ---
   const call = (fixture: Awaited<ReturnType<typeof server.fixture>>, tool: string, args: Record<string, unknown>) => fixture.authority.execute({ tool, arguments: args, callId: randomUUID() });
 
   it("pages only visible projects and prefilters low-trust agent and run scopes", async () => {
-    const f = await server.fixture({ disableWakeOnDemand: true });
+    const f = await fixture({ disableWakeOnDemand: true });
     const ids = Array.from({ length: 53 }, (_, i) => `abcdefab-0000-4000-8000-${String(i).padStart(12, "0")}`);
     await server.db.insert(projects).values(ids.map((id, i) => ({
       id, companyId: f.companyId, name: `Project ${i}`, status: "in_progress",
@@ -70,7 +87,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("allows a conversation reply to enter review without manufacturing a review interaction", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     const token = createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!;
     const response = await fetch(`${server.apiUrl}/api/issues/${f.issueId}`, {
       method: "PATCH", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -82,7 +99,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("creates an ordinary project task and its plan atomically, retaining the conversation plan", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     await documentService(server.db).upsertIssueDocument({ issueId: f.issueId, key: "plan", format: "markdown", body: "Full discussion plan" });
     const input = { title: "Implement the clarified outcome", projectId: f.projectId, initialPlan: "# Execution plan\n\nBuild and verify the outcome.", idempotencyKey: "handoff" };
     const first = await call(f, "create_task", input) as any;
@@ -97,7 +114,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("rejects creation, child helpers, and reparenting under a chat, while retaining legacy children", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     const svc = issueService(server.db);
     await expect(svc.create(f.companyId, { title: "Invalid", parentId: f.issueId })).rejects.toThrow(/cannot have new subtasks/);
     await expect(svc.createChild(f.issueId, { title: "Invalid" })).rejects.toThrow(/cannot have new subtasks/);
@@ -115,7 +132,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("hands off through the same API used by Claude/Codex MCP with the plan present on return", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     // --- RK9 Custom (RK9-317): the fork RK9-313 rule needs a tasks:assign grant or legacy creator
     // authority for every agent assignment, self-assignment included. The HTTP handoff assigns the
     // new task, so give the fixture agent creator authority. ---
@@ -129,7 +146,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("allows low-trust chat handoffs and self-assigned subtasks through both creation endpoints", async () => {
-    const f = await server.fixture({ conversation: true, disableWakeOnDemand: true });
+    const f = await fixture({ conversation: true, disableWakeOnDemand: true });
     const policy = { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: { mode: "low_trust_review", companyId: f.companyId, projectIds: [f.projectId] } } };
     await server.db.update(agents).set({ permissions: policy }).where(eq(agents.id, f.agentId));
     const token = createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!;
@@ -157,7 +174,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("retains a run-only low-trust boundary on a new task even when standard policy is requested", async () => {
-    const f = await server.fixture({ conversation: true, disableWakeOnDemand: true });
+    const f = await fixture({ conversation: true, disableWakeOnDemand: true });
     const executionPolicy = { authorizationPolicy: { trustPreset: "low_trust_review", trustBoundary: { mode: "low_trust_review", companyId: f.companyId, projectIds: [f.projectId] } } };
     const [run] = await server.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
     await server.db.update(heartbeatRuns).set({ contextSnapshot: { ...run.contextSnapshot, executionPolicy } }).where(eq(heartbeatRuns.id, f.runId));
@@ -172,7 +189,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("enforces the proposed task scope and assignee before creating any low-trust work", async () => {
-    const f = await server.fixture({ disableWakeOnDemand: true });
+    const f = await fixture({ disableWakeOnDemand: true });
     const policy = { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: { mode: "low_trust_review", companyId: f.companyId, projectIds: [f.projectId] } } };
     await server.db.update(agents).set({ permissions: policy }).where(eq(agents.id, f.agentId));
     const [outside] = await server.db.insert(projects).values({ companyId: f.companyId, name: "Outside boundary" }).returning();
@@ -214,7 +231,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("allows low-trust root-scoped subtasks without granting descendants of an exact issue scope", async () => {
-    const f = await server.fixture({ disableWakeOnDemand: true });
+    const f = await fixture({ disableWakeOnDemand: true });
     const boundary = { mode: "low_trust_review", companyId: f.companyId, rootIssueId: f.issueId };
     await server.db.update(agents).set({ permissions: { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: boundary } } }).where(eq(agents.id, f.agentId));
     const token = createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!;
@@ -248,7 +265,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("authorizes workspace-derived projects before creating children of a projectless root", async () => {
-    const f = await server.fixture({ disableWakeOnDemand: true });
+    const f = await fixture({ disableWakeOnDemand: true });
     const settings = instanceSettingsService(server.db);
     const previous = await settings.getExperimental();
     await settings.updateExperimental({ enableIsolatedWorkspaces: true });
@@ -298,7 +315,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("keeps the responsible user's assignment restrictions on low-trust self-assignment", async () => {
-    const f = await server.fixture({ conversation: true, disableWakeOnDemand: true });
+    const f = await fixture({ conversation: true, disableWakeOnDemand: true });
     await server.db.update(agents).set({ permissions: { trustPreset: "low_trust_review", authorizationPolicy: { trustBoundary: { mode: "low_trust_review", projectIds: [f.projectId] } } } }).where(eq(agents.id, f.agentId));
     await server.db.update(companyMemberships).set({ membershipRole: "viewer" }).where(eq(companyMemberships.principalId, f.responsibleUserId!));
     await expect(call(f, "create_task", { title: "Viewer cannot assign", projectId: f.projectId, idempotencyKey: "viewer-denied" })).rejects.toThrow();
@@ -306,7 +323,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("does not reuse an out-of-scope task through a title or idempotency collision", async () => {
-    const f = await server.fixture({ disableWakeOnDemand: true });
+    const f = await fixture({ disableWakeOnDemand: true });
     const [outside] = await server.db.insert(projects).values({ companyId: f.companyId, name: "Private project" }).returning();
     const token = createLocalAgentJwt(f.agentId, f.companyId, "paperclip_runner", f.runId, f.responsibleUserId)!;
     for (const parentId of [null, f.issueId]) {
@@ -334,14 +351,14 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("retains ordinary child delegation and projectless task creation", async () => {
-    const f = await server.fixture();
+    const f = await fixture();
     const result = await call(f, "create_task", { title: "Delegate ordinary work", idempotencyKey: "child" }) as any;
     expect(result.task.parentId).toBe(f.issueId);
     expect(await issueService(server.db).create(f.companyId, { title: "No project needed" })).toMatchObject({ projectId: null });
   });
 
   it("creates a project once through the production API and records it on the source feed", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     const input = { name: "New non-code project", description: "A well-scoped outcome", idempotencyKey: "project" };
     const results = await Promise.all(Array.from({ length: 4 }, () => call(f, "create_project", input))) as any[];
     const project = results[0];
@@ -355,7 +372,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("includes an explicit workspace repository in the committed project card", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     const project = await call(f, "create_project", { name: "Workspace repo", workspace: { repoUrl: "https://github.com/example/web" }, idempotencyKey: "workspace" }) as any;
     const feed = await activityService(server.db).forIssue(f.issueId);
     expect(feed.find(event => event.entityId === project.id)?.details?.repositories).toEqual([
@@ -364,7 +381,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("registers multiple previously unknown GitHub URLs and deduplicates equivalent URLs", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     const project = await call(f, "create_project", { name: "Across repos", repositoryUrls: ["https://github.com/example/web.git", "https://github.com/example/api", "https://github.com/example/web/"], idempotencyKey: "urls" }) as any;
     expect(project.workspaces.map((w: any) => w.repoUrl).sort()).toEqual(["https://github.com/example/api", "https://github.com/example/web"]);
     expect(project.workspaces.filter((w: any) => w.isPrimary)).toHaveLength(1);
@@ -374,7 +391,7 @@ const support = await getEmbeddedPostgresTestSupport();
 
   it("allows planning documents while denying project/task creation in Plan and Ask mode", async () => {
     for (const mode of ["planning", "ask"] as const) {
-      const f = await server.fixture({ conversation: true, mode });
+      const f = await fixture({ conversation: true, mode });
       await expect(call(f, "create_project", { name: "No", idempotencyKey: "no" })).rejects.toThrow(/mode_denied/);
       await expect(call(f, "create_task", { title: "No", idempotencyKey: "no" })).rejects.toThrow(/mode_denied/);
       if (mode === "planning") await call(f, "write_document", { key: "plan", title: "Plan", body: "Clarify and plan here", idempotencyKey: "plan" });
@@ -382,7 +399,7 @@ const support = await getEmbeddedPostgresTestSupport();
   });
 
   it("rejects invented repository IDs and cancelled runs without creating a project", async () => {
-    const f = await server.fixture({ conversation: true });
+    const f = await fixture({ conversation: true });
     await expect(call(f, "create_project", { name: "Missing repo", repositoryIds: ["999999"], idempotencyKey: "missing" })).rejects.toThrow(/repository.*available/);
     await server.db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, f.runId));
     await expect(call(f, "create_project", { name: "Cancelled", idempotencyKey: "cancelled" })).rejects.toThrow();

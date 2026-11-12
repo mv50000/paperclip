@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, writeFile, symlink, mkdir, open } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { eq } from "drizzle-orm";
-import { assets, documents, heartbeatRuns, issues, projects, routineDocuments, routines, runnerApiResponseReservations } from "@paperclipai/db";
+import { assets, companyMemberships, documents, heartbeatRuns, issues, principalPermissionGrants, projects, routineDocuments, routines, runnerApiResponseReservations } from "@paperclipai/db";
 import { beforeAll, afterAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { startRunnerApiTestServer } from "../../__tests__/helpers/runner-api-server.js";
 import { createRunnerdCodexTransport, defaultCapabilityRunnerdBinary } from "../../vendor/paperclip-runner/index.js";
@@ -618,6 +618,17 @@ else if(m.id!==undefined) send({id:m.id,result:{}});
 
   it("creates child tasks after seeding and preserves company numbering", async () => {
     const fixture = await server.fixture();
+    // --- RK9 Custom (RK9-700): create_task with a null assignee assigns the calling agent, and the
+    // fork RK9-313/RK9-317 rule needs a tasks:assign grant for that. Upstream 1012 gives new agents
+    // tasks:assign by default (#15283); the fork withholds it. ---
+    await server.db.insert(companyMemberships).values({
+      companyId: fixture.companyId, principalType: "agent", principalId: fixture.agentId, status: "active", membershipRole: "member",
+    });
+    await server.db.insert(principalPermissionGrants).values({
+      companyId: fixture.companyId, principalType: "agent", principalId: fixture.agentId,
+      permissionKey: "tasks:assign", scope: null, grantedByUserId: null,
+    });
+    // --- /RK9 Custom ---
     await expect(fixture.authority.execute({ tool: "create_task", callId: "child", arguments: { title: "Verify release notes", description: "Check before shipping.", assigneeActorId: null, idempotencyKey: "child" } })).resolves.toBeDefined();
     const children = (await fixture.snapshot()).issues.filter(issue => issue.parentId === fixture.issueId);
     expect(children).toHaveLength(1);

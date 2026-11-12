@@ -4852,6 +4852,8 @@ export function issueRoutes(
     parentIssueId?: string | null;
     assigneeAgentId?: string | null;
     assigneeUserId?: string | null;
+    // RK9 Custom (RK9-700): marks a new issue or subtask create; see authorization.ts (RK9-313 block).
+    rk9IssueCreate?: true;
   };
 
   async function resolveAssignmentProjectId(input: {
@@ -11837,7 +11839,8 @@ export function issueRoutes(
         rawCreateBody.assigneeAgentId ||
         rawCreateBody.assigneeUserId
       ) {
-        await assertCanAssignTasks(req, companyId, createAssignmentScope);
+        // RK9 Custom (RK9-700): an unassigned create needs no task-assignment grant.
+        await assertCanAssignTasks(req, companyId, { ...createAssignmentScope, rk9IssueCreate: true });
       }
       await assertIssueEnvironmentSelection(
         companyId,
@@ -12182,7 +12185,8 @@ export function issueRoutes(
         sanitizedBody.assigneeAgentId ||
         sanitizedBody.assigneeUserId
       ) {
-        await assertCanAssignTasks(req, parent.companyId, childAssignmentScope);
+        // RK9 Custom (RK9-700): an unassigned subtask create needs no task-assignment grant.
+        await assertCanAssignTasks(req, parent.companyId, { ...childAssignmentScope, rk9IssueCreate: true });
       }
       await assertIssueEnvironmentSelection(
         parent.companyId,

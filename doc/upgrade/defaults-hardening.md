@@ -617,7 +617,14 @@ Upstream luki sen nyt oletuslistasta, joka forkissa on tyhjä. RK9 Custom tiedos
 **Agentti saa luoda assignoimattoman issuen ja subtaskin ilman granttia (#14870).** Upstream ajaa nyt `assertCanAssignTasks`in
 jokaiselle agentin luomalle issuelle. Forkin RK9-313-sääntö vaatii grantin vain, kun luonti assignoi jonkun.
 RK9 Custom tiedostossa `server/src/services/authorization.ts` sallii issue-resurssin, jolla ei ole `issueId`tä eikä assigneeta.
+Poikkeus koskee vain kutsuja, joiden scopessa on merkki `rk9IssueCreate`. Merkin asettavat vain issuen ja subtaskin luontireitit (`routes/issues.ts`).
+Muut tyhjän kohteen kutsujat pitävät grant-tarkistuksen: status-kortit (luovat Summarizerille assignoidun issuen), skill-testiajot ja pluginien esikatselu.
 Low-trust-rajaus tarkistetaan ennen tätä poikkeusta. Olemassa olevan issuen assignointi tai assignoinnin poisto vaatii yhä grantin.
+Projektissa, jolla on rajattu assignointipolitiikka, assignoimaton luonti vaatii grantin (upstreamin käytös, tiukempi kuin ennen 1012:ta).
+
+**Natiivin runnerin `create_task` vaatii grantin.** Upstream 1012 lisäsi työkaluun `tasks:assign`-tarkistuksen
+(`server/src/services/native-runtime/paperclip-runner-tool-authority.ts`). Työkalu assignoi tehtävän oletuksena agentille itselleen,
+ja forkin RK9-313/RK9-317-sääntö vaatii grantin myös siihen, kuten HTTP-reitillä jo masterilla. Prodissa `enableNativeRunner = false`, joten vaikutusta ei ole.
 
 **Agentin avain ei voi asettaa `*_local`-adapterin isäntäkomentoa.** `assertNoAgentLocalAdapterHostCommandMutation` (#15283) estää agentin
 avaimella kentät `cwd`, `env`, `args` ja `command` paikallisissa adaptereissa. Skillin `paperclip-create-agent` esimerkki
@@ -625,7 +632,7 @@ avaimella kentät `cwd`, `env`, `args` ja `command` paikallisissa adaptereissa. 
 Prodissa agentit palkataan hyväksynnän kautta, joten muutos hyväksytään.
 
 Lukitsevat testit: `agent-default-configure-grants.test.ts` (sovitettu), `invite-join-grants.test.ts` ja
-`permissions-upgrade-boundary-routes.test.ts` (assignoimaton luonti ja subtask 201, assignoitu subtask vertaiselle 403).
+`permissions-upgrade-boundary-routes.test.ts` (assignoimaton luonti ja subtask 201, assignoitu subtask vertaiselle 403, tyhjä kohde ilman merkkiä kielletään).
 
 ### Oletusohjeet (#14948, #14985)
 

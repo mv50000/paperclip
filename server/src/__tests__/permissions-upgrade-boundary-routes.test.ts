@@ -36,6 +36,7 @@ vi.mock("../services/issue-assignment-wakeup.js", () => ({
 
 import { activityRoutes } from "../routes/activity.js";
 import { issueRoutes } from "../routes/issues.js";
+import { authorizationService } from "../services/authorization.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -379,5 +380,22 @@ describeEmbeddedPostgres("permissions upgrade visibility and route boundaries", 
       .send({ title: "Assigned subtask", assigneeAgentId: peerAgent.id });
     expect(assignedChild.status, JSON.stringify(assignedChild.body)).toBe(403);
     expect(assignedChild.body.error).toContain("tasks:assign");
+
+    // Only the issue create routes set the marker. An empty target from another caller
+    // (status cards create issues for the Summarizer) keeps the RK9-313 grant check.
+    const emptyTargetDecision = await authorizationService(db).decide({
+      actor: agentActor(company.id, actorAgent.id),
+      action: "tasks:assign",
+      resource: {
+        type: "issue",
+        companyId: company.id,
+        issueId: null,
+        projectId: null,
+        parentIssueId: null,
+        assigneeAgentId: null,
+        assigneeUserId: null,
+      },
+    });
+    expect(emptyTargetDecision.allowed).toBe(false);
   });
 });

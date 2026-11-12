@@ -485,7 +485,12 @@ describe.skipIf(!support.supported)("public MCP OAuth and tool boundary", () => 
     app.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: async () => null }));
     app.get("/api/actor", (req, res) => res.json(req.actor));
     const response = await request(app).get("/api/actor").set("Authorization", `Bearer ${f.tokens.access_token}`);
-    expect(response.status).toBe(401);
+    // --- RK9 Custom: the fork hands a non-JWT bearer to the route as an anonymous request, so fork
+    // routes can check their own static keys (middleware/auth.ts, since v2026.831.1). The MCP token is
+    // still neither a board nor an agent credential. Upstream answers 401 here. ---
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ type: "none" });
+    // --- /RK9 Custom ---
     expect(response.body).not.toHaveProperty("type", "board");
     expect(response.body).not.toHaveProperty("type", "agent");
   });
@@ -575,13 +580,14 @@ describe.skipIf(!support.supported)("public MCP OAuth and tool boundary", () => 
       expect(rejected).toHaveProperty("outcome", "rejected");
       expect(await execute(f.tokens.access_token, "paperclip_create_task", unavailable)).toEqual(rejected);
       expect(wake).toHaveBeenCalledTimes(1);
-      // Human assignment to a paused agent is deliberate and allowed by existing routes.
-      // Creating its queued task must neither unpause the agent nor claim execution started.
+      // --- RK9 Custom: the fork rejects assignment to a paused or terminated agent with 409
+      // (routes/issues.ts, "paused/terminated assignee guard"). Upstream allows a human to queue it.
+      // The rejected create must not unpause the agent either. ---
       await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agent!.id));
       const paused = await execute(f.tokens.access_token, "paperclip_create_task", { ...args, requestId: randomUUID(), title: "Wait for the paused researcher" });
-      expect(paused).toHaveProperty("task.status", "todo");
-      expect(paused.scheduling).toContain("does not guarantee execution has started");
+      expect(paused).toMatchObject({ outcome: "rejected", status: 409 });
       expect((await db.select().from(agents).where(eq(agents.id, agent!.id)))[0]?.status).toBe("paused");
+      // --- /RK9 Custom ---
     } finally { wake.mockRestore(); }
   });
 

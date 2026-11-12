@@ -2218,9 +2218,12 @@ export function authorizationService(db: Db | DbTransaction) {
       // legacy creator authority (CEO or canCreateAgents). doc/upgrade/defaults-hardening.md.
       // RK9-700: upstream v2026.1012 (#14870) runs this check for every agent-created issue,
       // also without an assignee. Before 1012 the fork checked only assigned creates, so an
-      // unassigned create (no existing issue, no assignee) needs no grant. Low-trust scope was
-      // already checked above (decideLowTrustAccess); an unassign of an existing issue is not exempt.
+      // unassigned create (no existing issue, no assignee) needs no grant. Only the issue and
+      // subtask create routes set the rk9IssueCreate marker; other callers that send an empty
+      // target (status cards, skill-test runs, plugin previews) keep the grant check. Low-trust
+      // scope was already checked above (decideLowTrustAccess); an unassign is not exempt.
       if (
+        scopeBoolean(input.scope, "rk9IssueCreate") &&
         input.resource.type === "issue" &&
         !input.resource.issueId &&
         !input.resource.assigneeAgentId &&

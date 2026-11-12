@@ -16,6 +16,7 @@ import {
   issueComments,
   issueThreadInteractions,
   issues,
+  principalPermissionGrants,
 } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { initializeRunIdentity, reserveSteeredIdentity, reconcileSteeredIdentity } from "../run-identity.js";
@@ -64,6 +65,16 @@ describe("PaperclipRunnerToolAuthority", () => {
       runtimeConfig: { token: "must-not-leak" },
       status: "active",
     });
+    // --- RK9 Custom (RK9-700): create_task assigns the new task to the calling agent by default,
+    // and the fork RK9-313/RK9-317 rule needs a tasks:assign grant for that, self-assignment included.
+    // Upstream 1012 gives new agents tasks:assign by default (#15283); the fork withholds it. ---
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "agent", principalId: agentId, status: "active", membershipRole: "member",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId, principalType: "agent", principalId: agentId, permissionKey: "tasks:assign", scope: null, grantedByUserId: null,
+    });
+    // --- /RK9 Custom ---
     await db.insert(issues).values({
       id: issueId,
       companyId,

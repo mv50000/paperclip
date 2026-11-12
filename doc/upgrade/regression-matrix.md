@@ -843,7 +843,7 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 4e81bed92 v2
 | `server/src/services/approvals.ts` | upstream siirsi hyväksynnän ja hylkäyksen transaktioon; forkin `approval.decided`-live-event lähtee commitin jälkeen |
 | `server/src/services/tool-access-policy.ts` | RK9-319:n taint-portti käärii upstreamin välimuistillisen `decide`n; `decideLoaded` saa erän välimuistin parametrina |
 | `server/src/services/agents.ts` | molemmat importit; oletusgrantit tulevat forkin tyhjästä listasta, tyhjä insert ohitetaan (luonti ja aktivointi) |
-| `server/src/services/agent-permissions.ts`, `invite-grants.ts`, `authorization.ts` (ei konfliktia) | RK9 Custom: `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS` jättää pois kaikki 14 upstreamin oletusavainta; kutsulla liittyvä agentti saa yhä `tasks:assign`in; assignoimaton issue ja subtask eivät vaadi granttia (#14870 + RK9-313). Ks. `defaults-hardening.md`. |
+| `server/src/services/agent-permissions.ts`, `invite-grants.ts`, `authorization.ts`, `routes/issues.ts` (ei konfliktia) | RK9 Custom: `RK9_WITHHELD_NEW_AGENT_GRANT_KEYS` jättää pois kaikki 14 upstreamin oletusavainta; kutsulla liittyvä agentti saa yhä `tasks:assign`in; assignoimaton issue ja subtask eivät vaadi granttia (#14870 + RK9-313). Ks. `defaults-hardening.md`. |
 | `server/src/onboarding-assets/ceo/AGENTS.md`, `default/AGENTS.md`, `services/default-agent-instructions.ts` | forkin versiot (CEO:n neljän tiedoston paketti, CTO-paketti, forkin default-ohje); upstreamin `first-task/chief-of-staff` hyväksytty |
 | `server/src/middleware/auth.ts` | upstreamin `database-retry`-import ja re-export + forkin coord-token-import |
 | `packages/adapters/claude-local/src/index.ts`, `server/src/__tests__/adapter-models.test.ts` | upstreamin mallijärjestys (#14917); forkin "Opus 5.5 ensin" oli vain testisovitus |
@@ -858,7 +858,14 @@ Testisovitukset:
 - `claude-local-execute.test.ts`: mallin läpivientitesti käyttää `claude-opus-4-8`:aa, koska `claude-sonnet-5-5` vaatii nyt CLI:n ≥ 2.1.284.
 - `agent-default-configure-grants.test.ts`: odottaa tyhjää oletuslistaa; kaikki 14 avainta puuttuvat, kutsu antaa vain `tasks:assign`in, ja vertaisagentin konfiguraatio kielletään syyllä `deny_no_grant`. Lisätty `fork-tests.txt`:iin.
 - `invite-join-grants.test.ts`: kutsun oletusgrantit sisältävät `tasks:assign`in (forkin käytös ennen 1012:ta).
-- `permissions-upgrade-boundary-routes.test.ts` (fork-testi): uusi testi, jossa agentti ilman granttia luo assignoimattoman issuen ja subtaskin (201) mutta ei assignoitua subtaskia vertaiselle (403).
+- `permissions-upgrade-boundary-routes.test.ts` (fork-testi): uusi testi, jossa agentti ilman granttia luo assignoimattoman issuen ja subtaskin (201) mutta ei assignoitua subtaskia vertaiselle (403); tyhjä kohde ilman `rk9IssueCreate`-merkkiä (esim. status-kortit) kielletään.
+- `chat-project-tools.test.ts`: fixture-agentti saa aktiivisen jäsenyyden ja `tasks:assign`-grantin. Upstream 1012 tarkistaa `tasks:assign`in myös natiivin `create_task`-työkalun itselle assignoinnissa, ja forkin RK9-313/RK9-317-sääntö vaatii siihen grantin. Prodissa `enableNativeRunner = false`. Low-trust-rajaustestit pysyvät ennallaan ja todistavat, ettei grantti ohita rajausta.
+- `paperclip-runner-tool-authority.test.ts`, `runner-api.integration.test.ts`: agentti saa jäsenyyden ja `tasks:assign`-grantin samasta syystä kuin `chat-project-tools.test.ts` (natiivi `create_task` assignoi oletuksena itselle).
+- `public-mcp.test.ts`: (1) MCP-token välitetään reitille anonyyminä (`type: "none"`, 200), koska fork päästää JWT:tä muistuttamattoman bearerin läpi forkin staattisten avainten takia (v2026.831.1:stä lähtien). Token ei ole board- eikä agent-tunniste. (2) Assignointi pausetulle agentille hylätään 409:llä (forkin "paused/terminated assignee guard"). `enablePublicMcp` on pois päältä.
+- `budgets-service.test.ts`: forkin 100 %-rajan testien stub palauttaa agenttirivin, koska upstream (#15280) lukitsee ja lukee rivin ennen budjettipausea. Upstream sovitti omat testinsä samoin.
+- `nosto-private-issue-visibility-rk9.test.ts`: `FORK_BASE_COMMIT = "bba6a45f0d"` (v2026.1012.0), ja baselineen lisättiin 3 uutta upstream-tiedostoa (`human-directed-work.ts`, `native-session-handoff.ts`, `owner-chat-instruction-authority.ts`). `pr.yml` hakee saman commitin (RK9-709).
+- Paikallisesti punaiset, CI:n ratkaistavat: `workspace-runtime.test.ts`:n 6 provisiointitestiä kaatuvat paperclip-01:llä, koska koneen globaali `paperclipai` (`/usr/local/bin`) ajetaan testin minimiconfigia vasten. Samat testit ovat masterilla ja olivat vihreät portaan 1 CI:ssä.
+- `built-in-agents.test.ts`: palautettu forkin masterin odotus (root-agentilla ei ole `*:suggest-changes`-granttia), koska fork jättää kaikki 14 oletusavainta pois.
 - `agent-skills-routes.test.ts`: CEO saa forkin neljän tiedoston paketin, muut roolit forkin default-ohjeen.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
