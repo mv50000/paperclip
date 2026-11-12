@@ -1,4 +1,57 @@
-import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
+import { LOW_TRUST_REVIEW_PRESET, type PermissionKey } from "@paperclipai/shared";
+
+/** Direct grants for newly activated standard agents. Existing agents are not backfilled. */
+const UPSTREAM_NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS = [
+  "agents:configure",
+  "agents:suggest-changes",
+  "skills:create",
+  "skills:suggest-changes",
+  "tools:manage_connections",
+  "tools:manage_profiles",
+  "tools:view_audit",
+  "audit:view_agent_actions",
+  "tools:use",
+  "tools:manage_runtime",
+  "inbox:manage",
+  "tasks:assign",
+  "tasks:assign_scope",
+  "tasks:manage_active_checkouts",
+] as const satisfies readonly PermissionKey[];
+
+// --- RK9 Custom (RK9-700): upstream v2026.1012 (#15283) gives every new standard agent 14 direct
+// grants. Nine of them widen what the agent can change without an approval: agents:configure (peer
+// agent config), tasks:assign / tasks:assign_scope / tasks:manage_active_checkouts (bypasses the
+// RK9-313 task-assignment rule), tools:use (an unscoped grant passes the tool-profile check),
+// tools:manage_connections / tools:manage_profiles / tools:manage_runtime and inbox:manage.
+// The fork keeps new agents at the pre-1012 level for those keys: they come only from an explicit
+// grant by the board. The remaining keys only suggest changes or read audit data.
+// See doc/upgrade/defaults-hardening.md, "Porras v2026.1012.0". ---
+export const RK9_WITHHELD_NEW_AGENT_GRANT_KEYS: readonly PermissionKey[] = [
+  "agents:configure",
+  "tools:manage_connections",
+  "tools:manage_profiles",
+  "tools:use",
+  "tools:manage_runtime",
+  "inbox:manage",
+  "tasks:assign",
+  "tasks:assign_scope",
+  "tasks:manage_active_checkouts",
+];
+
+export const NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS: readonly PermissionKey[] =
+  UPSTREAM_NEW_STANDARD_AGENT_DEFAULT_GRANT_KEYS.filter(
+    (permissionKey) => !RK9_WITHHELD_NEW_AGENT_GRANT_KEYS.includes(permissionKey),
+  );
+// --- end RK9 Custom ---
+
+export function newStandardAgentGrantScope(
+  permissionKey: PermissionKey,
+  agentId: string,
+): Record<string, unknown> | null {
+  if (permissionKey === "tasks:assign_scope") return { subtreeRootAgentId: agentId };
+  if (permissionKey === "inbox:manage") return { responsibleUserOnly: true };
+  return null;
+}
 
 export type NormalizedAgentPermissions = Record<string, unknown> & {
   canCreateAgents: boolean;
