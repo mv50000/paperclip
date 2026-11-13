@@ -4,8 +4,9 @@
 // rebuilt here against a real database. Upstream 1023 also compares money as
 // numeric(24,7) text (`compareCents`), so the 99.99 / 100.01 cents cases now
 // exercise the real column type instead of a stubbed number.
-// The last case locks the 1023 default `unpriced_usage_policy = 'block'`: one
-// unpriced, non-subscription cost event hard-stops the scope even below 100 %.
+// The last case locks the fork default `unpriced_usage_policy = 'allow'` (migration 9017,
+// RK9-693): an unpriced, non-subscription cost event does not hard-stop the scope, and an
+// explicit 'block' still does.
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -182,8 +183,13 @@ describeEmbeddedPostgres("budget hard stop at the exact 100 % boundary (fork, RK
     expect(block).toMatchObject({ scopeType: "agent", scopeId: agentId });
   });
 
-  it("hard-stops on one unpriced metered event under the 1023 default, and not when the policy allows it", async () => {
-    const blocked = await fixture();
+  it("does not hard-stop on an unpriced metered event under the fork default, and does under an explicit block", async () => {
+    const byDefault = await fixture();
+    const defaultService = budgetService(db, { cancelWorkForScope: vi.fn().mockResolvedValue(undefined) });
+    await spend(byDefault.companyId, byDefault.agentId, 0, { costStatus: "unpriced" });
+    expect(await defaultService.getInvocationBlock(byDefault.companyId, byDefault.agentId)).toBeNull();
+
+    const blocked = await fixture({ unpricedUsagePolicy: "block" });
     const service = budgetService(db, { cancelWorkForScope: vi.fn().mockResolvedValue(undefined) });
     await spend(blocked.companyId, blocked.agentId, 0, { costStatus: "unpriced" });
     expect(await service.getInvocationBlock(blocked.companyId, blocked.agentId)).toMatchObject({
@@ -196,7 +202,7 @@ describeEmbeddedPostgres("budget hard stop at the exact 100 % boundary (fork, RK
     expect(await service.getInvocationBlock(allowed.companyId, allowed.agentId)).toBeNull();
 
     // A subscription-included event never counts as unpriced usage.
-    const subscription = await fixture();
+    const subscription = await fixture({ unpricedUsagePolicy: "block" });
     await spend(subscription.companyId, subscription.agentId, 0, {
       costStatus: "unpriced",
       billingType: "subscription_included",

@@ -695,15 +695,22 @@ Migraatiot 0294–0305 ovat lisääviä. `0298` täyttää oletusohjeet muisti-i
 
 ## Porras v2026.1023.0 (RK9-701)
 
-### Budjetti: hinnoittelematon käyttö pysäyttää oletuksena (0312)
+### Budjetti: hinnoittelematon käyttö ei pysäytä forkissa (0312 + 9017)
 
-Migraatio `0312` lisää `budget_policies.unpriced_usage_policy`-sarakkeen oletuksella `block`. Sarake tulee myös olemassa oleville politiikoille.
-Kova pysäytys laukeaa nyt kolmesta syystä: kulut ≥ budjetti, ikkunassa on `cost_status = 'unpriced'` -rivi (ei `subscription_included`) tai ikkunassa on päättynyt ajo, jonka kirjanpito on kesken (`heartbeat_runs.cost_accounting_pending`).
+Migraatio `0312` lisää `budget_policies.unpriced_usage_policy`-sarakkeen upstreamin oletuksella `block`. Sarake tulee myös olemassa oleville politiikoille.
+Upstreamissa kova pysäytys laukeaa kolmesta syystä: kulut ≥ budjetti, ikkunassa on `cost_status = 'unpriced'` -rivi (ei `subscription_included`) tai ikkunassa on päättynyt ajo, jonka kirjanpito on kesken (`heartbeat_runs.cost_accounting_pending`).
 Rahasummat vertaillaan `numeric(24,7)`-tarkkuudella (`cost_events.cost_cents`, `budget_incidents.amount_observed`).
 
-Vaikutus prodiin mitattiin dry-runissa prod-kopiolla 12.11.2026. Kopiossa on 13 aktiivista kovaa politiikkaa (11 agentti-, 2 yritystasoista), ja yhtäkään ei pysäytetä: hinnoittelemattomia rivejä on 0 ja kesken jääneitä kirjanpitoajoja on 0. Viimeisen 30 vuorokauden 413 kulurivistä kaikki ovat `subscription_included`.
-Päätös: fork pitää upstreamin oletuksen `block`. Se on turvallinen suunta, eikä se muuta nykytilaa. Jos uusi adapteri tuottaa hinnoittelemattomia rivejä, scope pysähtyy, ja board joko hinnoittelee käytön tai asettaa politiikalle `allow`.
-Lukitsee: `budgets-boundary-rk9.test.ts` (100 %-raja, 99,99 ja 100,01 senttiä, sekä `block`/`allow`/`subscription_included`).
+Päätös (RK9-693, RK9-707, PR #279 ja #281): fork käyttää oletusta `allow`. Claude_local-ajo, joka raportoi laskutustyypin `api` tai ei mitään eikä hintaa, tallentuu `unpriced`-riviksi. Fork ei ole koskaan pysäyttänyt sellaista käyttöä.
+Toteutus:
+- Forkin migraatio `9017_rk9_budget_unpriced_allow.sql` asettaa sarakkeen oletukseksi `allow` ja siirtää kaikki `block`-rivit arvoon `allow`. Kaikki rivit saivat `block`in samassa nostossa `0312`:n oletuksesta, joten mikään boardin valinta ei katoa.
+- `server/src/services/budgets.ts` käyttää uudelle politiikalle oletusta `allow`. UI:n paikkamerkit (`ProjectDetail.tsx`, `AgentDetail.production.tsx`) näyttävät saman arvon.
+- Drizzle-skeema pitää upstreamin arvon `block`, jotta snapshot-drift-tarkistus vastaa upstreamin `0312`:ta. Insert käyttää kannan oletusta.
+- Board voi yhä valita `block`in politiikkakohtaisesti (Costs-sivun valintaruutu).
+
+Mittaus prod-kopiolla 12.11.2026: 13 aktiivista kovaa politiikkaa (11 agentti-, 2 yritystasoista). Hinnoittelemattomia rivejä on 0 ja kesken jääneitä kirjanpitoajoja on 0. Viimeisen 30 vuorokauden 413 kulurivistä kaikki ovat `subscription_included`. Siksi kumpikaan arvo ei olisi pysäyttänyt yhtäkään politiikkaa nyt.
+Kesken jäänyt kirjanpito (`cost_accounting_pending`) pysäyttää yhä myös forkissa.
+Lukitsee: `budgets-boundary-rk9.test.ts` (100 %-raja, 99,99 ja 100,01 senttiä, oletus `allow`, eksplisiittinen `block`, `subscription_included`) ja `nosto-budget-unpriced-usage-rk9.test.ts` (valmistelutiketin testi).
 
 ### Uusi agentti syntyy tilaan `paused` + `preparing`
 

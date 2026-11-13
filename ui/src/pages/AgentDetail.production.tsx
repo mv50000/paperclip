@@ -937,7 +937,7 @@ export function AgentDetail() {
       windowKind: "calendar_month_utc",
       amount: budgetMonthlyCents,
       unpricedEventCount: 0, pendingRunCount: 0,
-      unpricedUsagePolicy: "block",
+      unpricedUsagePolicy: "allow", // RK9 Custom (RK9-701): fork default (migration 9017)
       observedAmount: spentMonthlyCents,
       remainingAmount: Math.max(0, budgetMonthlyCents - spentMonthlyCents),
       utilizationPercent:

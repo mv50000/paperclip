@@ -610,7 +610,7 @@ export function ProjectDetail() {
       windowKind: "lifetime",
       amount: 0,
       unpricedEventCount: 0, pendingRunCount: 0,
-      unpricedUsagePolicy: "block",
+      unpricedUsagePolicy: "allow", // RK9 Custom (RK9-701): fork default (migration 9017)
       observedAmount: 0,
       remainingAmount: 0,
       utilizationPercent: 0,

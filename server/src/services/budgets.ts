@@ -686,7 +686,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
             warnPercent: input.warnPercent ?? 80,
             hardStopEnabled: input.hardStopEnabled ?? true,
             notifyEnabled: input.notifyEnabled ?? true,
-            unpricedUsagePolicy: input.unpricedUsagePolicy ?? "block",
+            // RK9 Custom (RK9-701): fork default is allow (RK9-693, migration 9017); a board can still choose block.
+            unpricedUsagePolicy: input.unpricedUsagePolicy ?? "allow",
             isActive: nextIsActive,
             createdByUserId: actorUserId,
             updatedByUserId: actorUserId,

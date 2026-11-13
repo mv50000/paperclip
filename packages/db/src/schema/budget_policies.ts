@@ -15,6 +15,8 @@ export const budgetPolicies = pgTable(
     reservationCents: numeric("reservation_cents", { precision: 24, scale: 7 }).notNull().default("0"),
     warnPercent: integer("warn_percent").notNull().default(80),
     hardStopEnabled: boolean("hard_stop_enabled").notNull().default(true),
+    // RK9 Custom (RK9-701): fork migration 9017 sets the database default to 'allow'. The upstream
+    // value stays here so the snapshot-drift check matches upstream 0312; inserts use the DB default.
     unpricedUsagePolicy: text("unpriced_usage_policy").notNull().default("block"),
     notifyEnabled: boolean("notify_enabled").notNull().default(true),
     isActive: boolean("is_active").notNull().default(true),
