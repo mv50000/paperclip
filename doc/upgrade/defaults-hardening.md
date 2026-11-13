@@ -714,13 +714,18 @@ Lukitsee: `budgets-boundary-rk9.test.ts` (100 %-raja, 99,99 ja 100,01 senttiä, 
 ### Budjetti: kesken jäänyt kirjanpito ei pysäytä forkissa (review 13.11.2026)
 
 Upstream merkitsee jokaisen päättyneen ajon `cost_accounting_pending`-lipulla ja laskee lipulliset ajot kovaksi pysäytykseksi (`observedBlocks`). Independent review löysi kaksi vikaa:
-- **HIGH: kuititon ajo lukitsee scopen pysyvästi.** Claude_local-ajo, joka aikakatkaistaan, perutaan tai kaatuu ennen viimeistä `result`-tapahtumaa, raportoi `usageComplete: false`. Silloin `accountingReceiptReady` on `false`, kirjanpidon sweep ohittaa ajon, ja lippu jää päälle. Jokainen agentin tai yrityksen kova politiikka pysäyttää scopen ja peruu sen jonon. Resume hylätään, ja integrity merkitsee ajon tilaan `missing_receipt`. Tila ei purkaudu ilman operaattoria tai kuukauden vaihtumista.
+- **HIGH: kuititon ajo lukitsee scopen pysyvästi.** Claude_local-ajo, joka aikakatkaistaan, perutaan tai kaatuu ennen viimeistä `result`-tapahtumaa, raportoi `usageComplete: false`. Silloin `accountingReceiptReady` on `false`, kirjanpidon sweep ohittaa ajon, ja lippu jää päälle. Jokainen agentin tai yrityksen kova politiikka pysäyttää scopen ja peruu sen jonon. Resume hylätään, ja integrity raportoi ajon (`missing_acknowledgement`). Tila ei purkaudu ilman operaattoria tai kuukauden vaihtumista.
 - **MEDIUM: kilpailutilanne.** Lippu kommitoituu ennen kuin `accountRunCost` ottaa yrityksen lukon. Rinnakkainen `getInvocationBlock` toisen agentin ajolle näkee lipun ja voi pausettaa koko yrityksen.
 
 Korjaus forkissa (ydin, raja 4: `heartbeat_runs` on ydintaulu, ja `budgets.ts` ja `run-cost-accounting.ts` ovat ydinpalveluja):
 - `RK9_PENDING_ACCOUNTING_BLOCKS = false` (`server/src/services/budgets.ts`). Lipullinen ajo ei pysäytä scopea, ei estä `raise_budget_and_resume`-päätöstä eikä anna pysäytyksen syytä. Tämä on 1023:a edeltävä forkin käytös: kulu lasketaan, kun se on kirjattu. Molemmat viat poistuvat, koska lippu ei enää vaikuta pysäytykseen.
 - `RK9_RECEIPTLESS_SETTLE_AFTER_MS = 15 min` (`server/src/services/run-cost-accounting.ts`). Kun päättyneestä kuitittomasta ajosta on kulunut 15 min, kirjanpito kirjaa ajon viimeisellä tunnetulla käytöllä ja merkitsee `usageJson.rk9SettledWithoutReceipt: true`. Lippu poistuu ilman operaattoria. 15 min antaa myöhästyneelle kuitille aikaa (replay ajetaan ennen sweepiä).
 - Kova raja toimii yhä kirjatuille kuluille (100 %-raja, `budgets-boundary-rk9.test.ts`).
+
+Jäännösriski (verifier 13.11.2026), koskee vain mitattua laskutusta (`metered_api`):
+- Ajo, jonka kirjaus heittää virheen joka sweepillä, ei koskaan päädy kirjanpitoon. Fork päästää agentin silti töihin, koska lippu ei enää pysäytä. Oletusvaraus (`reservation_cents`) on 0, joten varauskaan ei suojaa.
+- Kuitittomana kirjattu ajo voi aliarvioida kulun. Jos maksullinen kuitti katoaa, ajo kirjataan viimeisellä tunnetulla käytöllä, joka voi olla 0. Myöhästynyt kuitti hylätään kirjauksen jälkeen. Jälki on vain `rk9SettledWithoutReceipt` ja lokin varoitus.
+- Prodissa kaikki kulurivit ovat nyt `subscription_included` (mittaus 12.11.2026), joten riski ei koske nykyistä käyttöä. Jos yritys ottaa käyttöön mitatun API-avaimen, tarkista `rk9SettledWithoutReceipt`-ajot ja `accounting_last_error` säännöllisesti.
 
 Käsin palautus: cutover-runbookin vaihe 5 kohta 6 (`POST /api/companies/<id>/costs/retry-accounting`).
 Lukitsee: `budgets-pending-accounting-rk9.test.ts` (7: `cancelled`, `timed_out` ja `failed` ilman kuittia eivät estä; tuore lippu ei pausetta yritystä toiselta agentilta; kirjaus 15 min jälkeen; lippu säilyy 15 min sisällä; kirjattu kulu pysäyttää yhä). Ennen korjausta 5/7 kaatui. `cost-data-quality.test.ts`:n kaksi kiinteän päivämäärän tapausta käyttävät nyt valekelloa, jotta ajo pysyy 15 min ikkunan sisällä.
@@ -738,7 +743,7 @@ Käytösmuutos operaattorille: kuun vaihtuessa budjetin takia pausettu agentti t
 ### Agentin yksityinen avain ei mene taint-ajolle (RK9-319)
 
 1023 antaa jokaiselle hallitulle ajolle `PAPERCLIP_AGENT_PRIVATE_KEY`-avaimen (agentin identiteetti, 0308). Avain elää pidempään kuin ajo. Prompt-injektoitu ajo (saapuvan sähköpostin herätys) voisi kopioida sen ulos.
-Fork jättää avaimen pois ajolta, jonka `resolveRunTaint` merkitsee taint-ajoksi (`server/src/services/heartbeat.ts`). Claim-hook merkitsee taintin ennen ajoympäristön rakentamista. Raja: kesken ajon syntyvä taint ei poista jo annettua avainta (sama raja kuin RK9-156, agentilla on Bash).
+Fork jättää avaimen pois ajolta, jonka `resolveRunTaint` merkitsee taint-ajoksi (`server/src/services/heartbeat.ts`). Claim-hook merkitsee taintin ennen ajoympäristön rakentamista. Raja: kesken ajon syntyvä taint ei poista jo annettua avainta (sama raja kuin RK9-156, agentilla on Bash). Lisäksi myöhempi ajo, joka jatkaa kesken ajon taintatun ajon sessiota, saa avaimen: tarkistus tehdään ennen kuin `sessionIdBefore` on asetettu, ja ajo merkitään taint-ajoksi vasta porteissa.
 Sivuvaikutus: taint-ajon sessiofingerprint ei sisällä `agentIdentityKeyId`:tä, joten taint-ajo ja sitä seuraava puhdas ajo aloittavat uuden session.
 Lukitsee: `agent-identity-taint-rk9.test.ts` (puhdas ajo saa avaimen, sähköpostin herättämä ajo ei). Ennen korjausta taint-tapaus kaatui.
 
@@ -746,6 +751,7 @@ Lukitsee: `agent-identity-taint-rk9.test.ts` (puhdas ajo saa avaimen, sähköpos
 
 Forkin coord-lista (`GET /api/companies/:id/rk9/coord/actors`) liittää ajoon issuen tunnisteen. Lista on auki agenttiavaimille, ja kysely tarkisti vain `visibleIssueCondition()`in, ei upstreamin `visibility`-kenttää.
 Korjaus: reitti välittää kutsujan `issueReadSqlCondition`in palveluun (`rk9-coord-presence.ts`, `rk9-coord-inbox.ts`). Yksityistä issueta, jota kutsuja ei saa lukea, ei liitetä: ajorivi säilyy, mutta `issue` on `null`. Inboxin viesti ei laskeudu kommentiksi yksityiseen issueen, jota lähettäjä ei saa lukea.
+Raja: presence-rivin `issue` on asiakkaan itse ilmoittama arvo, ei issues-taulun tieto. Fork ei suodata sitä. Agentti, joka rekisteröi itsensä yksityisen issuen tunnisteella, näyttää tunnisteen muille coord-kutsujille.
 Lukitsee: `rk9-coord-actors-routes.test.ts` ("does not show a private issue to an agent that cannot read it"). Ennen korjausta testi kaatui.
 
 ### Matalat havainnot (review 13.11.2026)
