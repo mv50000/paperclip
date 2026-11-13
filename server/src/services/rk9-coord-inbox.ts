@@ -27,7 +27,7 @@
 //   (`issue.comment_added` plus `rk9.coord.message_commented`).
 //
 // Contract: docs/implementation-notes/coord-bus.md.
-import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns, issues, rk9CoordActors, rk9CoordInbox } from "@paperclipai/db";
 import { parseRk9CoordActorId, RK9_COORD_ISSUE_PATTERN, type SendRk9CoordInbox } from "@paperclipai/shared";
@@ -37,6 +37,7 @@ import { logger } from "../middleware/logger.js";
 import { logActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { issueReferenceService } from "./issue-references.js";
 import { issueService } from "./issues.js";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import { issueTreeControlService } from "./issue-tree-control.js";
 import {
   assertRk9CoordNoSecretFields,
@@ -69,6 +70,11 @@ export interface Rk9CoordInboxCaller {
     | { type: "user"; userId: string }
     | { type: "agent"; agentId: string; runId: string | null; agentApiKeyId: string | null }
     | { type: "coord_token" };
+  /**
+   * RK9 Custom (RK9-701): the caller's upstream issue-privacy predicate (issueReadSqlCondition).
+   * A message never lands as a comment on a private issue that the caller cannot read.
+   */
+  issueReadCondition?: SQL<boolean>;
 }
 
 export interface Rk9CoordInboxSendResult {
@@ -180,7 +186,7 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
       .limit(20);
   }
 
-  async function findIssue(companyId: string, identifier: string) {
+  async function findIssue(companyId: string, identifier: string, readCondition?: SQL<boolean>) {
     const [row] = await db
       .select({
         id: issues.id,
@@ -189,12 +195,13 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
         conversationAgentId: issues.conversationAgentId,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier)))
+      // RK9 Custom (RK9-701): a hidden issue is not resolved by identifier.
+      .where(and(eq(issues.companyId, companyId), eq(issues.identifier, identifier), visibleIssueCondition(), readCondition))
       .limit(1);
     return row ?? null;
   }
 
-  async function findIssueById(companyId: string, issueId: string) {
+  async function findIssueById(companyId: string, issueId: string, readCondition?: SQL<boolean>) {
     const [row] = await db
       .select({
         id: issues.id,
@@ -203,7 +210,8 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
         conversationAgentId: issues.conversationAgentId,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+      // RK9 Custom (RK9-701): a hidden issue is not resolved by id.
+      .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), visibleIssueCondition(), readCondition))
       .limit(1);
     return row ?? null;
   }
@@ -220,9 +228,9 @@ export function rk9CoordInboxService(db: Db, opts: { now?: () => Date } = {}) {
     if (caller.paperclip.type !== "user") throw new Error("unreachable");
     let issue: { id: string; identifier: string | null; title: string; conversationAgentId: string | null } | null = null;
     if (input.issue) {
-      issue = await findIssue(companyId, input.issue);
+      issue = await findIssue(companyId, input.issue, caller.issueReadCondition);
     } else if (target.runIssueId) {
-      issue = await findIssueById(companyId, target.runIssueId);
+      issue = await findIssueById(companyId, target.runIssueId, caller.issueReadCondition);
     } else {
       throw coordError(
         422,

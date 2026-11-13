@@ -1,10 +1,12 @@
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, approvals, issues, riskEntries, riskIncidents } from "@paperclipai/db";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import type { RiskIncidentSeverity, RiskIncidentStatus } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import { emitApprovalCreated } from "./approvals.js";
+import { createAgentLifecycle } from "./agent-lifecycle.js"; // RK9 Custom (RK9-701)
 import { publishLiveEvent } from "./live-events.js";
 import { PLAYBOOKS, type Playbook } from "./risk-playbooks.js";
 import { riskRegistryService } from "./risk-registry.js";
@@ -99,11 +101,15 @@ export function riskIncidentService(db: Db) {
         if (action.type === "pause_agent" && incident.riskEntryId) {
           const entry = await registry.getEntry(companyId, incident.riskEntryId);
           if (entry.scopeType === "agent") {
-            await db
-              .update(agents)
-              .set({ status: "paused", pauseReason: "system", updatedAt: new Date() })
+            // RK9 Custom (RK9-701): pause through the 1023 agent lifecycle. A direct status write
+            // leaves lifecycleState "ready" with no hold, so the board's resume is a no-op and the
+            // agent stays paused (and hidden from agents.list) for good.
+            const [target] = await db
+              .select({ id: agents.id })
+              .from(agents)
               .where(and(eq(agents.id, entry.scopeId), eq(agents.companyId, companyId)));
-            executedActions.push({ type: "pause_agent", agentId: entry.scopeId, success: true });
+            const paused = target ? await createAgentLifecycle(db).pauseAgent(target.id, "system") : null;
+            executedActions.push({ type: "pause_agent", agentId: entry.scopeId, success: paused !== null });
           }
         }
 
@@ -116,6 +122,8 @@ export function riskIncidentService(db: Db) {
               .where(
                 and(
                   eq(issues.companyId, companyId),
+                  // RK9 Custom (RK9-701): reassign_tasks never touches a hidden issue.
+                  visibleIssueCondition(),
                   eq(issues.assigneeAgentId, entry.scopeId),
                   inArray(issues.status, ["in_progress"]),
                 ),

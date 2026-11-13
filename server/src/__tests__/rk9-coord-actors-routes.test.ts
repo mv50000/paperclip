@@ -964,6 +964,29 @@ if (!support.supported) {
     await expect(readOnlyDb.insert(rk9CoordActors).values({ companyId, kind: "orch", actorRef: "orch:x", trust: "attributed" })).rejects.toThrow();
   });
 
+  it("does not show a private issue to an agent that cannot read it (RK9-701)", async () => {
+    // Upstream 1023 private tasks: `issues.visibility = 'private'` is readable only by its
+    // assignee, owners, grants and project members. The coord list is open to agent keys, so the
+    // run row stays but the issue identifier is not joined in. (Board callers of the coord
+    // routes are instance admins, who read every issue.)
+    await db.update(issues).set({ visibility: "private" }).where(eq(issues.id, issueId));
+    try {
+      const member = await request(makeApp(agentKey())).get(`${base()}?active=1`);
+      expect(member.status, JSON.stringify(member.body)).toBe(200);
+      const memberRuns = member.body.actors.filter((a: { kind: string }) => a.kind === "agent_run");
+      expect(memberRuns.map((a: { actorId: string; issue: string | null }) => [a.actorId, a.issue])).toEqual([
+        [`agent_run:${runningRunId}`, null],
+      ]);
+      const byIssue = await request(makeApp(agentKey())).get(`${base()}?issue=RKP-7`);
+      expect(byIssue.body.actors.filter((a: { kind: string }) => a.kind === "agent_run")).toEqual([]);
+      // The instance admin still reads it.
+      const admin = await request(makeApp(operatorKey())).get(`${base()}?active=1`);
+      expect(admin.body.actors.find((a: { kind: string }) => a.kind === "agent_run")?.issue).toBe("RKP-7");
+    } finally {
+      await db.update(issues).set({ visibility: "open" }).where(eq(issues.id, issueId));
+    }
+  });
+
   it("registers an agent run once and does not list it twice", async () => {
     const app = makeApp(agentKey());
     const put = await request(app).put(`${base()}/me`).send({ phase: "working" });

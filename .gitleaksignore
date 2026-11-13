@@ -116,3 +116,28 @@ d08abcba15233de375a655d21d743022d7842e94:tests/e2e/chat-adapters-ui.shared.ts:pr
 78e003449827540175e2441c05bac9eeec8dae98:doc/plans/2026-10-02-hiring-executable-accounting-replay.v2.json:generic-api-key:421
 78e003449827540175e2441c05bac9eeec8dae98:doc/plans/2026-10-02-hiring-executable-accounting-replay.v2.json:generic-api-key:616
 78e003449827540175e2441c05bac9eeec8dae98:doc/plans/2026-10-02-hiring-executable-accounting-replay.v2.json:generic-api-key:811
+# Upstream v2026.1023.0 fixtures and eval evidence (RK9-701): idempotency/operation keys and sha256 digests,
+# fake tokens and a PEM placeholder in redaction tests, a Rust Duration line. Not credentials.
+57e977be72f37dcf31acff64b3e5dcbb64a92cd0:doc/architecture/runner-rich-acp-validation-2026-09-30.json:generic-api-key:768
+57e977be72f37dcf31acff64b3e5dcbb64a92cd0:packages/paperclip-runner/src/drivers/acpx/copilot-tool-evidence.test.ts:generic-api-key:96
+57e977be72f37dcf31acff64b3e5dcbb64a92cd0:packages/paperclip-runner/test/fixtures/copilot-product-v3-question-2026-09-29.json:generic-api-key:75
+57e977be72f37dcf31acff64b3e5dcbb64a92cd0:server/src/__tests__/redaction.test.ts:jwt:71
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:226
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:242
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:258
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:274
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:289
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:304
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:334
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:349
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:419
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:433
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:449
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:463
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:479
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:493
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:507
+d66acb7ac157c3db2e1d389de4513a7809977725:server/src/services/connectors/slack/evals/2026-10-08-evidence.json:generic-api-key:909
+a590ab769d32be6e8912de1ac169eb7bdc398fb7:packages/paperclip-runner/src/contracts/provider-trace-file-sink.test.ts:private-key:22
+a590ab769d32be6e8912de1ac169eb7bdc398fb7:packages/paperclip-runner/runner/crates/runner-core/src/durable/state.rs:private-key:2620
+a590ab769d32be6e8912de1ac169eb7bdc398fb7:packages/paperclip-runner/runner/crates/runner-core/src/durable/state.rs:private-key:2654

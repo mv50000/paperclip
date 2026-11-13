@@ -78,6 +78,21 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   return { ...actual, findExistingIssueBlockersResolvedWakeForReadyState: mockFindExistingWake };
 });
 
+// RK9-701: upstream v2026.1023.0 enqueues a fast response from the comment route; it reads
+// instance settings from the db. Upstream's route tests mock it the same way.
+vi.mock("../services/fast-responses.js", () => ({
+  enqueueFastResponse: vi.fn(async () => undefined),
+  supersedeFastResponse: vi.fn(async () => undefined),
+}));
+
+// RK9-701: upstream v2026.1023.0 checks approval read access in approvalRoutes' id param
+// (canActorReadApproval queries the db). This route test has no database; upstream's own
+// approval route tests mock the check the same way.
+vi.mock("../services/authorization.js", async (importActual) => ({
+  ...await importActual<typeof import("../services/authorization.js")>(),
+  canActorReadApproval: async () => true,
+}));
+
 vi.mock("../services/index.js", () => ({
   companyService: () => ({ getById: vi.fn(async () => ({ id: "company-1" })) }),
   accessService: () => ({

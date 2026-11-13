@@ -16,5 +16,6 @@
   "9013_rk9_outreach_approved_content_hash.sql": "5589a77aeda204296293c0d7da0ce8b8aa78127d8b9d3392b59e82463ab9578d",
   "9014_rk9_run_taints.sql": "de7762d08098bc4e38993019108cd653bbbb3c308c6b3f6420963c3554cf5c25",
   "9015_rk9_coord.sql": "7037f36ef53d8b1b5b64529cb4478e2ae12e02a37fd383be2ebe75ab0f1ee300",
-  "9016_rk9_coord_recall_scope.sql": "ccaba245bec87e4697fe9531a3b25c7447df05e1b6cf7ca2c54f97e38d141fc6"
+  "9016_rk9_coord_recall_scope.sql": "ccaba245bec87e4697fe9531a3b25c7447df05e1b6cf7ca2c54f97e38d141fc6",
+  "9017_rk9_budget_unpriced_allow.sql": "2aecdf97939a389c344fa770c7618d4eeb60c7e31305e9a7bb4e2174a3869e08"
 }

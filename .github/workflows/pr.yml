@@ -233,6 +233,11 @@ jobs:
             shard_count: 2
           - group: general-workspaces-b
             group_label: workspaces-b
+          # --- RK9 Custom (RK9-701): run-vitest-stable moved the db project out of
+          # workspaces-b into its own workspaces-c lane (upstream, step 1012/1023).
+          # Without this entry the fork PR CI never ran @paperclipai/db tests.
+          - group: general-workspaces-c
+            group_label: workspaces-c
 
     steps:
       - name: Checkout repository
@@ -244,7 +249,7 @@ jobs:
       # one commit instead of the full history. Keep the SHA in sync with the test.
       # RK9_REQUIRE_FORK_BASE on the test step makes a missing commit fail, not skip.
       - name: Fetch fork base commit for the issue visibility inventory
-        run: git fetch --no-tags --depth=1 origin bba6a45f0d364cfd962ac59b3bdf2426a8222adb
+        run: git fetch --no-tags --depth=1 origin 1b4c803816e82b0265c8422e1a804327a7ed8c54
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6

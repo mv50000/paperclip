@@ -228,6 +228,8 @@ export async function testEnvironment(
       detail: `Detected in ${source}.`,
       hint: "Ensure AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or AWS_PROFILE) and AWS_REGION are configured.",
     });
+  } else if (config.managedAiRouting) {
+    checks.push({ code: "claude_managed_provider_configured", level: "info", message: "Testing the selected connection’s provider and model." });
   // --- RK9 Custom (RK9-228): only the adapter config key counts here; a server-wide key is the branch below ---
   } else if (isNonEmpty(configApiKey)) {
     const source = "adapter config env";

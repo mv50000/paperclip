@@ -693,6 +693,95 @@ Mallivalitsimen järjestys on upstreamin (#14917, Fable 5.1 ensin). Oletusmalli 
 Prodin `experimental`-rivi ei muutu (12.11.2026: `enableNativeRunner = false`, `recoveryStrictInProgressOnly = true`). Pre-deploy-SQL:ää ei tarvita.
 Migraatiot 0294–0305 ovat lisääviä. `0298` täyttää oletusohjeet muisti-integraatioille, mutta prodissa `tool_connections` on tyhjä (0 riviä).
 
+## Porras v2026.1023.0 (RK9-701)
+
+### Budjetti: hinnoittelematon käyttö ei pysäytä forkissa (0312 + 9017)
+
+Migraatio `0312` lisää `budget_policies.unpriced_usage_policy`-sarakkeen upstreamin oletuksella `block`. Sarake tulee myös olemassa oleville politiikoille.
+Upstreamissa kova pysäytys laukeaa kolmesta syystä: kulut ≥ budjetti, ikkunassa on `cost_status = 'unpriced'` -rivi (ei `subscription_included`) tai ikkunassa on päättynyt ajo, jonka kirjanpito on kesken (`heartbeat_runs.cost_accounting_pending`).
+Rahasummat vertaillaan `numeric(24,7)`-tarkkuudella (`cost_events.cost_cents`, `budget_incidents.amount_observed`).
+
+Päätös (RK9-693, RK9-707, PR #279 ja #281): fork käyttää oletusta `allow`. Claude_local-ajo, joka raportoi laskutustyypin `api` tai ei mitään eikä hintaa, tallentuu `unpriced`-riviksi. Fork ei ole koskaan pysäyttänyt sellaista käyttöä.
+Toteutus:
+- Forkin migraatio `9017_rk9_budget_unpriced_allow.sql` asettaa sarakkeen oletukseksi `allow` ja siirtää kaikki `block`-rivit arvoon `allow`. Kaikki rivit saivat `block`in samassa nostossa `0312`:n oletuksesta, joten mikään boardin valinta ei katoa.
+- `server/src/services/budgets.ts` käyttää uudelle politiikalle oletusta `allow`. UI:n paikkamerkit (`ProjectDetail.tsx`, `AgentDetail.production.tsx`) näyttävät saman arvon.
+- Drizzle-skeema pitää upstreamin arvon `block`, jotta snapshot-drift-tarkistus vastaa upstreamin `0312`:ta. Insert käyttää kannan oletusta.
+- Board voi yhä valita `block`in politiikkakohtaisesti (Costs-sivun valintaruutu).
+
+Mittaus prod-kopiolla 12.11.2026: 13 aktiivista kovaa politiikkaa (11 agentti-, 2 yritystasoista). Hinnoittelemattomia rivejä on 0 ja kesken jääneitä kirjanpitoajoja on 0. Viimeisen 30 vuorokauden 413 kulurivistä kaikki ovat `subscription_included`. Siksi kumpikaan arvo ei olisi pysäyttänyt yhtäkään politiikkaa nyt.
+Lukitsee: `budgets-boundary-rk9.test.ts` (100 %-raja, 99,99 ja 100,01 senttiä, oletus `allow`, eksplisiittinen `block`, `subscription_included`) ja `nosto-budget-unpriced-usage-rk9.test.ts` (valmistelutiketin testi).
+
+### Budjetti: kesken jäänyt kirjanpito ei pysäytä forkissa (review 13.11.2026)
+
+Upstream merkitsee jokaisen päättyneen ajon `cost_accounting_pending`-lipulla ja laskee lipulliset ajot kovaksi pysäytykseksi (`observedBlocks`). Independent review löysi kaksi vikaa:
+- **HIGH: kuititon ajo lukitsee scopen pysyvästi.** Claude_local-ajo, joka aikakatkaistaan, perutaan tai kaatuu ennen viimeistä `result`-tapahtumaa, raportoi `usageComplete: false`. Silloin `accountingReceiptReady` on `false`, kirjanpidon sweep ohittaa ajon, ja lippu jää päälle. Jokainen agentin tai yrityksen kova politiikka pysäyttää scopen ja peruu sen jonon. Resume hylätään, ja integrity raportoi ajon (`missing_acknowledgement`). Tila ei purkaudu ilman operaattoria tai kuukauden vaihtumista.
+- **MEDIUM: kilpailutilanne.** Lippu kommitoituu ennen kuin `accountRunCost` ottaa yrityksen lukon. Rinnakkainen `getInvocationBlock` toisen agentin ajolle näkee lipun ja voi pausettaa koko yrityksen.
+
+Korjaus forkissa (ydin, raja 4: `heartbeat_runs` on ydintaulu, ja `budgets.ts` ja `run-cost-accounting.ts` ovat ydinpalveluja):
+- `RK9_PENDING_ACCOUNTING_BLOCKS = false` (`server/src/services/budgets.ts`). Lipullinen ajo ei pysäytä scopea, ei estä `raise_budget_and_resume`-päätöstä eikä anna pysäytyksen syytä. Tämä on 1023:a edeltävä forkin käytös: kulu lasketaan, kun se on kirjattu. Molemmat viat poistuvat, koska lippu ei enää vaikuta pysäytykseen.
+- `RK9_RECEIPTLESS_SETTLE_AFTER_MS = 15 min` (`server/src/services/run-cost-accounting.ts`). Kun päättyneestä kuitittomasta ajosta on kulunut 15 min, kirjanpito kirjaa ajon viimeisellä tunnetulla käytöllä ja merkitsee `usageJson.rk9SettledWithoutReceipt: true`. Lippu poistuu ilman operaattoria. 15 min antaa myöhästyneelle kuitille aikaa (replay ajetaan ennen sweepiä).
+- Kova raja toimii yhä kirjatuille kuluille (100 %-raja, `budgets-boundary-rk9.test.ts`).
+
+Jäännösriski (verifier 13.11.2026), koskee vain mitattua laskutusta (`metered_api`):
+- Ajo, jonka kirjaus heittää virheen joka sweepillä, ei koskaan päädy kirjanpitoon. Fork päästää agentin silti töihin, koska lippu ei enää pysäytä. Oletusvaraus (`reservation_cents`) on 0, joten varauskaan ei suojaa.
+- Kuitittomana kirjattu ajo voi aliarvioida kulun. Jos maksullinen kuitti katoaa, ajo kirjataan viimeisellä tunnetulla käytöllä, joka voi olla 0. Myöhästynyt kuitti hylätään kirjauksen jälkeen. Jälki on vain `rk9SettledWithoutReceipt` ja lokin varoitus.
+- Prodissa kaikki kulurivit ovat nyt `subscription_included` (mittaus 12.11.2026), joten riski ei koske nykyistä käyttöä. Jos yritys ottaa käyttöön mitatun API-avaimen, tarkista `rk9SettledWithoutReceipt`-ajot ja `accounting_last_error` säännöllisesti.
+
+Käsin palautus: cutover-runbookin vaihe 5 kohta 6 (`POST /api/companies/<id>/costs/retry-accounting`).
+Lukitsee: `budgets-pending-accounting-rk9.test.ts` (7: `cancelled`, `timed_out` ja `failed` ilman kuittia eivät estä; tuore lippu ei pausetta yritystä toiselta agentilta; kirjaus 15 min jälkeen; lippu säilyy 15 min sisällä; kirjattu kulu pysäyttää yhä). Ennen korjausta 5/7 kaatui. `cost-data-quality.test.ts`:n kaksi kiinteän päivämäärän tapausta käyttävät nyt valekelloa, jotta ajo pysyy 15 min ikkunan sisällä.
+
+### Budjettipausen vapautus: upstreamin käytös hyväksytty (review MEDIUM 3)
+
+Masterilla budjetin takia pausettu agentti pysyi pausella, kunnes board korotti budjettia tai hyväksyi incidentin. 1023:ssa lifecyclen 60 s sweep laskee budjettipidon uudelleen agentin politiikoista (`modules/agent-lifecycle/adapters/postgres.ts`). Pito poistuu, kun yksikään agentin politiikka ei enää estä. Sama koskee yritystä ja projektia (`reconcileScope`: suljettu UTC-ikkuna, inaktiivinen politiikka tai korotus vapauttaa vain budjetin oman pausen).
+Päätös: hyväksytään upstream.
+- Vapautus tapahtuu vain, kun kulut ovat rajan alla nykyisessä ikkunassa tai board on muuttanut politiikkaa. Raha ei ylity: uusi ikkuna alkaa nollasta, ja raja pätee siihen.
+- Käsin tehty pause (`manual`, `system`) ei vapaudu sweepissä. Board-resume ei poista budjetti- eikä yrityspitoa.
+- Masterin käytöksen palautus vaatisi muutoksen sekä lifecycle-sweepiin että `reconcileScope`en ja `resumeScopeFromBudget`iin kaikilla scopeilla. Muutos ei ole pieni.
+- Prod-kopiolla 13.11.2026 yhdelläkään agentilla ei ollut budjettipitoa.
+Käytösmuutos operaattorille: kuun vaihtuessa budjetin takia pausettu agentti tai yritys jatkaa itsestään.
+
+### Agentin yksityinen avain ei mene taint-ajolle (RK9-319)
+
+1023 antaa jokaiselle hallitulle ajolle `PAPERCLIP_AGENT_PRIVATE_KEY`-avaimen (agentin identiteetti, 0308). Avain elää pidempään kuin ajo. Prompt-injektoitu ajo (saapuvan sähköpostin herätys) voisi kopioida sen ulos.
+Fork jättää avaimen pois ajolta, jonka `resolveRunTaint` merkitsee taint-ajoksi (`server/src/services/heartbeat.ts`). Claim-hook merkitsee taintin ennen ajoympäristön rakentamista. Raja: kesken ajon syntyvä taint ei poista jo annettua avainta (sama raja kuin RK9-156, agentilla on Bash). Lisäksi myöhempi ajo, joka jatkaa kesken ajon taintatun ajon sessiota, saa avaimen: tarkistus tehdään ennen kuin `sessionIdBefore` on asetettu, ja ajo merkitään taint-ajoksi vasta porteissa.
+Sivuvaikutus: taint-ajon sessiofingerprint ei sisällä `agentIdentityKeyId`:tä, joten taint-ajo ja sitä seuraava puhdas ajo aloittavat uuden session.
+Lukitsee: `agent-identity-taint-rk9.test.ts` (puhdas ajo saa avaimen, sähköpostin herättämä ajo ei). Ennen korjausta taint-tapaus kaatui.
+
+### Coord presence ja inbox noudattavat yksityisiä tehtäviä (0313)
+
+Forkin coord-lista (`GET /api/companies/:id/rk9/coord/actors`) liittää ajoon issuen tunnisteen. Lista on auki agenttiavaimille, ja kysely tarkisti vain `visibleIssueCondition()`in, ei upstreamin `visibility`-kenttää.
+Korjaus: reitti välittää kutsujan `issueReadSqlCondition`in palveluun (`rk9-coord-presence.ts`, `rk9-coord-inbox.ts`). Yksityistä issueta, jota kutsuja ei saa lukea, ei liitetä: ajorivi säilyy, mutta `issue` on `null`. Inboxin viesti ei laskeudu kommentiksi yksityiseen issueen, jota lähettäjä ei saa lukea.
+Raja: presence-rivin `issue` on asiakkaan itse ilmoittama arvo, ei issues-taulun tieto. Fork ei suodata sitä. Agentti, joka rekisteröi itsensä yksityisen issuen tunnisteella, näyttää tunnisteen muille coord-kutsujille.
+Lukitsee: `rk9-coord-actors-routes.test.ts` ("does not show a private issue to an agent that cannot read it"). Ennen korjausta testi kaatui.
+
+### Matalat havainnot (review 13.11.2026)
+
+- Drizzle-skeeman oletus on yhä `block` (`schema/budget_policies.ts`). Tämä on tarkoituksellista, ks. yllä: insert käyttää kannan oletusta `allow`.
+- `9017`:n `lock_timeout` on 5 s. Jos lukkoa ei saada, migraatio kaatuu ja palvelu ei käynnisty, joten `block`-arvot eivät jää hiljaa voimaan. Cutover-runbookin vaihe 5 kohta 6 tarkistaa lisäksi, että `block`-rivejä on 0.
+
+### Uusi agentti syntyy tilaan `paused` + `preparing`
+
+Upstream luo jokaisen uuden agentin (myös hyväksytyn hiren) tilaan `status: "paused"`, `lifecycleState: "preparing"`, ja lifecycle-worker vie sen valmiiksi.
+Forkin sääntö `52b995085` piilottaa pausetut agentit listasta ja hylkää ne assigneena. RK9-701 rajaa säännön pitoon (`server/src/services/rk9-agent-pause.ts`): pausettu agentti, jonka `lifecycleState` on `preparing`, `verifying` tai `resuming`, näkyy listassa ja on assignoitavissa.
+Muut pausetut agentit pysyvät piilossa (fail closed). Lukitsee: `rk9-agent-pause.test.ts`.
+Pito voittaa valmistelun: jos pausetulla agentilla on yksikin `lifecycleHolds`-pito, agentti on piilossa ja hylätään assigneena, vaikka `lifecycleState` olisi `preparing`. Sama ehto pätee `risk-monitors.ts`:n kuolleen agentin hälytykseen.
+
+### Riskin `pause_agent` kulkee lifecyclen kautta
+
+Ennen 1023:a riski-playbookin `pause_agent` kirjoitti suoraan `status: "paused"`. 1023:ssa board-resume poistaa vain pitoja, joten suora kirjoitus ilman pitoa teki resumesta tyhjän toimen.
+RK9-701 kutsuu nyt `createAgentLifecycle(db).pauseAgent(id, "system")` (`server/src/services/risk-incidents.ts`). Agentti saa pidon `system`, ja board-resume (`reason: "user"`) poistaa sen.
+Käytösmuutos: `pending_approval`-, `terminated`- tai `rejected`-tilassa olevaa agenttia ei voi enää pausettaa playbookilla. Toimenpide kirjataan tulokseksi `success: false`. Lukitsee: `rk9-agent-pause.test.ts`.
+
+### Muut käytösmuutokset
+
+- Yksityiset tehtävät ja projektit (0313): `issues.visibility` ja `projects.visibility` ovat oletuksena `open`. Uusia tauluja ovat `issue_access_grants` ja `project_access_members`. Olemassa olevat issuet pysyvät avoimina. Forkin kyselyt suodattavat piilotetut issuet (`visibleIssueCondition()`, ks. regressiomatriisi).
+- Agentin lifecycle (0320) täyttää `lifecycle_state`-sarakkeen kaikille agenteille. Mukana tulevat lifecycle-pidot (holds) ja agentin identiteettiavaimet (`agent_identity_keys`, 0308).
+- `cost_events.agent_id` on nullattava (0316), ja `cost_events.subscription_id` on uusi sarake (0322). Forkin `risk-monitors.ts` ohittaa agentittomat rivit.
+- `issue_comments.origin` (0331) on uusi sarake. Indeksit `0313` (`heartbeat_runs`, `issues`, `projects`) ja `0332` (`agent_wakeup_requests`) luodaan `CONCURRENTLY`. `0333` luo `cost_events`- ja `heartbeat_runs`-indeksit tavallisesti; dry-runissa se kesti alle 0,02 s.
+- Uudet `experimental`-avaimet `enableGitHubReviewBots`, `enableOpenAiDot` ja `enableFastResponses` ovat oletuksena `false`. Fork ei kirjoita niitä.
+- Idle sleep -turvatilan lukema ja pluginien drain ovat uusia. Fork ei käytä host-sleepiä.
+- Upstreamin `skills/paperclip` otettiin käyttöön (operaattorin päätös 3.11.2026). @-maininta ei herätä agenttia, `/interactions`-reitit ja `questionSet` ovat dokumentoidut. RK9-433-, RK9-125- ja RK9-315-lohkot säilyvät.
+
 ## Preflight — tarkistuslista RK9-307:lle
 
 Tämä tiketti ei muokkaa preflightia. Kanoninen lähde on

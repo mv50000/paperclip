@@ -8,7 +8,7 @@ import {
   defaultAgentPermissions,
   normalizeAgentPermissions,
   permissionsImplyLowTrust,
-} from "../services/agent-permissions.js";
+} from "../lib/agent-permissions.js";
 
 describe("agent permissions service", () => {
   // --- RK9 Custom (RK9-309, RK9-317): upstream grants agent-creation authority to every new agent;

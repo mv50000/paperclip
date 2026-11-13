@@ -1,4 +1,6 @@
-import { and, desc, eq, gte, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, lt, ne, not, or, sql } from "drizzle-orm";
+import { notRk9HeldPausedAgentCondition } from "./rk9-agent-pause.js"; // RK9 Custom (RK9-701)
+import { visibleIssueCondition } from "./issue-visibility.js";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -332,8 +334,11 @@ export function riskMonitorService(db: Db) {
         .where(and(
           eq(costEvents.companyId, companyId),
           gte(costEvents.occurredAt, sevenDaysAgo),
+          // RK9 Custom (RK9-701): upstream 0316 made cost_events.agent_id nullable.
+          isNotNull(costEvents.agentId),
         ))
-        .groupBy(costEvents.agentId);
+        .groupBy(costEvents.agentId)
+        .then((rows) => rows.filter((row): row is { agentId: string; totalCents: number } => row.agentId !== null));
 
       const todayCosts = await db
         .select({
@@ -344,8 +349,11 @@ export function riskMonitorService(db: Db) {
         .where(and(
           eq(costEvents.companyId, companyId),
           gte(costEvents.occurredAt, today),
+          // RK9 Custom (RK9-701): upstream 0316 made cost_events.agent_id nullable.
+          isNotNull(costEvents.agentId),
         ))
-        .groupBy(costEvents.agentId);
+        .groupBy(costEvents.agentId)
+        .then((rows) => rows.filter((row): row is { agentId: string; totalCents: number } => row.agentId !== null));
 
       const todayMap = new Map(todayCosts.map((c) => [c.agentId, c.totalCents]));
       const daysElapsed = Math.max(1, Math.ceil((now.getTime() - sevenDaysAgo.getTime()) / (24 * 60 * 60 * 1000)));
@@ -398,6 +406,8 @@ export function riskMonitorService(db: Db) {
           .from(issues)
           .where(and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues raise no orphan alert.
+            visibleIssueCondition(),
             inArray(issues.status, ["todo", "in_progress", "in_review"]),
             sql`${issues.assigneeAgentId} IS NULL`,
             sql`${issues.assigneeUserId} IS NULL`,
@@ -421,8 +431,12 @@ export function riskMonitorService(db: Db) {
           .innerJoin(agents, eq(issues.assigneeAgentId, agents.id))
           .where(and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues raise no dead-agent alert.
+            visibleIssueCondition(),
             inArray(issues.status, ["todo", "in_progress"]),
-            inArray(agents.status, ["terminated", "paused"]),
+            // RK9 Custom (RK9-701): a new hire the 1023 lifecycle is still preparing is
+            // status "paused" but not dead; only a held pause or termination alerts.
+            or(eq(agents.status, "terminated"), not(notRk9HeldPausedAgentCondition())),
           ));
 
         for (const task of deadAgentTasks) {
@@ -461,6 +475,8 @@ export function riskMonitorService(db: Db) {
           .from(issues)
           .where(and(
             eq(issues.companyId, companyId),
+            // RK9 Custom (RK9-701): hidden issues raise no stale-blocker alert.
+            visibleIssueCondition(),
             eq(issues.status, "blocked"),
             lt(issues.updatedAt, staleCutoff),
           ));

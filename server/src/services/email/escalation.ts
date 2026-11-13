@@ -11,6 +11,7 @@
 // sending so a restart in the middle does not double-escalate.
 
 import { and, eq, isNull, sql } from "drizzle-orm";
+import { visibleIssueCondition } from "../issue-visibility.js";
 import type { Db } from "@paperclipai/db";
 import {
   companyEmailConfig,
@@ -55,7 +56,8 @@ async function findCandidates(db: Db): Promise<EscalationCandidate[]> {
       sendingDomain: companyEmailConfig.sendingDomain,
     })
     .from(rk9EmailMessages)
-    .leftJoin(issues, eq(rk9EmailMessages.issueId, issues.id))
+    // RK9 Custom (RK9-701): a hidden issue is not joined in; the condition sits in ON so the message row survives.
+    .leftJoin(issues, and(eq(rk9EmailMessages.issueId, issues.id), visibleIssueCondition()))
     .leftJoin(
       emailRoutes,
       and(
@@ -84,6 +86,8 @@ async function findCandidates(db: Db): Promise<EscalationCandidate[]> {
     } => r.escalateAfterHours != null && r.sendingDomain != null)
     .filter((r) => {
       if (!r.issueId) return false; // no linked issue → noise; skip
+      // RK9 Custom (RK9-701): the visibility join left the issue columns null, so the issue is hidden; skip it.
+      if (r.issueStatus === null) return false;
       const status = r.issueStatus ?? "";
       // Backlog = unrouted/catch-all triage queue; it must page nobody.
       return (

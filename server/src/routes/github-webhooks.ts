@@ -3,6 +3,7 @@ import { Router, type Request, type Response } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issues, issueWorkProducts } from "@paperclipai/db";
+import { visibleIssueCondition } from "../services/issue-visibility.js";
 import { issueService, logActivity } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
 
@@ -100,6 +101,8 @@ export function githubWebhookRoutes(db: Db) {
           and(
             inArray(issues.identifier, identifiers),
             eq(issues.status, "in_review"),
+            // RK9 Custom (RK9-701): a PR merge must not close a hidden issue.
+            visibleIssueCondition(),
           ),
         );
 
@@ -146,6 +149,8 @@ export function githubWebhookRoutes(db: Db) {
           eq(issueWorkProducts.type, "pull_request"),
           eq(issueWorkProducts.url, prUrl),
           eq(issues.status, "in_review"),
+          // RK9 Custom (RK9-701): a PR merge must not close a hidden issue.
+          visibleIssueCondition(),
         ),
       );
 

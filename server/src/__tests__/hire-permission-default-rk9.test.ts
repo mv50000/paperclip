@@ -1,14 +1,13 @@
 // RK9 Custom (RK9-317): the stored permissions of a new agent keep the fork hire rule.
 // Upstream v2026.916 grants canCreateAgents to every standard-trust agent on the create path;
-// the fork pin in services/agent-permissions.ts limits the default to the CEO role. The route
+// the fork pin in lib/agent-permissions.ts limits the default to the CEO role. The route
 // tests mock the agent service, so only this test sees what the create path persists.
 //
-// RK9-707: upstream v2026.1023 has no `agentService.create` (hiring moves to the agent-lifecycle API,
-// services/agent-lifecycle.ts, and `prepareAgentHire` in services/agent-hiring.ts), nor
-// services/agent-permissions.ts. After the lift the DB cases below fail with a TypeError, not on the
-// CEO assertion. In RK9-701 move them to the agent-lifecycle API / `prepareAgentHire` path and keep
-// the CEO case. The pure-function cases call the fork pin (`normalizeAgentPermissions` + role)
-// directly. They import the module lazily, so a lift that drops services/agent-permissions.ts fails
+// RK9-707/RK9-701: upstream v2026.1023 has no `agentService.create`; the DB cases create the agent
+// through the agent-lifecycle API (`createAgentLifecycle(db).requestHire`, services/agent-lifecycle.ts),
+// which runs the same records.create path as the hire routes. The fork pin moved with upstream's
+// rename to lib/agent-permissions.ts. The pure-function cases call the fork pin (`normalizeAgentPermissions` + role)
+// directly. They import the module lazily, so a lift that drops lib/agent-permissions.ts fails
 // them with a clear "module not found" instead of breaking the whole file at load.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -17,13 +16,13 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { agentService } from "../services/agents.ts";
+import { createAgentLifecycle } from "../services/agent-lifecycle.ts";
 import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 
 describe("hire permission default as a pure function (RK9-317, RK9-707)", () => {
-  let normalizeAgentPermissions!: typeof import("../services/agent-permissions.ts").normalizeAgentPermissions;
+  let normalizeAgentPermissions!: typeof import("../lib/agent-permissions.ts").normalizeAgentPermissions;
   beforeAll(async () => {
-    ({ normalizeAgentPermissions } = await import("../services/agent-permissions.ts"));
+    ({ normalizeAgentPermissions } = await import("../lib/agent-permissions.ts"));
   });
   const onCreate = (permissions: unknown, role: string) =>
     normalizeAgentPermissions(permissions, { context: "create", role }).canCreateAgents;
@@ -89,7 +88,7 @@ describeEmbeddedPostgres("new agent hire permission default (RK9-317)", () => {
   }
 
   async function createAgent(companyId: string, role: string, permissions?: Record<string, unknown>) {
-    return agentService(db).create(companyId, {
+    return createAgentLifecycle(db).requestHire(companyId, {
       name: `${role}-${randomUUID().slice(0, 8)}`,
       role,
       status: "idle",

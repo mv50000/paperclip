@@ -10,7 +10,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultAgentPermissions, normalizeAgentPermissions } from "../services/agent-permissions.js";
+import { defaultAgentPermissions, normalizeAgentPermissions } from "../lib/agent-permissions.js";
 
 const companyId = "22222222-2222-4222-8222-222222222222";
 const standardAgentId = "11111111-1111-4111-8111-111111111111";
@@ -129,10 +129,22 @@ function registerModuleMocks() {
   }));
   vi.doMock("../telemetry.js", () => ({ getTelemetryClient: () => null }));
   vi.doMock("../services/agents.js", () => ({ agentService: services.agentService }));
+  // RK9-701: upstream 1023 hires through the agent-lifecycle API. Route it to the agent
+  // service mock, as upstream's own agent route tests do.
+  vi.doMock("../services/agent-lifecycle.js", async (importActual) => ({
+    ...await importActual<typeof import("../services/agent-lifecycle.js")>(),
+    createAgentLifecycle: () => ({
+      requestHire: (...args: unknown[]) => mockAgentService.create(...args),
+    }),
+  }));
   vi.doMock("../services/access.js", () => ({ accessService: services.accessService }));
   vi.doMock("../services/approvals.js", () => ({ approvalService: services.approvalService }));
   vi.doMock("../services/company-skills.js", () => ({ companySkillService: services.companySkillService }));
-  vi.doMock("../services/budgets.js", () => ({ budgetService: services.budgetService }));
+  // RK9-701: upstream 1023 agent-lifecycle imports more budget exports (policyBlocks, ...); keep them real.
+  vi.doMock("../services/budgets.js", async (importActual) => ({
+    ...await importActual<typeof import("../services/budgets.js")>(),
+    budgetService: services.budgetService,
+  }));
   vi.doMock("../services/heartbeat.js", () => ({ heartbeatService: services.heartbeatService }));
   vi.doMock("../services/issue-approvals.js", () => ({ issueApprovalService: services.issueApprovalService }));
   vi.doMock("../services/issues.js", () => ({ issueService: services.issueService }));
@@ -199,7 +211,7 @@ const hireBody = {
 };
 
 // The first test pays the cold import of routes/agents.js, which can exceed the 5 s default.
-describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () => {
+describe("hire approval policy (RK9-309)", { sequential: true, timeout: 30_000 }, () => {
   beforeEach(() => {
     vi.resetModules();
     registerModuleMocks();
@@ -375,7 +387,7 @@ describe.sequential("hire approval policy (RK9-309)", { timeout: 30_000 }, () =>
 
 // Tripwire for v2026.916.1: upstream makes canCreateAgents default-on for every
 // standard-trust agent created through the hire/create path. The fork grants
-// it only to the CEO role (RK9-317 pin in services/agent-permissions.ts). When
+// it only to the CEO role (RK9-317 pin in lib/agent-permissions.ts). When
 // this turns red during an upgrade stage, keep the fork default (or require
 // board approval for every company) before merge.
 describe("default hire permission (RK9-309, RK9-317)", () => {

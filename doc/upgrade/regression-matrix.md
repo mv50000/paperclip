@@ -15,6 +15,7 @@ Tämä dokumentti on hyväksyntäportti: jokainen porras (ks. `doc/UPSTREAM-UPGR
 | Freeze päivitetty (porras 707, RK9-314) | `a0ae4d43b` (2026-09-27, PR #128 merge), commitit 175–180 alla |
 | Freeze päivitetty (porras 720, RK9-314) | `7a2ceba55` (2026-09-27, PR #129 merge), commitit 181–190 alla |
 | Freeze päivitetty (porras 817→831, RK9-316) | `917ae45d8` (2026-09-27, portaan 831 pre-SHA). Välissä vain 817:n seitsemän sovituscommittia (`c38f350c`…`13a76a70`, RK9-315); niitä ei lisätty taulukkoon, koska ne kuuluvat 817:n konfliktilokiin. |
+| Freeze päivitetty (porras 1023, RK9-701) | `0b9a49423aebc02f8b29b0d18e552f641442d9ae` (2026-11-12, PR #298 merge = portaan 1023 pre-SHA) |
 | Forkin haarautumiskohta upstreamista | `d0bdbe11a9624435b6dca3968389bd59c6a559a2` (`canary/v2026.428.0-canary.1`) |
 | Ei-merge-committeja `d0bdbe11a..origin/master` | 142 (9ed8e7704), 159 (3e7ff9320) |
 | Upstream `upstream/master` fetch-hetkellä | `7f3c06dac` (2026-09-25) |
@@ -871,6 +872,67 @@ Testisovitukset:
 - `packages/plugins/plugin-rk9-ads/schemas/creative-manifest.v1.schema.json`: generoitu uudelleen zod 4.6.5:llä.
 - `built-in-agents.test.ts`: palautettu forkin masterin odotus (root-agentilla ei ole `*:suggest-changes`-granttia), koska fork jättää kaikki 14 oletusavainta pois.
 - `agent-skills-routes.test.ts`: CEO saa forkin neljän tiedoston paketin, muut roolit forkin default-ohjeen.
+
+## Konfliktit portaassa 1023 (`origin/master` `0b9a49423` + `v2026.1023.0`, RK9-701)
+
+Porras 3 (1012 → 1023). 41 konfliktitiedostoa ja 28 upstream-migraatiota (0306–0333). Upstream jakoi `heartbeat.ts`:n moduuleihin (`server/src/services/heartbeat/`), siirsi agentin luonnin agent-lifecycle-API:in (`services/agent-lifecycle.ts`, `services/agent-hiring.ts`, `lib/agent-records.ts`) ja `agent-permissions.ts`:n hakemistoon `lib/`.
+Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 0b9a49423 v2026.1023.0`.
+
+| Tiedosto | Ratkaisu |
+|---|---|
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0333 + slot `0126` omalla paikallaan, sitten `9000`–`9016` (idx 334–350). 350 entryä = 350 tiedostoa. Uusi forkin migraatio `9017_rk9_budget_unpriced_allow` (idx 351, ks. `defaults-hardening.md`) → 351 entryä. |
+| `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/validators/index.ts` | upstreamin uudet exportit ensin, forkin RK9 Custom -lohko perässä |
+| `packages/db/package.json`, `packages/db/src/client.ts` | forkin `db:migration-dry-run` + upstreamin `seed` (siirtyi `server/scripts/seed.ts`:ään); upstreamin bootstrap, RK9-348- ja RK9-635-lukkolohkot ennallaan |
+| `pnpm-lock.yaml` | upstreamista + `pnpm install`; forkin SES- ja mailparser-versiot pinnattu masterin versioihin (3.1141.0, 3.9.28, 3.4.6) |
+| `server/src/services/heartbeat.ts` (+ `heartbeat/queue.ts`, `scheduling.ts`, `run-completion.ts`, uusi `heartbeat/rk9-gates.ts`) | upstreamin versio; forkin logiikka siirretty port mapin (`doc/plans/2026-11-03-heartbeat-port-map.md`) mukaan: system- ja yrityspause, globaali ajoraja round-robinilla, idle-timerin ohitus, human proxy, RK9-319-taint claimissa, RK9-676-coord-ehto, RK9-699-finalisointikytkin ja RK9-18-knowledge-injektio. Portit kulkevat `queue.ts`:lle ja `scheduling.ts`:lle **pakollisena** riippuvuutena (`rk9Gates`). |
+| `server/src/services/agents.ts`, `agent-hiring.ts`, `lib/agent-records.ts`, `routes/agents.ts` | upstreamin versiot + forkin `list({ includePaused })`, `recordExternalRun`, RK9-317-roolipinni (`role` välittyy `normalizeAgentPermissions`ille), human proxyn nollabudjetti ja heartbeat pois, oletusgranttien tyhjä lista |
+| `server/src/services/approvals.ts`, `budgets.ts` | upstreamin versiot + forkin `approval.created`/`approval.decided`-live-eventit commitin jälkeen |
+| `server/src/app.ts`, `routes/instance-settings.ts`, `middleware/auth.ts` | upstreamin `getOpenAiDotEnabled`-adapterireitit + forkin outreach-reitit, `systemPause`-optio asetusreitille, coord-token |
+| `server/src/services/companies.ts`, `issue-execution-policy.ts`, `ui/src/lib/issue-execution-policy.ts` | forkin pause/resume + upstreamin `remove`; forkin `outcomeRequirements` + upstreamin `maxReviewRounds` |
+| `packages/adapters/claude-local/src/server/execute.ts`, `test.ts`, `packages/adapter-utils/src/acpx-engine/execute.ts` | upstreamin accounting-loki ja managed AI routing + forkin `doNotInheritEnvKeys`, config-avaimen lähde ja `localWrapper` |
+| `skills/paperclip/SKILL.md`, `scripts/paperclip-issue-update.sh` | upstreamin versio (operaattorin päätös 3.11.); RK9-433-, RK9-125- ja RK9-315-lohkot sekä `paperclip-api-get.sh` ja `paperclip-issue-update.sh` säilyvät |
+| `packages/paperclip-runner/spec/capability/capabilities.yaml` ja generoidut, `runner-api-reference.ts` | upstreamin versio; 30 SKILL.md-otsikon rivinumeroa ja 33 sourceAnchoria siirretty forkin riveille, contract renderöity, API-referenssi generoitu (`?goalId=`). `check:capability-inventory` ja `check:capability-contract` OK. |
+| `scripts/run-vitest-stable.mjs`, `scripts/__tests__/release-verify-workflow.test.mjs` | upstreamin versiot; RK9 Ads pysyy listalla; poistettujen workflowjen testit ohitetaan, canary-assert sallii kommenttirivit |
+| `.github/workflows/cloud-migrator-artifacts.yml`, `docker-runner-check.yml`, `pr-trusted.yml`, `runner-full-stack-e2e.yml`, `runner-live-evals.yml` (modify/delete) | pysyvät poistettuina |
+| `ui/src/components/ClaudeSubscriptionPanel.tsx` | upstreamin versio + forkin system pause -painike |
+| `server/src/__tests__/budgets-service.test.ts` | upstreamin DB-pohjainen versio; forkin 100 %-rajan tapaukset siirtyivät tiedostoon `budgets-boundary-rk9.test.ts` |
+| muut `server/src/__tests__/*` -konfliktit | molempien puolten testit (`workspace-runtime`, `openapi-routes`, `heartbeat-process-recovery`), forkin `paperclip-issue-update-helper` |
+
+Fork-koodin sovitukset (ei konfliktia):
+
+- Issue-näkyvyys (RK9-707:n todo-tapaukset): `visibleIssueCondition()` lisättiin forkin kyselyihin tiedostoissa `routes/github-webhooks.ts`, `agent-metrics.ts`, `email/escalation.ts`, `email/inbound-router.ts`, `risk-incidents.ts`, `risk-monitors.ts`, `rk9-coord-inbox.ts`, `rk9-coord-presence.ts` ja `rk9-voice-action-deps.ts`. LEFT JOINeissa ehto on ON-lausekkeessa. `rk9-run-taint.ts` jää tarkoituksella ilman ehtoa: taint on turvaportti, ja piilotettu issue taintaa yhä ajon (fail-safe). Testit: `nosto-private-issue-visibility-leaks-rk9.test.ts` (10 tapausta). Käsin tehty grep (`schema.issues`, `const t = issues`, taulu apufunktiolle, `.insert(issues)`, yksi `hiddenAt` piilottaa muut): ei uusia vuotoja forkin tiedostoissa.
+- `risk-monitors.ts`: 0316 teki `cost_events.agent_id`:stä nullattavan; agentittomat rivit ohitetaan.
+- `agent-metrics.ts`: `sql`-templaatti saa ISO-merkkijonon raa'an `Date`n sijaan (postgres-js heitti `ERR_INVALID_ARG_TYPE`).
+- Lifecycle (paused + preparing): forkin pausettujen agenttien piilotus ja assignee-esto koskevat vain pidossa olevia agentteja (`rk9-agent-pause.ts`, `agents.ts`, `routes/issues.ts`). Riskin `pause_agent` kutsuu `createAgentLifecycle(db).pauseAgent(id, "system")`, jotta board-resume toimii. Ks. `defaults-hardening.md`.
+- Tunnettu käytös 1 (ei korjattu): kun yritys on pausella claim-hetkellä, ajo merkitään `cancelled` mutta wakeup `skipped` (ei `cancelled`). Sama kuin masterilla.
+- Tunnettu käytös 2 (ei korjattu): sähköpostivastaus piilotetun issuen ketjuun ei löydä issueta ja kulkee normaalin reitityksen kautta (`email/inbound-router.ts`). Piilotettu issue ei vuoda, mutta vastaus voi luoda uuden issuen.
+
+Testisovitukset:
+
+- `nosto-private-issue-visibility-rk9.test.ts`: `FORK_BASE_COMMIT = "1b4c803816"` (v2026.1023.0), baseline luokiteltu uudelleen (128 upstream-tiedostoa), fork-listalla vain `rk9-run-taint.ts`. `pr.yml` hakee saman commitin (RK9-709).
+- `hire-permission-default-rk9.test.ts`, `built-in-agents.test.ts`: agentti luodaan `createAgentLifecycle(db).requestHire`lla, koska `agentService.create` poistui. CEO-pinni (`canCreateAgents` vain CEO:lle tai eksplisiittisellä grantilla) pysyy vihreänä.
+- `hire-approval-policy.test.ts`, `hire-authorization-rk9.test.ts`: import `lib/agent-permissions.js`; agent-lifecycle ohjataan agenttipalvelun mockiin, budjettimoduuli pidetään muuten aitona (upstreamin reittitestien malli).
+- `hire-approval-policy.test.ts`, `outreach-routes.test.ts`, `issue-document-run-id-routes.test.ts`: vitest 5 poisti `describe.sequential`in; tilalla `{ sequential: true }`.
+- `email-approval-gate.test.ts`, `voice-action-approval.test.ts`, `voice-action-wake-parity.test.ts`: `canActorReadApproval` (approval-reitin id-param) ja `enqueueFastResponse` (kommenttireitti) mockataan, kuten upstreamin reittitesteissä.
+- `heartbeat-idle-timer-skip.test.ts`: siivous poistaa `cost_events`-rivit, koska 1023:n accounting kirjoittaa rivin jokaiselle ajolle.
+- `heartbeat/queue.test.ts`, `heartbeat/scheduling.test.ts`: avoimet portit (`__tests__/helpers/rk9-heartbeat-gates.ts`) ja `skipWhenIdle: false`.
+- `packages/adapters/gemini-local/src/server/parse.test.ts`: upstream #14991 laskee `inputTokens`in ilman välimuistitokeneita (80, ei 100).
+- `ui/src/lib/issue-execution-policy.test.ts`: fork palauttaa aina `outcomeRequirements`-kentän (SEC-91, kuten masterilla).
+- `packages/db/src/heartbeat-run-issue-privacy-migration.test.ts`: upstream 1023 lisäsi migraatioajoon oman `paperclip:migrations`-lukon. Forkin RK9-635-lukko (`rk9-migration-lock.ts`, avain `rk9mig`) on sen ulkopuolella, joten kilpaileva migraattori odottaa forkin lukossa. Testi hyväksyy kummankin lukon odotuksen; sarjallistus pysyy, ja molemmat lukot pollaavat `pg_try_advisory_lock`illa (ei snapshot-deadlockia `CREATE INDEX CONCURRENTLY`n kanssa).
+- `scripts/__tests__/run-vitest-stable-shard.test.mjs`: fork poisti `pr-trusted.yml`:n (RK9-317), joten workspaces-lanejen matriisi tarkistetaan `pr.yml`:stä.
+- CI-ajon (PR #299) sovitukset:
+  - `issue-execution-policy.test.ts`, `issue-execution-policy-persistence.test.ts`, `ui/.../ExecutionParticipantPicker.test.tsx`, `ui/.../IssueProperties.test.tsx`: odotukseen `outcomeRequirements: []` (SEC-91).
+  - `heartbeat-process-recovery.test.ts`: forkin `run_liveness_continuation` (RK9-699-kytkin) rajattuna tämän plan-only-ajon herätykseen (`sourceRunId`); rajattu ketju (max 2) lisää jatkon 2.
+  - `issue-creation-source-routes.test.ts`: delegaatiosyklin tapauksessa QA-agentti saa `tasks:assign`-grantin (RK9-313) ja se poistetaan tapauksen lopussa.
+  - `routes/issues.ts` (`resolveRunDelegationParentDefault`): upstreamin #15762 oletusparentin tarkistus saa saman `rk9IssueCreate`-merkin kuin create-polku. Ilman sitä forkin sääntö hylkäsi jokaisen grantittoman agentin, eikä yksikään jatkotehtävä saanut parentia. Assignoitu luonti vaatii yhä grantin, ja suojattu parent hylätään yhä.
+  - `dot-runner.test.ts`: Dot-agentti saa `tasks:assign`-grantin (RK9-313). Prodissa `enableOpenAiDot` on pois.
+  - `claude-local/.../engine-availability.test.ts`: fork kiinnittää oletusmoottoriksi CLI:n (RK9-228, RK9-305), joten ACP-sandboxin testit valitsevat `engine: "acp"` eksplisiittisesti.
+  - `runner-bridge-tools.test.ts`: kirjoituksen esto hyväksyy minkä tahansa nollasta poikkeavan koodin (dash palauttaa 2).
+  - `paperclip-runner/scripts/stage-runner-binary.test.mjs`: GitHubin `ubuntu-latest` (26.04) -imagessa `/bin/sleep` voi olla uutils-multicall-binääri, joka nimellä `paperclip-runnerd` poistuu koodilla 1. Testi käyttää pientä skriptiä, joka kutsuu `/bin/sleep`iä.
+  - e2e `runner-task-creation.spec.ts`, `plan-task-fixture.spec.ts` (everyday): fixture ei pausettaa agenttia (fork piilottaa pidossa olevan agentin), vaan herätykset ovat pois (RK9-700:n malli).
+- `.github/workflows/pr.yml`: uusi `general-workspaces-c`-lane. `run-vitest-stable.mjs` siirsi db-projektin omaan laneensa, eikä forkin PR-CI ajanut `@paperclipai/db`-testejä lainkaan (puute oli jo masterilla). Paikallisesti 55/55 tiedostoa, 259 testiä.
+- Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10), `rk9-agent-pause.test.ts` (lifecycle-pito ja riskin pause/resume). Lisätty `fork-tests.txt`:iin, samoin valmistelutiketin `nosto-budget-unpriced-usage-rk9.test.ts` ja `nosto-full-auto-defaults-rk9.test.ts`.
+- Review 13.11.2026: `budgets-pending-accounting-rk9.test.ts` (7: kuititon ajo ei lukitse budjettia, 15 min kirjaus), `agent-identity-taint-rk9.test.ts` (2: taint-ajo ei saa `PAPERCLIP_AGENT_PRIVATE_KEY`:tä) ja `rk9-coord-actors-routes.test.ts`:n yksityisen issuen tapaus. `cost-data-quality.test.ts`:n kaksi kiinteän päivämäärän tapausta käyttävät valekelloa. Ks. `defaults-hardening.md`, porras 1023.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

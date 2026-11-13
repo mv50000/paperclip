@@ -74,8 +74,8 @@ const mockApprovalService = vi.hoisted(() => ({
   create: vi.fn(),
   getById: vi.fn(),
   findOpenHireApprovalForAgent: vi.fn(),
-  approve: vi.fn(),
-  reject: vi.fn(),
+  approveHire: vi.fn(),
+  rejectHire: vi.fn(),
 }));
 
 const mockBudgetService = vi.hoisted(() => ({
@@ -318,8 +318,8 @@ describe("agent permission routes", () => {
     mockApprovalService.create.mockReset();
     mockApprovalService.getById.mockReset();
     mockApprovalService.findOpenHireApprovalForAgent.mockReset();
-    mockApprovalService.approve.mockReset();
-    mockApprovalService.reject.mockReset();
+    mockApprovalService.approveHire.mockReset();
+    mockApprovalService.rejectHire.mockReset();
     mockBudgetService.upsertPolicy.mockReset();
     mockHeartbeatService.listTaskSessions.mockReset();
     mockHeartbeatService.resetRuntimeSession.mockReset();
@@ -679,6 +679,16 @@ describe("agent permission routes", () => {
       }),
     ]);
   });
+
+  it.each([{ spentMonthlyCents: 0 }, { name: "Renamed", spentMonthlyCents: 0 }])(
+    "rejects accounting fields before applying an agent update: %j", async payload => {
+      const app = await createApp({ type: "board", userId: "board-user", source: "session", isInstanceAdmin: true, companyIds: [companyId] });
+      const res = await requestApp(app, baseUrl => request(baseUrl).patch(`/api/agents/${agentId}`).send(payload));
+      expect(res.status).toBe(400);
+      expect(res.body.details).toEqual(expect.arrayContaining([expect.objectContaining({ path: ["spentMonthlyCents"] })]));
+      expect(mockAgentService.update).not.toHaveBeenCalled();
+    },
+  );
 
   it("blocks agent updates for authenticated company members without agent admin permission", async () => {
     mockAccessService.canUser.mockResolvedValue(false);
@@ -1385,7 +1395,7 @@ describe("agent permission routes", () => {
       expect.objectContaining({
         status: "idle",
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "agent-admin-user", applyExistingWithoutClaim: false } },
+      { createdByUserId: "agent-admin-user", responsibleUserId: "agent-admin-user", claudeLogin: { storedSessionId: null, ownerUserId: "agent-admin-user", applyExistingWithoutClaim: false } },
     );
     expect(mockAccessService.setPrincipalPermission).toHaveBeenCalledWith(
       companyId,
@@ -1516,7 +1526,7 @@ describe("agent permission routes", () => {
           },
         },
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
+      { createdByUserId: "board-user", responsibleUserId: "board-user", claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
     );
   });
 
@@ -1552,7 +1562,7 @@ describe("agent permission routes", () => {
           model: DEFAULT_OPENCODE_LOCAL_MODEL,
         }),
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
+      { createdByUserId: "board-user", responsibleUserId: "board-user", claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
     );
   });
 
@@ -1590,7 +1600,7 @@ describe("agent permission routes", () => {
           model: "anthropic/claude-sonnet-4-5",
         }),
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
+      { createdByUserId: "board-user", responsibleUserId: "board-user", claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
     );
   });
 
@@ -1631,6 +1641,7 @@ describe("agent permission routes", () => {
         },
       }),
       {
+        createdByUserId: "board-user", responsibleUserId: "board-user",
         claudeLogin: {
           storedSessionId: null,
           ownerUserId: "board-user",
@@ -1651,9 +1662,10 @@ describe("agent permission routes", () => {
       status: "idle",
     };
     mockAgentService.getById.mockResolvedValue(pendingAgent);
-    mockAgentService.activatePendingApproval.mockResolvedValue({
+    mockApprovalService.approveHire.mockResolvedValue({
       agent: approvedAgent,
-      activated: true,
+      applied: true,
+      approval: null,
     });
 
     const app = await createApp({
@@ -1669,8 +1681,7 @@ describe("agent permission routes", () => {
       .send({}));
 
     expect(res.status).toBe(200);
-    expect(mockAgentService.activatePendingApproval).toHaveBeenCalledWith(agentId);
-    expect(mockApprovalService.approve).not.toHaveBeenCalled();
+    expect(mockApprovalService.approveHire).toHaveBeenCalledWith(agentId, "board-user");
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       companyId,
       actorType: "user",
@@ -1691,19 +1702,9 @@ describe("agent permission routes", () => {
       ...baseAgent,
       status: "idle",
     };
-    // First getById (getAccessibleAgent) sees the pending agent; the second
-    // (after the approval resolves) sees the activated agent.
-    mockAgentService.getById
-      .mockResolvedValueOnce(pendingAgent)
-      .mockResolvedValue(approvedAgent);
-    mockApprovalService.findOpenHireApprovalForAgent.mockResolvedValue({
-      id: "approval-1",
-      companyId,
-      type: "hire_agent",
-      status: "pending",
-      payload: { agentId },
-    });
-    mockApprovalService.approve.mockResolvedValue({
+    mockAgentService.getById.mockResolvedValue(pendingAgent);
+    mockApprovalService.approveHire.mockResolvedValue({
+      agent: approvedAgent,
       approval: { id: "approval-1", status: "approved" },
       applied: true,
     });
@@ -1722,7 +1723,7 @@ describe("agent permission routes", () => {
 
     expect(res.status).toBe(200);
     // The shared approval flow handles activation; we must not double-activate.
-    expect(mockApprovalService.approve).toHaveBeenCalledWith("approval-1", "board-user");
+    expect(mockApprovalService.approveHire).toHaveBeenCalledWith(agentId, "board-user");
     expect(mockAgentService.activatePendingApproval).not.toHaveBeenCalled();
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: "agent.approved",
@@ -1739,19 +1740,9 @@ describe("agent permission routes", () => {
       ...baseAgent,
       status: "terminated",
     };
-    // getAccessibleAgent sees the pending agent; after the rejection resolves
-    // (which terminates internally) the route re-reads the terminated agent.
-    mockAgentService.getById
-      .mockResolvedValueOnce(pendingAgent)
-      .mockResolvedValue(terminatedAgent);
-    mockApprovalService.findOpenHireApprovalForAgent.mockResolvedValue({
-      id: "approval-1",
-      companyId,
-      type: "hire_agent",
-      status: "pending",
-      payload: { agentId },
-    });
-    mockApprovalService.reject.mockResolvedValue({
+    mockAgentService.getById.mockResolvedValue(pendingAgent);
+    mockApprovalService.rejectHire.mockResolvedValue({
+      agent: terminatedAgent,
       approval: { id: "approval-1", status: "rejected" },
       applied: true,
     });
@@ -1774,8 +1765,8 @@ describe("agent permission routes", () => {
       .send({}));
 
     expect(res.status).toBe(200);
-    expect(mockApprovalService.reject).toHaveBeenCalledWith("approval-1", "board-user");
-    // reject() terminates the agent internally; the route must not terminate again.
+    expect(mockApprovalService.rejectHire).toHaveBeenCalledWith(agentId, "board-user");
+    // The hire decision rejects the pending agent; the route must not terminate again.
     expect(mockAgentService.terminate).not.toHaveBeenCalled();
   });
 
@@ -1805,7 +1796,7 @@ describe("agent permission routes", () => {
     expect(res.status).toBe(200);
     expect(mockAgentService.terminate).toHaveBeenCalledWith(agentId);
     expect(mockApprovalService.findOpenHireApprovalForAgent).not.toHaveBeenCalled();
-    expect(mockApprovalService.reject).not.toHaveBeenCalled();
+    expect(mockApprovalService.rejectHire).not.toHaveBeenCalled();
   });
 
   it("rejects direct approval for agents that are not pending approval", async () => {
@@ -1822,7 +1813,7 @@ describe("agent permission routes", () => {
       .send({}));
 
     expect(res.status).toBe(409);
-    expect(mockAgentService.activatePendingApproval).not.toHaveBeenCalled();
+    expect(mockApprovalService.approveHire).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: "agent.approved",
     }));
@@ -1861,7 +1852,7 @@ describe("agent permission routes", () => {
       expect.objectContaining({
         defaultEnvironmentId: environmentId,
       }),
-      { claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
+      { createdByUserId: "board-user", responsibleUserId: "board-user", claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
     );
   });
 
@@ -1947,7 +1938,7 @@ describe("agent permission routes", () => {
           adapterType: adapterCase.adapterType,
           defaultEnvironmentId: environmentId,
         }),
-        { claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
+        { createdByUserId: "board-user", responsibleUserId: "board-user", claudeLogin: { storedSessionId: null, ownerUserId: "board-user", applyExistingWithoutClaim: false } },
       );
     });
   }
@@ -2425,4 +2416,13 @@ describe("agent permission routes", () => {
     expect(res.body.error).toBe("Heartbeat run not found");
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
   });
+});
+
+vi.mock("../services/agent-lifecycle.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/agent-lifecycle.js")>();
+  return { ...actual, createAgentLifecycle: () => ({
+    requestHire: (...args: unknown[]) => mockAgentService.create(...args),
+    approveHire: (...args: unknown[]) => mockAgentService.activatePendingApproval(...args),
+    terminateAgent: (...args: unknown[]) => mockAgentService.terminate(...args),
+  }) };
 });
