@@ -10,6 +10,17 @@ import { promises as fs } from "node:fs";
 import { replayUsageReceipts, indexPendingUsageReceipts, recoverPendingRunUsageReceipts, type UsageReceiptIndex } from "./usage-receipts.js";
 
 const terminalStatuses = ["succeeded", "failed", "timed_out", "cancelled", "interrupted"];
+// --- RK9 Custom (RK9-701): settle a receipt-less terminal run after a grace period ---
+// A run that ended before the adapter's final usage event (cancelled, timed out, failed, process
+// lost) reports usageComplete: false, and upstream keeps it pending until a receipt that a dead
+// process can no longer send. The fork waits this long for a late shutdown receipt, then records
+// the run with its last known usage (checkpoints already merged into usage_json) and flags it
+// `rk9SettledWithoutReceipt`. A later receipt for a settled run is ignored (costAccountedAt is set).
+export const RK9_RECEIPTLESS_SETTLE_AFTER_MS = 15 * 60_000;
+function rk9ReceiptGraceExpired(run: { finishedAt: Date | null; createdAt: Date }, now = Date.now()) {
+  return now - (run.finishedAt ?? run.createdAt).getTime() >= RK9_RECEIPTLESS_SETTLE_AFTER_MS;
+}
+// --- /RK9 Custom ---
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown) => typeof value === "string" && value.length > 0 ? value : null;
 const amount = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -50,7 +61,9 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     }
     // A failed capture may follow an older complete attempt. Neither replay
     // nor terminal status can certify that the missing work was free.
-    if (object(run.usageJson).accountingCaptureFailed === true) return false;
+    // RK9 Custom (RK9-701): after the grace period a failed capture settles with the last known usage.
+    const rk9SettleWithoutReceipt = rk9ReceiptGraceExpired(run);
+    if (object(run.usageJson).accountingCaptureFailed === true && !rk9SettleWithoutReceipt) return false;
     const preProviderFailure = object(object(run.resultJson).executionRecovery).providerWorkStarted === false
       || object(run.usageJson).accountingProviderWorkStarted === false;
     // A failed native turn is not necessarily the end of this heartbeat: the
@@ -63,7 +76,14 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     // A stop can mark the run terminal before the provider's shutdown receipt
     // arrives. Keep the debt pending instead of acknowledging an invented zero
     // and permanently discarding that late receipt.
-    if (!preProviderFailure && object(run.usageJson).accountingReceiptReady === false) return false;
+    const rk9ReceiptMissing = object(run.usageJson).accountingReceiptReady === false || object(run.usageJson).accountingCaptureFailed === true;
+    if (!preProviderFailure && rk9ReceiptMissing && !rk9SettleWithoutReceipt) return false;
+    if (!preProviderFailure && rk9ReceiptMissing) {
+      // RK9 Custom (RK9-701): record that this charge is the last known usage, not a final receipt.
+      await tx.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || '{"rk9SettledWithoutReceipt":true}'::jsonb` })
+        .where(eq(heartbeatRuns.id, run.id));
+      logger.warn({ runId: run.id, status: run.status }, "Run had no final usage receipt; settled with its last known usage (RK9-701)");
+    }
     // Acknowledgement is part of the same transaction. Budget checks inside
     // this transaction must not mistake this receipt for missing accounting.
     await tx.update(heartbeatRuns).set({ costAccountingPending: false, costAccountedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
@@ -157,13 +177,16 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
 export async function reconcileRunCosts(db: Db, hooks: BudgetServiceHooks = {}) {
   const pending = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.costAccountingPending, true), inArray(heartbeatRuns.status, terminalStatuses),
-    sql`${heartbeatRuns.usageJson}->>'accountingCaptureFailed' is distinct from 'true'`,
+    // RK9 Custom (RK9-701): receipt-less runs past the grace period are settled too (see accountRunCost).
+    sql`(${heartbeatRuns.usageJson}->>'accountingCaptureFailed' is distinct from 'true'
+      or coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt}) <= now() - make_interval(secs => ${RK9_RECEIPTLESS_SETTLE_AFTER_MS / 1000}))`,
     sql`(${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false'
       or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false'
       or not exists (select 1 from ${nativeRunFinalizations} where ${nativeRunFinalizations.runId} = ${heartbeatRuns.id}
       and ${heartbeatRuns.runtimeMode} = 'native' and ${nativeRunFinalizations.resultId} is null
       and ${nativeRunFinalizations.phase} <> 'terminal_failure'))`,
-    sql`(${heartbeatRuns.usageJson}->>'accountingReceiptReady' is distinct from 'false' or ${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false' or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false')`,
+    sql`(${heartbeatRuns.usageJson}->>'accountingReceiptReady' is distinct from 'false' or ${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false' or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false'
+      or coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt}) <= now() - make_interval(secs => ${RK9_RECEIPTLESS_SETTLE_AFTER_MS / 1000}))`,
   )).orderBy(asc(heartbeatRuns.updatedAt), asc(heartbeatRuns.id)).limit(100);
   let accounted = 0;
   const receiptIndex = pending.length > 0 ? await indexPendingUsageReceipts() : undefined;

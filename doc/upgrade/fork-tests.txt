@@ -117,3 +117,6 @@ server/src/__tests__/nosto-private-issue-visibility-leaks-rk9.test.ts
 server/src/__tests__/nosto-budget-unpriced-usage-rk9.test.ts
 server/src/__tests__/nosto-full-auto-defaults-rk9.test.ts
 server/src/__tests__/rk9-agent-pause.test.ts
+# RK9-701 review 13.11.: kuititon ajo ei lukitse budjettia; taint-ajo ei saa agentin avainta.
+server/src/__tests__/budgets-pending-accounting-rk9.test.ts
+server/src/__tests__/agent-identity-taint-rk9.test.ts

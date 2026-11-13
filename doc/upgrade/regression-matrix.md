@@ -932,6 +932,7 @@ Testisovitukset:
   - e2e `runner-task-creation.spec.ts`, `plan-task-fixture.spec.ts` (everyday): fixture ei pausettaa agenttia (fork piilottaa pidossa olevan agentin), vaan herätykset ovat pois (RK9-700:n malli).
 - `.github/workflows/pr.yml`: uusi `general-workspaces-c`-lane. `run-vitest-stable.mjs` siirsi db-projektin omaan laneensa, eikä forkin PR-CI ajanut `@paperclipai/db`-testejä lainkaan (puute oli jo masterilla). Paikallisesti 55/55 tiedostoa, 259 testiä.
 - Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10), `rk9-agent-pause.test.ts` (lifecycle-pito ja riskin pause/resume). Lisätty `fork-tests.txt`:iin, samoin valmistelutiketin `nosto-budget-unpriced-usage-rk9.test.ts` ja `nosto-full-auto-defaults-rk9.test.ts`.
+- Review 13.11.2026: `budgets-pending-accounting-rk9.test.ts` (7: kuititon ajo ei lukitse budjettia, 15 min kirjaus), `agent-identity-taint-rk9.test.ts` (2: taint-ajo ei saa `PAPERCLIP_AGENT_PRIVATE_KEY`:tä) ja `rk9-coord-actors-routes.test.ts`:n yksityisen issuen tapaus. `cost-data-quality.test.ts`:n kaksi kiinteän päivämäärän tapausta käyttävät valekelloa. Ks. `defaults-hardening.md`, porras 1023.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 

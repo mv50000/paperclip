@@ -28,6 +28,7 @@ import {
 import { HttpError, unprocessable } from "../errors.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../services/activity-log.js";
+import { issueReadSqlCondition } from "../services/authorization.js";
 import { isRk9CoordCounterKey, rk9CoordMatchText, rk9CoordTextHasSecret } from "../services/rk9-coord-text.js";
 import {
   rk9CoordPresenceService,
@@ -753,7 +754,9 @@ export function rk9CoordActorRoutes(db: Db, opts: Rk9CoordActorRouteOptions = {}
   router.get("/", validate422(listRk9CoordActorsQuerySchema, "query"), async (req, res, next) => {
     try {
       const query = (req as Request & { rk9CoordQuery?: ListRk9CoordActorsQuery }).rk9CoordQuery ?? {};
-      const actors = await presence.list(req.params.companyId as string, query);
+      const actors = await presence.list(req.params.companyId as string, query, {
+        issueReadCondition: await issueReadSqlCondition(db, req.actor),
+      });
       res.json({ actors, ttlS: presence.ttlS() });
     } catch (err) {
       next(err);

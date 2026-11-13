@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { appearanceForPalette } from "@paperclipai/shared";
 import { agents, companies, costEvents, createDb, heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
@@ -150,6 +150,11 @@ describe("actionable cost data quality", () => {
   });
 
   it("offers retry only at the writer's proven receipt boundary", async () => {
+    // RK9 Custom (RK9-701): the fork settles a receipt-less run 15 min after it finished
+    // (RK9_RECEIPTLESS_SETTLE_AFTER_MS). These runs finish at the fixed `now`, so pin the clock there
+    // to stay inside the receipt wait window that this case tests.
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now);
+    onTestFinished(() => { vi.useRealTimers(); });
     const owner = await company();
     const ready = await run(owner, { usageJson: { accountingReceiptReady: true } });
     const noWork = await run(owner, { usageJson: { accountingReceiptReady: false, accountingProviderWorkStarted: false } });
@@ -197,6 +202,11 @@ describe("actionable cost data quality", () => {
   });
 
   it("retry cannot invent a missing receipt; a late receipt is recorded exactly once", async () => {
+    // RK9 Custom (RK9-701): the fork settles a receipt-less run 15 min after it finished
+    // (RK9_RECEIPTLESS_SETTLE_AFTER_MS). These runs finish at the fixed `now`, so pin the clock there
+    // to stay inside the receipt wait window that this case tests.
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now);
+    onTestFinished(() => { vi.useRealTimers(); });
     const owner = await company();
     const pending = await run(owner);
     const integrity = accountingIntegrityService(db);

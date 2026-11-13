@@ -223,9 +223,22 @@ export async function computeObservedSpend(db: Db, policy: SpendPolicy) {
   return (await computeObservedSpends(db, [policy]))[0];
 }
 
+// --- RK9 Custom (RK9-701): a run awaiting cost accounting never hard-stops a scope in the fork ---
+// Upstream 1023 counts every finished run with cost_accounting_pending as a hard stop. A claude_local
+// run that is cancelled, times out or fails before its final result event has no receipt and stays
+// pending, so one such run would pause and cancel its agent or company. A fresh pending flag also
+// commits before accountRunCost takes the company lock, so a parallel check could pause the whole
+// company. Before 1023 the fork counted spend once it reached the ledger; that stays the rule.
+// Receipt-less runs are settled after a grace period (run-cost-accounting.ts). Native recovery
+// (recoveringRunCount) still denies fresh work without pausing. doc/upgrade/defaults-hardening.md.
+export const RK9_PENDING_ACCOUNTING_BLOCKS = false;
+function pendingBlocks(observed: { pendingRunCount: number; recoveringRunCount: number }) {
+  return RK9_PENDING_ACCOUNTING_BLOCKS && (observed.pendingRunCount - observed.recoveringRunCount) > 0;
+}
+// --- /RK9 Custom ---
 function observedBlocks(policy: PolicyRow, observed: Awaited<ReturnType<typeof computeObservedSpend>>) {
   if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0) return false;
-  return compareCents(observed.totalExact, policy.amount) >= 0 || (observed.pendingRunCount - observed.recoveringRunCount) > 0 || (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0);
+  return compareCents(observed.totalExact, policy.amount) >= 0 || pendingBlocks(observed) || (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0);
 }
 export async function policyBlocks(db: Db, policy: PolicyRow) {
   if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0) return false;
@@ -576,7 +589,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         await createIncidentIfNeeded(policy, "hard", observed);
         await pauseAndCancelScopeForBudget(policy);
         const title = scopeType === "company" ? "Company" : scopeType === "agent" ? "Agent" : "Project";
-        if (observed.pendingRunCount > 0) {
+        if (RK9_PENDING_ACCOUNTING_BLOCKS && observed.pendingRunCount > 0) { // RK9 Custom (RK9-701)
           return { scopeType, scopeId, scopeName: scope.name, reason: `${title} cannot start work while completed runs await accounting.` };
         }
         if (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0) {
@@ -882,7 +895,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         if (policy.unpricedUsagePolicy !== "allow" && observed.unpricedEventCount > 0) {
           throw unprocessable("Resolve unpriced usage or explicitly allow it in the budget policy before resuming");
         }
-        if (observed.pendingRunCount > 0) throw unprocessable("Completed runs must finish accounting before resuming");
+        // RK9 Custom (RK9-701): pending accounting does not block in the fork, so it does not block a resume either.
+        if (RK9_PENDING_ACCOUNTING_BLOCKS && observed.pendingRunCount > 0) throw unprocessable("Completed runs must finish accounting before resuming");
         if (compareCents(observed.totalExact, nextAmount) >= 0) {
           throw unprocessable("New budget must exceed current observed spend");
         }

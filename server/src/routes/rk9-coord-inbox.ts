@@ -8,6 +8,7 @@ import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import { sendRk9CoordInboxSchema, type SendRk9CoordInbox } from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
+import { issueReadSqlCondition } from "../services/authorization.js";
 import type { Rk9CoordResolvedActor } from "../middleware/rk9-coord-actor.js";
 import {
   RK9_COORD_INBOX_CLAIM_LIMIT,
@@ -53,7 +54,10 @@ export function rk9CoordInboxRoutes(db: Db) {
   router.post("/", validate(sendRk9CoordInboxSchema), async (req, res, next) => {
     try {
       const actor = requireRk9CoordActor(req);
-      const result = await inbox.send(companyIdOf(req), inboxCaller(req, actor), req.body as SendRk9CoordInbox);
+      const caller = inboxCaller(req, actor);
+      // RK9 Custom (RK9-701): only a board user comments on an issue; apply its privacy predicate.
+      if (caller.paperclip.type === "user") caller.issueReadCondition = await issueReadSqlCondition(db, req.actor);
+      const result = await inbox.send(companyIdOf(req), caller, req.body as SendRk9CoordInbox);
       res.status(201).json(result);
     } catch (err) {
       next(err);

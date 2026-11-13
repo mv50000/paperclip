@@ -227,6 +227,7 @@ import { decisionModelService } from "./decision-models.js";
 import { TASK_QUESTION_GUIDANCE } from "./issue-question-context.js";
 import { createAgentIdentityRedactor } from "./agent-identity-redaction.js";
 import { agentIdentityService, supportsManagedAgentIdentity } from "./agent-identity.js";
+import { resolveRunTaint } from "./rk9-run-taint.js";
 
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
@@ -3266,9 +3267,16 @@ export function heartbeatService(
         resolve: () => resolveAssignedConnectionInstructionsForRun(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id }),
         context, config: connectorDelivery.config, native: agent.adapterType === "paperclip_runner",
       });
-      const agentIdentity = supportsManagedAgentIdentity(agent.adapterType, agent.adapterConfig, run.runtimeMode === "native" ? run.driverKind : undefined)
+      // --- RK9 Custom (RK9-701, RK9-319): a run that received untrusted content gets no agent
+      // private key. The key outlives the run, so a prompt-injected run could copy it out. The
+      // claim hook marks the taint before this point; a taint set later in the run is the
+      // RK9-156 limit (an agent with Bash). ---
+      const rk9RunTainted = (await resolveRunTaint(db, run)).tainted;
+      const agentIdentity = !rk9RunTainted
+        && supportsManagedAgentIdentity(agent.adapterType, agent.adapterConfig, run.runtimeMode === "native" ? run.driverKind : undefined)
         ? await agentIdentityService(db).ensureAgentIdentity(agent.companyId, agent.id)
         : undefined;
+      // --- /RK9 Custom ---
       identityRedactor = createAgentIdentityRedactor(agentIdentity?.privateKeyPem);
       if (agentIdentity) secretKeys.add("PAPERCLIP_AGENT_PRIVATE_KEY");
       const resolvedFailureSecrets = readFailureReportSecrets();

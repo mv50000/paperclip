@@ -170,8 +170,13 @@ sudo systemctl restart paperclip.service
 3. **Smoke:** `scripts/upgrade-smoke.sh $API` (`OUTREACH_METRICS_API_KEY` asetettuna, jolloin digest ja `/metrics` vaaditaan 200:ksi). Jokaisessa portaassa ajetaan lisäksi yksi `claude_local`-heartbeat per aktiivinen yritys, kun SYSTEM_PAUSE on poistettu vaiheessa 6 (katso vaihe 6 kohta 1).
 4. **Outreach-tila:** `scripts/outreach-window-report.sh snapshot --label after-restart --out ...` ja `compare before after-restart --expect-paused`.
 5. **Regressiomatriisi:** portaan pakolliset tarkistukset `doc/upgrade/regression-matrix.md`:stä ovat vihreitä.
+6. **Budjetti ja kulukirjanpito (porras 1023 alkaen, [RK9-701](/RK9/issues/RK9-701)):**
+   - Migraatio 9017 vaihtoi oletuksen. Tämä kysely palauttaa `0`: `dbpsql -Atc "select count(*) from budget_policies where unpriced_usage_policy = 'block'"`. Jos tulos on yli 0, 9017 ei ole ajettu loppuun. Tarkista kohta 1 ja lokin `lock timeout` -rivi, ja aja palvelun restart vasta selvityksen jälkeen.
+   - Kirjaa ajot, jotka odottavat kulukirjausta: `dbpsql -Atc "select status, count(*), min(coalesce(finished_at, created_at)) from heartbeat_runs where cost_accounting_pending and status in ('succeeded','failed','timed_out','cancelled','interrupted') group by 1"`.
+   - Fork ei pysäytä agenttia eikä yritystä pending-ajon takia. Fork kirjaa kuittia vaille jääneen ajon viimeisellä tunnetulla käytöllä 15 min kuluttua ajon päättymisestä (`rk9SettledWithoutReceipt: true`). Kirjauksen tekee 60 s ajastettu kulukirjaus, joten operaattorin ei tarvitse tehdä mitään.
+   - Jos sama kysely näyttää 30 min kuluttua ajon, joka päättyi yli 15 min sitten, kirjaa se käsin: `api -X POST "$API/api/companies/<companyId>/costs/retry-accounting" -H 'Content-Type: application/json' -d '{"runId":"<runId>"}'`. Vastaus `{"accounted":true}` tarkoittaa, että ajo on kirjattu. Jos vastaus on `false` tai virhe, kirjaa runId Porraslokiin ja selvitä `accounting_last_error`-sarake.
 
-**Go**, kun kaikki viisi täyttyvät.
+**Go**, kun kaikki kuusi täyttyvät.
 **No-go**: mikä tahansa epäonnistuu. Älä jatka outreachia. Rollback on vielä sallittu: siirry osioon "Rollback".
 
 ## Vaihe 6 — Jatko ja 24 h seuranta
