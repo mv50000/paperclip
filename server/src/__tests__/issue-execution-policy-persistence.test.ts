@@ -34,7 +34,8 @@ const support = await getEmbeddedPostgresTestSupport();
     const service = issueService(db);
     await service.update(issueId, { executionPolicy: normalized, companyGuard: companyId });
     const saved = await service.getById(issueId);
-    expect(saved?.executionPolicy).toEqual({ mode: "normal", commentRequired: true, stages: [], maxReviewRounds: 4 });
+    // RK9 Custom (RK9-701): the fork always returns outcomeRequirements (SEC-91).
+    expect(saved?.executionPolicy).toEqual({ mode: "normal", commentRequired: true, stages: [], maxReviewRounds: 4, outcomeRequirements: [] });
 
     const restored = normalizeIssueExecutionPolicy(buildExecutionPolicy({
       existingPolicy: saved?.executionPolicy,

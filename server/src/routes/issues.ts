@@ -3844,6 +3844,9 @@ export function issueRoutes(
         typeof rawCreateBody.assigneeUserId === "string"
           ? rawCreateBody.assigneeUserId
           : null,
+      // RK9 Custom (RK9-701): mirror the create path, which sets the RK9-313 create marker.
+      // Without it the fork rule denies every agent without a grant, and no follow-up gets a parent.
+      rk9IssueCreate: true,
     };
     const assignment = await access.decide({
       actor: req.actor,

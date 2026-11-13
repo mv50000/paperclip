@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { activityLog, agents, companies, companyMemberships, createDb, heartbeatRuns, issues, principalPermissionGrants } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueRoutes } from "../routes/issues.js";
 import { errorHandler } from "../middleware/index.js";
@@ -134,6 +134,14 @@ describePostgres("agent-created follow-ups: parent links and creation source", (
   });
 
   it("stays standalone instead of failing when the default parent would be a delegation cycle", async () => {
+    // RK9 Custom (RK9-701): under the fork rule (RK9-313) an agent needs a tasks:assign grant to
+    // assign another agent, so the QA agent gets one here; the cycle check is what this case tests.
+    await db.insert(companyMemberships).values({
+      companyId, principalType: "agent", principalId: qaAgentId, status: "active", membershipRole: "member",
+    });
+    await db.insert(principalPermissionGrants).values({
+      companyId, principalType: "agent", principalId: qaAgentId, permissionKey: "tasks:assign", grantedByUserId: null,
+    });
     const created = await request(app(agentActor(qaAgentId, runOnSource)))
       .post(`/api/companies/${companyId}/issues`)
       .send({ title: "Bug for the engineer who delegated to QA", assigneeAgentId: engineerAgentId });
@@ -142,6 +150,9 @@ describePostgres("agent-created follow-ups: parent links and creation source", (
     expect(created.body.assigneeAgentId).toBe(engineerAgentId);
     const detail = await request(app(boardActor)).get(`/api/issues/${created.body.id}`);
     expect(detail.body.createdFrom).toMatchObject({ issue: { id: sourceId } });
+    // RK9 Custom (RK9-701): later cases share this database and expect the QA agent without a grant.
+    await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, qaAgentId));
+    await db.delete(companyMemberships).where(eq(companyMemberships.principalId, qaAgentId));
   });
 
   it("stays standalone instead of failing when the default parent is protected without a grant", async () => {

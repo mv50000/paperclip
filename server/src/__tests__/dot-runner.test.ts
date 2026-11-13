@@ -10,7 +10,7 @@ import express, { type Request } from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, companies, companyMemberships, createDb, dotAgentBindings, dotMailboxItems, dotRunnerAssignments, dotRunnerOperations,
-  heartbeatRuns, agentWakeupRequests, issueComments, issues, nativeRunResults, nativeRunFinalizations, completionContracts, mcpEventDeliveries, mcpEventSubscriptions, workspaceOperations, workAssessments, statusDecisions, issueThreadInteractions } from "@paperclipai/db";
+  heartbeatRuns, agentWakeupRequests, issueComments, issues, nativeRunResults, nativeRunFinalizations, completionContracts, mcpEventDeliveries, mcpEventSubscriptions, workspaceOperations, workAssessments, statusDecisions, issueThreadInteractions, principalPermissionGrants } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createPublicMcpOAuth, DEVICE_GRANT } from "../services/public-mcp/oauth.js";
 import { createPublicMcpExecutor } from "../services/public-mcp/capabilities.js";
@@ -103,6 +103,10 @@ describe("durable Dot Runner integration", () => {
     const [company] = await db.insert(companies).values({ name: "Dot test", issuePrefix: "DT" + randomBytes(3).toString("hex") }).returning();
     await db.insert(companyMemberships).values({ companyId: company!.id, principalType: "user", principalId: userId, membershipRole: "owner", status: "active" });
     const [agent] = await db.insert(agents).values({ companyId: company!.id, name: "Dot", adapterType: "paperclip_runner", status: "active", adapterConfig: { provider: "openai_dot", allowUnmeteredProvider: true } }).returning();
+    // RK9 Custom (RK9-701): Dot intake creates a self-assigned task. Under the fork rule (RK9-313)
+    // an agent needs an explicit tasks:assign grant for that; prod also keeps enableOpenAiDot off.
+    await db.insert(companyMemberships).values({ companyId: company!.id, principalType: "agent", principalId: agent!.id, membershipRole: "member", status: "active" });
+    await db.insert(principalPermissionGrants).values({ companyId: company!.id, principalType: "agent", principalId: agent!.id, permissionKey: "tasks:assign", grantedByUserId: null });
     const config = { origin: "https://paperclip.example", resource: "https://paperclip.example/mcp/runner" };
     const oauth = createPublicMcpOAuth(db, config);
     const client = await oauth.register({ client_name: "Dedicated Dot", redirect_uris: ["https://chatgpt.com/connector_platform/oauth/callback"] }, randomUUID());

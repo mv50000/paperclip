@@ -51,7 +51,8 @@ describe("normalizeIssueExecutionPolicy", () => {
     });
     const edited = buildExecutionPolicy({ existingPolicy: original, reviewerValues: [], approverValues: [] });
     const saved = normalizeIssueExecutionPolicy(edited);
-    expect(saved).toEqual({ mode: "normal", commentRequired: true, stages: [], maxReviewRounds: 4 });
+    // RK9 Custom (RK9-701): the fork always returns outcomeRequirements (SEC-91).
+    expect(saved).toEqual({ mode: "normal", commentRequired: true, stages: [], maxReviewRounds: 4, outcomeRequirements: [] });
     expect(applyIssueExecutionPolicyTransition({
       issue: { status: "in_progress", assigneeAgentId: coderAgentId },
       policy: saved, requestedStatus: "done", requestedAssigneePatch: {}, actor: { agentId: coderAgentId },

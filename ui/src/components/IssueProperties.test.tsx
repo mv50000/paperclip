@@ -2977,6 +2977,7 @@ describe("IssueProperties", () => {
     expect(onUpdate).toHaveBeenCalledWith({ executionPolicy: {
       mode: "normal", commentRequired: true, stages: [],
       ...(withAuthorization ? { authorizationPolicy: before.authorizationPolicy } : {}), maxReviewRounds: 4,
+      outcomeRequirements: [], // RK9 Custom (RK9-701): the fork always returns outcomeRequirements (SEC-91).
     } });
     expect(executionPolicy).toEqual(before);
     act(() => root.unmount());

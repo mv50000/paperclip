@@ -9,11 +9,13 @@ for (const workMode of ["standard", "planning", "ask"] as const) {
     const company = await companyResponse.json();
     const agentResponse = await request.post(`/api/companies/${company.id}/agents`, { data: {
       name: "Paused composer fixture", role: "engineer", adapterType: "codex_local",
-      runtimeConfig: { heartbeat: { enabled: false } },
+      // RK9 Custom (RK9-701): the fork hides held (paused) agents from the assignee picker
+      // (RK9-700, rk9-agent-pause.ts), so the fixture disables on-demand wakes instead of
+      // pausing. The empty heartbeat-run check below still proves no provider started.
+      runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } },
     } });
     expect(agentResponse.ok()).toBe(true);
     const agent = await agentResponse.json();
-    expect((await request.post(`/api/agents/${agent.id}/pause`)).ok()).toBe(true);
     const projectResponse = await request.post(`/api/companies/${company.id}/projects`, { data: { name: "Composer project" } });
     expect(projectResponse.ok()).toBe(true);
     const project = await projectResponse.json();

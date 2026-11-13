@@ -43,11 +43,11 @@ test("everyday fixture preserves prompt, selected project and assignee without p
     for (const name of ["A Different Owner", "Everyday Fixture Lead"]) {
       const response = await request.post(`/api/companies/${company.id}/agents`, { data: {
         name, role: "general", adapterType: "process", adapterConfig: { command: "false" },
-        runtimeConfig: { heartbeat: { enabled: false } },
+        // RK9 Custom (RK9-701): same as the planning fixture above (RK9-700): no pause, no wakes.
+        runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } },
       } });
       expect(response.ok()).toBe(true);
       lead = await response.json();
-      expect((await request.post(`/api/agents/${lead!.id}/pause`)).ok()).toBe(true);
     }
     let project: { id: string; name: string } | undefined;
     for (const name of ["A Different Project", "Everyday Fixture Project"]) {

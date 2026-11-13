@@ -12443,9 +12443,12 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .select()
         .from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.agentId, agentId));
-      return (
-        rows.find((row) => row.reason === "run_liveness_continuation") ?? null
-      );
+      // RK9 Custom (RK9-701): the fork keeps the liveness continuation (RK9-699 finalize switch),
+      // so match that reason. The bounded chain (max 2) adds attempt 2 from the continuation run,
+      // so match this plan-only run, as upstream 1023 does for its repair wake.
+      const matching = rows.filter((row) => row.reason === "run_liveness_continuation"
+        && (row.payload as Record<string, unknown> | null)?.sourceRunId === planOnlyRunId);
+      return matching.length > 0 ? matching : null;
     });
     expect(livenessWakes).toHaveLength(1);
     const livenessWake = livenessWakes![0]!;

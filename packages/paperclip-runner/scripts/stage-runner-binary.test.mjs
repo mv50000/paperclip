@@ -32,15 +32,28 @@ async function withOwnedChildren(root, action) {
   }
 }
 
+// --- RK9 Custom (RK9-701): fork CI runs on GitHub ubuntu-latest (26.04), where /bin/sleep can be
+// the uutils multicall binary. A copy named paperclip-runnerd then dispatches on argv[0] and exits 1.
+// Stage a tiny script that execs /bin/sleep instead; it lives outside `root` so the readdir assert holds.
+async function sleepFixture() {
+  const directory = await mkdtemp(path.join(tmpdir(), "runnerd-stage-source-"));
+  const source = path.join(directory, "sleep-fixture");
+  await writeFile(source, '#!/bin/sh\nexec /bin/sleep "$@"\n', { mode: 0o755 });
+  return { source, cleanup: () => rm(directory, { recursive: true, force: true }) };
+}
+// --- /RK9 Custom ---
+
 test("atomically publishes while the previous executable is running", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "runnerd-stage-test-"));
   const destination = path.join(root, "paperclip-runnerd");
+  const fixture = await sleepFixture(); // RK9 Custom (RK9-701)
+  try {
   await withOwnedChildren(root, async start => {
-    await stageRunnerBinary("/bin/sleep", destination);
+    await stageRunnerBinary(fixture.source, destination);
     const previous = await stat(destination);
     const old = start(destination, ["30"]);
     await old.spawned;
-    await stageRunnerBinary("/bin/sleep", destination);
+    await stageRunnerBinary(fixture.source, destination);
     const published = await stat(destination);
     assert.notEqual(published.ino, previous.ino);
     assert.equal(published.mode & 0o777, 0o755);
@@ -51,6 +64,7 @@ test("atomically publishes while the previous executable is running", { skip: pr
     await next.spawned; await next.closed;
     assert.equal(next.child.exitCode, 0);
   });
+  } finally { await fixture.cleanup(); } // RK9 Custom (RK9-701)
 });
 
 test("a second spawn error still retires the live old child and removes its fixture", { skip: process.platform === "win32", timeout: 15_000 }, async () => {

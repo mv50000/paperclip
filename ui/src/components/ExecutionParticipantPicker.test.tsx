@@ -55,6 +55,7 @@ describe("ExecutionParticipantPicker", () => {
     expect(onUpdate).toHaveBeenCalledWith({ executionPolicy: {
       mode: "normal", commentRequired: true, stages: [],
       authorizationPolicy: policy.authorizationPolicy, maxReviewRounds: 4,
+      outcomeRequirements: [], // RK9 Custom (RK9-701): the fork always returns outcomeRequirements (SEC-91).
     } });
     expect(policy.stages[0].participants).toHaveLength(1);
     cleanup();

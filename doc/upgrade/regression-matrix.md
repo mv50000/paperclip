@@ -880,7 +880,7 @@ Lista on tarkistettavissa: `git merge-tree --write-tree --name-only 0b9a49423 v2
 
 | Tiedosto | Ratkaisu |
 |---|---|
-| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0333 + slot `0126` omalla paikallaan, sitten `9000`–`9016` (idx 334–350). 350 entryä = 350 tiedostoa. |
+| `packages/db/src/migrations/meta/_journal.json` | upstream 0000–0333 + slot `0126` omalla paikallaan, sitten `9000`–`9016` (idx 334–350). 350 entryä = 350 tiedostoa. Uusi forkin migraatio `9017_rk9_budget_unpriced_allow` (idx 351, ks. `defaults-hardening.md`) → 351 entryä. |
 | `packages/db/src/schema/index.ts`, `packages/shared/src/index.ts`, `packages/shared/src/validators/index.ts` | upstreamin uudet exportit ensin, forkin RK9 Custom -lohko perässä |
 | `packages/db/package.json`, `packages/db/src/client.ts` | forkin `db:migration-dry-run` + upstreamin `seed` (siirtyi `server/scripts/seed.ts`:ään); upstreamin bootstrap, RK9-348- ja RK9-635-lukkolohkot ennallaan |
 | `pnpm-lock.yaml` | upstreamista + `pnpm install`; forkin SES- ja mailparser-versiot pinnattu masterin versioihin (3.1141.0, 3.9.28, 3.4.6) |
@@ -920,8 +920,18 @@ Testisovitukset:
 - `ui/src/lib/issue-execution-policy.test.ts`: fork palauttaa aina `outcomeRequirements`-kentän (SEC-91, kuten masterilla).
 - `packages/db/src/heartbeat-run-issue-privacy-migration.test.ts`: upstream 1023 lisäsi migraatioajoon oman `paperclip:migrations`-lukon. Forkin RK9-635-lukko (`rk9-migration-lock.ts`, avain `rk9mig`) on sen ulkopuolella, joten kilpaileva migraattori odottaa forkin lukossa. Testi hyväksyy kummankin lukon odotuksen; sarjallistus pysyy, ja molemmat lukot pollaavat `pg_try_advisory_lock`illa (ei snapshot-deadlockia `CREATE INDEX CONCURRENTLY`n kanssa).
 - `scripts/__tests__/run-vitest-stable-shard.test.mjs`: fork poisti `pr-trusted.yml`:n (RK9-317), joten workspaces-lanejen matriisi tarkistetaan `pr.yml`:stä.
+- CI-ajon (PR #299) sovitukset:
+  - `issue-execution-policy.test.ts`, `issue-execution-policy-persistence.test.ts`, `ui/.../ExecutionParticipantPicker.test.tsx`, `ui/.../IssueProperties.test.tsx`: odotukseen `outcomeRequirements: []` (SEC-91).
+  - `heartbeat-process-recovery.test.ts`: forkin `run_liveness_continuation` (RK9-699-kytkin) rajattuna tämän plan-only-ajon herätykseen (`sourceRunId`); rajattu ketju (max 2) lisää jatkon 2.
+  - `issue-creation-source-routes.test.ts`: delegaatiosyklin tapauksessa QA-agentti saa `tasks:assign`-grantin (RK9-313) ja se poistetaan tapauksen lopussa.
+  - `routes/issues.ts` (`resolveRunDelegationParentDefault`): upstreamin #15762 oletusparentin tarkistus saa saman `rk9IssueCreate`-merkin kuin create-polku. Ilman sitä forkin sääntö hylkäsi jokaisen grantittoman agentin, eikä yksikään jatkotehtävä saanut parentia. Assignoitu luonti vaatii yhä grantin, ja suojattu parent hylätään yhä.
+  - `dot-runner.test.ts`: Dot-agentti saa `tasks:assign`-grantin (RK9-313). Prodissa `enableOpenAiDot` on pois.
+  - `claude-local/.../engine-availability.test.ts`: fork kiinnittää oletusmoottoriksi CLI:n (RK9-228, RK9-305), joten ACP-sandboxin testit valitsevat `engine: "acp"` eksplisiittisesti.
+  - `runner-bridge-tools.test.ts`: kirjoituksen esto hyväksyy minkä tahansa nollasta poikkeavan koodin (dash palauttaa 2).
+  - `paperclip-runner/scripts/stage-runner-binary.test.mjs`: GitHubin `ubuntu-latest` (26.04) -imagessa `/bin/sleep` voi olla uutils-multicall-binääri, joka nimellä `paperclip-runnerd` poistuu koodilla 1. Testi käyttää pientä skriptiä, joka kutsuu `/bin/sleep`iä.
+  - e2e `runner-task-creation.spec.ts`, `plan-task-fixture.spec.ts` (everyday): fixture ei pausettaa agenttia (fork piilottaa pidossa olevan agentin), vaan herätykset ovat pois (RK9-700:n malli).
 - `.github/workflows/pr.yml`: uusi `general-workspaces-c`-lane. `run-vitest-stable.mjs` siirsi db-projektin omaan laneensa, eikä forkin PR-CI ajanut `@paperclipai/db`-testejä lainkaan (puute oli jo masterilla). Paikallisesti 55/55 tiedostoa, 259 testiä.
-- Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10), `rk9-agent-pause.test.ts` (lifecycle-pito ja riskin pause/resume). Lisätty `fork-tests.txt`:iin.
+- Uudet fork-testit: `heartbeat-rk9-gates.test.ts` (12: pause startNext/claim- ja timer-poluilla, yrityspause, human proxy, globaali raja ja round-robin, knowledge-injektio adapterin kontekstiin ja virhe ilman kaatumista, taint-hookin paikka native review -haaran ulkopuolella), `budgets-boundary-rk9.test.ts` (5), `nosto-private-issue-visibility-leaks-rk9.test.ts` (10), `rk9-agent-pause.test.ts` (lifecycle-pito ja riskin pause/resume). Lisätty `fork-tests.txt`:iin, samoin valmistelutiketin `nosto-budget-unpriced-usage-rk9.test.ts` ja `nosto-full-auto-defaults-rk9.test.ts`.
 
 ## Seuranta: ajonaikaiset commitit ilman automaattista testiä
 
