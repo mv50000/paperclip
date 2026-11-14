@@ -187,8 +187,12 @@ Skripti tekee nämä:
 - rajaa rootless Dockerin muistin: `user-<uid>.slice` saa `MemoryHigh=5G`, `MemoryMax=6G`
   (dockerd ja kontit ajavat user-sessiossa, eivät runner-unitissa)
 - kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` (`KillMode=mixed`) drop-inillä
-  `Slice=ci-runners.slice`, `MemoryHigh=6G`, `MemoryMax=7G`, `Restart=on-failure`,
-  `OOMPolicy=continue`
+  `Slice=ci-runners.slice`, `MemoryHigh=3584M`, `MemoryMax=4G`, `Restart=on-failure`,
+  `OOMPolicy=continue`. builder-02:ssa on 6 G muistia, joten runnerin katto on 4 G (RK9-782).
+  Katto on mittaamatta. `NODE_OPTIONS` rajaa jokaisen Node-prosessin erikseen, ja
+  `doc/UPSTREAM-UPGRADE.md` kirjaa 27.9.2026, että clin `pnpm -r typecheck` tarvitsi
+  builder-02:lla 6144 M heapin. Mittaa vaiheessa 6 `systemctl show -p MemoryPeak <unit>`
+  `verify`-, `e2e`- ja `release-verify`-ajon jälkeen.
 
 Skripti on idempotentti. Uusi ajo ohittaa rekisteröinnin, jos runneri on jo rekisteröity,
 ja päivittää hookin, `.env`:n ja unitin. Keskeneräinen asennus (hakemisto ilman `.runner`ia)

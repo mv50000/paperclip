@@ -399,8 +399,8 @@ EOF
       echo "Slice=ci-runners.slice"
     fi
     echo "Nice=10"
-    echo "MemoryHigh=6G"
-    echo "MemoryMax=7G"
+    echo "MemoryHigh=3584M"
+    echo "MemoryMax=4G"
     echo "Restart=on-failure"
     echo "RestartSec=60"
     # Yhden prosessin OOM-kill ei saa pysäyttää koko runner-palvelua (RK9-216).
