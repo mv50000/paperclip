@@ -122,6 +122,16 @@ export function createMemoryGateStore(now: () => Date = () => new Date()): Memor
       byToken.set(tokenHash, id);
       return true;
     },
+    async findByMessage(chatId, messageId) {
+      const row = [...rows.values()].reverse().find((entry) => entry.chatId === chatId && entry.messageId === messageId);
+      return row ? record(row) : null;
+    },
+    async claimDenyReason(companyId, id, reason) {
+      const row = rows.get(id);
+      if (!row || row.companyId !== companyId || row.status !== "denied" || row.outcome !== null) return false;
+      row.outcome = structuredClone(reason);
+      return true;
+    },
     async markUpdateProcessed(companyId, botKey, updateId) {
       const key = `${companyId}:${botKey}:${updateId}`;
       if (processed.has(key)) return false;

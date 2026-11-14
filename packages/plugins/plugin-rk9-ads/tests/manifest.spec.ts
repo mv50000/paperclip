@@ -147,6 +147,7 @@ describe("manifest", () => {
       "rk9ads_get_pacing",
       "rk9ads_list_ads",
       "rk9ads_pause_all",
+      "rk9ads_request_organic_post",
       "rk9ads_stage_creative",
     ]);
     // No agent tool can activate an ad (G1): activation happens only from a Telegram tap.

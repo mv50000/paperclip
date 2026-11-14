@@ -7,11 +7,14 @@
  * rules: `companyId` is always `$1` and every statement filters or inserts
  * `company_id = $1`; table and column names are literals of this file, never
  * caller strings. Only tables of migration 001 are used (no migration 003):
- * insights_daily, digest_runs, alert_dedupe, rule_actions and gate_requests.
+ * insights_daily, digest_runs, alert_dedupe, rule_actions and gate_requests,
+ * plus organic_posts of migration 006 through organic/store.ts (RK9-832).
  */
 
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 import { createLedger } from "../db.js";
+import { effectiveStatus, sqlOrganicPostStore } from "../organic/store.js";
+import type { OrganicChannel, OrganicPostStatus } from "../organic/types.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -20,6 +23,16 @@ const UPSERT_BATCH = 50;
 /** recentAdSeries page size and page bound (RK9-526: 5000 rows was about 55 ads x 90 days). */
 const SERIES_PAGE_ROWS = 5000;
 const SERIES_MAX_PAGES = 40;
+
+/** An organic post that changed in the digest window (RK9-832). */
+export interface OrganicPostSummary {
+  channel: OrganicChannel;
+  status: OrganicPostStatus;
+  mode: "dry_run" | "live";
+  permalink: string | null;
+  error: string | null;
+  rejectReasonCode: string | null;
+}
 
 /** One ad-day as stored in insights_daily. Money in cents, rates computed by ../metrics/cpc.ts. */
 export interface InsightDayRow {
@@ -283,6 +296,19 @@ export function createInsightsStore(db: PluginDatabaseClient) {
         mode: String(row.mode),
         applied: row.applied === true,
         decidedAt: row.decided_at instanceof Date ? row.decided_at.toISOString() : String(row.decided_at),
+      }));
+    },
+
+    /** Organic posts that changed in the last `hours` hours, oldest first (the digest's organic section). */
+    async recentOrganicPosts(companyId: string, hours = 24): Promise<OrganicPostSummary[]> {
+      const posts = await sqlOrganicPostStore(db, ledger).recent(companyId, hours, 50);
+      return posts.map((post) => ({
+        channel: post.channel,
+        status: effectiveStatus(post),
+        mode: post.mode,
+        permalink: post.permalink,
+        error: post.error,
+        rejectReasonCode: post.rejectReasonCode,
       }));
     },
 

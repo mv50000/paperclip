@@ -88,6 +88,12 @@ fails the tests instead of orphaning the data.
 Migration 001 must not change once it is applied anywhere: the host stores a
 checksum per file and refuses a changed file. A later child that really needs a
 new table uses its reserved number: A7 = 002, A10 = 003, A11 = 004, A9 = 005.
+Organic posting (RK9-832) takes 006. The host applies the files in name order,
+so an unused reserved number leaves a harmless gap.
+
+Do not put a quote character (`'` or `"`) in a migration comment. The host
+validator removes quoted text before it removes comments, so an apostrophe in a
+comment hides the next statement and the host refuses the whole migration.
 
 `publications.idempotency_key` is unique across the whole table, so the code
 that builds the key (A8) must hash `company_id` into it.
@@ -767,6 +773,102 @@ anything ACTIVE.
 |---|---|---|
 | `resend_gate_card` | action | `{ gateRequestId \| publicationId }`: posts a pending, unexpired activation card again |
 | `gate-expiry` | job | Expires pending cards past `valid_until` and removes their buttons |
+
+## Organic posting (RK9-832)
+
+An organic (unpaid) Instagram or Facebook Page post from a staged creative. It
+uses the Meta client of the plugin, the plugin's own gate kit and the Ads
+digest. No core change: none of the five plugin SDK limits in `AGENTS.md`
+applies (no core action is intercepted, no core approval is created, no
+non-JSON webhook, no core table and no `activity_log` read, no secret that the
+plugin must not see).
+
+| Channel | Creative | Meta calls |
+|---|---|---|
+| `ig_reel` | video 9:16 | `POST {ig}/media` (REELS, `video_url`), wait for `FINISHED`, `POST {ig}/media_publish` |
+| `ig_feed` | image 1:1, 4:5 or 1.91:1 | `POST {ig}/media` (`image_url`), wait, `POST {ig}/media_publish` |
+| `fb_photo` | image | `POST {page}/photos` (`url`, `caption`) with the Page token |
+| `fb_video` | video | `POST {page}/videos` (`file_url`, `description`) with the Page token |
+
+1. **Card.** `organic.request` (board) or the agent tool
+   `rk9ads_request_organic_post` takes `{ creativeId, channel, caption?,
+   brandLint? }`. The service checks the creative (ready, not expired, the
+   right media kind and aspect ratio), the caption (at most 2 200 characters
+   and 30 hashtags) and the brand-lint JSON of rk9-motion
+   (`scripts/brand-lint.mjs`). It recomputes the result from the rows, so a
+   `fail` row refuses even when `ok` is true. A `draft` result is refused. It
+   then sends one card to the brand chat: the preview, the channel, the
+   caption, the lint summary, every `human` rule as a "☐" line, and the
+   buttons "📣 Julkaise" and "❌ Hylkää". The card writes nothing to Meta. The
+   same content (company, creative sha256, channel, caption) gets one open
+   card; a second request returns the open post.
+2. **Publish.** The tap goes through the kit router (chat, approver list,
+   pending -> approved compare-and-set, update dedupe). The handler
+   (`publishApproved` in `src/organic/service.ts`) checks the binding, re-reads
+   the config and the creative hash, moves the post pending -> publishing and
+   posts. The client has a write allowlist (`organicWriteGuard` in
+   `src/meta/organic.ts`): only the four shapes above and a delete of the one
+   named object. No ad edge, status field or budget field can pass. An IG
+   `media_publish` error is checked against the container: `PUBLISHED` counts
+   as success.
+3. **Reject.** "❌ Hylkää" edits the same card to the reason buttons (visual,
+   text, claim, brand, topic, repeat). A reply to the card stores a typed
+   reason as `other`. The first reason wins. The typed text is cleaned of
+   control characters and clipped to 500 characters; the activity log stores
+   only the reason code.
+4. **Notices.** No reminders and no new Telegram messages. The card is edited
+   in place, and the morning digest lists the last 24 hours under
+   "📣 Orgaaniset julkaisut": published with the link, dry run, failed with the
+   reason, rejected with the reason, expired, deleted.
+5. **Delete.** `organic.delete { postId }` previews the DELETE by default. A
+   real delete needs `dryRun: false`, `confirm: true` and a board user
+   (`actor.type = "user"`); an agent is refused. It writes an activity entry.
+
+Dry run is the default (`organic.mode: "dry_run"`): an approved card records
+the planned calls in `organic_posts.payload.planned` and sends nothing to Meta.
+Set `organic.mode: "live"` only after the operator grants the permissions
+below.
+
+`tests/organic-sole-path.spec.ts` asserts that no action, job, tool or forged
+gate call publishes. Only an approved card does.
+
+### Meta permissions (operator decision)
+
+Organic posting needs permissions that the current ads token does not have.
+The plugin does not request them; a new permission is the operator's decision.
+
+| Token | Config field | Permissions |
+|---|---|---|
+| System user token (IG) | `meta.accessTokenRef` | `instagram_basic`, `instagram_content_publish` |
+| Page access token (FB) | `organic.pageAccessTokenRef` | `pages_manage_posts`, `pages_read_engagement`, `pages_show_list` |
+| Delete of an IG post | `meta.accessTokenRef` | probably `instagram_manage_contents` (not verified) |
+
+In live mode the card request reads `me/permissions` and refuses an IG card
+when a permission is missing. The IG user id goes to `meta.igUserId`.
+
+### Config (`organic`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | The tool and the actions refuse while false |
+| `mode` | `dry_run` | `live` posts to Meta after the tap |
+| `channels` | — | At least one of `ig_reel`, `ig_feed`, `fb_video`, `fb_photo` |
+| `pageAccessTokenRef` | — | Secret ref; required for an `fb_*` channel |
+| `cardTtlHours` | 24 | 1..168; an expired card does not publish |
+
+### Install and update
+
+Migration 006 adds `organic_posts` and the gate kind `organic_publish`. The
+capabilities do not change. Install as in ADR 5. In prod, update with a soft
+uninstall, then `paperclipai plugin install --local <abs path>` from a pinned
+checkout. Plugin jobs run in UTC.
+
+| Key | Kind | What it does |
+|---|---|---|
+| `organic.request` | action | Opens one card for a staged creative |
+| `organic.posts` | action | Lists the posts of the company (newest first) |
+| `organic.delete` | action | Previews or deletes a published post (board only) |
+| `rk9ads_request_organic_post` | tool | The agent path to `organic.request`; it cannot publish |
 
 ## Operator UI (RK9-518)
 

@@ -21,6 +21,13 @@
  * step 5. A handler may end the card `denied` (it refused before it acted)
  * or `failed` (it stopped part way) instead of `approved`.
  *
+ * Deny reasons (RK9-832): a kind registered with `denyReasons` gets its
+ * preset reason buttons on the card after a deny tap, and a reply to the card
+ * message counts as a typed reason. The same chat, message and approver
+ * checks apply; the first reason wins (`claimDenyReason`), and nothing but
+ * the card is edited. A reason never moves the card out of `denied` and never
+ * runs the kind handler.
+ *
  * The handler runs at most once. A worker that dies during the handler leaves
  * the card `approved` with outcome `{ handler: "started" }`: the handler may
  * or may not have acted. A reconciler must check the real state (for example
@@ -38,13 +45,17 @@ import {
   redactSecrets,
   type BotApi,
   type CardMedia,
+  type InlineKeyboardMarkup,
   type TelegramCallbackQuery,
+  type TelegramMessage,
   type TelegramUpdate,
 } from "../telegram/bot-api.js";
-import type { GateHandlerResult, GateRegistry } from "./registry.js";
+import type { GateDenyReasons, GateHandlerResult, GateRegistry } from "./registry.js";
 import {
   gateTokenHash,
   parseGateCallbackData,
+  parseReasonCallbackData,
+  reasonButtons,
   storedCard,
   type GateDecision,
   type GateRequestRecord,
@@ -65,7 +76,8 @@ export type GateAuditEvent =
   | { type: "unknown_kind"; companyId: string; gateRequestId: string; kind: string }
   | { type: "expired"; companyId: string; gateRequestId: string; tgUserId: number }
   | { type: "decided"; companyId: string; gateRequestId: string; kind: string; decision: GateDecision; tgUserId: number }
-  | { type: "handler_failed"; companyId: string; gateRequestId: string; kind: string; errorName: string };
+  | { type: "handler_failed"; companyId: string; gateRequestId: string; kind: string; errorName: string }
+  | { type: "deny_reason"; companyId: string; gateRequestId: string; kind: string; code: string; typed: boolean; tgUserId: number };
 
 /** "stale": the approver list could not be confirmed against the saved config. */
 export type RefusalReason = "chat" | "user" | "bot" | "kind" | "stale";
@@ -81,7 +93,20 @@ export const GATE_TEXT = {
   denied: "❌ Hylätty",
   skipped: "🗑 Ohitettu",
   failed: "⚠️ Epäonnistui",
+  reasonSaved: "Syy tallennettu",
+  reasonTaken: "Syy on jo tallennettu",
+  reasonLabel: "Syy",
 } as const;
+
+/** A typed reason is stored at most this long (UTF-16 units). */
+export const DENY_REASON_TEXT_MAX = 500;
+
+/** Trims a typed reason, drops control characters and clips it. Empty means no reason. */
+export function cleanReasonText(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  const flat = text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069]+/g, " ").replace(/\s+/g, " ").trim();
+  return flat.length <= DENY_REASON_TEXT_MAX ? flat : `${flat.slice(0, DENY_REASON_TEXT_MAX - 1)}…`;
+}
 
 export interface CallbackRouterOptions {
   api: BotApi;
@@ -134,15 +159,20 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     }
   }
 
-  async function edit(request: GateRequestRecord, query: TelegramCallbackQuery, status: string): Promise<void> {
-    const chatId = request.chatId ?? (query.message ? String(query.message.chat.id) : null);
-    const messageId = request.messageId ?? query.message?.message_id ?? null;
+  async function edit(
+    request: GateRequestRecord,
+    query: TelegramCallbackQuery | null,
+    status: string,
+    buttons: InlineKeyboardMarkup | null = null,
+  ): Promise<void> {
+    const chatId = request.chatId ?? (query?.message ? String(query.message.chat.id) : null);
+    const messageId = request.messageId ?? query?.message?.message_id ?? null;
     if (!chatId || !messageId) return;
     const card = storedCard(request);
-    const media: CardMedia = query.message ? messageMedia(query.message) : (card?.media ?? "text");
-    const original = card?.text ?? query.message?.caption ?? query.message?.text ?? "";
+    const media: CardMedia = query?.message ? messageMedia(query.message) : (card?.media ?? "text");
+    const original = card?.text ?? query?.message?.caption ?? query?.message?.text ?? "";
     try {
-      await editCard(api, { chatId, messageId, media, original, status, buttons: null });
+      await editCard(api, { chatId, messageId, media, original, status, buttons });
     } catch (error) {
       logger.warn("gate: card edit failed", { botKey: api.botKey, gateRequestId: request.id, detail: safe(error) });
     }
@@ -217,7 +247,102 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     await edit(request, query, result.statusText ?? (to === "approved" ? GATE_TEXT.approved : GATE_TEXT[to]));
   }
 
+  /** Stores the first reason, edits the card and tells the kind. False when a reason was already stored. */
+  async function storeReason(
+    request: GateRequestRecord,
+    reasons: GateDenyReasons,
+    input: { code: string; label: string; text: string | null; tgUserId: number; query: TelegramCallbackQuery | null },
+  ): Promise<boolean> {
+    const reason = { denyReason: { code: input.code, ...(input.text !== null ? { text: input.text } : {}), byTgUserId: input.tgUserId } };
+    if (!(await store.claimDenyReason!(request.companyId, request.id, reason))) return false;
+    await edit(request, input.query, `${GATE_TEXT.denied} · ${GATE_TEXT.reasonLabel}: ${input.label}`);
+    await audit({
+      type: "deny_reason",
+      companyId: request.companyId,
+      gateRequestId: request.id,
+      kind: request.kind,
+      code: input.code,
+      typed: input.text !== null,
+      tgUserId: input.tgUserId,
+    });
+    try {
+      await reasons.onReason({ request, tgUserId: input.tgUserId, code: input.code, text: input.text });
+    } catch (error) {
+      logger.warn("gate: onReason failed", { gateRequestId: request.id, kind: request.kind, detail: safe(error) });
+    }
+    return true;
+  }
+
+  async function handleReasonTap(update: TelegramUpdate, query: TelegramCallbackQuery, parsed: { index: number; token: string }): Promise<void> {
+    const request = await store.findByTokenHash(gateTokenHash(parsed.token));
+    if (!request) {
+      await answer(query, GATE_TEXT.unknownCard);
+      return;
+    }
+    const refused = authorize(request, query, options.brandFor(request.companyId));
+    if (refused) {
+      logger.warn("gate: reason tap refused", { botKey: api.botKey, companyId: request.companyId, gateRequestId: request.id, reason: refused });
+      await answer(query, GATE_TEXT.unauthorized, true);
+      await audit({
+        type: "unauthorized",
+        companyId: request.companyId,
+        gateRequestId: request.id,
+        tgUserId: query.from?.id ?? 0,
+        chatId: query.message ? String(query.message.chat.id) : null,
+        reason: refused,
+      });
+      return;
+    }
+    const reasons = store.claimDenyReason ? registry.denyReasons(request.kind) : undefined;
+    const option = reasons?.options[parsed.index];
+    if (!reasons || !option || request.status !== "denied") {
+      await answer(query, `${GATE_TEXT.alreadyDecided} (${request.status})`);
+      return;
+    }
+    if (!(await store.markUpdateProcessed(request.companyId, api.botKey, update.update_id, "callback_query"))) return;
+    const stored = await storeReason(request, reasons, { code: option.code, label: option.label, text: null, tgUserId: query.from.id, query });
+    await answer(query, stored ? GATE_TEXT.reasonSaved : GATE_TEXT.reasonTaken);
+  }
+
+  /** A reply to a denied card is its typed reason. Anything else is left alone. */
+  async function handleReply(update: TelegramUpdate, message: TelegramMessage): Promise<void> {
+    const target = message.reply_to_message;
+    if (!target || typeof message.text !== "string" || !store.findByMessage || !store.claimDenyReason) return;
+    const chatId = String(message.chat.id);
+    const request = await store.findByMessage(chatId, target.message_id);
+    if (!request) return;
+    const reasons = registry.denyReasons(request.kind);
+    if (!reasons?.freeText) return;
+    const brand = options.brandFor(request.companyId);
+    const fromId = message.from?.id;
+    const refusal: RefusalReason | null = !brand
+      ? "bot"
+      : chatId !== brand.chatId || request.chatId !== chatId
+        ? "chat"
+        : !brand.allowedUserIds.includes(String(fromId))
+          ? "user"
+          : brand.allowedKinds && !brand.allowedKinds.includes(request.kind)
+            ? "kind"
+            : null;
+    if (refusal) {
+      // No reply is sent: a refused reply changes nothing and adds no message to the chat.
+      logger.warn("gate: reason reply refused", { botKey: api.botKey, companyId: request.companyId, gateRequestId: request.id, reason: refusal });
+      await audit({ type: "unauthorized", companyId: request.companyId, gateRequestId: request.id, tgUserId: fromId ?? 0, chatId, reason: refusal });
+      return;
+    }
+    if (request.status !== "denied") return;
+    const text = cleanReasonText(message.text);
+    if (text.length === 0) return;
+    if (!(await store.markUpdateProcessed(request.companyId, api.botKey, update.update_id, "message"))) return;
+    await storeReason(request, reasons, { code: reasons.freeTextCode ?? "other", label: text, text, tgUserId: fromId!, query: null });
+  }
+
   async function handleCallback(update: TelegramUpdate, query: TelegramCallbackQuery): Promise<void> {
+    const reasonTap = parseReasonCallbackData(query.data);
+    if (reasonTap) {
+      await handleReasonTap(update, query, reasonTap);
+      return;
+    }
     const parsed = parseGateCallbackData(query.data);
     if (!parsed) {
       // Not a gate button. Leave it alone: it may belong to another consumer.
@@ -290,9 +415,14 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       return;
     }
 
+    const reasons = parsed.decision === "denied" && store.claimDenyReason ? registry.denyReasons(request.kind) : undefined;
     if (parsed.decision !== "approved") {
       await answer(query, GATE_TEXT[parsed.decision]);
-      await edit(request, query, GATE_TEXT[parsed.decision]);
+      if (reasons) {
+        await edit(request, query, `${GATE_TEXT.denied}\n${reasons.prompt}`, reasonButtons(parsed.token, reasons.options));
+      } else {
+        await edit(request, query, GATE_TEXT[parsed.decision]);
+      }
     } else {
       await answer(query, GATE_TEXT.processing);
       await edit(request, query, GATE_TEXT.processing);
@@ -306,6 +436,13 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
       tgUserId,
     });
 
+    if (reasons?.onDenied) {
+      try {
+        await reasons.onDenied({ request: { ...request, status: "denied" }, tgUserId });
+      } catch (error) {
+        logger.warn("gate: onDenied failed", { gateRequestId: request.id, kind: request.kind, detail: safe(error) });
+      }
+    }
     if (parsed.decision !== "approved") return;
     const run = runHandler(request, query).finally(() => {
       running.delete(run);
@@ -317,6 +454,10 @@ export function createCallbackRouter(options: CallbackRouterOptions): CallbackRo
     async handleUpdate(update) {
       const query = update.callback_query;
       if (!query) {
+        if (update.message?.reply_to_message) {
+          await handleReply(update, update.message);
+          return;
+        }
         logger.debug("gate: non-callback update ignored", { botKey: api.botKey, updateId: update.update_id });
         return;
       }

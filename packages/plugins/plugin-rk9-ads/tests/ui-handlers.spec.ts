@@ -3,6 +3,7 @@
  * allowlisted DTOs, pause-ad and the kill switch, no activate path, and a
  * secret scan over every data and action response and over the UI bundle.
  */
+import { ORGANIC_DELETE_ACTION_KEY, ORGANIC_POSTS_ACTION_KEY } from "../src/features/organic/register.js";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -249,6 +250,8 @@ describe("operator UI handlers (RK9-518)", () => {
       provision: PROVISION_ACTION_KEY,
       rulesDryRun: RULES_DRY_RUN_ACTION_KEY,
       rulesPrepareSave: RULES_PREPARE_SAVE_ACTION_KEY,
+      organicPosts: ORGANIC_POSTS_ACTION_KEY,
+      organicDelete: ORGANIC_DELETE_ACTION_KEY,
     });
     for (const key of Object.values(ACTION)) expect(r.actionKeys).toContain(key);
     // The views are actions: the company comes from the host context (RK9-583).

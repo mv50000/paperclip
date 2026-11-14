@@ -84,11 +84,13 @@ describeDb("ledger on real Postgres (migration 001)", () => {
     await testDb?.cleanup();
   }, EMBEDDED_PG_TIMEOUT_MS);
 
-  it("applies 001 once, records its checksum and skips it on the next activation", async () => {
+  it("applies 001 and 006 once, records their checksums and skips them on the next activation", async () => {
     const first = await testDb.appliedMigrations();
-    expect(first).toHaveLength(1);
-    expect(first[0]).toMatchObject({ migration_key: MIGRATION_001_FILE, status: "applied" });
-    expect(first[0]?.checksum).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.map((row) => row.migration_key)).toEqual([MIGRATION_001_FILE, "006_rk9_ads_organic.sql"]);
+    for (const row of first) {
+      expect(row).toMatchObject({ status: "applied" });
+      expect(row.checksum).toMatch(/^[0-9a-f]{64}$/);
+    }
 
     // A worker restart re-runs applyMigrations: it must neither fail nor re-apply.
     await testDb.applyMigrations();

@@ -6,6 +6,7 @@ import { register as registerBrand } from "./brand/register.js";
 import { register as registerCreatives } from "./creatives/register.js";
 import { register as registerGate } from "./gate/register.js";
 import { register as registerInsights } from "./insights/register.js";
+import { register as registerOrganic } from "./organic/register.js";
 import { register as registerPublish } from "./publish/register.js";
 import { register as registerRules } from "./rules/register.js";
 import { register as registerSmoke } from "./smoke/register.js";
@@ -24,5 +25,6 @@ export const FEATURES: readonly FeatureModule[] = [
   { key: "insights", register: registerInsights },
   { key: "rules", register: registerRules },
   { key: "publish", register: registerPublish },
+  { key: "organic", register: registerOrganic },
   { key: "ui", register: registerUi },
 ];

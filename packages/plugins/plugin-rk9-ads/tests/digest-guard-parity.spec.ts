@@ -29,6 +29,7 @@ function stubStore(insightsMtdCents: number): InsightsStore {
     spendCents: async () => insightsMtdCents,
     recentRuleActions: async () => [],
     pendingGates: async () => [],
+    recentOrganicPosts: async () => [],
     recentMarks: async () => [],
     hasMark: async () => true,
     recentAdSeries: async () => [],

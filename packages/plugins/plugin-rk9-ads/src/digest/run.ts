@@ -254,6 +254,13 @@ export async function buildDigest(
 
   const ruleActions = await deps.store.recentRuleActions(companyId, 24);
   const pendingGates = await deps.store.pendingGates(companyId);
+  let organicPosts: DigestInput["organicPosts"] = [];
+  try {
+    organicPosts = await deps.store.recentOrganicPosts(companyId, 24);
+  } catch (error) {
+    deps.ctx.logger.warn("rk9-ads digest: organic posts not read", { companyId, error: errorText(error) });
+    warnings.push("Orgaanisten julkaisujen tilaa ei saatu luettua");
+  }
 
   warnings.push(...(await insightsWarnings(deps, companyId)));
   // The close marks the account-local date whose yesterday it closed.
@@ -283,6 +290,7 @@ export async function buildDigest(
     fatigued,
     ruleActions,
     pendingGates,
+    organicPosts,
     warnings,
   };
   return {
@@ -304,6 +312,7 @@ export async function buildDigest(
       fatigued: fatigued.length,
       ruleActions: ruleActions.length,
       pendingGates: pendingGates.length,
+      organicPosts: organicPosts.length,
       warnings: warnings.length,
     },
   };

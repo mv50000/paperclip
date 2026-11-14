@@ -53,7 +53,11 @@ describe("guard call sites", () => {
       [...code(file.text).matchAll(/guardedWrite\s*:\s*([A-Za-z_$][\w$]*)/g)].map((match) => `${file.path}: ${match[1]}`),
     );
     expect(hooks.length).toBeGreaterThan(0);
-    for (const hook of hooks) expect(hook).toMatch(/: createSpendGuardHook$/);
+    // The organic client (RK9-832) has its own allowlist: it refuses every ad-account edge,
+    // so it can never spend. tests/organic-sole-path.spec.ts pins it.
+    const organic = hooks.filter((hook) => hook.endsWith(": organicWriteGuard"));
+    expect(organic).toEqual(["src/organic/service.ts: organicWriteGuard"]);
+    for (const hook of hooks.filter((entry) => !organic.includes(entry))) expect(hook).toMatch(/: createSpendGuardHook$/);
     // A client without a hook gets pausedOnlyWrites, which refuses spend.
     const unhooked = files.filter((file) => !file.path.startsWith("src/meta/") && /new\s+MetaGraphClient\s*\(/.test(code(file.text)));
     expect(unhooked.map((file) => file.path)).toEqual([]);

@@ -6,6 +6,7 @@ import { brandDeclarations } from "./brand/declarations.js";
 import { creativesDeclarations } from "./creatives/declarations.js";
 import { gateDeclarations } from "./gate/declarations.js";
 import { insightsDeclarations } from "./insights/declarations.js";
+import { organicDeclarations } from "./organic/declarations.js";
 import { rulesDeclarations } from "./rules/declarations.js";
 import { smokeDeclarations } from "./smoke/declarations.js";
 import { spendGuardDeclarations } from "./spend-guard/declarations.js";
@@ -23,4 +24,5 @@ export const FEATURE_DECLARATIONS: readonly FeatureDeclarations[] = [
   insightsDeclarations,
   rulesDeclarations,
   uiDeclarations,
+  organicDeclarations,
 ];
