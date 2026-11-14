@@ -163,7 +163,8 @@ ensure_base_dir() {
 # Runner-käyttäjän pitää päästä RUNNER_DIRin jokaisen ylähakemiston läpi.
 # Tarkistus kokeillaan runner-käyttäjänä (cd), ei päätellä oikeusbiteistä:
 # ryhmät ja ACL:t vaikuttavat tulokseen. Puuttuvat hakemistot skripti luo itse
-# root:root 755 -oikeuksin, joten ne tarkistetaan vasta olemassa olevaan asti.
+# (ensure_base_dir), joten ne tarkistetaan vasta olemassa olevaan asti.
+# install_runner kokeilee kulun uudelleen kantahakemiston luonnin jälkeen.
 check_runner_traversal() {
   local target="$RUNNER_DIR" prefix="" part
   while [ ! -e "$target" ]; do target="$(dirname "$target")"; done

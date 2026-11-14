@@ -296,7 +296,7 @@ RUID="$(id -u "$RUSER")"
 UNIT="actions.runner.mv50000-paperclip.${NAME:?}.service"
 RDIR="$(systemctl show -p WorkingDirectory --value "$UNIT")"
 case "$RDIR" in
-  ''|/|/srv/ci/actions-runners/*) echo "Pysähdy: runner-hakemisto on '$RDIR'." >&2; exit 1 ;;
+  ''|/|/srv/ci/actions-runners|/srv/ci/actions-runners/*) echo "Pysähdy: runner-hakemisto on '$RDIR'." >&2; exit 1 ;;
 esac
 sudo systemctl disable --now "$UNIT"
 sudo rm -f "/etc/systemd/system/$UNIT"
