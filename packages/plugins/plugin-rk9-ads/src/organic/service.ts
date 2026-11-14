@@ -218,12 +218,13 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (caption.length > ORGANIC_CAPTION_MAX_CHARS) throw new OrganicError("invalid_caption", `caption exceeds ${ORGANIC_CAPTION_MAX_CHARS} characters`);
     if ((caption.match(/#[\p{L}\p{N}_]+/gu) ?? []).length > MAX_HASHTAGS) throw new OrganicError("invalid_caption", `caption has more than ${MAX_HASHTAGS} hashtags`);
 
-    let lint: OrganicLint | null = null;
-    if (input.brandLint !== undefined && input.brandLint !== null) {
-      const checked = checkLint(input.brandLint);
-      if (!checked.ok) throw new OrganicError(checked.code, checked.message);
-      lint = checked.lint;
+    // The card must show a brand-lint result (RK9-832): a missing one is refused.
+    if (input.brandLint === undefined || input.brandLint === null) {
+      throw new OrganicError("invalid_lint", "brandLint is required: pass the JSON result of rk9-motion scripts/brand-lint.mjs --json");
     }
+    const checked = checkLint(input.brandLint);
+    if (!checked.ok) throw new OrganicError(checked.code, checked.message);
+    const lint: OrganicLint = checked.lint;
 
     const mode = cfg.organic!.mode;
     if (mode === "live" && channel.startsWith("ig_")) await assertIgScopes(companyId, cfg);
@@ -336,7 +337,11 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const creativeIssue = creativeProblem(creative, post.channel, now());
     if (creativeIssue) return close("⛔ Creative ei kelpaa enää: ei julkaistu.", creativeIssue);
 
+    // The card told the approver whether the tap publishes; a mode change since then closes the card.
     const mode = cfg.organic!.mode;
+    if (mode !== post.mode) {
+      return close("⛔ Julkaisutila on muuttunut kortin jälkeen: ei julkaistu. Pyydä uusi kortti.", `mode_changed: card ${post.mode}, config ${mode}`);
+    }
     if (
       !(await deps.posts.update(companyId, post.id, "pending", {
         status: "publishing",
@@ -428,6 +433,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
   async function onReason(request: GateRequestRecord, tgUserId: number, code: string, text: string | null): Promise<void> {
     const binding = bindingOf(request);
     if (!binding) return;
+    // A reason tap can overtake onDenied; the denied gate decides, so close the post first.
+    await onDenied(request, tgUserId);
     const preset = ORGANIC_REJECT_REASONS.some((reason) => reason.code === code);
     const stored = await deps.posts.setRejectReason(request.companyId, binding.postId, code, preset ? null : text);
     if (stored) {

@@ -21,7 +21,7 @@ export const organicDeclarations: FeatureDeclarations = {
           caption: { type: "string", description: "Post text; default the creative's copy.message" },
           brandLint: { type: "object", description: "brand-lint --json result (rk9-motion scripts/brand-lint.mjs)" },
         },
-        required: ["creativeId", "channel"],
+        required: ["creativeId", "channel", "brandLint"],
       },
     },
   ],

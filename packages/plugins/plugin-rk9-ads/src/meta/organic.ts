@@ -177,10 +177,18 @@ async function igPermalink(client: MetaGraphClient, mediaId: string): Promise<st
 
 /**
  * media_publish can answer an error although the post went live (seen in
- * Sunspot's publish-ig.mjs). The container's status_code then says PUBLISHED;
- * the media id is the newest media item created after `startedAtMs`.
+ * Sunspot's publish-ig.mjs). The container's status_code then says PUBLISHED.
+ * The media id is taken only when exactly one recent media item (created
+ * after `startedAtMs` - 60 s) carries the same caption; otherwise it stays
+ * null, so a board delete can never remove a post of another publisher.
  */
-async function recoverPublished(client: MetaGraphClient, igUserId: string, containerId: string, startedAtMs: number): Promise<string | null | false> {
+async function recoverPublished(
+  client: MetaGraphClient,
+  igUserId: string,
+  containerId: string,
+  startedAtMs: number,
+  caption: string,
+): Promise<string | null | false> {
   let status: unknown;
   try {
     status = (await client.get<{ status_code?: unknown }>(containerId, { fields: "status_code" })).status_code;
@@ -189,12 +197,16 @@ async function recoverPublished(client: MetaGraphClient, igUserId: string, conta
   }
   if (status !== "PUBLISHED") return false;
   try {
-    const page = await client.get<{ data?: Array<{ id?: unknown; timestamp?: unknown }> }>(`${igUserId}/media`, { fields: "id,timestamp", limit: 3 });
-    const newest = (page.data ?? []).find((item) => {
-      const at = typeof item.timestamp === "string" ? Date.parse(item.timestamp) : Number.NaN;
-      return typeof item.id === "string" && ID_RE.test(item.id) && Number.isFinite(at) && at >= startedAtMs - 60_000;
+    const page = await client.get<{ data?: Array<{ id?: unknown; timestamp?: unknown; caption?: unknown }> }>(`${igUserId}/media`, {
+      fields: "id,timestamp,caption",
+      limit: 5,
     });
-    return newest ? String(newest.id) : null;
+    const matches = (page.data ?? []).filter((item) => {
+      const at = typeof item.timestamp === "string" ? Date.parse(item.timestamp) : Number.NaN;
+      const text = typeof item.caption === "string" ? item.caption.trim() : "";
+      return typeof item.id === "string" && ID_RE.test(item.id) && Number.isFinite(at) && at >= startedAtMs - 60_000 && text === caption.trim();
+    });
+    return matches.length === 1 ? String(matches[0]!.id) : null;
   } catch {
     return null;
   }
@@ -223,7 +235,7 @@ async function publishIgContainer(
     mediaId = requireId(published.id, "id");
   } catch (error) {
     if (!(error instanceof MetaGraphError) || error instanceof MetaResponseError) throw error;
-    const found = await recoverPublished(client, igUserId, containerId, startedAtMs);
+    const found = await recoverPublished(client, igUserId, containerId, startedAtMs, typeof fields.caption === "string" ? fields.caption : "");
     if (found === false) throw error;
     mediaId = found;
     recovered = true;

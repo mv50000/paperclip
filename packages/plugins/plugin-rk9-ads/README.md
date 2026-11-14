@@ -792,10 +792,10 @@ plugin must not see).
 
 1. **Card.** `organic.request` (board) or the agent tool
    `rk9ads_request_organic_post` takes `{ creativeId, channel, caption?,
-   brandLint? }`. The service checks the creative (ready, not expired, the
+   brandLint }`. The service checks the creative (ready, not expired, the
    right media kind and aspect ratio), the caption (at most 2 200 characters
    and 30 hashtags) and the brand-lint JSON of rk9-motion
-   (`scripts/brand-lint.mjs`). It recomputes the result from the rows, so a
+   (`scripts/brand-lint.mjs --json`). A missing result is refused. It recomputes the result from the rows, so a
    `fail` row refuses even when `ok` is true. A `draft` result is refused. It
    then sends one card to the brand chat: the preview, the channel, the
    caption, the lint summary, every `human` rule as a "☐" line, and the
@@ -810,7 +810,10 @@ plugin must not see).
    `src/meta/organic.ts`): only the four shapes above and a delete of the one
    named object. No ad edge, status field or budget field can pass. An IG
    `media_publish` error is checked against the container: `PUBLISHED` counts
-   as success.
+   as success. The media id is then stored only when exactly one recent media
+   item has the same caption; otherwise it stays empty and a delete is
+   refused. A change of `organic.mode` after the card closes the card without
+   a Meta write: the approver saw the mode on the card.
 3. **Reject.** "❌ Hylkää" edits the same card to the reason buttons (visual,
    text, claim, brand, topic, repeat). A reply to the card stores a typed
    reason as `other`. The first reason wins. The typed text is cleaned of

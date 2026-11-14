@@ -248,6 +248,7 @@ describe("organic card", () => {
     await expect(request(r, { brandLint: failed })).rejects.toThrow(/lint_failed: brand-lint failed: source.safe_top/);
     await expect(request(r, { brandLint: { ...LINT, mode: "draft" } })).rejects.toThrow(/lint_draft/);
     await expect(request(r, { brandLint: { ok: true } })).rejects.toThrow(/invalid_lint/);
+    await expect(request(r, { brandLint: undefined })).rejects.toThrow(/invalid_lint: brandLint is required/);
     await expect(request(r, { channel: "fb_photo" })).rejects.toThrow(/creative_unusable: fb_photo takes a image creative/);
     await expect(request(r, { channel: "ig_feed", creativeId: IMAGE_ID })).rejects.toThrow(/channel_unavailable: channel ig_feed is not in organic.channels/);
     expect(r.posts.rows).toHaveLength(0);
@@ -341,12 +342,50 @@ describe("organic approve", () => {
     const meta = graph()
       .on(`POST ${IG}/media_publish`, graphError(9007, "Media ID is not available"))
       .on(`GET ${CONTAINER}`, () => ({ body: { status_code: polls++ === 0 ? "FINISHED" : "PUBLISHED" } }))
-      .on(`GET ${IG}/media`, () => ({ body: { data: [{ id: MEDIA, timestamp: new Date().toISOString() }] } }));
+      .on(`GET ${IG}/media`, () => ({
+        body: {
+          data: [
+            { id: "17999999999999999", timestamp: new Date().toISOString(), caption: "Someone else posted this" },
+            { id: MEDIA, timestamp: new Date().toISOString(), caption: "Valo palaa. #ololla" },
+          ],
+        },
+      }));
     const r = await rig({ meta });
     const { gateRequestId, postId } = await request(r);
     const messageId = cardMessageId(r, gateRequestId);
     await tap(r, messageId, r.fake.buttons(messageId)[0]!);
     expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "published", metaMediaId: MEDIA });
+  });
+
+  it("stores no media id after a recovery when the caption match is not unique, so a delete cannot hit another post", async () => {
+    let polls = 0;
+    const meta = graph()
+      .on(`POST ${IG}/media_publish`, graphError(9007, "Media ID is not available"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: polls++ === 0 ? "FINISHED" : "PUBLISHED" } }))
+      .on(`GET ${IG}/media`, () => ({ body: { data: [{ id: "17999999999999999", timestamp: new Date().toISOString(), caption: "Someone else posted this" }] } }));
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "published", metaMediaId: null });
+    await expect(
+      r.harness.performAction(ORGANIC_DELETE_ACTION_KEY, { postId, dryRun: false, confirm: true }, { companyId: COMPANY_A, actor: { type: "user", userId: "board-user-1" } }),
+    ).rejects.toThrow(/no_media_id/);
+    expect(r.meta.writes().filter((call) => call.method === "DELETE")).toEqual([]);
+  });
+
+  it("closes a dry-run card without a Meta write when the brand switched to live after the card, and the reverse", async () => {
+    for (const [cardMode, tapMode] of [["dry_run", "live"], ["live", "dry_run"]] as const) {
+      const r = await rig({ config: config({ mode: cardMode }) });
+      const { gateRequestId, postId } = await request(r);
+      useCompanyConfigs(r.harness, { [COMPANY_A]: config({ mode: tapMode }) });
+      const messageId = cardMessageId(r, gateRequestId);
+      await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+      expect(publishWrites(r)).toEqual([]);
+      expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "failed", mode: cardMode });
+      expect(cardText(r, messageId)).toContain("Julkaisutila on muuttunut");
+      await r.controller.stop();
+    }
   });
 
   it("refuses to publish when the creative changed after the card", async () => {
