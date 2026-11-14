@@ -1,12 +1,36 @@
-# CI-runner: siirto pois GitHub-hostatuilta runnereilta (RK9-350)
+# CI-runner: vipu omalle runnerille (RK9-350), forkin CI jää GitHubin koneille (RK9-848)
+
+## Päätös 14.11.2026: poikkeus policyyn
 
 RK9:n CI-runner-policy kieltää buildit GitHub-hostatuilla runnereilla. Operaattori päätti
 27.9.2026, että forkin `mv50000/paperclip` jobit siirretään omalle runnerille tai
-Ubicloudiin. Poikkeusta ei kirjata.
+Ubicloudiin. Operaattori perui päätöksen 14.11.2026 (päätöskortti `fork-ci-runner`,
+vaihtoehto A):
 
-Tämä dokumentti kuvaa vivun, turvamallin, käyttöönoton ja palautuksen. Workflow-muutokset
-ovat valmiina masterissa. Runneria ei ole vielä rekisteröity, joten CI ajaa yhä
-`ubuntu-latest`illa, kunnes operaattori tekee alla olevat vaiheet.
+- **Forkin `mv50000/paperclip` CI jää GitHub-hostatuille runnereille.**
+- Policyyn kirjataan poikkeus tälle yhdelle julkiselle repolle. Muut repot noudattavat
+  policyä ennallaan. `CONSTITUTION.md` kirjaa rajauksen.
+- Vipu `vars.CI_RUNNER` jää workflow'hin. Muuttujaa ei aseteta, joten jobit ajavat
+  `ubuntu-latest`illa.
+
+Peruste on mittaus (RK9-782). Oma runneri oli hitaampi kuin GitHubin koneet:
+
+| Mittari | Oma runneri (builder-02, yksi slotti) | GitHubin koneet |
+|---|---|---|
+| 23 työtä | 2,5–3 h | noin 18 min |
+| Runnerin `MemoryPeak` | 3,77 G (katto 4 G) | – |
+
+- Yksi slotti ajaa työt peräkkäin, joten jono pitenee.
+- Muistikatto 4 G on lähellä huippua. Yksi raskas jobi voi kaatua OOM:iin.
+- Runnerilta puuttui Rust-toolchain. `Verify Paperclip Runner` vaatii pinnatun toolchainin.
+
+Julkisen repon hostatut minuutit ovat ilmaisia. Poikkeus ei maksa rahaa.
+
+Peruste on kirjattu myös vaultiin: `rk9/areas/ci_runner_policy_no_github_hosted.md`.
+
+Tämä dokumentti kuvaa edelleen vivun, turvamallin, käyttöönoton ja palautuksen. Käytä niitä
+vain, jos päätös muuttuu. Workflow-muutokset ovat valmiina masterissa. Runneria ei ole
+rekisteröity, joten CI ajaa `ubuntu-latest`illa, kunnes joku tekee alla olevat vaiheet.
 
 ## Vipu: `vars.CI_RUNNER`
 
@@ -123,7 +147,8 @@ ja `release-smoke.yml` tarvitsevat vain lukuoikeuden.
 
 ## Käyttöönotto (operaattori)
 
-Tee siirto masterin jäädytyksen ulkopuolella. Älä tee sitä kesken upstream-portaan mergeä.
+Nämä vaiheet ovat ohje siltä varalta, että 14.11.2026 tehty päätös muuttuu. Nyt niitä ei
+tehdä. Tee siirto masterin jäädytyksen ulkopuolella. Älä tee sitä kesken upstream-portaan mergeä.
 
 ### Vaihe 1: fork-PR-hyväksyntä
 
@@ -169,6 +194,16 @@ puussa `/srv/ci/actions-runners/`.
 Ennen RK9-844:ää asennin loi runner-hakemiston org-runnerien puuhun. Jos sellainen on yhä
 olemassa, esitarkistus varoittaa. Poista se rootina, esim.
 `sudo rm -rf /srv/ci/actions-runners/builder-02-paperclip`.
+
+Esivaatimus: `rustup` ja pinnattu toolchain runner-käyttäjälle `ghrunner-pc`. `pr.yml`n
+`Verify Paperclip Runner` kääntää Rustia, eikä RK9-782:n mittauksessa runnerilla ollut
+toolchainia. Asenna toolchain käyttäjänä, ei rootina, ja käytä versiota tiedostosta
+`packages/paperclip-runner/rust-toolchain.toml`:
+
+```sh
+sudo -u ghrunner-pc -H sh -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none'
+sudo -u ghrunner-pc -H sh -c 'cd <repo>/packages/paperclip-runner && ~/.cargo/bin/rustup show'
+```
 
 Tyypilliset pakettikorjaukset rootina:
 

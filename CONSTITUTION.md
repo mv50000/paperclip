@@ -12,7 +12,9 @@ Distillattu RK9-vaultista 2026-08-14 (RK9-107).
   pidä draftina kunnes itsenäinen verifier on puhdas.
 
 ## CI ja koneet
-- EI buildeja GitHub-hosted-runnereille — vain builder/builder-fast.
+- EI buildeja GitHub-hosted-runnereille — vain builder/builder-fast. Sääntö
+  koskee rk9-ai-orgin repoja. Poikkeus: tämän repon (`mv50000/paperclip`) oma CI
+  ajaa GitHubin koneilla (päätös 14.11.2026, `doc/CI-RUNNER.md`).
 - EI CI-buildeja paperclip-01-hostille (RAM-overcommit). Cargo/raskaat
   buildit: jobs cap 2.
 
