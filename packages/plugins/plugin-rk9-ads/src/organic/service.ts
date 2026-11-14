@@ -58,6 +58,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ID_RE = /^\d+$/;
 
 export const ORGANIC_LABELS = { approve: "📣 Julkaise", deny: "❌ Hylkää" } as const;
+/** A dry-run card says on its button that the tap publishes nothing. */
+export const ORGANIC_DRY_RUN_LABELS = { approve: "🧪 Kuivaharjoita", deny: "❌ Hylkää" } as const;
 
 export class OrganicError extends Error {
   constructor(
@@ -141,10 +143,20 @@ export function channelProblem(config: BrandConfig, channel: OrganicChannel): st
   return null;
 }
 
-function cleanCaption(text: string): string {
-  // Control characters other than the line feed are dropped; Meta and Telegram show the rest as typed.
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "").trim();
+/**
+ * Control characters other than the line feed, bidi controls (LRM, RLM,
+ * embeddings, overrides, isolates), zero-width spaces and the BOM are
+ * dropped, so the card shows the text Meta gets. U+2028/2029 become line
+ * feeds. The zero-width joiner U+200D stays: emoji sequences need it.
+ */
+export function cleanCaption(text: string): string {
+  return (
+    text
+      .replace(/\r\n?|[\u2028\u2029]/g, "\n")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b\u200c\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "")
+      .trim()
+  );
 }
 
 function creativeProblem(creative: CreativeRow, channel: OrganicChannel, now: Date): string | null {
@@ -271,7 +283,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
           validUntil,
           card: { media: candidate.media, text: candidate.text, ...(candidate.mediaUrl ? { mediaUrl: candidate.mediaUrl } : {}) },
           payload: { organic: binding },
-          labels: ORGANIC_LABELS,
+          labels: mode === "live" ? ORGANIC_LABELS : ORGANIC_DRY_RUN_LABELS,
           denyDecision: "denied",
         });
         break;
@@ -336,6 +348,10 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     }
     const creativeIssue = creativeProblem(creative, post.channel, now());
     if (creativeIssue) return close("⛔ Creative ei kelpaa enää: ei julkaistu.", creativeIssue);
+    // Publish the media URL the card showed, never a later one.
+    const mediaUrl = typeof post.payload.mediaUrl === "string" ? post.payload.mediaUrl : null;
+    if (!mediaUrl) return close("⛔ Kortin media puuttuu: ei julkaistu.", "media_missing");
+    if (creative.mediaUrl !== mediaUrl) return close("⛔ Creativen media on vaihtunut kortin jälkeen: ei julkaistu.", "media_changed");
 
     // The card told the approver whether the tap publishes; a mode change since then closes the card.
     const mode = cfg.organic!.mode;
@@ -357,7 +373,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const client = deps.writeClient(companyId, cfg, post.channel, targetOf(cfg));
     let result: OrganicPublishResult;
     try {
-      result = await publish(client, cfg, post, creative);
+      result = await publish(client, cfg, post, mediaUrl);
     } catch (error) {
       const message = safe(error);
       await deps.posts.update(companyId, post.id, "publishing", { status: "failed", error: message });
@@ -403,16 +419,16 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     };
   };
 
-  async function publish(client: MetaGraphClient, cfg: BrandConfig, post: OrganicPost, creative: CreativeRow): Promise<OrganicPublishResult> {
+  async function publish(client: MetaGraphClient, cfg: BrandConfig, post: OrganicPost, mediaUrl: string): Promise<OrganicPublishResult> {
     switch (post.channel) {
       case "ig_reel":
-        return publishIgReel(client, cfg.meta.igUserId!, { videoUrl: creative.mediaUrl, caption: post.caption }, deps.wait);
+        return publishIgReel(client, cfg.meta.igUserId!, { videoUrl: mediaUrl, caption: post.caption }, deps.wait);
       case "ig_feed":
-        return publishIgImage(client, cfg.meta.igUserId!, { imageUrl: creative.mediaUrl, caption: post.caption }, deps.wait);
+        return publishIgImage(client, cfg.meta.igUserId!, { imageUrl: mediaUrl, caption: post.caption }, deps.wait);
       case "fb_photo":
-        return publishFbPhoto(client, cfg.meta.pageId, { url: creative.mediaUrl, caption: post.caption });
+        return publishFbPhoto(client, cfg.meta.pageId, { url: mediaUrl, caption: post.caption });
       case "fb_video":
-        return publishFbVideo(client, cfg.meta.pageId, { fileUrl: creative.mediaUrl, description: post.caption });
+        return publishFbVideo(client, cfg.meta.pageId, { fileUrl: mediaUrl, description: post.caption });
     }
   }
 

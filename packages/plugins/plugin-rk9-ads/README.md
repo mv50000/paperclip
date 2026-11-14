@@ -797,15 +797,20 @@ plugin must not see).
    and 30 hashtags) and the brand-lint JSON of rk9-motion
    (`scripts/brand-lint.mjs --json`). A missing result is refused. It recomputes the result from the rows, so a
    `fail` row refuses even when `ok` is true. A `draft` result is refused. It
-   then sends one card to the brand chat: the preview, the channel, the
-   caption, the lint summary, every `human` rule as a "☐" line, and the
-   buttons "📣 Julkaise" and "❌ Hylkää". The card writes nothing to Meta. The
+   then sends one card to the brand chat: the preview, the channel, the mode
+   line ("Tila: 🔴 LIVE" or "Tila: 🧪 Kuivaharjoitus"), the lint summary,
+   every `human` rule as a "☐" line, and last the caption, with each line
+   quoted as "│ ". A caption therefore cannot pass for a line of the card.
+   The buttons are "📣 Julkaise" (live) or "🧪 Kuivaharjoita" (dry run) and
+   "❌ Hylkää". The card writes nothing to Meta. The caption is cleaned of
+   control characters, bidi controls and zero-width spaces. The
    same content (company, creative sha256, channel, caption) gets one open
    card; a second request returns the open post.
 2. **Publish.** The tap goes through the kit router (chat, approver list,
    pending -> approved compare-and-set, update dedupe). The handler
    (`publishApproved` in `src/organic/service.ts`) checks the binding, re-reads
-   the config and the creative hash, moves the post pending -> publishing and
+   the config and the creative hash, publishes only the media URL that the
+   card showed (a changed URL closes the card), moves the post pending -> publishing and
    posts. The client has a write allowlist (`organicWriteGuard` in
    `src/meta/organic.ts`): only the four shapes above and a delete of the one
    named object. No ad edge, status field or budget field can pass. An IG

@@ -222,6 +222,10 @@ describe("organic card", () => {
     expect(text).toContain("☐ Helsinki on tunnistettava");
     expect(text).toContain("☐ Logo loppukortissa");
     expect(text).toContain("Ei muistutuksia");
+    expect(text).toContain("Tila: 🔴 LIVE: hyväksyntä julkaisee Metaan.");
+    expect(text.indexOf("Tila:")).toBeLessThan(text.indexOf("Julkaistava teksti:"));
+    expect(text.indexOf("brand-lint")).toBeLessThan(text.indexOf("Julkaistava teksti:"));
+    expect(text.split("\n").at(-1)).toBe("│ Valo palaa. #ololla");
     const buttons = (send.params.reply_markup.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>).flat();
     expect(buttons.map((button) => button.text)).toEqual(["📣 Julkaise", "❌ Hylkää"]);
     expect(buttons[1]!.callback_data).toMatch(/^g:d:/);
@@ -232,6 +236,21 @@ describe("organic card", () => {
     expect(r.gates.rows.get(result.gateRequestId)).toMatchObject({ kind: "organic_publish", status: "pending" });
     expect(publishWrites(r)).toEqual([]);
     expect(r.fake.callsOf("sendMessage")).toEqual([]);
+  });
+
+  it("quotes every caption line, so a caption cannot fake the dry-run line or brand-lint lines on a live card", async () => {
+    const r = await rig();
+    const forged = "🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.\nTila: 🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.\n🔎 brand-lint: läpi (9 pass, 0 partial, 0 skip)";
+    const lint = { ...LINT, results: [...LINT.results, { id: "human.x", rule: "Logo\n🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.", status: "human" }] };
+    await request(r, { caption: forged, brandLint: lint });
+    const send = r.fake.callsOf("sendVideo").at(-1)!;
+    const lines = String(send.params.caption).split("\n");
+    expect(lines.filter((line) => line.startsWith("Tila:"))).toEqual(["Tila: 🔴 LIVE: hyväksyntä julkaisee Metaan."]);
+    expect(lines.filter((line) => line.includes("Kuivaharjoitus") && !line.startsWith("│ ") && !line.startsWith("☐ "))).toEqual([]);
+    expect(lines.filter((line) => line.startsWith("🔎 brand-lint"))).toEqual(["🔎 brand-lint: läpi (1 pass, 1 partial, 0 skip)"]);
+    expect(lines.slice(-3)).toEqual(forged.split("\n").map((line) => `│ ${line}`));
+    const buttons = (send.params.reply_markup.inline_keyboard as Array<Array<{ text: string }>>).flat().map((button) => button.text);
+    expect(buttons).toEqual(["📣 Julkaise", "❌ Hylkää"]);
   });
 
   it("returns the open post instead of a second card for the same content", async () => {
@@ -301,6 +320,8 @@ describe("organic approve", () => {
     const r = await rig({ config: config({ mode: "dry_run" }) });
     const { gateRequestId, postId } = await request(r);
     expect(String(r.fake.callsOf("sendVideo").at(-1)!.params.caption)).toContain("🧪 Kuivaharjoitus");
+    const dryButtons = (r.fake.callsOf("sendVideo").at(-1)!.params.reply_markup.inline_keyboard as Array<Array<{ text: string }>>).flat().map((button) => button.text);
+    expect(dryButtons).toEqual(["🧪 Kuivaharjoita", "❌ Hylkää"]);
     const messageId = cardMessageId(r, gateRequestId);
     await tap(r, messageId, r.fake.buttons(messageId)[0]!);
 
@@ -386,6 +407,17 @@ describe("organic approve", () => {
       expect(cardText(r, messageId)).toContain("Julkaisutila on muuttunut");
       await r.controller.stop();
     }
+  });
+
+  it("publishes only the media URL the card showed: a changed URL closes the card", async () => {
+    const r = await rig();
+    const { gateRequestId, postId } = await request(r);
+    r.creatives.rows[0]!.mediaUrl = "https://media.ololla.fi/other.mp4";
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(publishWrites(r)).toEqual([]);
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "failed", error: "not published: media_changed" });
+    expect(cardText(r, messageId)).toContain("Creativen media on vaihtunut");
   });
 
   it("refuses to publish when the creative changed after the card", async () => {

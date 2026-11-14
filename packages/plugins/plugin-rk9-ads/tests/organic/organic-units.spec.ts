@@ -4,6 +4,7 @@ import { parseBrandConfig } from "../../src/config.js";
 import type { WritePlan } from "../../src/meta/graph.js";
 import { organicWriteGuard } from "../../src/meta/organic.js";
 import { checkLint } from "../../src/organic/lint.js";
+import { cleanCaption } from "../../src/organic/service.js";
 import { formatDigest, type DigestInput } from "../../src/digest/format.js";
 import { computePacing } from "../../src/insights/mtd.js";
 import { localMonthBounds } from "../../src/kit/local-time.js";
@@ -140,5 +141,12 @@ describe("organic digest lines", () => {
     expect(text).toContain("❌ Instagram-syöte (kuva): hylätty (väite tai luku)");
     expect(text).toContain("hylätty, syy puuttuu");
     expect(text).toContain("🧪 Facebook-sivu (video): kuivaharjoitus, ei julkaistu");
+  });
+});
+
+describe("cleanCaption", () => {
+  it("drops bidi controls, zero-width spaces and the BOM, keeps the emoji joiner and line feeds", () => {
+    expect(cleanCaption("\ufeffValo\u200b palaa\u202e.gpj\u202c\r\nrivi\u2028kolme\u2066x\u2069\u200e\u200f\u0007")).toBe("Valo palaa.gpj\nrivi\nkolmex");
+    expect(cleanCaption("perhe 👨\u200d👩\u200d👧")).toBe("perhe 👨\u200d👩\u200d👧");
   });
 });
