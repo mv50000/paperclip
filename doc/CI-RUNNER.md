@@ -85,9 +85,12 @@ Varsinainen suoja on nämä viisi:
 3. **Runneri ajaa omana käyttäjänään** (`ghrunner-pc`). Käyttäjällä ei ole sudoa, docker-ryhmää
    eikä kirjoitusoikeutta org-runnerien (`ghrunner`) kotiin, hakemistoihin ja cacheihin.
    Asennusskripti tarkistaa tämän ja varoittaa, jos cache on luettavissa. Docker on rootless.
-   Runnerilla on oma root-omisteinen kantahakemisto `/srv/ci/actions-runners-ghrunner-pc/`
-   (RK9-844). Org-runnerien `/srv/ci/actions-runners/` on `root:ghrunner 750`, eikä
-   `ghrunner-pc` pääse sinne. Tämä on tarkoitus, joten sen oikeuksia ei löysätä.
+   Runnerilla on oma kantahakemisto `/srv/ci/actions-runners-ghrunner-pc/` (`root:ghrunner-pc 750`,
+   RK9-844), ja runner-hakemisto on `ghrunner-pc:ghrunner-pc 750`. Muut paikalliset käyttäjät,
+   myös org-runnerit, eivät näe jobin `_work`-hakemistoa eivätkä sen tokeneita. Org-runnerien
+   `/srv/ci/actions-runners/` on `root:ghrunner 750`, eikä `ghrunner-pc` pääse sinne. Tämä on
+   tarkoitus, joten sen oikeuksia ei löysätä. Skripti hylkää `--base-dir`in org-runnerien puussa
+   ja `ghrunner-pc`:n jäsenyyden ryhmässä `ghrunner`.
 4. **Root ei aja eikä kirjoita mitään runner-hakemistossa asennuksen jälkeen.** Hakemisto
    on runner-käyttäjän kirjoitettavissa. Skripti kirjoittaa systemd-unitin suoraan
    (`svc.sh`ää ei ajeta rootina), päivittää `.env`:n runner-käyttäjänä, ja poisto tehdään
@@ -154,11 +157,18 @@ Esitarkistus kertoo puuttuvat paketit. Se tarkistaa myös runner-hakemiston polu
   kirjoitusoikeutta.
 - Jos `ghrunner-pc` on jo olemassa, skripti kokeilee `ghrunner-pc`:nä (`cd`), että käyttäjä
   pääsee jokaisen ylähakemiston läpi. Tarkistus ei päättele tulosta oikeusbiteistä.
-  Uudella hostilla käyttäjää ei vielä ole, joten sama tarkistus ajetaan käyttäjän luonnin
-  jälkeen, ennen kuin hook tai runner-hakemisto luodaan.
 
-Kumpikin virhe pysäyttää skriptin ennen kuin mitään luodaan. Oletuspolun voi vaihtaa
-valinnalla `--base-dir POLKU`, mutta älä osoita sitä org-runnerien hakemistoon.
+Kun käyttäjä on olemassa, kumpikin virhe pysäyttää skriptin ennen kuin mitään luodaan.
+Uudella hostilla käyttäjää ei vielä ole, joten `--check` ei voi kokeilla kulkua. Asennus
+kokeilee sen heti käyttäjän luonnin jälkeen. Silloin käyttäjä ja sen koti on jo luotu, mutta
+hookia ja runner-hakemistoa ei.
+
+Oletuspolun voi vaihtaa valinnalla `--base-dir POLKU`. Polku ei saa olla org-runnerien
+puussa `/srv/ci/actions-runners/`.
+
+Ennen RK9-844:ää asennin loi runner-hakemiston org-runnerien puuhun. Jos sellainen on yhä
+olemassa, esitarkistus varoittaa. Poista se rootina, esim.
+`sudo rm -rf /srv/ci/actions-runners/builder-02-paperclip`.
 
 Tyypilliset pakettikorjaukset rootina:
 
@@ -193,9 +203,10 @@ unset RUNNER_TOKEN
 Skripti tekee nämä:
 
 - luo järjestelmäkäyttäjän `ghrunner-pc` (koti `/srv/ci/ghrunner-pc`, lukittu salasana, ei ryhmiä)
-- luo kantahakemiston `/srv/ci/actions-runners-ghrunner-pc` (`root:root 755`) ja sen alle
+- luo kantahakemiston `/srv/ci/actions-runners-ghrunner-pc` (`root:ghrunner-pc 750`) ja sen alle
   runner-hakemiston `<nimi>` (`ghrunner-pc:ghrunner-pc 750`), esim.
-  `/srv/ci/actions-runners-ghrunner-pc/builder-02-paperclip`
+  `/srv/ci/actions-runners-ghrunner-pc/builder-02-paperclip`. Tila pysyy 750:nä purun jälkeen
+  ja jokaisessa uusintaajossa.
 - asentaa root-omisteisen job-started-hookin (ks. [Turvamalli](#turvamalli)); vaatii `jq`:n ja `pkill`in
 - lataa actions/runnerin kiinnitetyllä versiolla ja tarkistaa SHA256:n
 - rekisteröi runnerin labeleilla `self-hosted, Linux, X64, paperclip-ci`
@@ -273,9 +284,9 @@ gh variable delete CI_RUNNER -R mv50000/paperclip
 
 Runnerin poisto hostilta. Aja lohko alikuoressa (`bash -eu`) tai skriptinä, jotta `set -eu`
 ei sulje omaa shelliäsi. Runner-hakemistosta ei ajeta mitään rootina, koska jobi voi
-muokata sen tiedostoja. `${NAME:?}` pysäyttää komennon, jos nimi jäi asettamatta, jottei
-`rm -rf` osu koko kantahakemistoon. Org-runnerien `/srv/ci/actions-runners/` ei kuulu tähän
-runneriin: älä poista sieltä mitään.
+muokata sen tiedostoja. `${NAME:?}` pysäyttää komennon, jos nimi jäi asettamatta. Lohko lukee
+runner-hakemiston unitin `WorkingDirectory`stä, joten se toimii myös `--base-dir`-asennukselle.
+`case` pysäyttää lohkon, jos polku on tyhjä tai org-runnerien puussa `/srv/ci/actions-runners/`.
 
 ```sh
 set -eu                  # keskeytä koko lohko ensimmäiseen virheeseen
@@ -283,6 +294,10 @@ NAME='<nimi>'            # esim. builder-02-paperclip
 RUSER=ghrunner-pc
 RUID="$(id -u "$RUSER")"
 UNIT="actions.runner.mv50000-paperclip.${NAME:?}.service"
+RDIR="$(systemctl show -p WorkingDirectory --value "$UNIT")"
+case "$RDIR" in
+  ''|/|/srv/ci/actions-runners/*) echo "Pysähdy: runner-hakemisto on '$RDIR'." >&2; exit 1 ;;
+esac
 sudo systemctl disable --now "$UNIT"
 sudo rm -f "/etc/systemd/system/$UNIT"
 sudo rm -rf "/etc/systemd/system/$UNIT.d"
@@ -291,8 +306,8 @@ sudo systemctl daemon-reload
 sudo loginctl disable-linger "$RUSER"
 sudo systemctl stop "user@${RUID:?}.service"
 sudo pkill -KILL -u "$RUSER" || true
-sudo rm -rf "/srv/ci/actions-runners-${RUSER:?}/${NAME:?}"
-sudo rmdir "/srv/ci/actions-runners-${RUSER:?}" || true   # jää, jos siellä on muita runnereita
+sudo rm -rf "${RDIR:?}"
+sudo rmdir "$(dirname "$RDIR")" || true   # kantahakemisto jää, jos siellä on muita runnereita
 sudo find /tmp -maxdepth 1 -uid "${RUID:?}" -exec rm -rf {} +
 sudo userdel -r "$RUSER"   # poistaa kodin /srv/ci/ghrunner-pc
 sudo sed -i "/^${RUSER}:/d" /etc/subuid /etc/subgid

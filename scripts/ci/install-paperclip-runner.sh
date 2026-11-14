@@ -114,6 +114,11 @@ BASE_DIR="${BASE_DIR:-/srv/ci/actions-runners-$RUNNER_USER}"
 [[ "$BASE_DIR" == /* ]] || fail "--base-dir: anna absoluuttinen polku."
 BASE_DIR="$(realpath -m -- "$BASE_DIR")"
 [[ "$BASE_DIR" =~ ^(/[A-Za-z0-9._-]+)+$ ]] || fail "--base-dir: sallittu [A-Za-z0-9._-/], ei juurihakemistoa."
+# Org-runnerien puu on tältä käyttäjältä suljettu tarkoituksella.
+ORG_RUNNERS_DIR="/srv/ci/actions-runners"
+case "$BASE_DIR/" in
+  "$ORG_RUNNERS_DIR"/*) fail "--base-dir ei saa olla org-runnerien puussa $ORG_RUNNERS_DIR." ;;
+esac
 
 RUNNER_DIR="$BASE_DIR/$RUNNER_NAME"
 RUNNER_HOME="/srv/ci/$RUNNER_USER"
@@ -141,6 +146,18 @@ check_base_chain() {
     [ "$d" = "/" ] && break
     d="$(dirname "$d")"
   done
+}
+
+# Uusi kantahakemisto on root:<runner-käyttäjä> 750: vain runner-käyttäjä pääsee
+# sen läpi, muut paikalliset käyttäjät (myös org-runnerit) eivät. Olemassa olevan
+# kantahakemiston oikeuksiin ei kosketa (ensure_root_dir tarkistaa sen).
+ensure_base_dir() {
+  if [ ! -e "$BASE_DIR" ] && [ ! -L "$BASE_DIR" ]; then
+    ensure_root_dir "$(dirname "$BASE_DIR")"
+    install -d -o root -g "$RUNNER_USER" -m 750 "$BASE_DIR"
+    return
+  fi
+  ensure_root_dir "$BASE_DIR"
 }
 
 # Runner-käyttäjän pitää päästä RUNNER_DIRin jokaisen ylähakemiston läpi.
@@ -218,6 +235,12 @@ preflight() {
     fail "$RUNNER_DIR on olemassa, mutta runneria ei ole rekisteröity. Poista keskeneräinen hakemisto: rm -rf $RUNNER_DIR"
   fi
 
+  # Vanha asennin (ennen RK9-844:ää) purki runnerin org-runnerien puuhun. Jäänne
+  # ei estä asennusta, mutta se kuuluu poistaa (doc/CI-RUNNER.md, vaihe 3).
+  if [ -e "$ORG_RUNNERS_DIR/$RUNNER_NAME" ]; then
+    warn "$ORG_RUNNERS_DIR/$RUNNER_NAME on vanhan asentimen jäänne org-runnerien puussa. Poista se rootina: rm -rf $ORG_RUNNERS_DIR/$RUNNER_NAME"
+  fi
+
   check_base_chain
   if id "$RUNNER_USER" >/dev/null 2>&1; then
     check_runner_traversal
@@ -257,7 +280,7 @@ ensure_user() {
   # Käyttäjä ei saa kuulua mihinkään etuoikeutettuun ryhmään.
   local groups
   groups="$(id -nG "$RUNNER_USER")"
-  for g in sudo admin wheel docker lxd adm paperclip; do
+  for g in sudo admin wheel docker lxd adm paperclip ghrunner; do
     if printf ' %s ' "$groups" | grep -q " $g "; then
       fail "$RUNNER_USER kuuluu ryhmään '$g'. Poista jäsenyys ennen jatkoa."
     fi
@@ -266,7 +289,7 @@ ensure_user() {
   # Org-runnerien (ghrunner) koti ja cachet eivät saa olla tämän käyttäjän
   # kirjoitettavissa. Luettavuus on varoitus: vain saman repon koodi ajaa täällä.
   local p
-  for p in /srv/ci/ghrunner /srv/ci/actions-runners /opt/cache/*; do
+  for p in /srv/ci/ghrunner "$ORG_RUNNERS_DIR" /opt/cache/*; do
     [ -e "$p" ] || continue
     if as_runner test -w "$p"; then
       fail "$RUNNER_USER voi kirjoittaa polkuun $p. Korjaa oikeudet ennen jatkoa."
@@ -351,15 +374,24 @@ install_runner() {
   # Hakemisto luodaan tyhjänä (esitarkistus hylkää keskeneräisen), joten root
   # purkaa paketin hakemistoon, jota jobi ei ole vielä koskaan nähnyt.
   check_base_chain
-  ensure_root_dir "$BASE_DIR"
+  ensure_base_dir
   check_runner_traversal
-  [ ! -e "$RUNNER_DIR" ] || fail "$RUNNER_DIR ilmestyi kesken asennuksen. Tarkista hakemisto ja aja uudelleen."
-  install -d -o "$RUNNER_USER" -g "$RUNNER_USER" -m 750 "$RUNNER_DIR"
-  # Tästä eteenpäin kaatuminen poistaa hakemiston (cleanup_on_exit).
+  # mkdir (ei install -d) kaatuu, jos hakemisto on jo olemassa: rinnakkainen ajo
+  # ei voi ottaa samaa hakemistoa, eikä siivous poista toisen ajon asennusta.
+  # Lippu asetetaan ennen mkdiriä, jottei signaali heti luonnin jälkeen jätä
+  # tyhjää hakemistoa. Epäonnistunut mkdir nollaa lipun ennen poistumista.
   CLEANUP_RUNNER_DIR=1
+  if ! mkdir -m 750 -- "$RUNNER_DIR"; then
+    CLEANUP_RUNNER_DIR=0
+    fail "$RUNNER_DIR ilmestyi kesken asennuksen. Tarkista hakemisto ja aja uudelleen."
+  fi
+  chown "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
   chmod 644 "$tmp/$tarball"
   chmod 711 "$tmp"
-  as_runner tar xzf "$tmp/$tarball" -C "$RUNNER_DIR"
+  # Paketin ./-merkintä vaihtaisi hakemiston tilaksi 755 (--no-overwrite-dir
+  # estää sen). chmod varmistaa tilan 750 joka tapauksessa.
+  as_runner tar --no-overwrite-dir -xzf "$tmp/$tarball" -C "$RUNNER_DIR"
+  as_runner chmod 750 "$RUNNER_DIR"
   rm -rf "$tmp"
   CLEANUP_TMP=""
   # svc.sh kopioisi tämän; skripti kirjoittaa unitin itse (ks. install_service).
@@ -385,6 +417,9 @@ write_runner_env() {
   if [ "$WITH_DOCKER" -eq 1 ]; then
     docker_host="unix:///run/user/${uid}/docker.sock"
   fi
+  # Runner-hakemisto pysyy tilassa 750 myös uusintaajossa (muut käyttäjät eivät
+  # näe _work-hakemistoa eivätkä jobin tokeneita).
+  as_runner chmod 750 "$RUNNER_DIR"
   info "Päivitetään $RUNNER_DIR/.env (runner-käyttäjänä)."
   # shellcheck disable=SC2016 # argumentit laajenevat tarkoituksella vasta alikuoressa
   as_runner bash -c '
