@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { isDryRunCreativeRow } from "../creative-manifest/staging-mode.js";
 import type { Ledger, LedgerRow } from "../db.js";
 import type { AdCopy, PublicationMode, PublicationPayload, PublicationRecord, PublicationStatus } from "./types.js";
 
@@ -63,6 +64,11 @@ export interface CreativeRow {
   targetAdsetId: string | null;
   validUntil: string | null;
   metaVideoId: string | null;
+  /**
+   * True when the creative was staged in dry-run mode (RK9-849). No paid ad,
+   * activation or live organic post may use it. The SQL source always sets it.
+   */
+  stagingDryRun?: boolean;
 }
 
 export interface CreativeSource {
@@ -143,6 +149,7 @@ export function toCreativeRow(row: LedgerRow): CreativeRow {
     targetAdsetId: str(row.target_adset_id),
     validUntil: iso(row.valid_until),
     metaVideoId: str(row.meta_video_id),
+    stagingDryRun: isDryRunCreativeRow(row),
   };
 }
 

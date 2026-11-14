@@ -8,7 +8,7 @@ import { createStagingCards, type GateCardTransport, type StagingCards } from ".
 import { createSqlGateStore, type GateStore } from "../../kit/gate/state-machine.js";
 import { PLUGIN_ID } from "../../manifest.js";
 import type { MetaGraphClient } from "../../meta/graph.js";
-import { sqlPublicationStore, type PublicationStore } from "../../publish/store.js";
+import { sqlCreativeSource, sqlPublicationStore, type CreativeSource, type PublicationStore } from "../../publish/store.js";
 import { readAdHalt, readHalt } from "../spend-guard/halt.js";
 import { reportUndoFailure } from "../spend-guard/pending-undo.js";
 import { brandReadClient, controllerNotifier, safeError, sqlOnceStore, type OnceStore, type SpendGuardNotifier } from "../spend-guard/support.js";
@@ -55,6 +55,8 @@ export interface GateOverrides {
   haltOf?: ActivateAdDeps["haltOf"];
   adHaltOf?: ActivateAdDeps["adHaltOf"];
   publications?: Pick<PublicationStore, "findByAd">;
+  /** The staged creatives, for the dry-run check (RK9-849). */
+  creatives?: CreativeSource;
   /** The failed-undo alert's Telegram and dedupe markers. */
   notifier?: SpendGuardNotifier;
   onceStore?: OnceStore;
@@ -82,6 +84,7 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
   const preflightDeps = { ctx, store: sqlOnceStore(ledger), pluginId: PLUGIN_ID, now };
   const undoDeps = { ctx, store: onceStore, notifier: overrides.notifier ?? controllerNotifier };
   const publications = overrides.publications ?? sqlPublicationStore(ledger);
+  const creatives = overrides.creatives ?? sqlCreativeSource(ledger);
 
   registerGateHandler(
     "activate_ad",
@@ -103,7 +106,11 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
       adHaltOf,
       publicationOf: async (companyId, adId) => {
         const owner = await publications.findByAd(companyId, adId);
-        return owner ? { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId } : null;
+        if (!owner) return null;
+        // Fail closed: a publication that names a creative whose row is gone counts as a dry run.
+        const creative = owner.creativeId ? await creatives.get(companyId, owner.creativeId) : null;
+        const creativeDryRun = owner.creativeId !== null && (creative === null || creative.stagingDryRun === true);
+        return { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId, creativeDryRun };
       },
       onUndoFailed: (companyId, config, input) => reportUndoFailure(undoDeps, companyId, config, input, now()),
       ...(overrides.checkSpend ? { checkSpend: overrides.checkSpend } : {}),

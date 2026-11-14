@@ -469,3 +469,24 @@ describe("no path to ACTIVE", () => {
     expect(pausedOnlyWrites(plan("5001", { creative: { object_story_spec: {} } })).allow).toBe(false);
   });
 });
+
+describe("a dry-run staged creative (RK9-849)", () => {
+  it("cannot become a paid ad: plan and publish refuse it, with no Meta call and no publication row", async () => {
+    const { service, routes, store } = serviceRig({
+      creatives: [imageCreative({ stagingDryRun: true }), videoCreative({ stagingDryRun: true })],
+    });
+    for (const creativeId of [CREATIVE_IMAGE, CREATIVE_VIDEO]) {
+      await expect(service.plan(COMPANY, { creativeId })).rejects.toThrow(/staged in dry-run mode/);
+      await expect(service.publish(COMPANY, { creativeId }, UI)).rejects.toMatchObject({ code: "creative_not_publishable" });
+    }
+    expect(routes.calls).toEqual([]);
+    expect(store.rows).toEqual([]);
+  });
+
+  it("a creative without the marker publishes as before", async () => {
+    const { service, store } = serviceRig({ creatives: [imageCreative({ stagingDryRun: false }), videoCreative()] });
+    await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);
+    await service.settled();
+    expect(store.rows[0]!.status).toBe("published");
+  });
+});

@@ -235,3 +235,18 @@ describe("dailyBudgetCents (G3)", () => {
     }
   });
 });
+
+describe("meta.stagingMode (RK9-849)", () => {
+  it("defaults to live: an absent or explicit live value leaves no stagingMode on the config", () => {
+    expect(enabled(brandConfig()).meta.stagingMode).toBeUndefined();
+    const raw = brandConfig();
+    expect(enabled({ ...raw, meta: { ...(raw.meta as Record<string, unknown>), stagingMode: "live" } }).meta.stagingMode).toBeUndefined();
+  });
+
+  it("keeps dry_run and refuses an unknown value", () => {
+    const raw = brandConfig();
+    const meta = raw.meta as Record<string, unknown>;
+    expect(enabled({ ...raw, meta: { ...meta, stagingMode: "dry_run" } }).meta.stagingMode).toBe("dry_run");
+    expect(errorsOf({ ...raw, meta: { ...meta, stagingMode: "dryRun" } })).toContain("meta.stagingMode: must be one of live, dry_run");
+  });
+});

@@ -203,6 +203,34 @@ that starts with the code. A staged creative holds at most a Meta video id:
 nothing in it can spend money. Publishing and activation belong to the publish
 pipeline and the Telegram gate.
 
+### Dry-run staging (`meta.stagingMode`, RK9-849)
+
+`meta.stagingMode` is `live` (the default) or `dry_run`. In `dry_run` the
+ingress runs every check above (manifest, brand config, landing key, media
+HEAD, dedupe), but it sends no Meta call and resolves no token. A video goes
+through a dry-run Meta client that returns the planned `advideos` call.
+
+- The creative gets `payload.stagingMode = "dry_run"`, and a video also gets
+  `payload.plannedCalls`. The creative view shows `stagingMode` and
+  `plannedCalls`. A video stays `staged`, an image is `ready` as in live mode.
+- Publication (`plan` and `publish`) refuses the creative with
+  `creative_not_publishable`. Activation denies an ad whose publication uses
+  it (`creative_dry_run`). A live organic card refuses it
+  (`creative_unusable`), and so does the tap on a live card. An organic
+  `dry_run` card accepts it.
+- Staging the same media again with `stagingMode: live` stages it anew: the
+  marker goes away and the video uploads for real. As with an `expired` or
+  `rejected` row, the new manifest's text fields replace the old ones, and the
+  row keeps its id and `idempotencyKey`.
+- A dry-run stage of the same media marks an existing live video that has no
+  Meta video id yet (`staged`, `failed`, stale `uploading`). An ad already
+  made from that row is then denied at activation. This fails closed.
+- Activation also denies an ad whose publication names a creative row that no
+  longer exists.
+
+Use `dry_run` only on a dev instance for an acceptance run. The prod configs
+keep the default.
+
 The read-only tools `rk9ads_list_ads` (optional `status` filter) and
 `rk9ads_get_insights` (optional `since`, `until`, `adId`; default the last
 seven full days, at most 90) read the company's own ad account with a client

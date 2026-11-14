@@ -31,7 +31,7 @@ import { createMemoryGateStore, type MemoryGateStore } from "../src/kit/testing/
 import { useCompanyConfigs, useCompanySecrets } from "../src/kit/testing/harness.js";
 import { telegramBotKey } from "../src/kit/telegram/bot-api.js";
 import type { PublishedPublication } from "../src/publish/handoff.js";
-import { memoryPublicationStore } from "../src/publish/store.js";
+import { memoryCreativeSource, memoryPublicationStore } from "../src/publish/store.js";
 import type { PublicationRecord } from "../src/publish/types.js";
 import { nextLocalMonthStart, nextLocalTime } from "../src/kit/local-time.js";
 import { brandConfig, COMPANY_A, COMPANY_B, SECRET_A_BOT, SECRET_A_META, secretRef } from "./fixtures.js";
@@ -1058,5 +1058,59 @@ describe("the approval is bound to the publication's contentHash (RK9-517 verifi
     await tap(r, sent.messageId);
     expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ reason: "content_changed" });
     expect(r.meta.writes).toEqual([]);
+  });
+});
+
+describe("a publication whose staged creative is a dry run (RK9-849)", () => {
+  const CREATIVE = "cccccccc-0000-4000-8000-0000000000d1";
+  function dryRunCreatives(stagingDryRun: boolean) {
+    return memoryCreativeSource([
+      {
+        companyId: COMPANY_A,
+        id: CREATIVE,
+        brand: "OLL",
+        kind: "video",
+        status: "published",
+        sha256: "a".repeat(64),
+        mediaUrl: "https://media.ololla.fi/a.mp4",
+        posterUrl: null,
+        aspectRatio: "9:16",
+        copy: { message: "x" },
+        cta: null,
+        landingUrlKey: "home",
+        utmCampaign: null,
+        targetAdsetId: null,
+        validUntil: null,
+        metaVideoId: null,
+        stagingDryRun,
+      },
+    ]);
+  }
+
+  it("is never activated: the card is denied with no Meta write", async () => {
+    const r = await rig({ gate: { creatives: dryRunCreatives(true) } });
+    r.publications.rows[0]!.creativeId = CREATIVE;
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "creative_dry_run" });
+    expect(r.meta.writes).toEqual([]);
+  });
+
+  it("a publication whose creative row is missing is denied too (fail closed)", async () => {
+    const r = await rig({ gate: { creatives: memoryCreativeSource([]) } });
+    r.publications.rows[0]!.creativeId = CREATIVE;
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "creative_dry_run" });
+    expect(r.meta.writes).toEqual([]);
+  });
+
+  it("a live creative still activates", async () => {
+    const r = await rig({ gate: { creatives: dryRunCreatives(false) } });
+    r.publications.rows[0]!.creativeId = CREATIVE;
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).not.toMatchObject({ reason: "creative_dry_run" });
+    expect(r.store.rows.get(sent.id)!.status).toBe("approved");
   });
 });

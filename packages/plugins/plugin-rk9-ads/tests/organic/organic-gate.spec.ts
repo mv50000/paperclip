@@ -537,3 +537,35 @@ describe("organic delete (board)", () => {
     expect(r.meta.writes()).toEqual([]);
   });
 });
+
+describe("a dry-run staged creative (RK9-849)", () => {
+  it("is refused for a live card, with no card and no Meta write", async () => {
+    const r = await rig();
+    r.creatives.rows[0]!.stagingDryRun = true;
+    await expect(request(r)).rejects.toThrow(/creative_unusable: the creative was staged in dry-run mode/);
+    expect(r.posts.rows).toHaveLength(0);
+    expect(r.fake.callsOf("sendVideo")).toHaveLength(0);
+    expect(r.meta.writes()).toEqual([]);
+  });
+
+  it("closes a live card without publishing when the creative became a dry run after the card", async () => {
+    const r = await rig();
+    const { gateRequestId, postId } = await request(r);
+    r.creatives.rows[0]!.stagingDryRun = true;
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(publishWrites(r)).toEqual([]);
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "failed" });
+    expect(r.gates.rows.get(gateRequestId)!.status).toBe("denied");
+  });
+
+  it("is fine for an organic dry run: the approved card records the plan and writes nothing", async () => {
+    const r = await rig({ config: config({ mode: "dry_run" }) });
+    r.creatives.rows[0]!.stagingDryRun = true;
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(r.meta.writes()).toEqual([]);
+    expect(r.posts.rows.find((row) => row.id === postId)!.status).toBe("dry_run");
+  });
+});

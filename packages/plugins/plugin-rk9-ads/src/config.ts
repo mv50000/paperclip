@@ -71,6 +71,13 @@ export type OrganicChannel = (typeof ORGANIC_CHANNELS)[number];
 export const ORGANIC_MODES = ["dry_run", "live"] as const;
 export type OrganicMode = (typeof ORGANIC_MODES)[number];
 export const DEFAULT_ORGANIC_CARD_TTL_HOURS = 24;
+/**
+ * Creative staging (RK9-849). `live` (default) uploads a staged video to the
+ * ad account library. `dry_run` runs every check but sends no Meta call: the
+ * creative is marked as a dry run, and no paid or live organic path takes it.
+ */
+export const STAGING_MODES = ["live", "dry_run"] as const;
+export type StagingMode = (typeof STAGING_MODES)[number];
 export const ORGANIC_PAGE_TOKEN_CONFIG_PATH = "organic.pageAccessTokenRef";
 /** Activation card validity (A9, RK9-517). */
 export const DEFAULT_GATE_TTL_HOURS = 24;
@@ -111,6 +118,8 @@ export interface BrandConfig {
     /** Existing objects to adopt instead of provisioning new ones. */
     campaignId?: string;
     adSetId?: string;
+    /** Creative staging mode (RK9-849). Absent means `live`. */
+    stagingMode?: StagingMode;
   };
   landing: {
     allowedDomains: string[];
@@ -261,6 +270,12 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
         },
         campaignId: { type: "string", title: "Adopt existing campaign id" },
         adSetId: { type: "string", title: "Adopt existing ad set id" },
+        stagingMode: {
+          type: "string",
+          title: "Creative staging: live uploads videos to Meta, dry_run sends nothing and marks the creative unusable for ads and live posts",
+          enum: [...STAGING_MODES],
+          default: "live",
+        },
       },
     },
     landing: {
@@ -601,6 +616,11 @@ export function isEmptyConfig(raw: unknown): boolean {
   return isRecord(raw) && Object.keys(raw).length === 0;
 }
 
+/** True when the brand stages creatives without any Meta call (RK9-849). */
+export function isStagingDryRun(config: Pick<BrandConfig, "meta">): boolean {
+  return config.meta.stagingMode === "dry_run";
+}
+
 /**
  * Parses one company's raw plugin config. Pure and offline: it never resolves
  * secrets or calls Meta. Live checks belong to the preflight (A4).
@@ -626,7 +646,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
 
   // meta
   const metaRaw = c.record(raw, "meta", root, true) ?? {};
-  c.known(metaRaw, ["adAccountId", "pageId", "igUserId", "datasetId", "accessTokenRef", "specialAdCategories", "campaignId", "adSetId"], "meta");
+  c.known(metaRaw, ["adAccountId", "pageId", "igUserId", "datasetId", "accessTokenRef", "specialAdCategories", "campaignId", "adSetId", "stagingMode"], "meta");
   const adAccountId = normaliseAdAccountId(metaRaw.adAccountId);
   if (metaRaw.adAccountId === undefined) c.add("meta.adAccountId", "is required");
   else if (adAccountId === null) c.add("meta.adAccountId", "must be numeric (an act_ prefix is allowed)");
@@ -646,6 +666,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
   }
   const campaignId = c.string(metaRaw, "campaignId", "meta", { pattern: DIGITS_RE });
   const adSetId = c.string(metaRaw, "adSetId", "meta", { pattern: DIGITS_RE });
+  const stagingMode = c.enumValue(metaRaw, "stagingMode", "meta", STAGING_MODES, "live");
 
   // landing
   const landingRaw = c.record(raw, "landing", root, true) ?? {};
@@ -817,6 +838,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
       specialAdCategories: specialAdCategories as SpecialAdCategory[],
       ...(campaignId ? { campaignId } : {}),
       ...(adSetId ? { adSetId } : {}),
+      ...(stagingMode === "dry_run" ? { stagingMode } : {}),
     },
     landing: { allowedDomains, urls, defaultUrlKey, utmTemplate },
     ...(telegram ? { telegram } : {}),

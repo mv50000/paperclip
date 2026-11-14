@@ -17,11 +17,18 @@
  * HEAD gives the type and size, Meta fetches the file itself. A staged
  * creative holds at most a Meta video id; nothing it creates can spend money.
  * Activation stays with the Telegram gate (G1).
+ *
+ * Dry run (RK9-849): with `meta.stagingMode: "dry_run"` every check above
+ * runs, but the video upload goes through a dry-run Meta client, which sends
+ * nothing and returns the planned call. The row gets
+ * `payload.stagingMode = "dry_run"` and the planned calls. Publication,
+ * activation and live organic posts refuse such a row. Staging the same media
+ * again in live mode stages it anew and clears the marker.
  */
 
 import { randomUUID } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import type { BrandConfig } from "../config.js";
+import { isStagingDryRun, type BrandConfig } from "../config.js";
 import { loadCompanyConfig } from "../company-configs.js";
 import type { Ledger, LedgerRow } from "../db.js";
 import { createMetaClient, type FetchLike, type MetaGraphClient } from "../meta/graph.js";
@@ -29,6 +36,7 @@ import { uploadVideoByUrl } from "../meta/methods.js";
 import { redactText } from "../meta/redact.js";
 import { isDryRun } from "../meta/types.js";
 import { parseCreativeManifest, type CreativeManifestV1, type ManifestIssue } from "./schema.js";
+import { creativePayloadOf as payloadOf, DRY_RUN_STAGING, isDryRunCreativeRow } from "./staging-mode.js";
 
 /** Meta's own limits: images up to 30 MB, videos fetched by file_url up to 1 GB. */
 export const MAX_MEDIA_BYTES = { image: 30 * 1024 * 1024, video: 1024 * 1024 * 1024 } as const;
@@ -90,6 +98,10 @@ export interface CreativeView {
   metaImageHash: string | null;
   error: string | null;
   createdAt: string | null;
+  /** `dry_run` when the creative was staged without any Meta call (RK9-849). */
+  stagingMode: "live" | "dry_run";
+  /** The Meta calls a dry-run staging would have sent (redacted). */
+  plannedCalls?: unknown[];
 }
 
 export interface StageError {
@@ -115,8 +127,16 @@ export interface StageDeps {
   ctx: PluginContext;
   ledger: Ledger;
   now?: () => Date;
-  /** Test seam; the worker uses `createMetaClient`. */
+  /**
+   * Test seam for the live upload client; the worker uses `createMetaClient`.
+   * A dry-run staging never calls it: it always builds its own dry-run client.
+   */
   metaClient?: (companyId: string, config: BrandConfig) => MetaGraphClient;
+}
+
+/** The payload a staging round writes: the schema version, plus the marker in dry-run mode. */
+function stagingPayload(manifest: CreativeManifestV1, dryRun: boolean): Record<string, unknown> {
+  return dryRun ? { schemaVersion: manifest.schemaVersion, stagingMode: DRY_RUN_STAGING } : { schemaVersion: manifest.schemaVersion };
 }
 
 function fail(code: StageErrorCode, message: string, extra: Partial<StageError> = {}, creative?: CreativeView): StageResult {
@@ -134,6 +154,8 @@ function str(value: unknown): string | null {
 }
 
 export function toCreativeView(row: LedgerRow): CreativeView {
+  const payload = payloadOf(row.payload);
+  const dryRun = payload.stagingMode === DRY_RUN_STAGING;
   return {
     id: String(row.id),
     brand: String(row.brand_code),
@@ -153,6 +175,8 @@ export function toCreativeView(row: LedgerRow): CreativeView {
     metaImageHash: str(row.meta_image_hash),
     error: str(row.error),
     createdAt: iso(row.created_at),
+    stagingMode: dryRun ? "dry_run" : "live",
+    ...(dryRun && Array.isArray(payload.plannedCalls) ? { plannedCalls: payload.plannedCalls } : {}),
   };
 }
 
@@ -223,7 +247,7 @@ async function loadRow(ledger: Ledger, companyId: string, id: string): Promise<L
  * company+idempotency_key) already exists. Returns false on a conflict. The
  * statement keeps the ledger rule: company_id is always $1.
  */
-async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, manifest: CreativeManifestV1): Promise<boolean> {
+async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, manifest: CreativeManifestV1, dryRun: boolean): Promise<boolean> {
   const values: Array<[string, unknown]> = [
     ["company_id", companyId],
     ["id", id],
@@ -242,7 +266,7 @@ async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, ma
     ["valid_until", new Date(manifest.validUntil).toISOString()],
     // An image goes to Meta by URL when the ad creative is built (G4), so it is ready now.
     ["status", manifest.kind === "image" ? "ready" : "staged"],
-    ["payload", JSON.stringify({ schemaVersion: manifest.schemaVersion })],
+    ["payload", JSON.stringify(stagingPayload(manifest, dryRun))],
   ];
   const result = await deps.ctx.db.execute(
     `INSERT INTO ${deps.ledger.qualified("creatives")} (${values.map(([column]) => column).join(", ")})
@@ -258,8 +282,10 @@ async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, ma
  * keeps its id and idempotency key (its publications point at it), and the
  * old Meta ids are cleared so a video uploads again from the new URL. The
  * expected status in the WHERE clause lets exactly one caller restage.
+ * A dry-run creative staged in live mode comes here too (RK9-849): the new
+ * payload drops its marker, and the video then uploads for real.
  */
-async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manifest: CreativeManifestV1): Promise<boolean> {
+async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manifest: CreativeManifestV1, dryRun: boolean): Promise<boolean> {
   const changed = await deps.ledger.update(
     companyId,
     "creatives",
@@ -279,7 +305,7 @@ async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manif
       meta_image_hash: null,
       error: null,
       status: manifest.kind === "image" ? "ready" : "staged",
-      payload: { schemaVersion: manifest.schemaVersion },
+      payload: stagingPayload(manifest, dryRun),
     },
   );
   return changed === 1;
@@ -348,31 +374,49 @@ async function claimStaleUpload(deps: StageDeps, companyId: string, id: string):
 }
 
 /**
+ * The upload client. Dry-run staging always gets a dry-run client, never the
+ * injected one: a dry-run client sends nothing and does not resolve the token.
+ */
+function uploadClient(deps: StageDeps, companyId: string, config: BrandConfig, dryRun: boolean): MetaGraphClient {
+  if (!dryRun && deps.metaClient) return deps.metaClient(companyId, config);
+  return createMetaClient(deps.ctx, {
+    companyId,
+    tokenRef: config.meta.accessTokenRef,
+    tokenConfigPath: "meta.accessTokenRef",
+    mode: dryRun ? "dryRun" : "live",
+  });
+}
+
+/**
  * Starts the Meta upload of a staged, failed or stale video. A compare-and-set
  * on the status (or on the stale `updated_at`) lets exactly one caller upload.
+ * In dry-run mode the planned call is stored on the row and the row stays
+ * `staged` with the dry-run marker.
  */
-async function uploadVideo(deps: StageDeps, companyId: string, config: BrandConfig, row: LedgerRow): Promise<StageResult | null> {
+async function uploadVideo(deps: StageDeps, companyId: string, config: BrandConfig, row: LedgerRow, dryRun: boolean): Promise<StageResult | null> {
   const id = String(row.id);
   const claimed =
     row.status === "uploading"
       ? await claimStaleUpload(deps, companyId, id)
       : (await deps.ledger.update(companyId, "creatives", { id, status: String(row.status) }, { status: "uploading", error: null })) === 1;
   if (!claimed) return null;
-  const client = deps.metaClient
-    ? deps.metaClient(companyId, config)
-    : createMetaClient(deps.ctx, {
-        companyId,
-        tokenRef: config.meta.accessTokenRef,
-        tokenConfigPath: "meta.accessTokenRef",
-        mode: "live",
-      });
+  const client = uploadClient(deps, companyId, config, dryRun);
   try {
     const result = await uploadVideoByUrl(client, config.meta.adAccountId, {
       fileUrl: String(row.media_url),
       name: `${config.namingPrefix}-${String(row.idempotency_key)}`.slice(0, 100),
     });
     if (isDryRun(result)) {
-      await deps.ledger.update(companyId, "creatives", { id, status: "uploading" }, { status: "staged" });
+      // Also reached by a live-mode client that answers with a plan: the row is a dry run either way.
+      const payload = { ...payloadOf(row.payload), stagingMode: DRY_RUN_STAGING, plannedCalls: [result.planned] };
+      await deps.ledger.update(companyId, "creatives", { id, status: "uploading" }, { status: "staged", payload });
+      await deps.ctx.activity.log({
+        companyId,
+        message: "rk9-ads creative dry-run upload",
+        entityType: "rk9ads_creative",
+        entityId: id,
+        metadata: { planned: `${result.planned.method} ${result.planned.path}` },
+      });
       return null;
     }
     // Meta processes the video asynchronously; the publish step waits for status ready.
@@ -445,17 +489,19 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
     );
   }
 
-  if (existing && RESTAGEABLE_STATUSES.has(String(existing.row.status))) {
+  const dryRun = isStagingDryRun(config);
+  // A dry-run creative staged in live mode is staged anew, so its marker never reaches a live path.
+  if (existing && (RESTAGEABLE_STATUSES.has(String(existing.row.status)) || (!dryRun && isDryRunCreativeRow(existing.row)))) {
     const media = await checkMedia();
     if (media) return media;
     const previousStatus = String(existing.row.status);
-    if (await restage(deps, companyId, existing.row, manifest)) {
+    if (await restage(deps, companyId, existing.row, manifest, dryRun)) {
       await deps.ctx.activity.log({
         companyId,
         message: "rk9-ads creative restaged",
         entityType: "rk9ads_creative",
         entityId: String(existing.row.id),
-        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256, previousStatus },
+        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256, previousStatus, stagingMode: dryRun ? "dry_run" : "live" },
       });
     }
     // Restaged now or by a concurrent call: either way the row holds a manifest from this round.
@@ -469,7 +515,7 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
     const media = await checkMedia();
     if (media) return media;
     const id = randomUUID();
-    if (await insertIfAbsent(deps, companyId, id, manifest)) {
+    if (await insertIfAbsent(deps, companyId, id, manifest, dryRun)) {
       created = true;
       existing = { row: await loadRow(deps.ledger, companyId, id), matchedOn: "idempotencyKey" };
       await deps.ctx.activity.log({
@@ -477,7 +523,7 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
         message: "rk9-ads creative staged",
         entityType: "rk9ads_creative",
         entityId: id,
-        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256 },
+        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256, stagingMode: dryRun ? "dry_run" : "live" },
       });
     } else {
       // A concurrent call inserted the same creative first.
@@ -509,7 +555,7 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
   }
 
   if (needsUpload(row)) {
-    const failure = await uploadVideo(deps, companyId, config, row);
+    const failure = await uploadVideo(deps, companyId, config, row, dryRun);
     if (failure) return failure;
   }
 
