@@ -15,7 +15,7 @@
 
 import { createHash } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import { ORGANIC_PAGE_TOKEN_CONFIG_PATH, type BrandConfig, type OrganicChannel } from "../config.js";
+import { ORGANIC_PAGE_TOKEN_CONFIG_PATH, type BrandConfig, type OrganicChannel, type OrganicMode } from "../config.js";
 import type { GateHandler, GateHandlerResult } from "../kit/gate/registry.js";
 import type { GateCard, GateRequestRecord } from "../kit/gate/state-machine.js";
 import { createMetaClient, type MetaClientContext, type MetaGraphClient } from "../meta/graph.js";
@@ -159,8 +159,10 @@ export function cleanCaption(text: string): string {
   );
 }
 
-function creativeProblem(creative: CreativeRow, channel: OrganicChannel, now: Date): string | null {
+function creativeProblem(creative: CreativeRow, channel: OrganicChannel, mode: OrganicMode, now: Date): string | null {
   if (!USABLE_CREATIVE_STATUSES.has(creative.status)) return `the creative is ${creative.status}`;
+  // RK9-849: a dry-run staging is fit for a dry-run card only, never for a live post.
+  if (mode === "live" && creative.stagingDryRun) return "the creative was staged in dry-run mode; stage it again in live mode";
   if (creative.validUntil && Date.parse(creative.validUntil) <= now.getTime()) return "the creative is past its validUntil";
   if (CHANNEL_MEDIA[channel] !== creative.kind) return `${channel} takes a ${CHANNEL_MEDIA[channel]} creative, this one is ${creative.kind}`;
   const ratios = CHANNEL_ASPECT_RATIOS[channel];
@@ -222,7 +224,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (problem) throw new OrganicError("channel_unavailable", problem);
     const creative = await deps.creatives.get(companyId, input.creativeId);
     if (!creative) throw new OrganicError("not_found", "creative not found");
-    const creativeIssue = creativeProblem(creative, channel, now());
+    const creativeIssue = creativeProblem(creative, channel, cfg.organic!.mode, now());
     if (creativeIssue) throw new OrganicError("creative_unusable", creativeIssue);
 
     if (input.caption !== undefined && typeof input.caption !== "string") throw new OrganicError("invalid_request", "caption must be a string");
@@ -346,7 +348,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (!creative || organicContentHash(companyId, creative.sha256, post.channel, post.caption) !== post.contentHash) {
       return close("⛔ Creative on muuttunut: ei julkaistu.", "creative_changed");
     }
-    const creativeIssue = creativeProblem(creative, post.channel, now());
+    const creativeIssue = creativeProblem(creative, post.channel, cfg.organic!.mode, now());
     if (creativeIssue) return close("⛔ Creative ei kelpaa enää: ei julkaistu.", creativeIssue);
     // Publish the media URL the card showed, never a later one.
     const mediaUrl = typeof post.payload.mediaUrl === "string" ? post.payload.mediaUrl : null;

@@ -333,6 +333,10 @@ export function createPublishService(deps: PublishServiceDeps) {
       if (creative.kind === "video" && creative.status === "uploading" && !creative.metaVideoId) {
         throw new PublishError("creative_not_publishable", "the creative's video upload is still starting; retry in a minute");
       }
+      if (creative.stagingDryRun) {
+        // RK9-849: a dry-run staging made no Meta upload, and no paid ad may come from it.
+        throw new PublishError("creative_not_publishable", "the creative was staged in dry-run mode; stage it again with meta.stagingMode live first");
+      }
       if (creative.validUntil && new Date(creative.validUntil).getTime() <= now().getTime()) {
         throw new PublishError("creative_expired", `creative was valid until ${creative.validUntil}`);
       }

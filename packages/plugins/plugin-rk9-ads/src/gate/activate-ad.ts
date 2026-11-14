@@ -79,6 +79,8 @@ export interface AdOwner {
   id: string;
   contentHash: string;
   metaCreativeId: string | null;
+  /** True when the publication's staged creative is a dry run (RK9-849); such an ad is never activated. */
+  creativeDryRun?: boolean;
 }
 
 export interface ActivateAdDeps {
@@ -292,6 +294,14 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
           ? `ad ${binding.adId} belongs to publication ${owner.id} (content ${owner.contentHash.slice(0, 12)}), the card showed ${binding.publicationId} (content ${binding.contentHash.slice(0, 12)})`
           : `no published publication owns ad ${binding.adId}`,
         lines: ["Lähetä uusi kortti nykyisestä julkaisusta."],
+      });
+    }
+
+    if (owner.creativeDryRun) {
+      return deny(request, decidedBy, binding, {
+        reason: "creative_dry_run",
+        detail: `publication ${owner.id} uses a creative staged in dry-run mode`,
+        lines: ["Creative on kuivaharjoitus: vaiheista se uudelleen live-tilassa."],
       });
     }
 
