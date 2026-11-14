@@ -83,8 +83,11 @@ Varsinainen suoja on nämä viisi:
    token-komento tarkistaa asetuksen ja kieltäytyy muuten. Hyväksyjä lukee `.github/`-diffin
    ennen kuin hyväksyy ajon.
 3. **Runneri ajaa omana käyttäjänään** (`ghrunner-pc`). Käyttäjällä ei ole sudoa, docker-ryhmää
-   eikä kirjoitusoikeutta org-runnerien (`ghrunner`) kotiin ja cacheihin. Asennusskripti
-   tarkistaa tämän ja varoittaa, jos cache on luettavissa. Docker on rootless.
+   eikä kirjoitusoikeutta org-runnerien (`ghrunner`) kotiin, hakemistoihin ja cacheihin.
+   Asennusskripti tarkistaa tämän ja varoittaa, jos cache on luettavissa. Docker on rootless.
+   Runnerilla on oma root-omisteinen kantahakemisto `/srv/ci/actions-runners-ghrunner-pc/`
+   (RK9-844). Org-runnerien `/srv/ci/actions-runners/` on `root:ghrunner 750`, eikä
+   `ghrunner-pc` pääse sinne. Tämä on tarkoitus, joten sen oikeuksia ei löysätä.
 4. **Root ei aja eikä kirjoita mitään runner-hakemistossa asennuksen jälkeen.** Hakemisto
    on runner-käyttäjän kirjoitettavissa. Skripti kirjoittaa systemd-unitin suoraan
    (`svc.sh`ää ei ajeta rootina), päivittää `.env`:n runner-käyttäjänä, ja poisto tehdään
@@ -145,7 +148,19 @@ Tarkista esivaatimukset ilman muutoksia:
 sudo ./install-paperclip-runner.sh --check
 ```
 
-Esitarkistus kertoo puuttuvat paketit. Tyypilliset korjaukset rootina:
+Esitarkistus kertoo puuttuvat paketit. Se tarkistaa myös runner-hakemiston polun:
+
+- Kantahakemiston ja sen jokaisen ylähakemiston pitää olla rootin ilman ryhmän ja muiden
+  kirjoitusoikeutta.
+- Jos `ghrunner-pc` on jo olemassa, skripti kokeilee `ghrunner-pc`:nä (`cd`), että käyttäjä
+  pääsee jokaisen ylähakemiston läpi. Tarkistus ei päättele tulosta oikeusbiteistä.
+  Uudella hostilla käyttäjää ei vielä ole, joten sama tarkistus ajetaan käyttäjän luonnin
+  jälkeen, ennen kuin hook tai runner-hakemisto luodaan.
+
+Kumpikin virhe pysäyttää skriptin ennen kuin mitään luodaan. Oletuspolun voi vaihtaa
+valinnalla `--base-dir POLKU`, mutta älä osoita sitä org-runnerien hakemistoon.
+
+Tyypilliset pakettikorjaukset rootina:
 
 ```sh
 apt install uidmap slirp4netns docker-ce-rootless-extras   # rootless Docker
@@ -178,6 +193,9 @@ unset RUNNER_TOKEN
 Skripti tekee nämä:
 
 - luo järjestelmäkäyttäjän `ghrunner-pc` (koti `/srv/ci/ghrunner-pc`, lukittu salasana, ei ryhmiä)
+- luo kantahakemiston `/srv/ci/actions-runners-ghrunner-pc` (`root:root 755`) ja sen alle
+  runner-hakemiston `<nimi>` (`ghrunner-pc:ghrunner-pc 750`), esim.
+  `/srv/ci/actions-runners-ghrunner-pc/builder-02-paperclip`
 - asentaa root-omisteisen job-started-hookin (ks. [Turvamalli](#turvamalli)); vaatii `jq`:n ja `pkill`in
 - lataa actions/runnerin kiinnitetyllä versiolla ja tarkistaa SHA256:n
 - rekisteröi runnerin labeleilla `self-hosted, Linux, X64, paperclip-ci`
@@ -195,8 +213,15 @@ Skripti tekee nämä:
   `verify`-, `e2e`- ja `release-verify`-ajon jälkeen.
 
 Skripti on idempotentti. Uusi ajo ohittaa rekisteröinnin, jos runneri on jo rekisteröity,
-ja päivittää hookin, `.env`:n ja unitin. Keskeneräinen asennus (hakemisto ilman `.runner`ia)
-pysäyttää skriptin: poista hakemisto ja aja uudelleen.
+ja päivittää hookin, `.env`:n ja unitin.
+
+Jos paketin purku tai rekisteröinti kaatuu, skripti poistaa itse luomansa runner-hakemiston.
+Korjaa virhe ja aja skripti uudelleen. Jos rekisteröinti ehti GitHubiin, uusi ajo korvaa sen
+(`--replace`). Jos poisto epäonnistuu, skripti tulostaa poistokomennon. Esitarkistus
+pysähtyy hakemistoon, jossa ei ole `.runner`ia, kunnes se on poistettu.
+
+Unitin nimi ei riipu hakemistosta: `actions.runner.mv50000-paperclip.builder-02-paperclip.service`
+(`builder-ondemand-ctl` käyttää tätä nimeä).
 
 ### Vaihe 4: runneri näkyy GitHubissa
 
@@ -249,7 +274,8 @@ gh variable delete CI_RUNNER -R mv50000/paperclip
 Runnerin poisto hostilta. Aja lohko alikuoressa (`bash -eu`) tai skriptinä, jotta `set -eu`
 ei sulje omaa shelliäsi. Runner-hakemistosta ei ajeta mitään rootina, koska jobi voi
 muokata sen tiedostoja. `${NAME:?}` pysäyttää komennon, jos nimi jäi asettamatta, jottei
-`rm -rf` osu koko `/srv/ci/actions-runners/`-hakemistoon (org-runnerit asuvat samassa).
+`rm -rf` osu koko kantahakemistoon. Org-runnerien `/srv/ci/actions-runners/` ei kuulu tähän
+runneriin: älä poista sieltä mitään.
 
 ```sh
 set -eu                  # keskeytä koko lohko ensimmäiseen virheeseen
@@ -265,7 +291,8 @@ sudo systemctl daemon-reload
 sudo loginctl disable-linger "$RUSER"
 sudo systemctl stop "user@${RUID:?}.service"
 sudo pkill -KILL -u "$RUSER" || true
-sudo rm -rf "/srv/ci/actions-runners/${NAME:?}"
+sudo rm -rf "/srv/ci/actions-runners-${RUSER:?}/${NAME:?}"
+sudo rmdir "/srv/ci/actions-runners-${RUSER:?}" || true   # jää, jos siellä on muita runnereita
 sudo find /tmp -maxdepth 1 -uid "${RUID:?}" -exec rm -rf {} +
 sudo userdel -r "$RUSER"   # poistaa kodin /srv/ci/ghrunner-pc
 sudo sed -i "/^${RUSER}:/d" /etc/subuid /etc/subgid
