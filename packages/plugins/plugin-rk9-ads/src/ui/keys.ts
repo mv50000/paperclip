@@ -26,6 +26,8 @@ export const ACTION = {
   provision: "provision",
   rulesDryRun: "rules.dryRun",
   rulesPrepareSave: "rules.prepareSave",
+  organicPosts: "organic.posts",
+  organicDelete: "organic.delete",
 } as const;
 
 /** The host's plugin settings page with the generated config form. */

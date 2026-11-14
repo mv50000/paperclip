@@ -60,6 +60,18 @@ export const TELEGRAM_MODES = ["poll", "webhook"] as const;
 export type TelegramMode = (typeof TELEGRAM_MODES)[number];
 
 export const ZERO_SPEND_MODES = ["message", "silent"] as const;
+
+/**
+ * Organic posting (RK9-832). Channels: Instagram Reel (video), Instagram feed
+ * image, Facebook Page video and Facebook Page photo. `dry_run` (default)
+ * sends no Meta write; `live` publishes after an approved Telegram card.
+ */
+export const ORGANIC_CHANNELS = ["ig_reel", "ig_feed", "fb_video", "fb_photo"] as const;
+export type OrganicChannel = (typeof ORGANIC_CHANNELS)[number];
+export const ORGANIC_MODES = ["dry_run", "live"] as const;
+export type OrganicMode = (typeof ORGANIC_MODES)[number];
+export const DEFAULT_ORGANIC_CARD_TTL_HOURS = 24;
+export const ORGANIC_PAGE_TOKEN_CONFIG_PATH = "organic.pageAccessTokenRef";
 /** Activation card validity (A9, RK9-517). */
 export const DEFAULT_GATE_TTL_HOURS = 24;
 export const MAX_GATE_TTL_HOURS = 168;
@@ -145,6 +157,16 @@ export interface BrandConfig {
   };
   /** Rule engine (A11): features/rules/schema.ts. */
   rules: RuleSet;
+  /** Organic posting (RK9-832). Absent: off. */
+  organic?: {
+    enabled: boolean;
+    mode: OrganicMode;
+    channels: OrganicChannel[];
+    /** Page access token for the fb_* channels (pages_manage_posts). IG uses meta.accessTokenRef. */
+    pageAccessTokenRef?: SecretRef;
+    /** How long an organic card can be approved. Default 24. */
+    cardTtlHours: number;
+  };
 }
 
 /**
@@ -325,6 +347,28 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
         maxFrequency: { type: "number", default: DEFAULT_FATIGUE.maxFrequency },
         ctrDropPct: { type: "number", default: DEFAULT_FATIGUE.ctrDropPct },
         issuesEnabled: { type: "boolean", default: DEFAULT_FATIGUE.issuesEnabled },
+      },
+    },
+    organic: {
+      type: "object",
+      additionalProperties: false,
+      title: "Organic posts (Instagram, Facebook Page)",
+      properties: {
+        enabled: { type: "boolean", default: false },
+        mode: {
+          type: "string",
+          title: "Mode: dry_run sends nothing to Meta, live publishes after an approved card",
+          enum: [...ORGANIC_MODES],
+          default: "dry_run",
+        },
+        channels: { type: "array", title: "Channels", items: { type: "string", enum: [...ORGANIC_CHANNELS] } },
+        pageAccessTokenRef: secretRefField("Facebook Page access token for the fb_* channels (company secret, pages_manage_posts)"),
+        cardTtlHours: {
+          type: "number",
+          title: "Organic card validity, hours (default 24)",
+          minimum: 1,
+          maximum: MAX_GATE_TTL_HOURS,
+        },
       },
     },
     rules: {
@@ -567,7 +611,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
 
   const c = new Collector();
   const root = "config";
-  c.known(raw, ["brandCode", "displayName", "timeZone", "monthlyCapEur", "namingPrefix", "meta", "landing", "telegram", "schedule", "digest", "fatigue", "rules"], root);
+  c.known(raw, ["brandCode", "displayName", "timeZone", "monthlyCapEur", "namingPrefix", "meta", "landing", "telegram", "schedule", "digest", "fatigue", "rules", "organic"], root);
 
   const brandCode = c.string(raw, "brandCode", root, { required: true, pattern: /^[A-Z0-9]{2,10}$/ });
   const displayName = c.string(raw, "displayName", root) ?? brandCode ?? "";
@@ -722,6 +766,34 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
     issuesEnabled: c.boolean(fatigueRaw, "issuesEnabled", "fatigue", DEFAULT_FATIGUE.issuesEnabled),
   };
 
+  // organic (RK9-832; optional block)
+  let organic: BrandConfig["organic"];
+  const organicRaw = c.record(raw, "organic", root, false);
+  if (organicRaw && Object.keys(organicRaw).length > 0) {
+    c.known(organicRaw, ["enabled", "mode", "channels", "pageAccessTokenRef", "cardTtlHours"], "organic");
+    const enabled = c.boolean(organicRaw, "enabled", "organic", false);
+    const mode = c.enumValue(organicRaw, "mode", "organic", ORGANIC_MODES, "dry_run");
+    const rawChannels = c.stringArray(organicRaw, "channels", "organic");
+    const channels: OrganicChannel[] = [];
+    rawChannels.forEach((channel, index) => {
+      if (!(ORGANIC_CHANNELS as readonly string[]).includes(channel)) {
+        c.add(`organic.channels[${index}]`, `must be one of ${ORGANIC_CHANNELS.join(", ")}`);
+      } else if (!channels.includes(channel as OrganicChannel)) {
+        channels.push(channel as OrganicChannel);
+      }
+    });
+    if (enabled && channels.length === 0) c.add("organic.channels", "must list at least one channel when organic.enabled is true");
+    const needsPageToken = channels.some((channel) => channel.startsWith("fb_"));
+    const pageAccessTokenRef = c.secretRef(organicRaw, "pageAccessTokenRef", "organic", needsPageToken);
+    if (channels.some((channel) => channel.startsWith("ig_")) && !igUserId) {
+      c.add("organic.channels", "an ig_* channel needs meta.igUserId");
+    }
+    const cardTtlHours = c.number(organicRaw, "cardTtlHours", "organic", { fallback: DEFAULT_ORGANIC_CARD_TTL_HOURS, min: 1, max: MAX_GATE_TTL_HOURS });
+    if (mode && cardTtlHours !== undefined) {
+      organic = { enabled, mode, channels, ...(pageAccessTokenRef ? { pageAccessTokenRef } : {}), cardTtlHours };
+    }
+  }
+
   // rules (A11: features/rules/schema.ts)
   const { rules, errors: ruleErrors } = parseRules(raw.rules);
   c.errors.push(...ruleErrors);
@@ -752,6 +824,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
     digest,
     fatigue,
     rules,
+    ...(organic ? { organic } : {}),
   };
   if (config.monthlyCapEur === null) return { state: "disabled", config, reason: MONTHLY_CAP_UNSET_REASON };
   return { state: "enabled", config: { ...config, monthlyCapEur: config.monthlyCapEur } };
@@ -770,6 +843,9 @@ export function configSecretRefs(config: BrandConfigDraft): Array<{ configPath: 
     if (config.telegram.webhookSecretRef) {
       refs.push({ configPath: "telegram.webhookSecretRef", ref: config.telegram.webhookSecretRef });
     }
+  }
+  if (config.organic?.pageAccessTokenRef) {
+    refs.push({ configPath: ORGANIC_PAGE_TOKEN_CONFIG_PATH, ref: config.organic.pageAccessTokenRef });
   }
   return refs;
 }

@@ -10,7 +10,8 @@
 
 import type { FatigueSignal } from "../insights/fatigue.js";
 import type { Pacing } from "../insights/mtd.js";
-import type { PendingGateSummary, RuleActionSummary } from "../insights/store.js";
+import type { OrganicPostSummary, PendingGateSummary, RuleActionSummary } from "../insights/store.js";
+import { CHANNEL_LABELS, ORGANIC_REJECT_REASONS } from "../organic/types.js";
 import { linkCpc, linkCtr } from "../metrics/cpc.js";
 
 export const TELEGRAM_TEXT_UTF16_LIMIT = 4096;
@@ -35,6 +36,8 @@ export interface DigestInput {
   fatigued: Array<{ adId: string; adName?: string | null; signals: FatigueSignal[] }>;
   ruleActions: RuleActionSummary[];
   pendingGates: PendingGateSummary[];
+  /** Organic posts that changed in the last 24 h (RK9-832); absent = none. */
+  organicPosts?: OrganicPostSummary[];
   warnings: string[];
 }
 
@@ -56,7 +59,33 @@ const ACTION_LABELS: Record<string, string> = {
 const GATE_LABELS: Record<string, string> = {
   activate_ad: "mainoksen aktivointi",
   pause_all: "kaikkien pysäytys",
+  organic_publish: "orgaaninen julkaisu",
 };
+
+const REASON_LABELS: Record<string, string> = Object.fromEntries([
+  ...ORGANIC_REJECT_REASONS.map((reason) => [reason.code, reason.label.replace(/^\S+\s/, "").toLowerCase()]),
+  ["other", "oma syy"],
+]);
+
+function organicLine(post: OrganicPostSummary): string | null {
+  const channel = CHANNEL_LABELS[post.channel] ?? post.channel;
+  switch (post.status) {
+    case "published":
+      return `✅ ${channel} julkaistu${post.permalink ? `: ${post.permalink}` : ""}`;
+    case "dry_run":
+      return `🧪 ${channel}: kuivaharjoitus, ei julkaistu`;
+    case "failed":
+      return `⚠️ ${channel}: ei julkaistu${post.error ? ` (${post.error.slice(0, 160)})` : ""}`;
+    case "deleted":
+      return `🗑 ${channel}: poistettu`;
+    case "rejected":
+      return `❌ ${channel}: hylätty${post.rejectReasonCode ? ` (${REASON_LABELS[post.rejectReasonCode] ?? post.rejectReasonCode})` : ", syy puuttuu"}`;
+    case "expired":
+      return `⌛ ${channel}: kortti vanheni`;
+    default:
+      return null;
+  }
+}
 
 function groupThousands(digits: string): string {
   return digits.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
@@ -113,7 +142,17 @@ function isZeroDay(input: DigestInput): boolean {
 }
 
 function hasNews(input: DigestInput): boolean {
-  return input.warnings.length > 0 || input.pendingGates.length > 0 || input.fatigued.length > 0 || input.ruleActions.length > 0;
+  return (
+    input.warnings.length > 0 ||
+    input.pendingGates.length > 0 ||
+    input.fatigued.length > 0 ||
+    input.ruleActions.length > 0 ||
+    organicLines(input).length > 0
+  );
+}
+
+function organicLines(input: DigestInput): string[] {
+  return (input.organicPosts ?? []).map(organicLine).filter((line): line is string => line !== null);
 }
 
 /**
@@ -202,6 +241,13 @@ export function formatDigest(input: DigestInput): string | null {
     lines.push(
       ...capped(input.pendingGates, (gate) => `• ${GATE_LABELS[gate.kind] ?? gate.kind}${gate.adId ? ` ${gate.adId}` : ""}`),
     );
+  }
+
+  const organic = organicLines(input);
+  if (organic.length > 0) {
+    lines.push("");
+    lines.push(`📣 Orgaaniset julkaisut (24 h): ${formatInt(organic.length)}`);
+    lines.push(...capped(organic, (line) => `• ${line}`));
   }
 
   if (input.warnings.length > 0) {

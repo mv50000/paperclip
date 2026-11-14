@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 
-/** Columns per ledger table, mirroring migrations/001_rk9_ads_ledger.sql. */
+/** Columns per ledger table, mirroring migrations/001_rk9_ads_ledger.sql and 006_rk9_ads_organic.sql. */
 export const LEDGER_COLUMNS = {
   brand_bindings: [
     "id", "company_id", "brand_code", "ad_account_id", "page_id", "ig_user_id", "dataset_id",
@@ -49,6 +49,12 @@ export const LEDGER_COLUMNS = {
   ],
   alert_dedupe: ["id", "company_id", "dedupe_key", "kind", "metadata", "created_at"],
   processed_updates: ["id", "company_id", "bot_key", "update_id", "update_kind", "received_at"],
+  organic_posts: [
+    "id", "company_id", "brand_code", "creative_id", "channel", "caption", "content_hash", "status", "mode",
+    "gate_request_id", "lint", "meta_container_id", "meta_media_id", "meta_post_id", "permalink",
+    "reject_reason_code", "reject_reason_text", "decided_by_tg_user_id", "decided_at", "published_at",
+    "deleted_at", "deleted_by", "error", "payload", "created_at", "updated_at",
+  ],
 } as const satisfies Record<string, readonly string[]>;
 
 export type LedgerTable = keyof typeof LEDGER_COLUMNS;
@@ -59,9 +65,10 @@ export type LedgerWhere<T extends LedgerTable> = Partial<Record<Exclude<LedgerCo
 
 export const LEDGER_TABLES = Object.keys(LEDGER_COLUMNS) as LedgerTable[];
 
-/** Status sets, mirroring the CHECK constraints of migration 001. */
+/** Status sets, mirroring the CHECK constraints of migrations 001 and 006. */
 export const GATE_REQUEST_STATUSES = ["pending", "approved", "denied", "skipped", "expired", "failed"] as const;
-export const GATE_REQUEST_KINDS = ["activate_ad", "pause_all"] as const;
+/** organic_publish: migration 006 (RK9-832). */
+export const GATE_REQUEST_KINDS = ["activate_ad", "pause_all", "organic_publish"] as const;
 export const PUBLICATION_STATUSES = ["pending", "published", "failed", "swapped"] as const;
 export const CREATIVE_STATUSES = ["staged", "uploading", "ready", "published", "rejected", "expired", "failed"] as const;
 export const DIGEST_RUN_STATUSES = ["pending", "sent", "failed", "skipped"] as const;

@@ -91,6 +91,18 @@ export interface GateStore {
    * (re-send). The old token stops matching any row. True when this call won.
    */
   rotateToken(companyId: string, id: string, tokenHash: string, chatId: string): Promise<boolean>;
+  /**
+   * The card posted as `messageId` in `chatId` (a reply names only the
+   * message). Like findByTokenHash it has no company filter: the router then
+   * checks the row's company, chat and approver. Optional: without it a
+   * typed deny reason is not read.
+   */
+  findByMessage?(chatId: string, messageId: number): Promise<GateRequestRecord | null>;
+  /**
+   * Stores the first deny reason in `outcome`: denied, and no outcome yet.
+   * True when this call won. Optional: without it no reason is asked for.
+   */
+  claimDenyReason?(companyId: string, id: string, reason: Record<string, unknown>): Promise<boolean>;
 }
 
 /** 18 random bytes = 144 bit, 24 base64url chars. */
@@ -120,6 +132,31 @@ export function parseGateCallbackData(data: string | undefined): { decision: Gat
   const match = CALLBACK_RE.exec(data);
   if (!match) return null;
   return { decision: CODE_DECISION[match[1]!]!, token: match[2]! };
+}
+
+/** Deny reason buttons: "g:r<index>:<token>", index into the kind's preset list (0-7). */
+const REASON_CALLBACK_RE = /^g:r([0-7]):([A-Za-z0-9_-]{16,48})$/;
+
+export function reasonCallbackData(index: number, token: string): string {
+  if (!Number.isInteger(index) || index < 0 || index > 7) throw new Error("Invalid reason index");
+  const data = `g:r${index}:${token}`;
+  if (Buffer.byteLength(data, "utf8") > CALLBACK_DATA_MAX_BYTES) throw new Error("callback_data exceeds 64 bytes");
+  return data;
+}
+
+export function parseReasonCallbackData(data: string | undefined): { index: number; token: string } | null {
+  if (typeof data !== "string") return null;
+  const match = REASON_CALLBACK_RE.exec(data);
+  if (!match) return null;
+  return { index: Number(match[1]), token: match[2]! };
+}
+
+/** The preset reasons, two per row. */
+export function reasonButtons(token: string, options: readonly { label: string }[]): InlineKeyboardMarkup {
+  const buttons = options.map((option, index) => ({ text: option.label, callback_data: reasonCallbackData(index, token) }));
+  const rows: InlineKeyboardMarkup["inline_keyboard"] = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  return { inline_keyboard: rows };
 }
 
 export function gateButtons(
@@ -377,6 +414,24 @@ export function createSqlGateStore(
         `UPDATE ${gate} SET status = $4, outcome = $5::jsonb, error = $6, updated_at = now()
           WHERE company_id = $1 AND id = $2 AND status = $3`,
         [companyId, id, input.from, input.to, input.outcome ? JSON.stringify(input.outcome) : null, input.error ?? null],
+      );
+      return result.rowCount === 1;
+    },
+
+    // No company filter, like findByTokenHash: a reply carries only the chat and message id.
+    async findByMessage(chatId, messageId) {
+      const rows = await db.query<Record<string, unknown>>(
+        `SELECT ${GATE_RECORD_COLUMNS} FROM ${gate} WHERE chat_id = $1 AND message_id = $2 ORDER BY created_at DESC LIMIT 1`,
+        [chatId, messageId],
+      );
+      return rows[0] ? toGateRecord(rows[0]) : null;
+    },
+
+    async claimDenyReason(companyId, id, reason) {
+      const result = await db.execute(
+        `UPDATE ${gate} SET outcome = $3::jsonb, updated_at = now()
+          WHERE company_id = $1 AND id = $2 AND status = 'denied' AND outcome IS NULL`,
+        [companyId, id, JSON.stringify(reason)],
       );
       return result.rowCount === 1;
     },

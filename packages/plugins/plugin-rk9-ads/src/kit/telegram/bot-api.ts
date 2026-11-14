@@ -57,6 +57,8 @@ export interface TelegramMessage {
   photo?: TelegramPhotoSize[];
   video?: { file_id: string };
   reply_markup?: InlineKeyboardMarkup;
+  /** The message this one replies to (a typed deny reason replies to the card). */
+  reply_to_message?: { message_id: number; chat?: TelegramChat };
 }
 
 export interface TelegramCallbackQuery {
