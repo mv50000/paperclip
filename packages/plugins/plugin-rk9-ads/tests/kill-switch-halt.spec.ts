@@ -1087,8 +1087,17 @@ describe("a publication whose staged creative is a dry run (RK9-849)", () => {
     ]);
   }
 
-  it("is never activated: the card is denied before any Meta read or write", async () => {
+  it("is never activated: the card is denied with no Meta write", async () => {
     const r = await rig({ gate: { creatives: dryRunCreatives(true) } });
+    r.publications.rows[0]!.creativeId = CREATIVE;
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "creative_dry_run" });
+    expect(r.meta.writes).toEqual([]);
+  });
+
+  it("a publication whose creative row is missing is denied too (fail closed)", async () => {
+    const r = await rig({ gate: { creatives: memoryCreativeSource([]) } });
     r.publications.rows[0]!.creativeId = CREATIVE;
     const sent = await r.cards.openActivationCard(publication());
     await tap(r, sent.messageId);

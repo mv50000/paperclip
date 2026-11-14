@@ -79,7 +79,10 @@ export interface AdOwner {
   id: string;
   contentHash: string;
   metaCreativeId: string | null;
-  /** True when the publication's staged creative is a dry run (RK9-849); such an ad is never activated. */
+  /**
+   * True when the publication's staged creative is a dry run, or its row is
+   * missing (RK9-849); such an ad is never activated.
+   */
   creativeDryRun?: boolean;
 }
 
@@ -300,7 +303,7 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
     if (owner.creativeDryRun) {
       return deny(request, decidedBy, binding, {
         reason: "creative_dry_run",
-        detail: `publication ${owner.id} uses a creative staged in dry-run mode`,
+        detail: `publication ${owner.id} uses a creative staged in dry-run mode, or its creative row is missing`,
         lines: ["Creative on kuivaharjoitus: vaiheista se uudelleen live-tilassa."],
       });
     }

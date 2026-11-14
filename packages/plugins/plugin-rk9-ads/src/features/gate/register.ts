@@ -107,9 +107,10 @@ export function registerGate(runtime: FeatureRuntime, overrides: GateOverrides =
       publicationOf: async (companyId, adId) => {
         const owner = await publications.findByAd(companyId, adId);
         if (!owner) return null;
-        // A missing creative row is not a dry run: the publication's own content hash still binds the card.
+        // Fail closed: a publication that names a creative whose row is gone counts as a dry run.
         const creative = owner.creativeId ? await creatives.get(companyId, owner.creativeId) : null;
-        return { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId, creativeDryRun: creative?.stagingDryRun === true };
+        const creativeDryRun = owner.creativeId !== null && (creative === null || creative.stagingDryRun === true);
+        return { id: owner.id, contentHash: owner.contentHash, metaCreativeId: owner.metaCreativeId, creativeDryRun };
       },
       onUndoFailed: (companyId, config, input) => reportUndoFailure(undoDeps, companyId, config, input, now()),
       ...(overrides.checkSpend ? { checkSpend: overrides.checkSpend } : {}),

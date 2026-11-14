@@ -219,7 +219,14 @@ through a dry-run Meta client that returns the planned `advideos` call.
   (`creative_unusable`), and so does the tap on a live card. An organic
   `dry_run` card accepts it.
 - Staging the same media again with `stagingMode: live` stages it anew: the
-  marker goes away and the video uploads for real.
+  marker goes away and the video uploads for real. As with an `expired` or
+  `rejected` row, the new manifest's text fields replace the old ones, and the
+  row keeps its id and `idempotencyKey`.
+- A dry-run stage of the same media marks an existing live video that has no
+  Meta video id yet (`staged`, `failed`, stale `uploading`). An ad already
+  made from that row is then denied at activation. This fails closed.
+- Activation also denies an ad whose publication names a creative row that no
+  longer exists.
 
 Use `dry_run` only on a dev instance for an acceptance run. The prod configs
 keep the default.
