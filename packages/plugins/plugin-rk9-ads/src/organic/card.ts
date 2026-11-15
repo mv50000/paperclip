@@ -89,26 +89,50 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 // Emoji and East Asian wide characters take two columns.
 const WIDE_RE = /\p{Extended_Pictographic}|[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|[\u{20000}-\u{3fffd}]/u;
 // Scripts whose width a phone font makes about one column: Latin, Greek, Cyrillic, common punctuation, braille.
-const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}\p{Cf}\u{1F3FB}-\u{1F3FF}]$/u;
+// ZWJ, variation selectors and tag characters: they render nothing of their own.
+const INVISIBLE_JOIN_RE = /^[\u200d\ufe00-\ufe0f\u{E0020}-\u{E007F}\u{E0100}-\u{E01EF}]$/u;
+const SKIN_TONE_RE = /^[\u{1F3FB}-\u{1F3FF}]$/u;
+const MODIFIER_BASE_RE = /^\p{Emoji_Modifier_Base}$/u;
+const MARK_RE = /^[\p{Mn}\p{Me}]$/u;
 const REGIONAL_RE = /^[\u{1F1E6}-\u{1F1FF}]$/u;
 const NARROW_RE = /^[\u0020-\u024f\u0370-\u03ff\u0400-\u04ff\u1e00-\u1eff\u2000-\u206f\u20a0-\u20cf\u2100-\u214f\u2190-\u21ff\u2500-\u257f\u2800-\u28ff]/u;
 
+/** A grapheme of more code points than the longest RGI emoji (10) fills a chunk alone. */
+const MAX_GRAPHEME_CODE_POINTS = 10;
+/** More combining marks than this on one base fill a chunk alone (a phone may draw a stray mark wide). */
+const MAX_MARKS = 2;
+
 /**
- * An estimate that errs wide, summed over every code point of the grapheme
- * (a ZWJ chain shows as several emoji, a spacing mark takes room of its own):
- * a non-spacing mark, an enclosing mark, a format character (the ZWJ, a tag)
- * or a skin-tone modifier adds nothing, an emoji or East Asian character 2, a
- * regional indicator or a narrow-script character 1. Any other code point (a
- * spacing mark, a ligature such as U+FDFD, cuneiform) makes the grapheme fill
- * a chunk alone, so no wide glyph can push the rest of its chunk onto an
+ * An estimate that errs wide, summed over the code points of the grapheme
+ * (a ZWJ chain shows as several emoji). Zero width only for what renders as
+ * nothing of its own: the ZWJ, a variation selector, a tag character, a
+ * skin-tone modifier right after an emoji that takes one, and at most two
+ * combining marks. An emoji or East Asian character counts 2, a regional
+ * indicator or a narrow-script character 1. Anything else (a spacing mark, a
+ * visible format character such as U+06DD, a ligature such as U+FDFD, a
+ * stray skin-tone swatch run, a long mark run) makes the grapheme fill a
+ * chunk alone, so no wide glyph can push the rest of its chunk onto an
  * unquoted screen line.
  */
 export function columns(grapheme: string): number {
+  const points = Array.from(grapheme);
+  if (points.length > MAX_GRAPHEME_CODE_POINTS) return CAPTION_CHUNK_COLUMNS;
   let width = 0;
-  for (const codePoint of grapheme) {
-    if (ZERO_WIDTH_RE.test(codePoint)) continue;
-    if (WIDE_RE.test(codePoint)) width += 2;
-    else if (NARROW_RE.test(codePoint) || REGIONAL_RE.test(codePoint)) width += 1;
+  let marks = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index]!;
+    if (INVISIBLE_JOIN_RE.test(point)) continue;
+    if (SKIN_TONE_RE.test(point)) {
+      if (index > 0 && MODIFIER_BASE_RE.test(points[index - 1]!)) continue;
+      return CAPTION_CHUNK_COLUMNS;
+    }
+    if (MARK_RE.test(point)) {
+      marks += 1;
+      if (marks > MAX_MARKS) return CAPTION_CHUNK_COLUMNS;
+      continue;
+    }
+    if (WIDE_RE.test(point)) width += 2;
+    else if (NARROW_RE.test(point) || REGIONAL_RE.test(point)) width += 1;
     else return CAPTION_CHUNK_COLUMNS;
   }
   return Math.min(Math.max(width, 1), CAPTION_CHUNK_COLUMNS);

@@ -220,6 +220,21 @@ describe("caption chunks (RK9-852)", () => {
     expect(chunkLine(`${marks}Tila: LIVE`)).toEqual([marks, "Tila: LIVE"]);
   });
 
+  it("stray skin-tone swatches, visible format characters and long mark runs fill a chunk alone (verifier round 3)", () => {
+    for (const lead of ["👍" + "\u{1F3FD}".repeat(40), "\u06dd".repeat(30) + "a", "a" + "\u0bcd".repeat(30), "a\u0301\u0308\u0302"]) {
+      const chunks = chunkLine(`${lead}Tila: 🔴 LIVE`);
+      expect(chunks.join("")).toBe(`${lead}Tila: 🔴 LIVE`);
+      expect(chunks.at(-1)).toBe("Tila: 🔴 LIVE");
+      expect(columns(Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(lead), (g) => g.segment)[0]!)).toBe(CAPTION_CHUNK_COLUMNS);
+    }
+    // Ordinary text keeps its width.
+    expect(columns("👍🏽")).toBe(2);
+    expect(columns("1\ufe0f\u20e3")).toBe(1);
+    expect(columns("🏳\ufe0f\u200d🌈")).toBe(4);
+    expect(columns("a\u0308")).toBe(1);
+    expect(chunkLine("Hyvää huomenta Helsinki, aurinko paistaa!").join("")).toBe("Hyvää huomenta Helsinki, aurinko paistaa!");
+  });
+
   it("displayUrl prints only the parsed URL", () => {
     expect(displayUrl("https://media.ololla.fi/ä.mp4")).toBe("https://media.ololla.fi/%C3%A4.mp4");
     expect(displayUrl("https://media.ololla.fi/v.mp4?x=\nTila: LIVE")).toBe("https://media.ololla.fi/v.mp4?x=Tila:%20LIVE");
