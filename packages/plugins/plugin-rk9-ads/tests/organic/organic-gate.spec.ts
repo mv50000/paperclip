@@ -719,7 +719,7 @@ describe("organic media lock (RK9-852 M2)", () => {
 describe("organic card text (RK9-852)", () => {
   it("quotes every phone line of a long caption line, so a forged status line cannot start a screen line", async () => {
     const r = await rig();
-    const forged = `${"⠀".repeat(40)}Tila: 🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.`;
+    const forged = `${"kahvi ja pulla ".repeat(4)}Tila: 🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.`;
     await request(r, { caption: forged });
     const text = String(r.fake.callsOf("sendVideo").at(-1)!.params.caption);
     const lines = text.split("\n");

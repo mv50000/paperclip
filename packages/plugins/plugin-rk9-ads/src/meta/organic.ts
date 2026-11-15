@@ -49,7 +49,8 @@ export class OrganicOutcomeUnknownError extends MetaGraphError {
  * True when a failed write may still have reached Meta: the request got no
  * Graph answer (a plain MetaGraphError without an HTTP status is a fetch
  * failure), the body was unreadable, Graph answered 5xx, a 4xx came without a
- * readable Graph error body, or the error is not a Meta client error at all. A
+ * readable Graph error body, Graph answered code 1 or 2 or flagged the error
+ * transient, or the error is not a Meta client error at all. A
  * local refusal (guard, token, bad parameter) and a Graph 4xx error answer mean
  * the write did not happen.
  */
@@ -59,6 +60,8 @@ export function outcomeUnknown(error: unknown): boolean {
   if (error instanceof MetaResponseError) return true;
   if (error.constructor === MetaGraphError && error.httpStatus === null) return true;
   if (error.httpStatus === null) return false;
+  // Graph code 1 (unknown error), code 2 (service unavailable) or is_transient: Graph itself does not know the result.
+  if (error.code === 1 || error.code === 2 || error.isTransient) return true;
   // A 4xx without a readable Graph error body (no error code) is not an answer from Graph: a proxy or edge may have sent it.
   if (error.httpStatus < 500 && error.code === null && error.graphType === null) return true;
   return error.httpStatus >= 500;

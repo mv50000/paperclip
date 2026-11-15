@@ -228,6 +228,7 @@ interface GraphErrorBody {
   fbtrace_id?: unknown;
   error_user_title?: unknown;
   error_user_msg?: unknown;
+  is_transient?: unknown;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -341,6 +342,7 @@ export function mapGraphError(
     fbtraceId: asString(body?.fbtrace_id),
     userTitle: body?.error_user_title ? redactText(String(body.error_user_title), knownSecrets) : null,
     userMessage: body?.error_user_msg ? redactText(String(body.error_user_msg), knownSecrets) : null,
+    isTransient: body?.is_transient === true,
   };
   const graphMessage = asString(body?.message) ?? `HTTP ${httpStatus}`;
   const suffix = [

@@ -86,38 +86,42 @@ export const CAPTION_CONTINUE = "┆ ";
 export const CAPTION_CHUNK_COLUMNS = 20;
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-// One column: printable ASCII, and the letters of Latin-1, Latin Extended-A/B and Latin Extended Additional.
-const NARROW_RE = /^[ -~\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff]$/u;
+// One column: printable ASCII, the Latin-1 letters, and the Finnish, Swedish, Estonian and German letters outside Latin-1 (S/Z with caron, capital sharp s).
+const NARROW_RE = /^[ -~\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u00ff\u0160\u0161\u017d\u017e\u1e9e]$/u;
+// The widest of them (W, M, @, %, AE) count two.
+const WIDE_NARROW_RE = /^[MWmw@%\u00c6\u00e6]/u;
 // Two columns: a letter or digit of a script whose glyphs a phone font keeps within two columns.
 const LETTER_RE = /^[\p{L}\p{N}]$/u;
 const BOUNDED_SCRIPT_RE =
   /^[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Armenian}\p{Script=Georgian}\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Devanagari}\p{Script=Bengali}\p{Script=Gurmukhi}\p{Script=Gujarati}\p{Script=Oriya}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Sinhala}\p{Script=Thai}\p{Script=Lao}\p{Script=Tibetan}\p{Script=Myanmar}\p{Script=Khmer}\p{Script=Ethiopic}\p{Script=Cherokee}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]$/u;
-// Letters drawn wider than two columns: Latin ligatures, number forms (U+2167 and the like), Arabic presentation ligatures, Cyrillic Extended-B (U+A66E).
-const EXTRA_WIDE_LETTER_RE = /^[\ufb00-\ufb06\u2150-\u218f\ufb50-\ufdff\ua640-\ua69f]$/u;
-// Two columns: emoji, skin tones, regional indicators and the common symbol blocks.
+// Letters known to be drawn wider than two columns: Latin digraphs and ligatures (U+01C4-01CC, U+01F1-01F3, U+0132/0133, U+1EFA-1EFF, U+FB00-FB06), number forms (U+2167), Arabic presentation ligatures (U+FDFD), Cyrillic Extended-B (U+A66E), and the widest Tamil and Malayalam letters.
+const EXTRA_WIDE_LETTER_RE = /^[\u0132\u0133\u01c4-\u01cc\u01f1-\u01f3\u1efa-\u1eff\ufb00-\ufb06\u2150-\u218f\ufb50-\ufdff\ua640-\ua69f\u0b94\u0bf0-\u0bfa\u0d14\u0d4c\u0d57]$/u;
+// Two columns: emoji, skin tones, regional indicators, and a short list of common symbols (Latin-1 symbols, dashes, quotes, bullets and the ellipsis, primes, currency, a few letterlike and math signs, short arrows, circled digits and letters, box drawing, blocks, geometric shapes, miscellaneous symbols and dingbats, braille, CJK punctuation and enclosed CJK, fullwidth forms). Long arrows, brackets spanning several lines and every other symbol fill a chunk alone.
 const BOUNDED_SYMBOL_RE =
-  /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[\u00a0-\u00bf\u00d7\u00f7\u2010-\u2027\u2030-\u205e\u2070-\u209f\u20a0-\u20c0\u2190-\u23ff\u2460-\u27ff\u2800-\u28ff\u2900-\u2bff\u3000-\u303f\u3200-\u32ff\ufe30-\ufe4f\uff00-\uffef])$/u;
-const MARK_RE = /^[\p{Mn}\p{Mc}]$/u;
-// The widest Latin glyphs (W, M, @, %, the AE and OE ligatures) count two, with or without a diacritic.
-const WIDE_LATIN_BASE_RE = /^[MWmw@%\u00c6\u00e6\u0152\u0153]/u;
+  /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[\u00a1-\u00bf\u00d7\u00f7\u2010-\u2027\u2030\u2032-\u2037\u2039\u203a\u20a0-\u20c0\u2103\u2109\u2116\u2122\u2190-\u2199\u2212\u2213\u221e\u2248\u2260\u2264\u2265\u2460-\u2473\u24b6-\u24e9\u2500-\u27bf\u2801-\u28ff\u3001-\u303f\u3200-\u32ff\uff01-\uff60\uffe0-\uffe6])$/u;
+// Never counted: private use, unassigned and surrogate code points fill a chunk alone.
+const UNASSIGNED_RE = /^[\p{Co}\p{Cn}\p{Cs}]$/u;
+const NONSPACING_MARK_RE = /^\p{Mn}$/u;
+const SPACING_MARK_RE = /^\p{Mc}$/u;
 const ZWJ = "\u200d";
 
 /** A grapheme of more code points than the longest RGI emoji (10) fills a chunk alone. */
 const MAX_GRAPHEME_CODE_POINTS = 10;
 
 /**
- * Columns a phone font may give one grapheme. The estimate may only err wide
- * (RK9-852): a chunk that breaks too early costs a line, one that breaks too
- * late lets the rest of a chunk wrap onto an unquoted screen line. Summed
- * over the code points:
- * - 1 for printable ASCII and a Latin-1 or Latin Extended letter, 2 for the
- *   widest of them (W, M, @, %, AE, OE);
- * - 1 for each combining mark (Mn, Mc) that survived the cleaning;
+ * Columns a phone font may give one grapheme. The estimate overestimates the
+ * known cases (RK9-852): a chunk that breaks too early costs a line, one that
+ * breaks too late lets the rest of a chunk wrap onto an unquoted screen line.
+ * Summed over the code points:
+ * - 1 for printable ASCII, a Latin-1 letter and the Finnish, Swedish,
+ *   Estonian and German letters (2 for W, M, @, % and AE);
+ * - 1 for each nonspacing mark (Mn), 2 for each spacing mark (Mc);
  * - 0 for the ZWJ that joins two emoji (each emoji counts on its own);
- * - 2 for a letter or digit of a script listed above, an emoji, a skin tone,
- *   a regional indicator or a character of the common symbol blocks;
- * - anything else (an enclosing mark, a ligature, a space other than U+0020,
- *   a script not listed, a grapheme of more than 10 code points) fills a
+ * - 2 for any other Latin letter, a letter or digit of a script listed above,
+ *   an emoji, a skin tone, a regional indicator or a listed symbol;
+ * - anything else (an enclosing mark, a digraph or ligature, a long arrow, a
+ *   space other than U+0020, an unlisted symbol or script, a private-use or
+ *   unassigned code point, a grapheme of more than 10 code points) fills a
  *   chunk alone.
  */
 export function columns(grapheme: string): number {
@@ -126,8 +130,10 @@ export function columns(grapheme: string): number {
   let width = 0;
   for (const point of points) {
     if (point === ZWJ) continue;
-    if (NARROW_RE.test(point)) width += WIDE_LATIN_BASE_RE.test(point.normalize("NFD")) ? 2 : 1;
-    else if (MARK_RE.test(point)) width += 1;
+    if (UNASSIGNED_RE.test(point)) return CAPTION_CHUNK_COLUMNS;
+    if (NARROW_RE.test(point)) width += WIDE_NARROW_RE.test(point) ? 2 : 1;
+    else if (NONSPACING_MARK_RE.test(point)) width += 1;
+    else if (SPACING_MARK_RE.test(point)) width += 2;
     else if (LETTER_RE.test(point) && BOUNDED_SCRIPT_RE.test(point) && !EXTRA_WIDE_LETTER_RE.test(point)) width += 2;
     else if (BOUNDED_SYMBOL_RE.test(point)) width += 2;
     else return CAPTION_CHUNK_COLUMNS;

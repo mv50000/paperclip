@@ -11,13 +11,21 @@
  *   after an emoji (at most one per emoji) and U+200D between two emoji.
  *   Variation selectors, tag characters, the Khmer and Mongolian invisible
  *   signs, the Hangul fillers and ZWJ runs therefore cannot carry hidden text.
- * - Every space separator (Zs) becomes U+0020.
+ * - Every space separator (Zs) and the braille blank U+2800 become U+0020.
+ *   Runs of spaces become one space, spaces at the end of a line go, and
+ *   more than two line feeds in a row become two, so whitespace cannot carry
+ *   a hidden message.
+ * - A base character must be a letter, digit, punctuation, symbol, U+0020 or
+ *   the line feed: private use, unassigned and noncharacter code points go.
  * - The text is normalised to NFC.
- * - A combining mark (Mn, Mc) stays only on a base of the same script, or
- *   when the mark itself is Inherited or Common, and at most two in a row.
- *   An enclosing mark (Me) is always removed.
- * The braille blank U+2800 stays: it is visible to the card as a character,
- * and Instagram captions use it for spacing.
+ * - A combining mark (Mn, Mc) stays only on a letter or digit of the same
+ *   script, or when the mark itself is Inherited or Common, and at most two
+ *   in a row. An enclosing mark (Me) is always removed.
+ *
+ * Limit: the card guarantees that the published text is, character for
+ * character, the text on the card. It does not stop a message hidden in the
+ * choice of visible characters (an emoji with or without U+FE0F or a ZWJ,
+ * rare Inherited marks). RK9-860 tracks it.
  */
 
 /** Scripts that have combining marks of their own (Unicode 16, checked against the runtime's regex tables). */
@@ -45,10 +53,15 @@ const SCRIPT_RES: ReadonlyArray<RegExp> = MARK_SCRIPTS.flatMap((name) => {
 
 const LINE_BREAK_RE = /\r\n?|[\u0085\u2028\u2029]/g;
 const LONE_SURROGATE_RE = /\p{Surrogate}/gu;
-const SPACE_RE = /\p{Zs}/gu;
+// Every space separator and the braille blank U+2800 (a visible-as-nothing space) become U+0020.
+const SPACE_RE = /[\p{Zs}\u2800]/gu;
 const HIDDEN_RE = /^[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]$/u;
 const EMOJI_RE = /^\p{Extended_Pictographic}$/u;
 const SKIN_TONE_RE = /^\p{Emoji_Modifier}$/u;
+// A visible base: a letter, digit, punctuation or symbol. Private use (Co), unassigned (Cn) and noncharacters are not.
+const BASE_RE = /^[\p{L}\p{N}\p{P}\p{S}]$/u;
+// A combining mark goes only on a letter or a digit.
+const MARK_BASE_RE = /^[\p{L}\p{N}]$/u;
 const MARK_RE = /^[\p{Mn}\p{Mc}]$/u;
 const ENCLOSING_RE = /^\p{Me}$/u;
 const SHARED_MARK_RE = /^[\p{Script=Inherited}\p{Script=Common}]$/u;
@@ -85,7 +98,7 @@ function keepVisible(text: string): string {
     if (point === ZWJ) {
       const afterEmoji = previous !== undefined && (EMOJI_RE.test(previous) || previous === VS16 || SKIN_TONE_RE.test(previous));
       const next = points[index + 1];
-      if (afterEmoji && next !== undefined && EMOJI_RE.test(next)) out.push(point);
+      if (afterEmoji && next !== undefined && EMOJI_RE.test(next) && BASE_RE.test(next)) out.push(point);
       continue;
     }
     if (HIDDEN_RE.test(point) || ENCLOSING_RE.test(point)) continue;
@@ -96,8 +109,9 @@ function keepVisible(text: string): string {
       }
       continue;
     }
+    if (point !== " " && !BASE_RE.test(point)) continue;
     out.push(point);
-    base = point;
+    base = MARK_BASE_RE.test(point) ? point : null;
     marks = 0;
   }
   return out.join("");
@@ -109,7 +123,12 @@ function keepVisible(text: string): string {
  */
 export function cleanCaption(text: string): string {
   const normalised = text.replace(LINE_BREAK_RE, "\n").replace(LONE_SURROGATE_RE, "").normalize("NFC").replace(SPACE_RE, " ");
-  return keepVisible(normalised).normalize("NFC").trim();
+  return keepVisible(normalised)
+    .replace(/ {2,}/g, " ")
+    .replace(/ +$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .normalize("NFC")
+    .trim();
 }
 
 /**

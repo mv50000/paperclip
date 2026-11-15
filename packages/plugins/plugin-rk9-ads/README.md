@@ -832,13 +832,15 @@ plugin must not see).
    A caption line, a rule line or a warning longer than 20 columns goes on in
    chunks that start with "┆ ", so a phone never wraps agent text onto an
    unquoted screen line (RK9-852). The width estimate (`columns` in
-   `src/organic/card.ts`) may err wide, never narrow, and sums every code
-   point of a grapheme: printable ASCII and a Latin-1 or Latin Extended letter
-   count 1 (W, M, @, %, AE and OE count 2), each combining mark 1, the ZWJ
-   between two emoji 0, and a letter of another listed script, an emoji, a
-   skin tone, a regional indicator or a common symbol 2. Anything else (an
-   enclosing mark, a ligature, a space other than U+0020, an unlisted script,
-   a grapheme of more than 10 code points) fills a chunk alone. A very large phone
+   `src/organic/card.ts`) overestimates the known cases and sums every code
+   point of a grapheme: printable ASCII, the Latin-1 letters and the Finnish,
+   Swedish, Estonian and German letters count 1 (W, M, @, % and AE count 2),
+   a nonspacing mark 1, a spacing mark 2, the ZWJ between two emoji 0, and
+   any other Latin letter, a letter of another listed script, an emoji, a
+   skin tone, a regional indicator or a listed symbol 2. Anything else (an
+   enclosing mark, a digraph or ligature, a long arrow, a multi-line bracket,
+   an unlisted symbol or script, a private-use or unassigned code point, a
+   grapheme of more than 10 code points) fills a chunk alone. A very large phone
    font can still wrap a chunk; a Telegram blockquote entity would close that
    gap (follow-up). A media URL with whitespace or a control character is
    refused at staging and on the card, and the card shows only the parsed URL. The rule text is cleaned like the caption.
@@ -851,12 +853,19 @@ plugin must not see).
    line breaks (NEL, U+2028 and U+2029 included) become a line feed; every
    other control, format character (Cf), default-ignorable code point and
    lone surrogate is removed, except U+FE0F once right after an emoji and the
-   ZWJ between two emoji; every space separator becomes U+0020; the text is
-   normalised to NFC; a combining mark stays only on a base of its own script
-   (or when it is Inherited or Common), two in a row at most; an enclosing
-   mark is always removed. Variation selectors and tag characters therefore
-   go, so a subdivision flag (England, Scotland, Wales) shows as the black
-   flag and a keycap emoji as its digit. The braille blank U+2800 stays. The card locks its media (see "Media lock"). The
+   ZWJ between two emoji; every space separator and the braille blank U+2800
+   become U+0020, runs of spaces become one, spaces at a line end go and at
+   most two line feeds stay in a row; a base character must be a letter,
+   digit, punctuation or symbol (private-use, unassigned and noncharacter
+   code points go); the text is normalised to NFC; a combining mark stays
+   only on a letter or digit of its own script (or when it is Inherited or
+   Common), two in a row at most; an enclosing mark is always removed.
+   Variation selectors and tag characters therefore go, so a subdivision flag
+   (England, Scotland, Wales) shows as the black flag and a keycap emoji as
+   its digit. **Limit (open, RK9-860):** the card guarantees that the
+   published text is, character for character, the text on the card; it does
+   not stop a message hidden in the choice of visible characters (an emoji
+   with or without U+FE0F or a ZWJ, rare Inherited marks). The card locks its media (see "Media lock"). The
    same content (company, creative sha256, channel, caption) gets one open
    card; a second request returns the open post.
 2. **Publish.** The tap goes through the kit router (chat, approver list,
@@ -876,7 +885,8 @@ plugin must not see).
    text. A change of `organic.mode` after the card closes the card without
    a Meta write: the approver saw the mode on the card.
    A publish whose answer never came (network error, a Graph 5xx, an
-   unreadable body, a 4xx without a Graph error body, or a 2xx without an id)
+   unreadable body, a 4xx without a Graph error body, a Graph error with code 1
+   or 2 or `is_transient: true`, or a 2xx without an id)
    may still be live, and so may an
    IG `media_publish` error while the container is not yet ERROR or EXPIRED. The post then stays in `publishing`
    with `error: "result unknown: …"`, so the same content gets no second card

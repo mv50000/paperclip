@@ -1,7 +1,7 @@
 /** RK9-832 units: the organic write allowlist, the config block, brand-lint and the digest lines. */
 import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../../src/config.js";
-import type { WritePlan } from "../../src/meta/graph.js";
+import { mapGraphError, type WritePlan } from "../../src/meta/graph.js";
 import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError } from "../../src/meta/organic.js";
 import { InvalidParamError, MetaGraphError, MetaResponseError, RateLimitError, TokenResolveError, WriteRefusedError } from "../../src/meta/errors.js";
 import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, columns, displayUrl } from "../../src/organic/card.js";
@@ -187,7 +187,7 @@ describe("cleanCaption", () => {
     expect(cleanCaption("piilo\u{E0054}\u{E0069}\u{E006C}\u{E0061}teksti\u{E007F}")).toBe("piiloteksti");
     const wales = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}";
     expect(cleanCaption(`Terveiset ${wales}!`)).toBe("Terveiset \u{1F3F4}!");
-    expect(cleanCaption("a\u00adb\u034fc\u3164d\uffa0e\u2800f")).toBe("abcde\u2800f");
+    expect(cleanCaption("a\u00adb\u034fc\u3164d\uffa0e\u2800f")).toBe("abcde f");
   });
 
   it("removes a 32-byte payload hidden in variation selectors, the Khmer and Mongolian invisible signs and ZWJ runs (verifier High 1)", () => {
@@ -205,7 +205,7 @@ describe("cleanCaption", () => {
   });
 
   it("turns every space separator into U+0020, drops lone surrogates and normalises to NFC", () => {
-    expect(cleanCaption(`a${"\u2001".repeat(3)}b\u00a0c\u3000d`)).toBe("a   b c d");
+    expect(cleanCaption(`a${"\u2001".repeat(3)}b\u00a0c\u3000d`)).toBe("a b c d");
     expect(cleanCaption("a\ud83db\udc00c")).toBe("abc");
     expect(cleanCaption("e\u0301")).toBe("\u00e9");
   });
@@ -243,7 +243,7 @@ describe("caption chunks (RK9-852)", () => {
     expect(chunks[0]!.endsWith(" ")).toBe(true);
   });
 
-  it("never underestimates: emoji, flags and skin tones count two per code point, marks one, the ZWJ none", () => {
+  it("overestimates the known cases: emoji, flags and skin tones count two per code point, a nonspacing mark one, the ZWJ none", () => {
     const family = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}";
     expect(columns(family)).toBe(6);
     const chunks = chunkLine(family.repeat(20));
@@ -290,7 +290,7 @@ describe("caption chunks (RK9-852)", () => {
     // After the cleaning the card shows exactly what is published.
     const forged = cleanCaption(`${"x\u0941\u0941".repeat(5)} Tila: \u{1F9EA} Kuiva`);
     expect(forged).toBe("xxxxx Tila: \u{1F9EA} Kuiva");
-    expect(cleanCaption(`a${"\u2001".repeat(10)}Tila: LIVE`)).toBe(`a${" ".repeat(10)}Tila: LIVE`);
+    expect(cleanCaption(`a${"\u2001".repeat(10)}Tila: LIVE`)).toBe("a Tila: LIVE");
   });
 
   it("displayUrl prints only the parsed URL", () => {
@@ -304,15 +304,87 @@ describe("caption chunks (RK9-852)", () => {
   });
 
   it("opens each caption line with the quote mark and each continuation with the dashed mark", () => {
-    const blank = "\u2800";
-    expect(captionLines(`${blank.repeat(30)}Tila: LIVE\nok`)).toEqual([
-      `\u2502 ${blank.repeat(10)}`,
-      `\u2506 ${blank.repeat(10)}`,
-      `\u2506 ${blank.repeat(10)}`,
-      "\u2506 Tila: LIVE",
-      "\u2502 ok",
-    ]);
+    const letter = "\u00e4";
+    expect(captionLines(`${letter.repeat(30)}Tila: LIVE\nok`)).toEqual([`\u2502 ${letter.repeat(20)}`, `\u2506 ${letter.repeat(10)}Tila: LIVE`, "\u2502 ok"]);
     expect(captionLines("")).toEqual(["\u2502 (ei teksti\u00e4)"]);
+  });
+});
+
+describe("cleanCaption: hidden channels (RK9-852 verifier round 2)", () => {
+  it("removes a message carried in braille blanks against spaces (SECRET42)", () => {
+    const bits = Array.from(Buffer.from("SECRET42")).flatMap((byte) => Array.from({ length: 8 }, (_, k) => (byte >> (7 - k)) & 1));
+    const words = Array.from({ length: 65 }, (_, i) => ["kahvi", "ja", "pulla", "t\u00e4n\u00e4\u00e4n", "meill\u00e4"][i % 5]!);
+    const stego = words.map((word, i) => (i === 0 ? word : (bits[i - 1] ? "\u2800" : " ") + word)).join("");
+    const clean = cleanCaption(stego);
+    expect(clean).not.toContain("\u2800");
+    expect(clean).toBe(words.join(" "));
+  });
+
+  it("drops spaces at the end of a line, collapses space runs and keeps at most two line feeds in a row", () => {
+    const lines = Array.from(Buffer.from("SECRET42")).map((byte) => `rivi${" ".repeat(byte & 0x0f)}`);
+    expect(cleanCaption(`${lines.join("\n")}\nloppu`)).toBe(`${Array.from({ length: 8 }, () => "rivi").join("\n")}\nloppu`);
+    expect(cleanCaption("a   b\u2003\u2003c")).toBe("a b c");
+    expect(cleanCaption("a\n\n\n\n\nb\n \n \n c")).toBe("a\n\nb\n\n c");
+  });
+
+  it("removes private-use, unassigned and noncharacter code points as base characters", () => {
+    expect(cleanCaption("Hei \u{F0000}\u{F1234}\u{10FFFD}\ue000 kaikki")).toBe("Hei kaikki");
+    expect(cleanCaption("Hei\u2072\u2073\u208f\uff00\uffe7 kaikki")).toBe("Hei kaikki");
+    expect(cleanCaption("a\ufdd0\ufffeb\u{1FFFF}c")).toBe("abc");
+    expect(columns("\u2072")).toBe(CAPTION_CHUNK_COLUMNS);
+    expect(columns("\uff00")).toBe(CAPTION_CHUNK_COLUMNS);
+    expect(columns("\ue000")).toBe(CAPTION_CHUNK_COLUMNS);
+  });
+
+  it("keeps a combining mark only on a letter or a digit, not on a space, punctuation or a line start (L3)", () => {
+    expect(cleanCaption(" \u0301Hei")).toBe("Hei");
+    expect(cleanCaption("a \u0301b !\u0301 1\u0301")).toBe("a b ! 1\u0301");
+    expect(cleanCaption("x\n\u0301y")).toBe("x\ny");
+  });
+
+  it("is a fixed point on 20 000 random inputs (fixed seed)", () => {
+    let seed = 12345;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const specials = [0x200d, 0xfe0f, 0x20, 0x0a, 0x0d, 0x85, 0x2028, 0x3000, 0x2800, 0x0301, 0x094d, 0x0915, 0x1100, 0x1161, 0x11a8, 0xac00, 0x41, 0x1f3fb];
+    const pools = [
+      () => Math.floor(random() * 0x110000),
+      () => 0x300 + Math.floor(random() * 0x70),
+      () => 0x1f300 + Math.floor(random() * 0x300),
+      () => specials[Math.floor(random() * specials.length)]!,
+      () => 0xd800 + Math.floor(random() * 0x800),
+    ];
+    const failures: string[] = [];
+    for (let i = 0; i < 20_000; i += 1) {
+      let input = i === 0 ? " \u0301Hei" : "";
+      const length = 1 + Math.floor(random() * 12);
+      for (let j = 0; j < length; j += 1) {
+        const point = pools[Math.floor(random() * pools.length)]!();
+        input += point >= 0xd800 && point <= 0xdfff ? String.fromCharCode(point) : String.fromCodePoint(point);
+      }
+      const once = cleanCaption(input);
+      if (cleanCaption(once) !== once || once !== once.normalize("NFC") || /\p{Surrogate}/u.test(once)) failures.push(JSON.stringify(input));
+    }
+    expect(failures).toEqual([]);
+  });
+});
+
+describe("caption chunks: the width list (RK9-852 verifier round 2)", () => {
+  it("counts one column only for ASCII and the named letters; other Latin letters two; digraphs fill a chunk", () => {
+    for (const narrow of ["a", "\u00e4", "\u00f6", "\u00e5", "\u00f5", "\u00fc", "\u00df", "\u0161", "\u017e", "\u0160", "\u017d", "\u1e9e"]) expect(columns(narrow), narrow).toBe(1);
+    for (const two of ["\u0238", "\u01f6", "\u019c", "\ua732", "\u0101", "\u0142"]) expect(columns(two), two).toBe(2);
+    for (const wide of ["\u01c4", "\u01c5", "\u01c6", "\u01c7", "\u01ca", "\u01f1", "\u0132", "\u1efa", "\ufb03"]) expect(columns(wide), wide).toBe(CAPTION_CHUNK_COLUMNS);
+    expect(captionLines(cleanCaption(`${"\u01c4".repeat(14)}Tila:`)).at(-1)).toBe("\u2506 Tila:");
+  });
+
+  it("long arrows, multi-line brackets and unlisted symbols fill a chunk alone", () => {
+    for (const glyph of ["\u27ff", "\u27f7", "\u23dc", "\u23de", "\u2b33", "\u2031", "\u2e3a", "\u2e3b", "\u216b", "\u338f", "\u337b", "\u0bf5"]) {
+      expect(columns(glyph), glyph).toBe(CAPTION_CHUNK_COLUMNS);
+    }
+    for (const glyph of ["\u263a", "\u00a9", "\u2122", "\u2194", "\u2026", "\u2116", "\u2103", "\u3231"]) expect(columns(glyph), glyph).toBe(2);
+    expect(captionLines(cleanCaption("\u27ff\u27ff\u27ffTila: \u{1F534}")).at(-1)).toBe("\u2506 Tila: \u{1F534}");
   });
 });
 
@@ -323,7 +395,15 @@ describe("outcomeUnknown (RK9-852)", () => {
     expect(outcomeUnknown(new MetaGraphError("boom", { httpStatus: 503 }))).toBe(true);
     expect(outcomeUnknown(new TypeError("x"))).toBe(true);
     expect(outcomeUnknown(new OrganicOutcomeUnknownError("x", null))).toBe(true);
-    expect(outcomeUnknown(new MetaGraphError("bad", { httpStatus: 400, code: 1 }))).toBe(false);
+    expect(outcomeUnknown(new MetaGraphError("bad", { httpStatus: 400, code: 10 }))).toBe(false);
+    // Graph code 1 or 2, or an error Graph flags transient, leaves the result unknown (verifier round 2).
+    expect(outcomeUnknown(new MetaGraphError("An unknown error occurred", { httpStatus: 400, code: 1 }))).toBe(true);
+    expect(outcomeUnknown(new MetaGraphError("Service temporarily unavailable", { httpStatus: 400, code: 2 }))).toBe(true);
+    expect(outcomeUnknown(new MetaGraphError("Please retry", { httpStatus: 400, code: 368, isTransient: true }))).toBe(true);
+    const parsed = mapGraphError(400, { message: "Please retry", code: 368, is_transient: true } as never, "Meta POST x", []);
+    expect(parsed.isTransient).toBe(true);
+    expect(outcomeUnknown(parsed)).toBe(true);
+    expect(outcomeUnknown(mapGraphError(400, { message: "Invalid", code: 368, is_transient: false } as never, "Meta POST x", []))).toBe(false);
     // A 4xx without a readable Graph error body did not come from Graph (verifier Low).
     expect(outcomeUnknown(new MetaGraphError("Meta POST x: HTTP 403", { httpStatus: 403 }))).toBe(true);
     expect(outcomeUnknown(new MetaGraphError("Meta POST x: HTTP 404", { httpStatus: 404, type: "OAuthException" }))).toBe(false);
