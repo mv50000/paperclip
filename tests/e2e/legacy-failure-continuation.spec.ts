@@ -105,8 +105,20 @@ for (const action of ["task_retry", "thread_retry", "inbox_retry", "message", "q
         await page.getByRole("textbox", { name: "editable markdown" }).fill("Please continue the pending follow-up.");
         await page.getByRole("button", { name: "Send", exact: true }).click();
       } else {
-        await page.getByRole("button", { name: action === "thread_retry" ? "Try again" : "Retry", exact: true }).click();
-        if (action === "inbox_retry") await page.goto(taskUrl);
+        const retry = page.getByRole("button", { name: action === "thread_retry" ? "Try again" : "Retry", exact: true });
+        if (action === "inbox_retry") {
+          // --- RK9 Custom: the inbox Retry sends POST /agents/:id/wakeup, and an immediate goto()
+          // cancels that request in flight. The retry then never reaches the server, and the
+          // agent response never appears (seen twice in a row on PR #309). Wait for the
+          // wakeup response before leaving the inbox. ---
+          const wakeup = page.waitForResponse((response) => response.request().method() === "POST"
+            && /\/agents\/[^/]+\/wakeup$/.test(new URL(response.url()).pathname));
+          await retry.click();
+          expect((await wakeup).ok()).toBe(true);
+          await page.goto(taskUrl);
+        } else {
+          await retry.click();
+        }
       }
       await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible({ timeout: 45_000 });
       await expect(page.getByRole("status", { name: "Task recovery" })).toHaveCount(0);
