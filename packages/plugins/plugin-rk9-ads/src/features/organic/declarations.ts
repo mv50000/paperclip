@@ -7,6 +7,14 @@ import type { FeatureDeclarations } from "../types.js";
 export const organicDeclarations: FeatureDeclarations = {
   key: "organic",
   owner: "RK9-832",
+  jobs: [
+    {
+      jobKey: "organic-reconcile",
+      displayName: "Organic reconcile",
+      description: "Closes organic posts stuck in publishing from what Meta reports. Reads Meta, never writes to it.",
+      schedule: "*/15 * * * *",
+    },
+  ],
   tools: [
     {
       name: "rk9ads_request_organic_post",

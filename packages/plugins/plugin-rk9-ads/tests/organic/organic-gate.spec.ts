@@ -11,7 +11,14 @@ import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/tes
 import type { Company } from "@paperclipai/plugin-sdk";
 import manifest from "../../src/manifest.js";
 import { createLedger } from "../../src/db.js";
-import { registerOrganic, ORGANIC_DELETE_ACTION_KEY, ORGANIC_POSTS_ACTION_KEY, ORGANIC_REQUEST_ACTION_KEY, ORGANIC_TOOL } from "../../src/features/organic/register.js";
+import {
+  registerOrganic,
+  ORGANIC_DELETE_ACTION_KEY,
+  ORGANIC_POSTS_ACTION_KEY,
+  ORGANIC_RECONCILE_ACTION_KEY,
+  ORGANIC_REQUEST_ACTION_KEY,
+  ORGANIC_TOOL,
+} from "../../src/features/organic/register.js";
 import { TelegramController } from "../../src/features/telegram/controller.js";
 import { gateRegistry, resetGateRegistry } from "../../src/features/telegram/gates.js";
 import type { FeatureRuntime } from "../../src/features/types.js";
@@ -24,6 +31,7 @@ import type { OrganicService } from "../../src/organic/service.js";
 import { brandConfig, COMPANY_A, SECRET_A_BOT, SECRET_A_META, secretRef } from "../fixtures.js";
 import { FakeTelegram } from "../helpers/fake-telegram.js";
 import { FakeRoutes, graphError } from "../brand/fake-routes.js";
+import { FakeMedia } from "../helpers/fake-media-host.js";
 
 const META_TOKEN = "EAAtest-meta-token-organic-00000000000";
 const PAGE_TOKEN = "EAAtest-page-token-organic-11111111111";
@@ -71,6 +79,7 @@ function config(organic: Record<string, unknown> = {}, extra: Record<string, unk
       mode: "live",
       channels: ["ig_reel", "ig_feed", "fb_video", "fb_photo"],
       pageAccessTokenRef: secretRef(SECRET_A_PAGE),
+      mediaHosts: ["media.ololla.fi"],
       ...organic,
     },
     ...extra,
@@ -118,6 +127,7 @@ interface Rig {
   harness: TestHarness;
   fake: FakeTelegram;
   meta: FakeRoutes;
+  media: FakeMedia;
   gates: MemoryGateStore;
   posts: ReturnType<typeof memoryOrganicPostStore>;
   creatives: ReturnType<typeof memoryCreativeSource>;
@@ -140,8 +150,10 @@ async function rig(input: { config?: Record<string, unknown>; meta?: FakeRoutes 
   const meta = input.meta ?? graph();
   const fake = new FakeTelegram();
   fake.maxWaitMs = 200;
+  const media = new FakeMedia();
   harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
     if (url.startsWith("https://graph.facebook.com/")) return meta.fetch(url, init);
+    if (media.handles(url)) return media.fetch(url, init);
     return fake.fetch(url, init);
   };
   const clock = { now: new Date() };
@@ -167,7 +179,7 @@ async function rig(input: { config?: Record<string, unknown>; meta?: FakeRoutes 
   const service = registerOrganic(runtime, { posts, creatives, transport: () => controller, now: () => clock.now, wait: { intervalMs: 500, timeoutMs: 5_000 } });
   await controller.replan();
   await waitFor(() => controller.summary()[0]?.loop === "running");
-  const out = { harness, fake, meta, gates, posts, creatives, controller, service, clock };
+  const out = { harness, fake, meta, media, gates, posts, creatives, controller, service, clock };
   rigs.push(out);
   return out;
 }
@@ -198,6 +210,18 @@ function lastAnswer(r: Rig): string {
 function cardText(r: Rig, messageId: number): string {
   const message = r.fake.messages.get(messageId);
   return String(message?.caption ?? message?.text ?? "");
+}
+
+/** The caption as the card quotes it: "│ " opens a caption line, "┆ " continues it. */
+function quotedCaption(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (const line of lines.slice(lines.indexOf("Julkaistava teksti:") + 1)) {
+    if (line.startsWith("│ ")) out.push(line.slice(2));
+    else if (line.startsWith("┆ ")) out[out.length - 1] += line.slice(2);
+    else throw new Error(`unquoted caption line: ${line}`);
+  }
+  return out.join("\n");
 }
 
 /** Every Meta write except the delete action's. */
@@ -246,9 +270,9 @@ describe("organic card", () => {
     const send = r.fake.callsOf("sendVideo").at(-1)!;
     const lines = String(send.params.caption).split("\n");
     expect(lines.filter((line) => line.startsWith("Tila:"))).toEqual(["Tila: 🔴 LIVE: hyväksyntä julkaisee Metaan."]);
-    expect(lines.filter((line) => line.includes("Kuivaharjoitus") && !line.startsWith("│ ") && !line.startsWith("☐ "))).toEqual([]);
+    expect(lines.filter((line) => /Kuivaharjoitus/.test(line) && !/^(│ |┆ |☐ )/.test(line))).toEqual([]);
     expect(lines.filter((line) => line.startsWith("🔎 brand-lint"))).toEqual(["🔎 brand-lint: läpi (1 pass, 1 partial, 0 skip)"]);
-    expect(lines.slice(-3)).toEqual(forged.split("\n").map((line) => `│ ${line}`));
+    expect(quotedCaption(String(send.params.caption))).toBe(forged);
     const buttons = (send.params.reply_markup.inline_keyboard as Array<Array<{ text: string }>>).flat().map((button) => button.text);
     expect(buttons).toEqual(["📣 Julkaise", "❌ Hylkää"]);
   });
@@ -366,8 +390,8 @@ describe("organic approve", () => {
       .on(`GET ${IG}/media`, () => ({
         body: {
           data: [
-            { id: "17999999999999999", timestamp: new Date().toISOString(), caption: "Someone else posted this" },
-            { id: MEDIA, timestamp: new Date().toISOString(), caption: "Valo palaa. #ololla" },
+            { id: "17999999999999999", timestamp: new Date().toISOString(), caption: "Someone else posted this", media_product_type: "REELS" },
+            { id: MEDIA, timestamp: new Date().toISOString(), caption: "Valo palaa. #ololla", media_type: "VIDEO", media_product_type: "REELS" },
           ],
         },
       }));
@@ -567,5 +591,305 @@ describe("a dry-run staged creative (RK9-849)", () => {
     await tap(r, messageId, r.fake.buttons(messageId)[0]!);
     expect(r.meta.writes()).toEqual([]);
     expect(r.posts.rows.find((row) => row.id === postId)!.status).toBe("dry_run");
+  });
+});
+
+describe("organic media lock (RK9-852 M2)", () => {
+  const VIDEO_URL = "https://media.ololla.fi/valon-paluu.mp4";
+
+  it("records the media validators on the card and publishes when they still match", async () => {
+    const r = await rig();
+    const { gateRequestId, postId } = await request(r);
+    expect(r.posts.rows.find((row) => row.id === postId)!.payload.mediaLock).toMatchObject({ host: "media.ololla.fi", contentLength: 1048576, etag: '"v1"', contentType: "video/mp4" });
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(r.media.heads).toEqual([VIDEO_URL, VIDEO_URL]);
+    expect(r.posts.rows.find((row) => row.id === postId)!.status).toBe("published");
+  });
+
+  it("refuses a live card on a host outside organic.mediaHosts; a dry-run card only warns", async () => {
+    const live = await rig({ config: config({ mediaHosts: ["cdn.ololla.fi"] }) });
+    await expect(request(live)).rejects.toThrow(/media_untrusted/);
+    expect(live.posts.rows).toHaveLength(0);
+    expect(live.media.heads).toEqual([]);
+    await live.controller.stop();
+
+    const dry = await rig({ config: config({ mode: "dry_run", mediaHosts: [] }) });
+    await request(dry);
+    const text = String(dry.fake.callsOf("sendVideo").at(-1)!.params.caption);
+    expect(text.replace(/\n┆ /g, "")).toContain("⚠️ Live-tila hylkäisi tämän: media host media.ololla.fi is not in organic.mediaHosts");
+    expect(text.indexOf("Live-tila hylkäisi")).toBeLessThan(text.indexOf("Julkaistava teksti:"));
+  });
+
+  it("refuses a live card when the host gives no ETag or Last-Modified (Sunspot's host today)", async () => {
+    const r = await rig();
+    r.media.file(VIDEO_URL).headers = { "content-type": "video/mp4", "content-length": "1048576" };
+    await expect(request(r)).rejects.toThrow(/media_unlockable/);
+    expect(r.posts.rows).toHaveLength(0);
+  });
+
+  it("closes the card without a Meta write when the file changed or vanished after the card", async () => {
+    for (const change of [
+      (file: { status: number; headers: Record<string, string> }) => (file.headers.etag = '"v2"'),
+      (file: { status: number; headers: Record<string, string> }) => (file.headers["content-length"] = "1048577"),
+      (file: { status: number; headers: Record<string, string> }) => (file.status = 404),
+    ]) {
+      const r = await rig();
+      const { gateRequestId, postId } = await request(r);
+      change(r.media.file(VIDEO_URL));
+      const messageId = cardMessageId(r, gateRequestId);
+      await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+      expect(publishWrites(r)).toEqual([]);
+      expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "failed" });
+      expect(r.posts.rows.find((row) => row.id === postId)!.error).toMatch(/media_changed/);
+      expect(cardText(r, messageId)).toContain("Media on muuttunut tai vanhentunut");
+      await r.controller.stop();
+    }
+  });
+
+  it("ends the card before the media host drops the file, and refuses a later publish without Meta", async () => {
+    const r = await rig({ config: config({ mediaHostTtlHours: 2 }) });
+    const modified = new Date(r.clock.now.getTime() - 30 * 60_000);
+    r.media.file(VIDEO_URL).headers["last-modified"] = modified.toUTCString();
+    const result = (await request(r)) as unknown as { validUntil: string; gateRequestId: string; postId: string };
+    const expected = Math.floor(modified.getTime() / 1000) * 1000 + 2 * 3_600_000 - 10 * 60_000;
+    expect(Date.parse(result.validUntil)).toBe(expected);
+    // The gate would expire the card at validUntil; the publish refuses on its own too.
+    r.clock.now = new Date(expected - 1_000);
+    r.posts.rows[0]!.payload = { ...r.posts.rows[0]!.payload, mediaLock: { ...(r.posts.rows[0]!.payload.mediaLock as object), expiresAt: new Date(expected).toISOString() } };
+    const messageId = cardMessageId(r, result.gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(publishWrites(r)).toEqual([]);
+    expect(r.posts.rows.find((row) => row.id === result.postId)!.error).toMatch(/media_expired/);
+  });
+
+  it("refuses a live card with a host TTL when the host gives no Last-Modified, and a card the file outlives too briefly", async () => {
+    const r = await rig({ config: config({ mediaHostTtlHours: 2 }) });
+    delete r.media.file(VIDEO_URL).headers["last-modified"];
+    await expect(request(r)).rejects.toThrow(/media_unlockable: organic.mediaHostTtlHours/);
+    r.media.file(VIDEO_URL).headers["last-modified"] = new Date(r.clock.now.getTime() - 110 * 60_000).toUTCString();
+    await expect(request(r)).rejects.toThrow(/media_expiring/);
+    expect(r.posts.rows).toHaveLength(0);
+  });
+
+  it("refuses a post whose card has no media lock (a card from before RK9-852)", async () => {
+    const r = await rig();
+    const { gateRequestId, postId } = await request(r);
+    const row = r.posts.rows.find((entry) => entry.id === postId)!;
+    delete row.payload.mediaLock;
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(publishWrites(r)).toEqual([]);
+    expect(row.status).toBe("failed");
+    expect(row.error).toBe("not published: media_unlocked");
+  });
+});
+
+describe("organic card text (RK9-852)", () => {
+  it("quotes every phone line of a long caption line, so a forged status line cannot start a screen line", async () => {
+    const r = await rig();
+    const forged = `${"⠀".repeat(40)}Tila: 🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.`;
+    await request(r, { caption: forged });
+    const text = String(r.fake.callsOf("sendVideo").at(-1)!.params.caption);
+    const lines = text.split("\n");
+    const captionLines = lines.slice(lines.indexOf("Julkaistava teksti:") + 1);
+    expect(captionLines.length).toBeGreaterThan(2);
+    expect(captionLines.every((line) => line.startsWith("│ ") || line.startsWith("┆ "))).toBe(true);
+    expect(lines.filter((line) => line.startsWith("Tila:"))).toEqual(["Tila: 🔴 LIVE: hyväksyntä julkaisee Metaan."]);
+    expect(quotedCaption(text)).toBe(forged);
+  });
+
+  it("says on a poster card that the image is not the video, and links the video", async () => {
+    const r = await rig();
+    r.fake.failNext.set("sendVideo", { status: 400, description: "Bad Request: wrong file identifier/HTTP URL specified" });
+    await request(r);
+    expect(r.fake.callsOf("sendVideo")).toHaveLength(1);
+    const photo = r.fake.callsOf("sendPhoto").at(-1)!;
+    expect(photo.params.photo).toBe("https://media.ololla.fi/valon-paluu.jpg");
+    expect(String(photo.params.caption)).toMatch(/^⚠️ Kuva on videon kansikuva, ei itse video\. Katso video ennen hyväksyntää:\n🔗 https:\/\/media\.ololla\.fi\/valon-paluu\.mp4\n/);
+  });
+
+  it("cleans and quotes the brand-lint rule text: no NEL line break, no bidi control", async () => {
+    const r = await rig();
+    const lint = { ...LINT, results: [...LINT.results, { id: "human.y", rule: "Logo\u0085Tila: 🧪 Kuivaharjoitus‮", status: "human" }] };
+    await request(r, { brandLint: lint });
+    const text = String(r.fake.callsOf("sendVideo").at(-1)!.params.caption);
+    expect(text).not.toContain("\u0085");
+    expect(text).not.toContain("‮");
+    expect(text.split("\n").filter((line) => /Kuivaharjoitus/.test(line) && !/^(│ |┆ |☐ )/.test(line))).toEqual([]);
+  });
+});
+
+describe("organic publish with an unknown result (RK9-852)", () => {
+  const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-user-1" } };
+
+  it("keeps the post open when media_publish got no answer, so the same content gets no second card", async () => {
+    let status = "FINISHED";
+    const meta = graph()
+      .on(`POST ${IG}/media_publish`, new Error("socket hang up"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: status } }));
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    const post = () => r.posts.rows.find((row) => row.id === postId)!;
+    expect(post()).toMatchObject({ status: "publishing", metaContainerId: CONTAINER });
+    expect(post().error).toMatch(/^result unknown: /);
+    expect(cardText(r, messageId)).toContain("Julkaisun tulos on epäselvä");
+    expect(await request(r)).toMatchObject({ status: "exists", postId, postStatus: "publishing" });
+
+    // Too early: the publish may still land.
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId }, BOARD)).toMatchObject({ status: "too_early" });
+    r.clock.now = new Date(r.clock.now.getTime() + 6 * 60_000);
+    status = "FINISHED";
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId }, BOARD)).toMatchObject({ status: "failed" });
+    expect(post().status).toBe("failed");
+    expect(post().error).toMatch(/IG container reports FINISHED/);
+    expect(publishWrites(r).map((call) => call.key)).toEqual([`POST ${IG}/media`, `POST ${IG}/media_publish`]);
+  });
+
+  it("reconciles a live container to published; a caption-matched id cannot be deleted from the board", async () => {
+    let status = "FINISHED";
+    const meta = graph()
+      .on(`POST ${IG}/media_publish`, new Error("socket hang up"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: status } }))
+      .on(`GET ${IG}/media`, () => ({
+        body: { data: [{ id: MEDIA, timestamp: r.clock.now.toISOString(), caption: "Valo palaa. #ololla", media_type: "VIDEO", media_product_type: "REELS" }] },
+      }));
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    status = "PUBLISHED";
+    r.clock.now = new Date(r.clock.now.getTime() + 6 * 60_000);
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId }, BOARD)).toMatchObject({ status: "published" });
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "published", metaMediaId: MEDIA });
+    await expect(r.harness.performAction(ORGANIC_DELETE_ACTION_KEY, { postId, dryRun: false, confirm: true }, BOARD)).rejects.toThrow(/media_id_unverified/);
+    expect(r.meta.writes().filter((call) => call.method === "DELETE")).toEqual([]);
+  });
+
+  it("the reconcile action is board-only and writes nothing to Meta", async () => {
+    const r = await rig();
+    const { postId } = await request(r);
+    await expect(
+      r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId }, { companyId: COMPANY_A, actor: { type: "agent", agentId: "agent-1", companyId: COMPANY_A } } as never),
+    ).rejects.toThrow(/board_only/);
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId }, BOARD)).toMatchObject({ status: "not_publishing", detail: "pending" });
+    expect(r.meta.writes()).toEqual([]);
+  });
+
+  it("an unanswered Page photo stays open; the job closes it once Meta shows exactly one matching photo", async () => {
+    let photos: Array<Record<string, unknown>> = [];
+    const meta = graph()
+      .on(`POST ${PAGE}/photos`, { status: 500, body: { error: { message: "An unknown error occurred", code: 1, fbtrace_id: "t" } } })
+      .on(`GET ${PAGE}/photos`, () => ({ body: { data: photos } }));
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r, { creativeId: IMAGE_ID, channel: "fb_photo" });
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    const post = () => r.posts.rows.find((row) => row.id === postId)!;
+    expect(post().status).toBe("publishing");
+
+    r.clock.now = new Date(r.clock.now.getTime() + 31 * 60_000);
+    // No unique match yet: the job leaves it open.
+    expect(await r.service.reconcileStale()).toEqual({ checked: 1, closed: 0 });
+    expect(post().status).toBe("publishing");
+    photos = [
+      { id: "555", created_time: r.clock.now.toISOString(), name: "Valo palaa. #ololla" },
+      { id: "556", created_time: new Date(Date.parse(post().decidedAt!) - 3_600_000).toISOString(), name: "Valo palaa. #ololla" },
+    ];
+    expect(await r.service.reconcileStale()).toEqual({ checked: 1, closed: 1 });
+    expect(post()).toMatchObject({ status: "published", metaMediaId: "555" });
+    expect(post().payload.mediaIdSource).toBe("caption_match");
+  });
+
+  it("the board closes an unclear post only with closeUnknown", async () => {
+    const meta = graph()
+      .on(`POST ${PAGE}/photos`, new Error("ECONNRESET"))
+      .on(`GET ${PAGE}/photos`, { body: { data: [] } });
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r, { creativeId: IMAGE_ID, channel: "fb_photo" });
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    r.clock.now = new Date(r.clock.now.getTime() + 6 * 60_000);
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId }, BOARD)).toMatchObject({ status: "unknown" });
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId, closeUnknown: true }, BOARD)).toMatchObject({ status: "failed" });
+    expect(r.posts.rows.find((row) => row.id === postId)!.error).toMatch(/closed by board:board-user-1 without a Meta result/);
+  });
+
+  it("the job closes a dry-run post whose worker stopped in publishing, and an IG post with no stored container", async () => {
+    const r = await rig();
+    const { postId } = await request(r);
+    const row = r.posts.rows.find((entry) => entry.id === postId)!;
+    row.status = "publishing";
+    row.payload = { ...row.payload, publishMode: "live" };
+    const second = await request(r, { caption: "Toinen teksti" });
+    const other = r.posts.rows.find((entry) => entry.id === second.postId)!;
+    other.status = "publishing";
+    other.payload = { ...other.payload, publishMode: "dry_run" };
+    r.clock.now = new Date(r.clock.now.getTime() + 31 * 60_000);
+    expect(await r.service.reconcileStale()).toEqual({ checked: 2, closed: 2 });
+    expect(row).toMatchObject({ status: "failed" });
+    expect(row.error).toMatch(/no IG container was stored/);
+    expect(other.error).toMatch(/worker stopped during a dry run/);
+    expect(r.meta.writes()).toEqual([]);
+  });
+});
+
+describe("organic recovery match (RK9-852 L-a, L-b)", () => {
+  function recovering(items: () => Array<Record<string, unknown>>): FakeRoutes {
+    let polls = 0;
+    return graph()
+      .on(`POST ${IG}/media_publish`, graphError(9007, "Media ID is not available"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: polls++ === 0 ? "FINISHED" : "PUBLISHED" } }))
+      .on(`GET ${IG}/media`, () => ({ body: { data: items() } }));
+  }
+  const item = (id: string, caption: string) => ({ id, timestamp: new Date().toISOString(), caption, media_type: "VIDEO", media_product_type: "REELS" });
+
+  async function approveRecovered(r: Rig, params: Record<string, unknown> = {}) {
+    const { gateRequestId, postId } = await request(r, params);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    return r.posts.rows.find((row) => row.id === postId)!;
+  }
+
+  it("two items with the caption: no media id (L-b)", async () => {
+    const r = await rig({ meta: recovering(() => [item(MEDIA, "Valo palaa. #ololla"), item("17999999999999999", "Valo palaa. #ololla")]) });
+    expect(await approveRecovered(r)).toMatchObject({ status: "published", metaMediaId: null });
+  });
+
+  it("an empty caption never matches, even a single empty item (L-a)", async () => {
+    const r = await rig({ meta: recovering(() => [item(MEDIA, "")]) });
+    r.creatives.rows[0]!.copy = { message: "" };
+    expect(await approveRecovered(r, { caption: "" })).toMatchObject({ status: "published", metaMediaId: null });
+  });
+
+  it("skips an id another post already holds, and an item of another kind (L-a)", async () => {
+    const r = await rig({ meta: recovering(() => [item(MEDIA, "Valo palaa. #ololla"), { ...item("17999999999999998", "Valo palaa. #ololla"), media_type: "IMAGE", media_product_type: "FEED" }]) });
+    const earlier = await request(r, { caption: "Toinen" });
+    r.posts.rows.find((row) => row.id === earlier.postId)!.metaMediaId = MEDIA;
+    expect(await approveRecovered(r)).toMatchObject({ status: "published", metaMediaId: null });
+  });
+});
+
+describe("organic stuck rows and the reason race (RK9-852)", () => {
+  it("a pending post that never got a card id expires after 10 minutes, so the content can get a card", async () => {
+    const r = await rig();
+    const content = await request(r);
+    const row = r.posts.rows.find((entry) => entry.id === content.postId)!;
+    row.gateRequestId = null;
+    expect(await request(r)).toMatchObject({ status: "exists", postId: row.id });
+    r.clock.now = new Date(r.clock.now.getTime() + 11 * 60_000);
+    const again = await request(r);
+    expect(again).toMatchObject({ status: "card_sent" });
+    expect(row.status).toBe("expired");
+  });
+
+  it("a reason tap that overtakes onDenied records the deny tapper, not the reason giver (L-c)", async () => {
+    const r = await rig();
+    const { gateRequestId, postId } = await request(r);
+    const gate = r.gates.rows.get(gateRequestId)!;
+    await r.service.onReason({ ...gate, status: "denied", live: true, decidedByTgUserId: APPROVER, decidedAt: r.clock.now }, 777, "visual", null);
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "rejected", decidedByTgUserId: APPROVER, rejectReasonCode: "visual" });
   });
 });

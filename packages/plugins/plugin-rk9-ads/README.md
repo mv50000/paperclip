@@ -829,24 +829,38 @@ plugin must not see).
    line ("Tila: 🔴 LIVE" or "Tila: 🧪 Kuivaharjoitus"), the lint summary,
    every `human` rule as a "☐" line, and last the caption, with each line
    quoted as "│ ". A caption therefore cannot pass for a line of the card.
+   A caption line, a rule line or a warning longer than 26 columns goes on in
+   chunks that start with "┆ ", so a phone never wraps agent text onto an
+   unquoted screen line (RK9-852). The rule text is cleaned like the caption.
+   When the card cannot show the video itself (it falls back to the poster or
+   to a text card), its first line says so and links the media.
    The buttons are "📣 Julkaise" (live) or "🧪 Kuivaharjoita" (dry run) and
    "❌ Hylkää". The card writes nothing to Meta. The caption is cleaned of
-   control characters, bidi controls and zero-width spaces. The
+   control characters (NEL included), bidi controls, zero-width spaces, the
+   invisible operators U+2060-2064, U+061C, U+180E and tag characters outside
+   a subdivision flag emoji. The card locks its media (see "Media lock"). The
    same content (company, creative sha256, channel, caption) gets one open
    card; a second request returns the open post.
 2. **Publish.** The tap goes through the kit router (chat, approver list,
    pending -> approved compare-and-set, update dedupe). The handler
    (`publishApproved` in `src/organic/service.ts`) checks the binding, re-reads
    the config and the creative hash, publishes only the media URL that the
-   card showed (a changed URL closes the card), moves the post pending -> publishing and
-   posts. The client has a write allowlist (`organicWriteGuard` in
+   card showed (a changed URL closes the card), checks the media lock again,
+   moves the post pending -> publishing and posts. The IG container id is
+   stored before `media_publish`. The client has a write allowlist (`organicWriteGuard` in
    `src/meta/organic.ts`): only the four shapes above and a delete of the one
    named object. No ad edge, status field or budget field can pass. An IG
    `media_publish` error is checked against the container: `PUBLISHED` counts
    as success. The media id is then stored only when exactly one recent media
-   item has the same caption; otherwise it stays empty and a delete is
-   refused. A change of `organic.mode` after the card closes the card without
+   item of the same kind has the same non-empty caption and no other post
+   holds that id; otherwise it stays empty. A board delete refuses such a
+   caption-matched id too, because another publisher may have posted the same
+   text. A change of `organic.mode` after the card closes the card without
    a Meta write: the approver saw the mode on the card.
+   A publish whose answer never came (network error, a Graph 5xx, an
+   unreadable body) may still be live. The post then stays in `publishing`
+   with `error: "result unknown: …"`, so the same content gets no second card
+   (see "Reconcile"). An error Meta answered closes the post as `failed`.
 3. **Reject.** "❌ Hylkää" edits the same card to the reason buttons (visual,
    text, claim, brand, topic, repeat). A reply to the card stores a typed
    reason as `other`. The first reason wins. The typed text is cleaned of
@@ -868,6 +882,62 @@ below.
 `tests/organic-sole-path.spec.ts` asserts that no action, job, tool or forged
 gate call publishes. Only an approved card does.
 
+### Media lock (RK9-852)
+
+Meta fetches the media URL only after the tap, up to `cardTtlHours` after the
+card. The plugin cannot hash the file: `ctx.http.fetch` is text based and the
+host stops a plugin request after 30 s, so a video never reaches the worker
+byte for byte. The lock is fail-closed instead (`src/organic/media-lock.ts`):
+
+1. A live card takes media only from a host in `organic.mediaHosts` (exact
+   hostname, https, default port). A dry-run card only warns on the card.
+2. At card time one HEAD stores Content-Type, Content-Length, ETag and
+   Last-Modified in `payload.mediaLock`. A live card needs Content-Length and
+   an ETag or a Last-Modified; a dry-run card only warns.
+3. Just before the publish the same HEAD runs again. A different value, a
+   missing header or a non-200 answer closes the card (`media_changed`)
+   without a Meta call. A card without a lock (older than RK9-852) is refused.
+4. With `organic.mediaHostTtlHours` the file expires at Last-Modified + TTL.
+   The card ends 10 min before that; a card shorter than 5 min is not sent
+   (`media_expiring`), and a later publish is refused (`media_expired`).
+
+Limits: a host that serves other bytes with the same length and validators,
+or swaps the file in the seconds between the second HEAD and Meta's fetch,
+goes unseen. That is why only a host the operator trusts qualifies. The
+manifest sha256 is still not checked against the bytes.
+
+Sunspot's media host (`/api/social/media/[slug]`, `src/lib/server/social/mediaStore.ts`
+in rk9-ai/sunspot, read 15.11.2026) keeps a file 120 min
+(`SOCIAL_MEDIA_TTL_MIN`) and answers with Content-Type and Content-Length
+only. A live card on it is refused (`media_unlockable`) until the host sends
+an ETag (ideally the sha256 of the body) or Last-Modified. Set
+`mediaHostTtlHours: 2` for it.
+
+### Reconcile (RK9-852)
+
+A post stuck in `publishing` (the worker stopped, or the result was unknown)
+blocks its content. The job `organic-reconcile` (every 15 min) and the board
+action `organic.reconcile { postId, closeUnknown? }` read the result from
+Meta and never write to it. They wait until the publisher is done: 30 min
+without an update, or 5 min after an unknown result.
+
+| Case | Result |
+|---|---|
+| Dry run | `failed`: nothing was sent to Meta |
+| IG, no stored container | `failed`: `media_publish` never ran |
+| IG container not `PUBLISHED` | `failed` |
+| IG container `PUBLISHED` | `published`; the media id only from a unique caption match |
+| FB, exactly one Page photo or video with the text since the tap | `published` (caption-matched id) |
+| Anything unclear | stays `publishing`; the board closes it with `closeUnknown: true` after checking the account (`failed`) |
+
+A caption-matched media id cannot be deleted from the board. A pending post
+that never got a card id (the worker stopped between the insert and the card)
+reads as `expired` after 10 min, so its content can get a new card.
+
+The FB lookup reads `{page}/photos?type=uploaded` and `{page}/videos` with the
+Page token. Whether `pages_read_engagement` suffices for it is not verified
+against a live Page.
+
 ### Meta permissions (operator decision)
 
 Organic posting needs permissions that the current ads token does not have.
@@ -877,7 +947,7 @@ The plugin does not request them; a new permission is the operator's decision.
 |---|---|---|
 | System user token (IG) | `meta.accessTokenRef` | `instagram_basic`, `instagram_content_publish` |
 | Page access token (FB) | `organic.pageAccessTokenRef` | `pages_manage_posts`, `pages_read_engagement`, `pages_show_list` |
-| Delete of an IG post | `meta.accessTokenRef` | probably `instagram_manage_contents` (not verified) |
+| Delete of an IG post | `meta.accessTokenRef` | open (M3, RK9-852): not verified whether `DELETE {ig-media-id}` works at all, nor which permission it needs (maybe `instagram_manage_contents`). Verify on a test account before relying on the board delete for IG; until then delete an IG post in the Instagram app |
 
 In live mode the card request reads `me/permissions` and refuses an IG card
 when a permission is missing. The IG user id goes to `meta.igUserId`.
@@ -891,11 +961,29 @@ when a permission is missing. The IG user id goes to `meta.igUserId`.
 | `channels` | — | At least one of `ig_reel`, `ig_feed`, `fb_video`, `fb_photo` |
 | `pageAccessTokenRef` | — | Secret ref; required for an `fb_*` channel |
 | `cardTtlHours` | 24 | 1..168; an expired card does not publish |
+| `mediaHosts` | `[]` | Exact hostnames a live post takes media from; empty = no live post |
+| `mediaHostTtlHours` | — | How long the media host keeps a file from its Last-Modified; the card ends before that |
 
 ### Install and update
 
 Migration 006 adds `organic_posts` and the gate kind `organic_publish`. The
-capabilities do not change. Install as in ADR 5. In prod, update with a soft
+capabilities do not change.
+
+Before the first prod install, check the name of the gate kind CHECK that
+migration 006 drops. It assumes the Postgres default name
+`gate_requests_kind_check`. The check was not run (15.11.2026: no read access
+to the prod database from the worktree). Run it read-only:
+
+```sql
+SELECT n.nspname, c.conname, pg_get_constraintdef(c.oid)
+FROM pg_constraint c
+JOIN pg_class t ON t.oid = c.conrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE t.relname = 'gate_requests' AND c.contype = 'c';
+```
+
+If the name differs, 006 fails on `DROP CONSTRAINT` and the install stops
+before any change (the host runs a migration in one transaction). Install as in ADR 5. In prod, update with a soft
 uninstall, then `paperclipai plugin install --local <abs path>` from a pinned
 checkout. Plugin jobs run in UTC.
 
@@ -904,6 +992,8 @@ checkout. Plugin jobs run in UTC.
 | `organic.request` | action | Opens one card for a staged creative |
 | `organic.posts` | action | Lists the posts of the company (newest first) |
 | `organic.delete` | action | Previews or deletes a published post (board only) |
+| `organic.reconcile` | action | Closes a post stuck in `publishing` from Meta's answer (board only) |
+| `organic-reconcile` | job | The same for every company, every 15 min |
 | `rk9ads_request_organic_post` | tool | The agent path to `organic.request`; it cannot publish |
 
 ## Operator UI (RK9-518)

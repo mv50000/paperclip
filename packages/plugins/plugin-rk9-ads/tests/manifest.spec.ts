@@ -135,6 +135,7 @@ describe("manifest", () => {
       "gate-expiry",
       "insights-daily-close",
       "insights-hourly",
+      "organic-reconcile",
       "rules-evaluate",
       "scheduled-pause",
       "smoke",

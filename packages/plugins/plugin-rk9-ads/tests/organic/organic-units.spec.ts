@@ -2,7 +2,11 @@
 import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../../src/config.js";
 import type { WritePlan } from "../../src/meta/graph.js";
-import { organicWriteGuard } from "../../src/meta/organic.js";
+import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError } from "../../src/meta/organic.js";
+import { InvalidParamError, MetaGraphError, MetaResponseError, RateLimitError, TokenResolveError, WriteRefusedError } from "../../src/meta/errors.js";
+import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine } from "../../src/organic/card.js";
+import { cardDeadline, lockMedia, recheckMedia } from "../../src/organic/media-lock.js";
+import { oneLineText } from "../../src/organic/text.js";
 import { checkLint } from "../../src/organic/lint.js";
 import { cleanCaption } from "../../src/organic/service.js";
 import { formatDigest, type DigestInput } from "../../src/digest/format.js";
@@ -58,6 +62,22 @@ describe("organicWriteGuard", () => {
 });
 
 describe("organic config", () => {
+  it("parses organic.mediaHosts as lowercase exact hostnames and refuses a URL or a port (RK9-852)", () => {
+    const meta = { adAccountId: "act_1", pageId: "1", igUserId: "2", accessTokenRef: secretRef(SECRET_A_META) };
+    const ok = parseBrandConfig(brandConfig({ meta, organic: { enabled: true, channels: ["ig_reel"], mediaHosts: ["Media.Ololla.fi", "media.ololla.fi"], mediaHostTtlHours: 2 } }));
+    expect(ok.state).toBe("enabled");
+    if (ok.state !== "enabled") throw new Error("unreachable");
+    expect(ok.config.organic).toMatchObject({ mediaHosts: ["media.ololla.fi"], mediaHostTtlHours: 2 });
+    const none = parseBrandConfig(brandConfig({ meta, organic: { enabled: true, channels: ["ig_reel"] } }));
+    if (none.state !== "enabled") throw new Error("unreachable");
+    expect(none.config.organic!.mediaHosts).toEqual([]);
+    expect(none.config.organic!.mediaHostTtlHours).toBeUndefined();
+    for (const bad of [["https://media.ololla.fi"], ["media.ololla.fi:443"], ["localhost"]]) {
+      expect(parseBrandConfig(brandConfig({ meta, organic: { enabled: true, channels: ["ig_reel"], mediaHosts: bad } })).state).toBe("invalid");
+    }
+    expect(parseBrandConfig(brandConfig({ meta, organic: { enabled: true, channels: ["ig_reel"], mediaHostTtlHours: 0 } })).state).toBe("invalid");
+  });
+
   const meta = { adAccountId: "act_29231592883113369", pageId: PAGE, igUserId: IG, accessTokenRef: secretRef(SECRET_A_META) };
 
   it("defaults to dry run and parses the channels", () => {
@@ -131,11 +151,13 @@ describe("organic digest lines", () => {
           { channel: "ig_feed", status: "rejected", mode: "dry_run", permalink: null, error: null, rejectReasonCode: null },
           { channel: "fb_video", status: "dry_run", mode: "dry_run", permalink: null, error: null, rejectReasonCode: null },
           { channel: "ig_reel", status: "pending", mode: "live", permalink: null, error: null, rejectReasonCode: null },
+          { channel: "fb_photo", status: "publishing", mode: "live", permalink: null, error: "result unknown: Page photo", rejectReasonCode: null },
         ],
       }),
     );
     expect(text).not.toBeNull();
-    expect(text).toContain("📣 Orgaaniset julkaisut (24 h): 5");
+    expect(text).toContain("📣 Orgaaniset julkaisut (24 h): 6");
+    expect(text).toContain("⏳ Facebook-sivu (kuva): julkaisun tulos epäselvä, tarkistetaan Metasta (result unknown: Page photo)");
     expect(text).toContain("✅ Instagram Reel julkaistu: https://www.instagram.com/reel/ABC/");
     expect(text).toContain("⚠️ Facebook-sivu (kuva): ei julkaistu (OAuthException (#200))");
     expect(text).toContain("❌ Instagram-syöte (kuva): hylätty (väite tai luku)");
@@ -148,5 +170,93 @@ describe("cleanCaption", () => {
   it("drops bidi controls, zero-width spaces and the BOM, keeps the emoji joiner and line feeds", () => {
     expect(cleanCaption("\ufeffValo\u200b palaa\u202e.gpj\u202c\r\nrivi\u2028kolme\u2066x\u2069\u200e\u200f\u0007")).toBe("Valo palaa.gpj\nrivi\nkolmex");
     expect(cleanCaption("perhe 👨\u200d👩\u200d👧")).toBe("perhe 👨\u200d👩\u200d👧");
+  });
+
+  it("drops NEL, U+061C, the invisible operators, the deprecated format controls and stray tag characters (RK9-852)", () => {
+    expect(cleanCaption("a\u0085b\u061cc\u2061d\u2062e\u2063f\u2064g\u206ah\u180ei\ufff9j")).toBe("abcdefghij");
+    expect(cleanCaption("piilo\u{E0054}\u{E0069}\u{E006C}\u{E0061}teksti\u{E007F}")).toBe("piiloteksti");
+  });
+
+  it("keeps a subdivision flag emoji, which needs tag characters", () => {
+    const wales = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}";
+    expect(cleanCaption(`Terveiset ${wales}!`)).toBe(`Terveiset ${wales}!`);
+  });
+
+  it("oneLineText turns NEL and line feeds into spaces and drops bidi controls", () => {
+    expect(oneLineText("Logo\u0085Tila:\n🧪 x\u202e  y")).toBe("Logo Tila: 🧪 x y");
+  });
+});
+
+describe("caption chunks (RK9-852)", () => {
+  it("splits a long line into chunks of at most CAPTION_CHUNK_COLUMNS columns without losing text", () => {
+    const line = "Valo palaa Helsinkiin ja aurinko nousee taas joka aamu aikaisemmin kuin eilen";
+    const chunks = chunkLine(line);
+    expect(chunks.join("")).toBe(line);
+    expect(chunks.every((chunk) => [...chunk].length <= CAPTION_CHUNK_COLUMNS)).toBe(true);
+    expect(chunks[0]!.endsWith(" ")).toBe(true);
+  });
+
+  it("counts an emoji as two columns and never splits a grapheme", () => {
+    const chunks = chunkLine("👨\u200d👩\u200d👧".repeat(20));
+    expect(chunks.join("")).toBe("👨\u200d👩\u200d👧".repeat(20));
+    expect(chunks[0]).toBe("👨\u200d👩\u200d👧".repeat(CAPTION_CHUNK_COLUMNS / 2));
+  });
+
+  it("opens each caption line with the quote mark and each continuation with the dashed mark", () => {
+    expect(captionLines(`${"\u2800".repeat(30)}Tila: LIVE\nok`)).toEqual([`│ ${"\u2800".repeat(26)}`, `┆ ${"\u2800".repeat(4)}Tila: LIVE`, "│ ok"]);
+    expect(captionLines("")).toEqual(["│ (ei tekstiä)"]);
+  });
+});
+
+describe("outcomeUnknown (RK9-852)", () => {
+  it("treats a missing or unreadable answer and a 5xx as unknown, a local refusal and a Graph 4xx as not published", () => {
+    expect(outcomeUnknown(new MetaGraphError("Meta POST x: request failed (TypeError: fetch failed)"))).toBe(true);
+    expect(outcomeUnknown(new MetaResponseError("not JSON"))).toBe(true);
+    expect(outcomeUnknown(new MetaGraphError("boom", { httpStatus: 503 }))).toBe(true);
+    expect(outcomeUnknown(new TypeError("x"))).toBe(true);
+    expect(outcomeUnknown(new OrganicOutcomeUnknownError("x", null))).toBe(true);
+    expect(outcomeUnknown(new MetaGraphError("bad", { httpStatus: 400, code: 1 }))).toBe(false);
+    expect(outcomeUnknown(new RateLimitError("slow", { httpStatus: 400, code: 4 }))).toBe(false);
+    expect(outcomeUnknown(new InvalidParamError("caption too long"))).toBe(false);
+    expect(outcomeUnknown(new WriteRefusedError("POST", "x", "guard"))).toBe(false);
+    expect(outcomeUnknown(new TokenResolveError("no token"))).toBe(false);
+  });
+});
+
+describe("media lock (RK9-852 M2)", () => {
+  const now = new Date("2026-11-15T10:00:00Z");
+  const url = "https://media.ololla.fi/v.mp4";
+  const answer = (status: number, headers: Record<string, string>) => async () => new Response(null, { status, headers });
+  const good = { "content-type": "video/mp4", "content-length": "100", etag: '"a"', "last-modified": "Sun, 15 Nov 2026 09:00:00 GMT" };
+
+  it("refuses http, a port and credentials in the URL", async () => {
+    for (const bad of ["http://media.ololla.fi/v.mp4", "https://media.ololla.fi:8443/v.mp4", "https://u:p@media.ololla.fi/v.mp4"]) {
+      expect(await lockMedia(answer(200, good), { url: bad, mode: "dry_run", mediaHosts: ["media.ololla.fi"], now })).toMatchObject({ ok: false, code: "media_untrusted" });
+    }
+  });
+
+  it("matches the host exactly: a subdomain or a look-alike is not trusted", async () => {
+    for (const bad of ["https://evil.media.ololla.fi/v.mp4", "https://media.ololla.fi.evil.fi/v.mp4"]) {
+      expect(await lockMedia(answer(200, good), { url: bad, mode: "live", mediaHosts: ["media.ololla.fi"], now })).toMatchObject({ ok: false, code: "media_untrusted" });
+    }
+  });
+
+  it("computes the expiry from Last-Modified and cuts the card deadline 10 min before it", async () => {
+    const locked = await lockMedia(answer(200, good), { url, mode: "live", mediaHosts: ["media.ololla.fi"], mediaHostTtlHours: 2, now });
+    expect(locked).toMatchObject({ ok: true, lock: { expiresAt: "2026-11-15T11:00:00.000Z" } });
+    if (!locked.ok) throw new Error("unreachable");
+    expect(cardDeadline(locked.lock, new Date("2026-11-16T10:00:00Z")).toISOString()).toBe("2026-11-15T10:50:00.000Z");
+    expect(cardDeadline(locked.lock, new Date("2026-11-15T10:30:00Z")).toISOString()).toBe("2026-11-15T10:30:00.000Z");
+  });
+
+  it("recheck: a header that vanished counts as a change, the same answer passes", async () => {
+    const locked = await lockMedia(answer(200, good), { url, mode: "live", mediaHosts: ["media.ololla.fi"], now });
+    if (!locked.ok) throw new Error("unreachable");
+    const input = { url, mode: "live" as const, mediaHosts: ["media.ololla.fi"], now };
+    expect(await recheckMedia(answer(200, good), locked.lock, input)).toBeNull();
+    const { etag: _etag, ...noEtag } = good;
+    expect(await recheckMedia(answer(200, noEtag), locked.lock, input)).toMatch(/media_changed: etag/);
+    expect(await recheckMedia(answer(200, good), locked.lock, { ...input, mediaHosts: [] })).toMatch(/media_untrusted/);
+    expect(await recheckMedia(async () => { throw new Error("ECONNRESET"); }, locked.lock, input)).toMatch(/media_changed: HEAD failed/);
   });
 });

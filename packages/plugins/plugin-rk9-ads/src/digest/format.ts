@@ -82,6 +82,11 @@ function organicLine(post: OrganicPostSummary): string | null {
       return `❌ ${channel}: hylätty${post.rejectReasonCode ? ` (${REASON_LABELS[post.rejectReasonCode] ?? post.rejectReasonCode})` : ", syy puuttuu"}`;
     case "expired":
       return `⌛ ${channel}: kortti vanheni`;
+    case "publishing":
+      // RK9-852: an unknown publish result stays open until organic-reconcile reads it from Meta.
+      return post.error
+        ? `⏳ ${channel}: julkaisun tulos epäselvä, tarkistetaan Metasta (${post.error.slice(0, 160)})`
+        : `⏳ ${channel}: julkaisu kesken`;
     default:
       return null;
   }
