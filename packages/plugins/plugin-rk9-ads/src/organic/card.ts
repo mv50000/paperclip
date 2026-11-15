@@ -89,17 +89,29 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 // Emoji and East Asian wide characters take two columns.
 const WIDE_RE = /\p{Extended_Pictographic}|[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|[\u{20000}-\u{3fffd}]/u;
 // Scripts whose width a phone font makes about one column: Latin, Greek, Cyrillic, common punctuation, braille.
+const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}\p{Cf}\u{1F3FB}-\u{1F3FF}]$/u;
+const REGIONAL_RE = /^[\u{1F1E6}-\u{1F1FF}]$/u;
 const NARROW_RE = /^[\u0020-\u024f\u0370-\u03ff\u0400-\u04ff\u1e00-\u1eff\u2000-\u206f\u20a0-\u20cf\u2100-\u214f\u2190-\u21ff\u2500-\u257f\u2800-\u28ff]/u;
 
 /**
- * An estimate that errs wide: a glyph of another script (a ligature such as
- * U+FDFD, cuneiform) fills a chunk alone, so no wide glyph can push the
- * rest of its chunk onto an unquoted screen line.
+ * An estimate that errs wide, summed over every code point of the grapheme
+ * (a ZWJ chain shows as several emoji, a spacing mark takes room of its own):
+ * a non-spacing mark, an enclosing mark, a format character (the ZWJ, a tag)
+ * or a skin-tone modifier adds nothing, an emoji or East Asian character 2, a
+ * regional indicator or a narrow-script character 1. Any other code point (a
+ * spacing mark, a ligature such as U+FDFD, cuneiform) makes the grapheme fill
+ * a chunk alone, so no wide glyph can push the rest of its chunk onto an
+ * unquoted screen line.
  */
-function columns(grapheme: string): number {
-  if (WIDE_RE.test(grapheme)) return 2;
-  if (NARROW_RE.test(grapheme)) return 1;
-  return CAPTION_CHUNK_COLUMNS;
+export function columns(grapheme: string): number {
+  let width = 0;
+  for (const codePoint of grapheme) {
+    if (ZERO_WIDTH_RE.test(codePoint)) continue;
+    if (WIDE_RE.test(codePoint)) width += 2;
+    else if (NARROW_RE.test(codePoint) || REGIONAL_RE.test(codePoint)) width += 1;
+    else return CAPTION_CHUNK_COLUMNS;
+  }
+  return Math.min(Math.max(width, 1), CAPTION_CHUNK_COLUMNS);
 }
 
 /**

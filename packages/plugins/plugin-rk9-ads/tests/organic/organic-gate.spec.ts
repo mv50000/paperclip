@@ -856,6 +856,10 @@ describe("organic verifier round 1 fixes (RK9-852)", () => {
     const messageId = cardMessageId(r, gateRequestId);
     await tap(r, messageId, r.fake.buttons(messageId)[0]!);
     expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "publishing", metaContainerId: CONTAINER });
+    // Not stuck: after the idle period the job reads the container (FINISHED: never live) and closes the row.
+    r.clock.now = new Date(r.clock.now.getTime() + 31 * 60_000);
+    expect(await r.service.reconcileStale()).toEqual({ checked: 1, closed: 1 });
+    expect(r.posts.rows.find((row) => row.id === postId)!.status).toBe("failed");
   });
 
   it("closes the post as failed when media_publish answered an error and the container is ERROR", async () => {

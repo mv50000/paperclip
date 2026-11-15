@@ -831,9 +831,11 @@ plugin must not see).
    quoted as "│ ". A caption therefore cannot pass for a line of the card.
    A caption line, a rule line or a warning longer than 20 columns goes on in
    chunks that start with "┆ ", so a phone never wraps agent text onto an
-   unquoted screen line (RK9-852). The width estimate errs wide: an emoji or
-   East Asian character counts 2, a glyph outside Latin, Greek, Cyrillic,
-   common punctuation and braille fills a chunk alone. A very large phone
+   unquoted screen line (RK9-852). The width estimate errs wide and sums every
+   code point of a grapheme: an emoji or East Asian character counts 2 (each
+   emoji of a ZWJ chain too), a mark or format character 0, and a code point
+   outside Latin, Greek, Cyrillic, common punctuation and braille (a spacing
+   mark, a ligature) makes its grapheme fill a chunk alone. A very large phone
    font can still wrap a chunk; a Telegram blockquote entity would close that
    gap (follow-up). A media URL with whitespace or a control character is
    refused at staging and on the card, and the card shows only the parsed URL. The rule text is cleaned like the caption.

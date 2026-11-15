@@ -4,7 +4,7 @@ import { parseBrandConfig } from "../../src/config.js";
 import type { WritePlan } from "../../src/meta/graph.js";
 import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError } from "../../src/meta/organic.js";
 import { InvalidParamError, MetaGraphError, MetaResponseError, RateLimitError, TokenResolveError, WriteRefusedError } from "../../src/meta/errors.js";
-import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine } from "../../src/organic/card.js";
+import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, columns, displayUrl } from "../../src/organic/card.js";
 import { cardDeadline, lockMedia, recheckMedia } from "../../src/organic/media-lock.js";
 import { oneLineText } from "../../src/organic/text.js";
 import { checkLint } from "../../src/organic/lint.js";
@@ -202,10 +202,28 @@ describe("caption chunks (RK9-852)", () => {
     expect(chunks[0]!.endsWith(" ")).toBe(true);
   });
 
-  it("counts an emoji as two columns and never splits a grapheme", () => {
-    const chunks = chunkLine("👨\u200d👩\u200d👧".repeat(20));
-    expect(chunks.join("")).toBe("👨\u200d👩\u200d👧".repeat(20));
-    expect(chunks[0]).toBe("👨\u200d👩\u200d👧".repeat(CAPTION_CHUNK_COLUMNS / 2));
+  it("counts every emoji of a ZWJ sequence and never splits a grapheme", () => {
+    const family = "👨\u200d👩\u200d👧";
+    expect(columns(family)).toBe(6);
+    const chunks = chunkLine(family.repeat(20));
+    expect(chunks.join("")).toBe(family.repeat(20));
+    expect(chunks[0]).toBe(family.repeat(3));
+    expect(columns("🇫🇮")).toBe(2);
+    expect(columns("👍🏽")).toBe(2);
+    expect(columns("e\u0301")).toBe(1);
+  });
+
+  it("a ZWJ chain or a spacing mark run fills a chunk alone, so forged text after it starts a quoted chunk (verifier round 2)", () => {
+    const cats = Array.from({ length: 30 }, () => "🐈").join("\u200d");
+    expect(chunkLine(`${cats}Tila: LIVE`)).toEqual([cats, "Tila: LIVE"]);
+    const marks = `a${"\u0bbe".repeat(60)}`;
+    expect(chunkLine(`${marks}Tila: LIVE`)).toEqual([marks, "Tila: LIVE"]);
+  });
+
+  it("displayUrl prints only the parsed URL", () => {
+    expect(displayUrl("https://media.ololla.fi/ä.mp4")).toBe("https://media.ololla.fi/%C3%A4.mp4");
+    expect(displayUrl("https://media.ololla.fi/v.mp4?x=\nTila: LIVE")).toBe("https://media.ololla.fi/v.mp4?x=Tila:%20LIVE");
+    expect(displayUrl("not a url")).toBe("(virheellinen osoite)");
   });
 
   it("puts a glyph of an uncommon script in a chunk of its own (M1)", () => {
