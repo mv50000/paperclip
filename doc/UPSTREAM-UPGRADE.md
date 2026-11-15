@@ -157,6 +157,10 @@ jokainen porras tuo rivit takaisin, jos upstream muuttaa niitä. Muutokset on me
 - `.github/workflows/storybook-visual.yml` (upstream, v2026.720.0) — `pull_request`-jobi: vipu fork-suojalla,
   `workflow_dispatch`illa vipu ilman suojaa.
 - `.github/workflows/docker.yml`, `refresh-lockfile.yml` — `runs-on`.
+- `.github/workflows/refresh-lockfile.yml` — auto-merge-askel ei kaada ajoa (RK9-856). Fork ei salli
+  auto-mergeä, joten lockfile-PR jää auki ja se mergetään käsin.
+- `package.json` ja `pnpm-workspace.yaml` — override `@smithy/core: ^3.40.0` (RK9-856). Poista override,
+  kun upstreamin lockfile ei enää sisällä versiota 3.35.1.
 - `.github/workflows/e2e.yml`, `release-smoke.yml` — `runs-on` ja Playwright-askel.
 - `.github/workflows/ai-auto-merge.yml` (vain forkissa) — `runs-on`, deploy-dev-dispatch pois,
   `actions: read`.

@@ -47,3 +47,9 @@ overrides:
   # Parsers and highlighters must share NodeProp IDs from one Lezer instance.
   # Mixed copies can interpret unrelated node metadata as highlighting tags.
   "@lezer/common": "^1.5.2"
+  # --- RK9 Custom (RK9-856) ---
+  # @smithy/core 3.35.1 is deprecated: its custom logger redaction has a bug
+  # (aws/aws-sdk-js-v3 issue 8393). @aws-sdk/client-s3 kept that copy in the
+  # lockfile, because a lockfile refresh does not move an existing resolution.
+  # Remove this override when upstream no longer resolves 3.35.1.
+  "@smithy/core": "^3.40.0"
