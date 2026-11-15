@@ -50,10 +50,10 @@ function imageManifest(): Record<string, unknown> {
   return { ...base, kind: "image", mediaUrl: IMAGE_URL, sha256: SHA_IMAGE, aspectRatio: "1:1", idempotencyKey: "aur-image-terassi" };
 }
 
-function sunspotConfig(stagingMode?: string): Record<string, unknown> {
+function sunspotConfig(stagingMode?: string, extraMeta: Record<string, unknown> = {}): Record<string, unknown> {
   return brandConfig({
     brandCode: "AUR",
-    meta: { adAccountId: AD_ACCOUNT, pageId: "1", accessTokenRef: secretRef(SECRET_A_META), ...(stagingMode ? { stagingMode } : {}) },
+    meta: { adAccountId: AD_ACCOUNT, pageId: "1", accessTokenRef: secretRef(SECRET_A_META), ...(stagingMode ? { stagingMode } : {}), ...extraMeta },
     landing: { allowedDomains: ["sunspot.fi"], urls: { home: "https://sunspot.fi/" } },
   });
 }
@@ -77,10 +77,12 @@ describeDb("dry-run creative staging (real Postgres)", () => {
     await testDb?.cleanup();
   });
 
-  async function setup(stagingMode?: string, withSecret = true) {
+  type DbClient = PluginTestDatabase["client"];
+
+  async function setup(stagingMode?: string, withSecret = true, options: { extraMeta?: Record<string, unknown>; db?: (client: DbClient) => DbClient } = {}) {
     harness = createTestHarness({ manifest });
     harness.seed({ companies: [{ id: company, name: "Sunspot (dev)" } as Company] });
-    useCompanyConfigs(harness, { [company]: sunspotConfig(stagingMode) });
+    useCompanyConfigs(harness, { [company]: sunspotConfig(stagingMode, options.extraMeta) });
     useCompanySecrets(harness, withSecret ? { [company]: { [SECRET_A_META]: "EAAG-sunspot-dev-token" } } : { [company]: {} });
     const resolve = harness.ctx.secrets.resolve.bind(harness.ctx.secrets);
     secretResolves = 0;
@@ -88,7 +90,7 @@ describeDb("dry-run creative staging (real Postgres)", () => {
       secretResolves += 1;
       return resolve(...args);
     };
-    (harness.ctx as { db: unknown }).db = testDb.client;
+    (harness.ctx as { db: unknown }).db = options.db ? options.db(testDb.client) : testDb.client;
     fake = new FakeMediaAndGraph()
       .head(VIDEO_URL, { headers: { "content-type": "video/mp4", "content-length": String(20 * 1024 * 1024) } })
       .head(POSTER_URL, { headers: { "content-type": "image/jpeg", "content-length": "200000" } })
@@ -196,5 +198,98 @@ describeDb("dry-run creative staging (real Postgres)", () => {
     expect(stored.meta_video_id).toBeTruthy();
     expect((await sqlCreativeSource(createLedger(testDb.client)).get(company, id))?.stagingDryRun).toBe(false);
     expect(harness.activity.some((entry) => entry.message === "rk9-ads creative restaged")).toBe(true);
+  });
+  // RK9-853: the rows a dry-run stage meets after a live one.
+  async function liveRowAs(status: string, extraSql = "") {
+    await setup("live");
+    const first = await viaRoute(videoManifest());
+    const id = (first.body as { creative: { id: string } }).creative.id;
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET status = $2, meta_video_id = NULL${extraSql} WHERE id = $1`, [id, status]);
+    return id;
+  }
+
+  for (const status of ["expired", "rejected"]) {
+    it(`a dry-run stage of an ${status} live row restages it as a dry run, with no Meta call`, async () => {
+      const id = await liveRowAs(status);
+      await setup("dry_run", false);
+      const response = await viaRoute(videoManifest());
+      expect(response.status).toBe(200);
+      expect((response.body as { creative: Record<string, unknown> }).creative).toMatchObject({ id, status: "staged", stagingMode: "dry_run", metaVideoId: null });
+      expect(graphCalls()).toEqual([]);
+      expect(secretResolves).toBe(0);
+      expect((await sqlCreativeSource(createLedger(testDb.client)).get(company, id))?.stagingDryRun).toBe(true);
+    });
+  }
+
+  it("a dry-run stage of a live failed row without a video id marks it and sends no Meta call", async () => {
+    const id = await liveRowAs("failed");
+    await setup("dry_run", false);
+    const response = await viaRoute(videoManifest());
+    expect(response.status).toBe(200);
+    expect((response.body as { creative: Record<string, unknown> }).creative).toMatchObject({ id, status: "staged", stagingMode: "dry_run" });
+    expect(graphCalls()).toEqual([]);
+    expect((await row()).payload).toMatchObject({ stagingMode: "dry_run", plannedCalls: [expect.objectContaining({ path: `${AD_ACCOUNT}/advideos` })] });
+  });
+
+  it("a dry-run stage claims a stale live upload, marks it and sends no Meta call", async () => {
+    const id = await liveRowAs("uploading", ", updated_at = now() - interval '30 minutes'");
+    await setup("dry_run", false);
+    const response = await viaRoute(videoManifest());
+    expect(response.status).toBe(200);
+    expect((response.body as { creative: Record<string, unknown> }).creative).toMatchObject({ id, status: "staged", stagingMode: "dry_run" });
+    expect(graphCalls()).toEqual([]);
+    expect((await sqlCreativeSource(createLedger(testDb.client)).get(company, id))?.stagingDryRun).toBe(true);
+  });
+
+  it("a dry run that dies after the claim leaves the row marked: the marker is in the claim write", async () => {
+    const id = await liveRowAs("failed");
+    // The worker dies at the write after the dry-run client answered (status back to
+    // staged with the planned calls): that write and every later one never happen.
+    let dead = false;
+    await setup("dry_run", false, {
+      db: (client) => ({
+        ...client,
+        execute: async (statement: string, params?: unknown[]) => {
+          if (/UPDATE/.test(statement) && (params ?? []).some((param) => typeof param === "string" && param.includes("plannedCalls"))) dead = true;
+          if (dead) throw new Error("worker died");
+          return client.execute(statement, params);
+        },
+      }),
+    });
+    await viaRoute(videoManifest()).catch(() => undefined);
+    const stored = await row();
+    expect(stored.status).toBe("uploading");
+    expect(stored.payload).toMatchObject({ stagingMode: "dry_run" });
+    expect((await sqlCreativeSource(createLedger(testDb.client)).get(company, id))?.stagingDryRun).toBe(true);
+    expect(graphCalls()).toEqual([]);
+  });
+
+  it("dryRunMediaCheck skip stages a dry run with no HEAD and says so on the creative", async () => {
+    await setup("dry_run", false, { extraMeta: { dryRunMediaCheck: "skip" } });
+    const response = await viaRoute(videoManifest({ mediaUrl: "https://media.unreachable.example/a.mp4", posterUrl: undefined }));
+    expect(response.status).toBe(201);
+    expect((response.body as { creative: Record<string, unknown> }).creative).toMatchObject({ status: "staged", stagingMode: "dry_run", mediaCheck: "skipped" });
+    expect(fake.mediaCalls).toEqual([]);
+    expect(graphCalls()).toEqual([]);
+    expect((await row()).payload).toMatchObject({ stagingMode: "dry_run", mediaCheck: "skipped" });
+  });
+
+  it("dryRunMediaCheck head keeps both HEADs in a dry run", async () => {
+    await setup("dry_run", false, { extraMeta: { dryRunMediaCheck: "head" } });
+    const response = await viaRoute(videoManifest());
+    expect(response.status).toBe(201);
+    expect((response.body as { creative: Record<string, unknown> }).creative).not.toHaveProperty("mediaCheck");
+    expect(fake.mediaCalls.map((call) => call.method)).toEqual(["HEAD", "HEAD"]);
+  });
+
+  it("legacy payloads: a JSON null is live, a JSON string is parsed (the marker inside counts)", async () => {
+    const id = await liveRowAs("staged");
+    const source = sqlCreativeSource(createLedger(testDb.client));
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET payload = 'null'::jsonb WHERE id = $1`, [id]);
+    expect((await source.get(company, id))?.stagingDryRun).toBe(false);
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET payload = to_jsonb($2::text) WHERE id = $1`, [id, JSON.stringify({ stagingMode: "dry_run" })]);
+    expect((await source.get(company, id))?.stagingDryRun).toBe(true);
+    await testDb.adminQuery(`UPDATE ${testDb.namespace}.creatives SET payload = to_jsonb('not json'::text) WHERE id = $1`, [id]);
+    expect((await source.get(company, id))?.stagingDryRun).toBe(false);
   });
 });

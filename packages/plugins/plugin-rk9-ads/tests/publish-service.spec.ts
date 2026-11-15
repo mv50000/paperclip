@@ -483,6 +483,38 @@ describe("a dry-run staged creative (RK9-849)", () => {
     expect(store.rows).toEqual([]);
   });
 
+  it("a creative marked a dry run after the submit stops the run before any Meta write (RK9-853)", async () => {
+    for (const creativeId of [CREATIVE_IMAGE, CREATIVE_VIDEO]) {
+      const rig = serviceRig({
+        deps: {
+          // Runs in run() after the submit checked the creative: a dry-run stage of the same media lands here.
+          assertLaunchReady: async () => {
+            for (const row of rig.creatives.rows) row.stagingDryRun = true;
+          },
+        },
+      });
+      await rig.service.publish(COMPANY, { creativeId }, UI);
+      await rig.service.settled();
+      expect(rig.routes.calls.filter((call) => call.method !== "GET")).toEqual([]);
+      expect(rig.store.rows[0]).toMatchObject({ status: "failed", metaVideoId: null, metaCreativeId: null, metaAdId: null });
+      expect(rig.store.rows[0]!.error).toMatch(/^creative_not_publishable: .*dry-run mode after the submit/);
+    }
+  });
+
+  it("a creative row gone after the submit stops the run too (fail closed)", async () => {
+    const rig = serviceRig({
+      deps: {
+        assertLaunchReady: async () => {
+          rig.creatives.rows.splice(0);
+        },
+      },
+    });
+    await rig.service.publish(COMPANY, { creativeId: CREATIVE_VIDEO }, UI);
+    await rig.service.settled();
+    expect(rig.routes.calls.filter((call) => call.method !== "GET")).toEqual([]);
+    expect(rig.store.rows[0]!.error).toMatch(/^creative_not_found: /);
+  });
+
   it("a creative without the marker publishes as before", async () => {
     const { service, store } = serviceRig({ creatives: [imageCreative({ stagingDryRun: false }), videoCreative()] });
     await service.publish(COMPANY, { creativeId: CREATIVE_IMAGE }, UI);

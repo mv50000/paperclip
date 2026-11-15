@@ -1093,15 +1093,36 @@ describe("a publication whose staged creative is a dry run (RK9-849)", () => {
     const sent = await r.cards.openActivationCard(publication());
     await tap(r, sent.messageId);
     expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "creative_dry_run" });
+    expect(caption(r, sent.messageId)).toContain("kuivaharjoitus");
     expect(r.meta.writes).toEqual([]);
   });
 
-  it("a publication whose creative row is missing is denied too (fail closed)", async () => {
+  it("a publication whose creative row is missing is denied with its own reason (fail closed, RK9-853)", async () => {
     const r = await rig({ gate: { creatives: memoryCreativeSource([]) } });
     r.publications.rows[0]!.creativeId = CREATIVE;
     const sent = await r.cards.openActivationCard(publication());
     await tap(r, sent.messageId);
-    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "creative_dry_run" });
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "creative_missing" });
+    const text = caption(r, sent.messageId);
+    expect(text).toContain("julkaisun creative-rivi puuttuu");
+    expect(text).not.toContain("kuivaharjoitus");
+    expect(r.meta.writes).toEqual([]);
+  });
+
+  it("a creative read that throws denies the activation (publication_unavailable), with no Meta write", async () => {
+    const r = await rig({
+      gate: {
+        creatives: {
+          async get() {
+            throw new Error("database is down");
+          },
+        },
+      },
+    });
+    r.publications.rows[0]!.creativeId = CREATIVE;
+    const sent = await r.cards.openActivationCard(publication());
+    await tap(r, sent.messageId);
+    expect(r.store.rows.get(sent.id)!.outcome).toMatchObject({ result: "denied", reason: "publication_unavailable" });
     expect(r.meta.writes).toEqual([]);
   });
 

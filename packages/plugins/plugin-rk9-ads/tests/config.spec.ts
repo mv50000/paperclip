@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   configSecretRefs,
   dailyBudgetCents,
+  isStagingDryRun,
   normaliseAdAccountId,
   parseBrandConfig,
+  skipsDryRunMediaCheck,
   type BrandConfig,
 } from "../src/config.js";
 import { brandConfig, SECRET_A_BOT, SECRET_A_META, secretRef } from "./fixtures.js";
@@ -248,5 +250,44 @@ describe("meta.stagingMode (RK9-849)", () => {
     const meta = raw.meta as Record<string, unknown>;
     expect(enabled({ ...raw, meta: { ...meta, stagingMode: "dry_run" } }).meta.stagingMode).toBe("dry_run");
     expect(errorsOf({ ...raw, meta: { ...meta, stagingMode: "dryRun" } })).toContain("meta.stagingMode: must be one of live, dry_run");
+  });
+
+  it("an empty value (null) is the default live, as in the other enum fields (RK9-853)", () => {
+    const raw = brandConfig();
+    const meta = raw.meta as Record<string, unknown>;
+    const config = enabled({ ...raw, meta: { ...meta, stagingMode: null } });
+    expect(config.meta.stagingMode).toBeUndefined();
+    expect(isStagingDryRun(config)).toBe(false);
+  });
+});
+
+describe("meta.dryRunMediaCheck (RK9-853)", () => {
+  const raw = brandConfig();
+  const meta = raw.meta as Record<string, unknown>;
+
+  it("defaults to head: absent, null or head leave no field and keep the HEAD", () => {
+    for (const value of [undefined, null, "head"]) {
+      const config = enabled({ ...raw, meta: { ...meta, stagingMode: "dry_run", ...(value === undefined ? {} : { dryRunMediaCheck: value }) } });
+      expect(config.meta.dryRunMediaCheck).toBeUndefined();
+      expect(skipsDryRunMediaCheck(config)).toBe(false);
+    }
+  });
+
+  it("keeps skip with stagingMode dry_run", () => {
+    const config = enabled({ ...raw, meta: { ...meta, stagingMode: "dry_run", dryRunMediaCheck: "skip" } });
+    expect(config.meta.dryRunMediaCheck).toBe("skip");
+    expect(skipsDryRunMediaCheck(config)).toBe(true);
+  });
+
+  it("refuses skip in live mode and an unknown value", () => {
+    expect(errorsOf({ ...raw, meta: { ...meta, dryRunMediaCheck: "skip" } })).toContain("meta.dryRunMediaCheck: skip is allowed only with meta.stagingMode dry_run");
+    expect(errorsOf({ ...raw, meta: { ...meta, stagingMode: "live", dryRunMediaCheck: "skip" } })).toContain(
+      "meta.dryRunMediaCheck: skip is allowed only with meta.stagingMode dry_run",
+    );
+    expect(errorsOf({ ...raw, meta: { ...meta, stagingMode: "dry_run", dryRunMediaCheck: "none" } })).toContain("meta.dryRunMediaCheck: must be one of head, skip");
+  });
+
+  it("a live config never skips, even if a parsed config carries the field", () => {
+    expect(skipsDryRunMediaCheck({ meta: { ...enabled(raw).meta, dryRunMediaCheck: "skip" } })).toBe(false);
   });
 });

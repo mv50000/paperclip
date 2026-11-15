@@ -78,6 +78,13 @@ export const DEFAULT_ORGANIC_CARD_TTL_HOURS = 24;
  */
 export const STAGING_MODES = ["live", "dry_run"] as const;
 export type StagingMode = (typeof STAGING_MODES)[number];
+/**
+ * The media check of a dry-run staging (RK9-853). `head` (default) sends the
+ * same HEAD as live staging. `skip` sends none, for a dev instance whose media
+ * host the plugin cannot reach; it is valid only with `stagingMode: dry_run`.
+ */
+export const DRY_RUN_MEDIA_CHECKS = ["head", "skip"] as const;
+export type DryRunMediaCheck = (typeof DRY_RUN_MEDIA_CHECKS)[number];
 export const ORGANIC_PAGE_TOKEN_CONFIG_PATH = "organic.pageAccessTokenRef";
 /** A bare DNS hostname: labels of letters, digits and hyphens, at least one dot, no port. */
 const MEDIA_HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
@@ -122,6 +129,8 @@ export interface BrandConfig {
     adSetId?: string;
     /** Creative staging mode (RK9-849). Absent means `live`. */
     stagingMode?: StagingMode;
+    /** Media check of a dry-run staging (RK9-853). Absent means `head`; `skip` only with `stagingMode: dry_run`. */
+    dryRunMediaCheck?: DryRunMediaCheck;
   };
   landing: {
     allowedDomains: string[];
@@ -290,6 +299,12 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
           title: "Creative staging: live uploads videos to Meta, dry_run sends nothing and marks the creative unusable for ads and live posts",
           enum: [...STAGING_MODES],
           default: "live",
+        },
+        dryRunMediaCheck: {
+          type: "string",
+          title: "Dry-run media check: head sends the media HEAD as in live staging, skip sends none (dev only, needs stagingMode dry_run)",
+          enum: [...DRY_RUN_MEDIA_CHECKS],
+          default: "head",
         },
       },
     },
@@ -647,6 +662,11 @@ export function isStagingDryRun(config: Pick<BrandConfig, "meta">): boolean {
   return config.meta.stagingMode === "dry_run";
 }
 
+/** True when a dry-run staging skips the media HEAD (RK9-853). Never true in live mode. */
+export function skipsDryRunMediaCheck(config: Pick<BrandConfig, "meta">): boolean {
+  return isStagingDryRun(config) && config.meta.dryRunMediaCheck === "skip";
+}
+
 /**
  * Parses one company's raw plugin config. Pure and offline: it never resolves
  * secrets or calls Meta. Live checks belong to the preflight (A4).
@@ -672,7 +692,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
 
   // meta
   const metaRaw = c.record(raw, "meta", root, true) ?? {};
-  c.known(metaRaw, ["adAccountId", "pageId", "igUserId", "datasetId", "accessTokenRef", "specialAdCategories", "campaignId", "adSetId", "stagingMode"], "meta");
+  c.known(metaRaw, ["adAccountId", "pageId", "igUserId", "datasetId", "accessTokenRef", "specialAdCategories", "campaignId", "adSetId", "stagingMode", "dryRunMediaCheck"], "meta");
   const adAccountId = normaliseAdAccountId(metaRaw.adAccountId);
   if (metaRaw.adAccountId === undefined) c.add("meta.adAccountId", "is required");
   else if (adAccountId === null) c.add("meta.adAccountId", "must be numeric (an act_ prefix is allowed)");
@@ -692,7 +712,12 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
   }
   const campaignId = c.string(metaRaw, "campaignId", "meta", { pattern: DIGITS_RE });
   const adSetId = c.string(metaRaw, "adSetId", "meta", { pattern: DIGITS_RE });
+  // An empty value (null) counts as the default, as in the other enum fields.
   const stagingMode = c.enumValue(metaRaw, "stagingMode", "meta", STAGING_MODES, "live");
+  const dryRunMediaCheck = c.enumValue(metaRaw, "dryRunMediaCheck", "meta", DRY_RUN_MEDIA_CHECKS, "head");
+  if (dryRunMediaCheck === "skip" && stagingMode !== "dry_run") {
+    c.add("meta.dryRunMediaCheck", "skip is allowed only with meta.stagingMode dry_run");
+  }
 
   // landing
   const landingRaw = c.record(raw, "landing", root, true) ?? {};
@@ -878,6 +903,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
       ...(campaignId ? { campaignId } : {}),
       ...(adSetId ? { adSetId } : {}),
       ...(stagingMode === "dry_run" ? { stagingMode } : {}),
+      ...(stagingMode === "dry_run" && dryRunMediaCheck === "skip" ? { dryRunMediaCheck } : {}),
     },
     landing: { allowedDomains, urls, defaultUrlKey, utmTemplate },
     ...(telegram ? { telegram } : {}),

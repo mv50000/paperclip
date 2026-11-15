@@ -23,12 +23,14 @@
  * nothing and returns the planned call. The row gets
  * `payload.stagingMode = "dry_run"` and the planned calls. Publication,
  * activation and live organic posts refuse such a row. Staging the same media
- * again in live mode stages it anew and clears the marker.
+ * again in live mode stages it anew and clears the marker. On a dev instance
+ * `meta.dryRunMediaCheck: "skip"` drops the media HEAD too (RK9-853); the
+ * row then carries `payload.mediaCheck = "skipped"`.
  */
 
 import { randomUUID } from "node:crypto";
 import type { PluginContext } from "@paperclipai/plugin-sdk";
-import { isStagingDryRun, type BrandConfig } from "../config.js";
+import { isStagingDryRun, skipsDryRunMediaCheck, type BrandConfig } from "../config.js";
 import { loadCompanyConfig } from "../company-configs.js";
 import type { Ledger, LedgerRow } from "../db.js";
 import { createMetaClient, type FetchLike, type MetaGraphClient } from "../meta/graph.js";
@@ -102,6 +104,8 @@ export interface CreativeView {
   stagingMode: "live" | "dry_run";
   /** The Meta calls a dry-run staging would have sent (redacted). */
   plannedCalls?: unknown[];
+  /** `skipped` when a dry-run staging sent no media HEAD (`meta.dryRunMediaCheck: skip`, RK9-853). */
+  mediaCheck?: "skipped";
 }
 
 export interface StageError {
@@ -134,9 +138,18 @@ export interface StageDeps {
   metaClient?: (companyId: string, config: BrandConfig) => MetaGraphClient;
 }
 
-/** The payload a staging round writes: the schema version, plus the marker in dry-run mode. */
-function stagingPayload(manifest: CreativeManifestV1, dryRun: boolean): Record<string, unknown> {
-  return dryRun ? { schemaVersion: manifest.schemaVersion, stagingMode: DRY_RUN_STAGING } : { schemaVersion: manifest.schemaVersion };
+/**
+ * The payload a staging round writes: the schema version, plus the marker in
+ * dry-run mode, plus `mediaCheck: "skipped"` when the dry run sent no HEAD.
+ */
+function stagingPayload(manifest: CreativeManifestV1, dryRun: boolean, mediaCheckSkipped = false): Record<string, unknown> {
+  if (!dryRun) return { schemaVersion: manifest.schemaVersion };
+  return { schemaVersion: manifest.schemaVersion, stagingMode: DRY_RUN_STAGING, ...(mediaCheckSkipped ? { mediaCheck: "skipped" } : {}) };
+}
+
+/** The row's payload with the dry-run marker set. */
+function markedPayload(row: LedgerRow): Record<string, unknown> {
+  return { ...payloadOf(row.payload), stagingMode: DRY_RUN_STAGING };
 }
 
 function fail(code: StageErrorCode, message: string, extra: Partial<StageError> = {}, creative?: CreativeView): StageResult {
@@ -177,6 +190,7 @@ export function toCreativeView(row: LedgerRow): CreativeView {
     createdAt: iso(row.created_at),
     stagingMode: dryRun ? "dry_run" : "live",
     ...(dryRun && Array.isArray(payload.plannedCalls) ? { plannedCalls: payload.plannedCalls } : {}),
+    ...(dryRun && payload.mediaCheck === "skipped" ? { mediaCheck: "skipped" as const } : {}),
   };
 }
 
@@ -247,7 +261,7 @@ async function loadRow(ledger: Ledger, companyId: string, id: string): Promise<L
  * company+idempotency_key) already exists. Returns false on a conflict. The
  * statement keeps the ledger rule: company_id is always $1.
  */
-async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, manifest: CreativeManifestV1, dryRun: boolean): Promise<boolean> {
+async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, manifest: CreativeManifestV1, dryRun: boolean, mediaCheckSkipped: boolean): Promise<boolean> {
   const values: Array<[string, unknown]> = [
     ["company_id", companyId],
     ["id", id],
@@ -266,7 +280,7 @@ async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, ma
     ["valid_until", new Date(manifest.validUntil).toISOString()],
     // An image goes to Meta by URL when the ad creative is built (G4), so it is ready now.
     ["status", manifest.kind === "image" ? "ready" : "staged"],
-    ["payload", JSON.stringify(stagingPayload(manifest, dryRun))],
+    ["payload", JSON.stringify(stagingPayload(manifest, dryRun, mediaCheckSkipped))],
   ];
   const result = await deps.ctx.db.execute(
     `INSERT INTO ${deps.ledger.qualified("creatives")} (${values.map(([column]) => column).join(", ")})
@@ -285,7 +299,7 @@ async function insertIfAbsent(deps: StageDeps, companyId: string, id: string, ma
  * A dry-run creative staged in live mode comes here too (RK9-849): the new
  * payload drops its marker, and the video then uploads for real.
  */
-async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manifest: CreativeManifestV1, dryRun: boolean): Promise<boolean> {
+async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manifest: CreativeManifestV1, dryRun: boolean, mediaCheckSkipped: boolean): Promise<boolean> {
   const changed = await deps.ledger.update(
     companyId,
     "creatives",
@@ -305,7 +319,7 @@ async function restage(deps: StageDeps, companyId: string, row: LedgerRow, manif
       meta_image_hash: null,
       error: null,
       status: manifest.kind === "image" ? "ready" : "staged",
-      payload: stagingPayload(manifest, dryRun),
+      payload: stagingPayload(manifest, dryRun, mediaCheckSkipped),
     },
   );
   return changed === 1;
@@ -363,12 +377,13 @@ export const STALE_UPLOAD_MINUTES = 10;
  * Claims a stale `uploading` row. `updated_at` moves to now() in the same
  * statement, so a second caller no longer matches and only one re-uploads.
  */
-async function claimStaleUpload(deps: StageDeps, companyId: string, id: string): Promise<boolean> {
+async function claimStaleUpload(deps: StageDeps, companyId: string, id: string, payload: Record<string, unknown> | null): Promise<boolean> {
+  // A dry run passes the marked payload; a live claim keeps the stored one.
   const result = await deps.ctx.db.execute(
-    `UPDATE ${deps.ledger.qualified("creatives")} SET error = NULL, updated_at = now()
+    `UPDATE ${deps.ledger.qualified("creatives")} SET error = NULL, updated_at = now(), payload = COALESCE($3::jsonb, payload)
      WHERE company_id = $1 AND id = $2 AND status = 'uploading' AND meta_video_id IS NULL
        AND updated_at < now() - interval '${STALE_UPLOAD_MINUTES} minutes'`,
-    [companyId, id],
+    [companyId, id, payload === null ? null : JSON.stringify(payload)],
   );
   return result.rowCount === 1;
 }
@@ -395,10 +410,13 @@ function uploadClient(deps: StageDeps, companyId: string, config: BrandConfig, d
  */
 async function uploadVideo(deps: StageDeps, companyId: string, config: BrandConfig, row: LedgerRow, dryRun: boolean): Promise<StageResult | null> {
   const id = String(row.id);
+  // RK9-853: a dry run sets its marker in the claim itself, so a crash before the
+  // planned-call write cannot leave an unmarked `uploading` row behind.
+  const marker = dryRun ? markedPayload(row) : null;
   const claimed =
     row.status === "uploading"
-      ? await claimStaleUpload(deps, companyId, id)
-      : (await deps.ledger.update(companyId, "creatives", { id, status: String(row.status) }, { status: "uploading", error: null })) === 1;
+      ? await claimStaleUpload(deps, companyId, id, marker)
+      : (await deps.ledger.update(companyId, "creatives", { id, status: String(row.status) }, { status: "uploading", error: null, ...(marker ? { payload: marker } : {}) })) === 1;
   if (!claimed) return null;
   const client = uploadClient(deps, companyId, config, dryRun);
   try {
@@ -469,7 +487,10 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
     return fail("unknown_landing_url_key", `landing.urls has no key ${manifest.landingUrlKey}`, { path: "/landingUrlKey" });
   }
 
+  // RK9-853: a dev instance in dry-run mode may skip the HEAD; live staging always sends it.
+  const skipMediaCheck = skipsDryRunMediaCheck(config);
   const checkMedia = async (): Promise<StageResult | null> => {
+    if (skipMediaCheck) return null;
     const media = await checkRemoteMedia(deps.ctx.http.fetch, deps.ctx.logger, manifest.mediaUrl, manifest.kind, "/mediaUrl");
     if (media) return media;
     if (manifest.posterUrl) {
@@ -495,7 +516,7 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
     const media = await checkMedia();
     if (media) return media;
     const previousStatus = String(existing.row.status);
-    if (await restage(deps, companyId, existing.row, manifest, dryRun)) {
+    if (await restage(deps, companyId, existing.row, manifest, dryRun, skipMediaCheck)) {
       await deps.ctx.activity.log({
         companyId,
         message: "rk9-ads creative restaged",
@@ -515,7 +536,7 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
     const media = await checkMedia();
     if (media) return media;
     const id = randomUUID();
-    if (await insertIfAbsent(deps, companyId, id, manifest, dryRun)) {
+    if (await insertIfAbsent(deps, companyId, id, manifest, dryRun, skipMediaCheck)) {
       created = true;
       existing = { row: await loadRow(deps.ledger, companyId, id), matchedOn: "idempotencyKey" };
       await deps.ctx.activity.log({
