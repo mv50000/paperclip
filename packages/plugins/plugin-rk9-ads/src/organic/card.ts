@@ -16,7 +16,7 @@ import { oneLineText } from "./text.js";
 import { CHANNEL_LABELS, type OrganicChannel, type OrganicLint, type OrganicMode } from "./types.js";
 
 /** Room kept under the caption limit for the status lines a decision appends. */
-const STATUS_ROOM = 120;
+const STATUS_ROOM = 170;
 const MAX_LISTED = 8;
 
 export interface OrganicCardFacts {
@@ -45,9 +45,9 @@ function oneLine(text: string, max: number): string {
   return clip(oneLineText(text), max);
 }
 
-/** Agent-supplied text as card lines: `first` opens the first chunk, "┆ " each continuation. */
+/** Agent-supplied text as card lines: `first` opens the first chunk, "┆ " or "↳ " each continuation. */
 function quoted(first: string, text: string): string[] {
-  return chunkLine(text).map((chunk, index) => `${index === 0 ? first : CAPTION_CONTINUE}${chunk}`);
+  return chunkSegments(text).map((chunk) => `${chunk.join === "first" ? first : continuePrefix(chunk.join)}${chunk.text}`);
 }
 
 export function lintLines(lint: OrganicLint | null): string[] {
@@ -75,8 +75,12 @@ export function modeLine(mode: OrganicMode): string {
 
 /** Every caption line starts with "│ ", so a caption cannot look like a line of the card. */
 export const CAPTION_QUOTE = "│ ";
-/** A caption line too long for one phone line goes on in chunks that start with "┆ ". */
+/** A caption line too long for one phone line goes on in chunks: "┆ " after a space (the space is not shown), */
 export const CAPTION_CONTINUE = "┆ ";
+/** and "↳ " when the break falls inside a word, so a space at the break is never invisible (RK9-852). */
+export const CAPTION_WORD_CONTINUE = "\u21b3 ";
+/** The card line that explains the two continuation marks; the card shows it when a chunk continues. */
+export const CAPTION_LEGEND = "(┆ = jatkuu välilyönnin jälkeen, \u21b3 = jatkuu samaa sanaa)";
 /**
  * Display columns per quoted chunk. Telegram wraps a long line on a phone
  * without the quote mark, so a long caption line could show a forged card line
@@ -143,36 +147,92 @@ export function columns(grapheme: string): number {
   return Math.min(Math.max(width, 1), CAPTION_CHUNK_COLUMNS);
 }
 
+/** How a chunk joins the chunk before it. */
+export type ChunkJoin = "first" | "space" | "word";
+
+export interface Chunk {
+  text: string;
+  join: ChunkJoin;
+}
+
 /**
- * Splits one caption line into chunks of at most `width` columns. A chunk
+ * Splits one cleaned line (no space at either end, no space runs: the output
+ * of `cleanCaption` or `oneLineText`) into chunks of at most `width` columns.
+ * No chunk starts or ends with a space (RK9-852): a break at a space consumes
+ * that one space and the next chunk joins with "space"; a break inside a word
+ * joins with "word". The card marks the two joins with different prefixes, so
+ * two captions that differ by one space never give the same card. A chunk
  * ends after the last space that fits when there is one in its second half;
- * otherwise it breaks between graphemes. No text is lost or reordered.
+ * otherwise it breaks between graphemes.
  */
-export function chunkLine(line: string, width = CAPTION_CHUNK_COLUMNS): string[] {
-  const parts = Array.from(graphemes.segment(line), (segment) => segment.segment);
-  const chunks: string[] = [];
+export function chunkSegments(line: string, width = CAPTION_CHUNK_COLUMNS): Chunk[] {
+  // Every space is a part of its own: a prepended mark (U+0D4E, U+11A3A) would otherwise join the space after it into one grapheme.
+  const parts = line.split(" ").flatMap((word, index) => {
+    const segments = Array.from(graphemes.segment(word), (segment) => segment.segment);
+    return index === 0 ? segments : [" ", ...segments];
+  });
+  const chunks: Chunk[] = [];
   let start = 0;
+  let join: ChunkJoin = "first";
   while (start < parts.length) {
     let used = 0;
     let end = start;
     let lastSpace = -1;
     while (end < parts.length && used + columns(parts[end]!) <= width) {
       used += columns(parts[end]!);
-      if (/^\s$/u.test(parts[end]!)) lastSpace = end;
+      if (parts[end] === " ") lastSpace = end;
       end += 1;
     }
     if (end === start) end = start + 1;
-    if (end < parts.length && lastSpace >= start + Math.floor((end - start) / 2)) end = lastSpace + 1;
-    chunks.push(parts.slice(start, end).join(""));
-    start = end;
+    let chunkEnd = end;
+    let next = end;
+    let nextJoin: ChunkJoin = "word";
+    if (end < parts.length && parts[end] === " ") {
+      next = end + 1;
+      nextJoin = "space";
+    } else if (end < parts.length && lastSpace > start && lastSpace >= start + Math.floor((end - start) / 2)) {
+      chunkEnd = lastSpace;
+      next = lastSpace + 1;
+      nextJoin = "space";
+    }
+    chunks.push({ text: parts.slice(start, chunkEnd).join(""), join });
+    start = next;
+    join = nextJoin;
   }
-  return chunks.length > 0 ? chunks : [""];
+  return chunks.length > 0 ? chunks : [{ text: "", join: "first" }];
 }
 
-/** The caption as card lines: "│ " opens each caption line, "┆ " each continuation. */
+/** The chunk texts of one line (see `chunkSegments`). */
+export function chunkLine(line: string, width = CAPTION_CHUNK_COLUMNS): string[] {
+  return chunkSegments(line, width).map((chunk) => chunk.text);
+}
+
+/** The card prefix of a continuation chunk. */
+function continuePrefix(join: ChunkJoin): string {
+  return join === "word" ? CAPTION_WORD_CONTINUE : CAPTION_CONTINUE;
+}
+
+/** The caption as card lines: "\u2502 " opens each caption line, "\u2506 " a chunk after a space, "\u21b3 " a chunk inside a word. */
 export function captionLines(caption: string): string[] {
-  const lines = caption.length > 0 ? caption.split("\n") : ["(ei tekstiä)"];
-  return lines.flatMap((line) => chunkLine(line).map((chunk, index) => `${index === 0 ? CAPTION_QUOTE : CAPTION_CONTINUE}${chunk}`));
+  const lines = caption.length > 0 ? caption.split("\n") : ["(ei teksti\u00e4)"];
+  return lines.flatMap((line) => chunkSegments(line).map((chunk) => `${chunk.join === "first" ? CAPTION_QUOTE : continuePrefix(chunk.join)}${chunk.text}`));
+}
+
+/**
+ * Reads card caption lines back into the caption: the inverse of
+ * `captionLines`. "\u2506 " puts the consumed space back, "\u21b3 " joins without one.
+ * A line may have lost its trailing spaces (Telegram trims), so "\u2502" alone is
+ * an empty caption line. Returns null for a line without a caption prefix.
+ */
+export function unwrapCaptionLines(lines: readonly string[]): string | null {
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line === CAPTION_QUOTE.trimEnd() || line.startsWith(CAPTION_QUOTE)) out.push(line.slice(CAPTION_QUOTE.length));
+    else if (line.startsWith(CAPTION_CONTINUE) && out.length > 0) out[out.length - 1] += ` ${line.slice(CAPTION_CONTINUE.length)}`;
+    else if (line.startsWith(CAPTION_WORD_CONTINUE) && out.length > 0) out[out.length - 1] += line.slice(CAPTION_WORD_CONTINUE.length);
+    else return null;
+  }
+  return out.join("\n");
 }
 
 export function organicCardText(facts: OrganicCardFacts): string {
@@ -181,8 +241,12 @@ export function organicCardText(facts: OrganicCardFacts): string {
   lines.push(...lintLines(facts.lint));
   lines.push("", `Creative ${facts.creativeId}`);
   lines.push(`Voimassa ${localDate(facts.validUntil, facts.timeZone)} klo ${localTime(facts.validUntil, facts.timeZone)} asti. Ei muistutuksia.`);
-  lines.push("", "Julkaistava teksti:");
-  lines.push(...captionLines(facts.caption));
+  const caption = captionLines(facts.caption);
+  const continued = [...lines, ...caption].some((line) => line.startsWith(CAPTION_CONTINUE) || line.startsWith(CAPTION_WORD_CONTINUE));
+  lines.push("");
+  if (continued) lines.push(CAPTION_LEGEND);
+  lines.push("Julkaistava teksti:");
+  lines.push(...caption);
   return lines.join("\n");
 }
 

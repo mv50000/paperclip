@@ -57,8 +57,8 @@ const LONE_SURROGATE_RE = /\p{Surrogate}/gu;
 // Every space separator and the braille blank U+2800 (a visible-as-nothing space) become U+0020.
 const SPACE_RE = /[\p{Zs}\u2800]/gu;
 // Also removed: symbols and fillers that render as a blank or a box (object replacement U+FFFC, replacement character U+FFFD,
-// musical null notehead U+1D159, Hangul fillers, Khitan filler U+16FE4).
-const HIDDEN_RE = /^(?:[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]|[\ufffc\ufffd\u3164\u115f\u1160\uffa0\u{1D159}\u{16FE4}])$/u;
+// musical null notehead U+1D159, Hangul fillers, Khitan filler U+16FE4, Egyptian full and half blank U+13441/13442).
+const HIDDEN_RE = /^(?:[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]|[\ufffc\ufffd\u3164\u115f\u1160\uffa0\u{1D159}\u{16FE4}\u{13441}\u{13442}])$/u;
 const EMOJI_RE = /^\p{Extended_Pictographic}$/u;
 const SKIN_TONE_RE = /^\p{Emoji_Modifier}$/u;
 // A visible base: a letter, digit, punctuation or symbol. Private use (Co), unassigned (Cn) and noncharacters are not.
@@ -141,4 +141,31 @@ export function cleanCaption(text: string): string {
  */
 export function oneLineText(text: string): string {
   return cleanCaption(text).replace(/\s+/g, " ");
+}
+
+/**
+ * Right-to-left text: the Hebrew, Arabic, Syriac, Thaana, N'Ko, Samaritan and
+ * Mandaic blocks, the Hebrew and Arabic presentation forms, and the RTL
+ * ranges of the supplementary planes (bidi classes R and AL, with their marks
+ * and digits). Not supported (RK9-852): the card cannot show the visual order
+ * a phone gives mixed-direction text, so such a caption is refused.
+ */
+const RTL_RE = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufeff\u{10800}-\u{10fff}\u{1E800}-\u{1EFFF}]/u;
+/** A grapheme of more code points than the longest RGI emoji (10). */
+const MAX_GRAPHEME_CODE_POINTS = 10;
+const captionGraphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * Why a cleaned caption cannot go on a card, or null. Refused, not cleaned
+ * silently: right-to-left text, and a grapheme of more than 10 code points
+ * (a phone may draw it at any width).
+ */
+export function captionProblem(caption: string): string | null {
+  if (RTL_RE.test(caption)) return "caption contains right-to-left text (Hebrew, Arabic or another RTL script); RTL captions are not supported";
+  for (const { segment } of captionGraphemes.segment(caption)) {
+    if (Array.from(segment).length > MAX_GRAPHEME_CODE_POINTS) {
+      return `caption contains a character cluster of more than ${MAX_GRAPHEME_CODE_POINTS} code points; split or remove it`;
+    }
+  }
+  return null;
 }

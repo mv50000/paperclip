@@ -28,6 +28,7 @@ import { telegramBotKey } from "../../src/kit/telegram/bot-api.js";
 import { memoryCreativeSource, type CreativeRow } from "../../src/publish/store.js";
 import { memoryOrganicPostStore } from "../../src/organic/store.js";
 import type { OrganicService } from "../../src/organic/service.js";
+import { CAPTION_LEGEND } from "../../src/organic/card.js";
 import { brandConfig, COMPANY_A, SECRET_A_BOT, SECRET_A_META, secretRef } from "../fixtures.js";
 import { FakeTelegram } from "../helpers/fake-telegram.js";
 import { FakeRoutes, graphError } from "../brand/fake-routes.js";
@@ -212,13 +213,14 @@ function cardText(r: Rig, messageId: number): string {
   return String(message?.caption ?? message?.text ?? "");
 }
 
-/** The caption as the card quotes it: "│ " opens a caption line, "┆ " continues it. */
+/** The caption as the card quotes it: "│ " opens a caption line, "┆ " continues it after a space, "↳ " inside a word. */
 function quotedCaption(text: string): string {
   const lines = text.split("\n");
   const out: string[] = [];
   for (const line of lines.slice(lines.indexOf("Julkaistava teksti:") + 1)) {
     if (line.startsWith("│ ")) out.push(line.slice(2));
-    else if (line.startsWith("┆ ")) out[out.length - 1] += line.slice(2);
+    else if (line.startsWith("┆ ")) out[out.length - 1] += ` ${line.slice(2)}`;
+    else if (line.startsWith("↳ ")) out[out.length - 1] += line.slice(2);
     else throw new Error(`unquoted caption line: ${line}`);
   }
   return out.join("\n");
@@ -238,7 +240,7 @@ describe("organic card", () => {
     const send = r.fake.callsOf("sendVideo").at(-1)!;
     expect(send.params.chat_id).toBe(CHAT);
     expect(send.params.video).toBe("https://media.ololla.fi/valon-paluu.mp4");
-    const text = String(send.params.caption).replace(/\n┆ /g, "");
+    const text = String(send.params.caption).replace(/\n┆ /g, " ").replace(/\n↳ /g, "");
     expect(text).toContain("Kanava: Instagram Reel");
     expect(text).toContain("Valo palaa. #ololla");
     expect(text).toContain("brand-lint: läpi");
@@ -341,6 +343,44 @@ describe("organic card shows the published caption (RK9-852 invariant)", () => {
     expect(shown).not.toMatch(/[\ufe00-\ufe0e\u17b4\u180b\u20dd\u2001\u0085]|[\u{E0100}-\u{E01EF}]/u);
     expect(shown.split("\n")[0]).toBe("Hyv\u00e4\u00e4 huomenta \u{1F600} kaikille");
     expect(card.split("\n").filter((line) => line.startsWith("Tila:"))).toEqual(["Tila: \u{1F534} LIVE: hyv\u00e4ksynt\u00e4 julkaisee Metaan."]);
+  });
+});
+
+describe("organic verifier round 4 (RK9-852)", () => {
+  it("refuses a right-to-left caption and a grapheme of more than 10 code points before any card", async () => {
+    const r = await rig();
+    await expect(request(r, { caption: "Hei \u05e9\u05dc\u05d5\u05dd kaikille" })).rejects.toThrow(/invalid_caption: caption contains right-to-left text/);
+    const chain = Array.from({ length: 12 }, () => "\u{1F534}").join("\u200d");
+    await expect(request(r, { caption: `Valo palaa ${chain}` })).rejects.toThrow(/invalid_caption: caption contains a character cluster of more than 10 code points/);
+    expect(r.fake.callsOf("sendVideo")).toEqual([]);
+    expect(r.posts.rows).toEqual([]);
+  });
+
+  it("sends a publish POST once: a transient rate-limit answer leaves the post unknown, with no retry", async () => {
+    let posts = 0;
+    const meta = graph().on(`POST ${PAGE}/photos`, () => {
+      posts += 1;
+      return posts === 1
+        ? { status: 400, body: { error: { message: "Application request limit reached", type: "OAuthException", code: 4, is_transient: true, fbtrace_id: "t" } } }
+        : { body: { id: "555", post_id: `${PAGE}_777` } };
+    });
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r, { creativeId: IMAGE_ID, channel: "fb_photo" });
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(posts).toBe(1);
+    expect(publishWrites(r).map((call) => call.key)).toEqual([`POST ${PAGE}/photos`]);
+    const post = r.posts.rows.find((row) => row.id === postId)!;
+    expect(post.status).toBe("publishing");
+    expect(post.error).toMatch(/^result unknown: /);
+  });
+
+  it("explains the continuation marks on a card that has them", async () => {
+    const r = await rig();
+    await request(r, { caption: "Hi @ololla_finland Mukaan kes\u00e4n tapahtumaan, joka alkaa huomenna" });
+    const text = String(r.fake.callsOf("sendVideo").at(-1)!.params.caption);
+    expect(text).toContain(CAPTION_LEGEND);
+    expect(text.indexOf(CAPTION_LEGEND)).toBeLessThan(text.indexOf("Julkaistava teksti:"));
   });
 });
 
@@ -648,7 +688,7 @@ describe("organic media lock (RK9-852 M2)", () => {
     const dry = await rig({ config: config({ mode: "dry_run", mediaHosts: [] }) });
     await request(dry);
     const text = String(dry.fake.callsOf("sendVideo").at(-1)!.params.caption);
-    expect(text.replace(/\n┆ /g, "")).toContain("⚠️ Live-tila hylkäisi tämän: media host media.ololla.fi is not in organic.mediaHosts");
+    expect(text.replace(/\n┆ /g, " ").replace(/\n↳ /g, "")).toContain("⚠️ Live-tila hylkäisi tämän: media host media.ololla.fi is not in organic.mediaHosts");
     expect(text.indexOf("Live-tila hylkäisi")).toBeLessThan(text.indexOf("Julkaistava teksti:"));
   });
 
@@ -725,7 +765,7 @@ describe("organic card text (RK9-852)", () => {
     const lines = text.split("\n");
     const captionLines = lines.slice(lines.indexOf("Julkaistava teksti:") + 1);
     expect(captionLines.length).toBeGreaterThan(2);
-    expect(captionLines.every((line) => line.startsWith("│ ") || line.startsWith("┆ "))).toBe(true);
+    expect(captionLines.every((line) => line.startsWith("│ ") || line.startsWith("┆ ") || line.startsWith("↳ "))).toBe(true);
     expect(lines.filter((line) => line.startsWith("Tila:"))).toEqual(["Tila: 🔴 LIVE: hyväksyntä julkaisee Metaan."]);
     expect(quotedCaption(text)).toBe(forged);
   });

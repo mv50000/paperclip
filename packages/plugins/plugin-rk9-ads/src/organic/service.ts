@@ -49,7 +49,7 @@ import { fitsTextCard, organicCardCandidates, organicCardText } from "./card.js"
 import { checkLint } from "./lint.js";
 import { cardDeadline, lockMedia, MIN_CARD_MS, readLock, recheckMedia, type FetchLike } from "./media-lock.js";
 import { effectiveStatus, type OrganicPostStore } from "./store.js";
-import { cleanCaption } from "./text.js";
+import { captionProblem, cleanCaption } from "./text.js";
 import {
   CHANNEL_ASPECT_RATIOS,
   CHANNEL_LABELS,
@@ -245,6 +245,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (input.caption !== undefined && typeof input.caption !== "string") throw new OrganicError("invalid_request", "caption must be a string");
     const caption = cleanCaption(input.caption ?? creative.copy?.message ?? "");
     if (caption.length > ORGANIC_CAPTION_MAX_CHARS) throw new OrganicError("invalid_caption", `caption exceeds ${ORGANIC_CAPTION_MAX_CHARS} characters`);
+    const captionIssue = captionProblem(caption);
+    if (captionIssue) throw new OrganicError("invalid_caption", captionIssue);
     if ((caption.match(/#[\p{L}\p{N}_]+/gu) ?? []).length > MAX_HASHTAGS) throw new OrganicError("invalid_caption", `caption has more than ${MAX_HASHTAGS} hashtags`);
 
     // The card must show a brand-lint result (RK9-832): a missing one is refused.
@@ -718,6 +720,8 @@ export function organicClientFactory(ctx: MetaClientContext): OrganicClientFacto
       tokenConfigPath: page ? ORGANIC_PAGE_TOKEN_CONFIG_PATH : "meta.accessTokenRef",
       mode: config.organic?.mode === "live" ? "live" : "dryRun",
       guardedWrite: organicWriteGuard(target),
+      // A publish POST never goes out twice: a rate-limit answer is final, and its result is read by the reconcile (RK9-852).
+      retry: { maxAttempts: 1 },
     });
   };
 }

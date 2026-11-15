@@ -830,8 +830,12 @@ plugin must not see).
    every `human` rule as a "☐" line, and last the caption, with each line
    quoted as "│ ". A caption therefore cannot pass for a line of the card.
    A caption line, a rule line or a warning longer than 20 columns goes on in
-   chunks that start with "┆ ", so a phone never wraps agent text onto an
-   unquoted screen line (RK9-852). The width estimate (`columns` in
+   chunks, so a phone never wraps agent text onto an unquoted screen line
+   (RK9-852). No chunk starts or ends with a space: a chunk that continues
+   after a space starts with "┆ " (the space itself is not shown), and a chunk
+   that continues inside a word starts with "↳ ". Two captions that differ by
+   one space therefore never give the same card, and the card explains the
+   two marks in one line above the caption when it uses them. The width estimate (`columns` in
    `src/organic/card.ts`) overestimates the known cases and sums every code
    point of a grapheme: printable ASCII, the Latin-1 letters and the Finnish,
    Swedish, Estonian and German letters count 1 (W, M, @, % and AE count 2),
@@ -865,7 +869,13 @@ plugin must not see).
    its digit. **Limit (open, RK9-860):** the card guarantees that the
    published text is, character for character, the text on the card; it does
    not stop a message hidden in the choice of visible characters (an emoji
-   with or without U+FE0F or a ZWJ, rare Inherited marks). The card locks its media (see "Media lock"). The
+   with or without U+FE0F or a ZWJ, rare Inherited marks, and invisible
+   marks of the base's own script such as U+1039, U+17D2, U+2D7F and
+   U+1BC9D). **Not supported:** a caption with right-to-left text (Hebrew,
+   Arabic, Syriac, Thaana, N'Ko and the other RTL scripts) is refused before
+   the card (`invalid_caption`), because the card cannot show the visual order
+   a phone gives mixed-direction text; so is a caption with a character
+   cluster of more than 10 code points. The card locks its media (see "Media lock"). The
    same content (company, creative sha256, channel, caption) gets one open
    card; a second request returns the open post.
 2. **Publish.** The tap goes through the kit router (chat, approver list,
@@ -889,7 +899,10 @@ plugin must not see).
    or 2 or `is_transient: true`, or a 2xx without an id)
    may still be live, and so may an
    IG `media_publish` error while the container is not yet ERROR or EXPIRED. The post then stays in `publishing`
-   with `error: "result unknown: …"`, so the same content gets no second card
+   with `error: "result unknown: …"`, so the same content gets no second card.
+   The publish client sends each POST once (`retry.maxAttempts: 1`): a
+   rate-limit answer is not retried, because the first POST may have gone
+   live
    (see "Reconcile"). An error Meta answered closes the post as `failed`.
 3. **Reject.** "❌ Hylkää" edits the same card to the reason buttons (visual,
    text, claim, brand, topic, repeat). A reply to the card stores a typed

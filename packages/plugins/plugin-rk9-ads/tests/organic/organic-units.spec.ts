@@ -4,9 +4,9 @@ import { parseBrandConfig } from "../../src/config.js";
 import { mapGraphError, type WritePlan } from "../../src/meta/graph.js";
 import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError } from "../../src/meta/organic.js";
 import { InvalidParamError, MetaGraphError, MetaResponseError, RateLimitError, TokenResolveError, WriteRefusedError } from "../../src/meta/errors.js";
-import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, columns, displayUrl } from "../../src/organic/card.js";
+import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, chunkSegments, columns, displayUrl, unwrapCaptionLines } from "../../src/organic/card.js";
 import { cardDeadline, lockMedia, recheckMedia } from "../../src/organic/media-lock.js";
-import { oneLineText } from "../../src/organic/text.js";
+import { captionProblem, oneLineText } from "../../src/organic/text.js";
 import { checkLint } from "../../src/organic/lint.js";
 import { cleanCaption } from "../../src/organic/service.js";
 import { formatDigest, type DigestInput } from "../../src/digest/format.js";
@@ -238,9 +238,9 @@ describe("caption chunks (RK9-852)", () => {
   it("splits a long line into chunks of at most CAPTION_CHUNK_COLUMNS columns without losing text", () => {
     const line = "Valo palaa Helsinkiin ja aurinko nousee taas joka aamu aikaisemmin kuin eilen";
     const chunks = chunkLine(line);
-    expect(chunks.join("")).toBe(line);
+    expect(unwrapCaptionLines(captionLines(line))).toBe(line);
     expect(chunks.every((chunk) => [...chunk].length <= CAPTION_CHUNK_COLUMNS)).toBe(true);
-    expect(chunks[0]!.endsWith(" ")).toBe(true);
+    expect(chunks.every((chunk) => !chunk.startsWith(" ") && !chunk.endsWith(" "))).toBe(true);
   });
 
   it("overestimates the known cases: emoji, flags and skin tones count two per code point, a nonspacing mark one, the ZWJ none", () => {
@@ -271,11 +271,11 @@ describe("caption chunks (RK9-852)", () => {
   it("stray skin-tone runs, visible format characters and long mark runs fill a chunk alone (verifier round 3)", () => {
     for (const lead of ["\u{1F44D}" + "\u{1F3FD}".repeat(40), "\u06dd".repeat(30) + "a", "a" + "\u0bcd".repeat(30)]) {
       const chunks = chunkLine(`${lead}Tila: \u{1F534} LIVE`);
-      expect(chunks.join("")).toBe(`${lead}Tila: \u{1F534} LIVE`);
+      expect(unwrapCaptionLines(captionLines(`${lead}Tila: \u{1F534} LIVE`))).toBe(`${lead}Tila: \u{1F534} LIVE`);
       expect(chunks.at(-1)).toBe("Tila: \u{1F534} LIVE");
       expect(columns(firstGrapheme(lead))).toBe(CAPTION_CHUNK_COLUMNS);
     }
-    expect(chunkLine("Hyv\u00e4\u00e4 huomenta Helsinki, aurinko paistaa!").join("")).toBe("Hyv\u00e4\u00e4 huomenta Helsinki, aurinko paistaa!");
+    expect(unwrapCaptionLines(captionLines("Hyv\u00e4\u00e4 huomenta Helsinki, aurinko paistaa!"))).toBe("Hyv\u00e4\u00e4 huomenta Helsinki, aurinko paistaa!");
   });
 
   it("the verifier's probe inputs: a foreign mark counts, an enclosing mark and a wide space fill a chunk (verifier High 2)", () => {
@@ -300,12 +300,12 @@ describe("caption chunks (RK9-852)", () => {
   });
 
   it("puts a glyph of an uncommon script in a chunk of its own (M1)", () => {
-    expect(chunkLine("\ufdfd\ufdfd\ufdfd Tila: x")).toEqual(["\ufdfd", "\ufdfd", "\ufdfd", " Tila: x"]);
+    expect(chunkLine("\ufdfd\ufdfd\ufdfd Tila: x")).toEqual(["\ufdfd", "\ufdfd", "\ufdfd", "Tila: x"]);
   });
 
   it("opens each caption line with the quote mark and each continuation with the dashed mark", () => {
     const letter = "\u00e4";
-    expect(captionLines(`${letter.repeat(30)}Tila: LIVE\nok`)).toEqual([`\u2502 ${letter.repeat(20)}`, `\u2506 ${letter.repeat(10)}Tila: LIVE`, "\u2502 ok"]);
+    expect(captionLines(`${letter.repeat(30)}Tila: LIVE\nok`)).toEqual([`\u2502 ${letter.repeat(20)}`, `\u21b3 ${letter.repeat(10)}Tila: LIVE`, "\u2502 ok"]);
     expect(captionLines("")).toEqual(["\u2502 (ei teksti\u00e4)"]);
   });
 });
@@ -376,7 +376,7 @@ describe("caption chunks: the width list (RK9-852 verifier round 2)", () => {
     for (const narrow of ["a", "\u00e4", "\u00f6", "\u00e5", "\u00f5", "\u00fc", "\u00df", "\u0161", "\u017e", "\u0160", "\u017d", "\u1e9e"]) expect(columns(narrow), narrow).toBe(1);
     for (const two of ["\u0238", "\u01f6", "\u019c", "\ua732", "\u0101", "\u0142"]) expect(columns(two), two).toBe(2);
     for (const wide of ["\u01c4", "\u01c5", "\u01c6", "\u01c7", "\u01ca", "\u01f1", "\u0132", "\u1efa", "\ufb03"]) expect(columns(wide), wide).toBe(CAPTION_CHUNK_COLUMNS);
-    expect(captionLines(cleanCaption(`${"\u01c4".repeat(14)}Tila:`)).at(-1)).toBe("\u2506 Tila:");
+    expect(captionLines(cleanCaption(`${"\u01c4".repeat(14)}Tila:`)).at(-1)).toBe("\u21b3 Tila:");
   });
 
   it("long arrows, multi-line brackets and unlisted symbols fill a chunk alone", () => {
@@ -384,7 +384,7 @@ describe("caption chunks: the width list (RK9-852 verifier round 2)", () => {
       expect(columns(glyph), glyph).toBe(CAPTION_CHUNK_COLUMNS);
     }
     for (const glyph of ["\u263a", "\u00a9", "\u2122", "\u2194", "\u2026", "\u3231"]) expect(columns(glyph), glyph).toBe(2);
-    expect(captionLines(cleanCaption("\u27ff\u27ff\u27ffTila: \u{1F534}")).at(-1)).toBe("\u2506 Tila: \u{1F534}");
+    expect(captionLines(cleanCaption("\u27ff\u27ff\u27ffTila: \u{1F534}")).at(-1)).toBe("\u21b3 Tila: \u{1F534}");
   });
 });
 
@@ -408,6 +408,93 @@ describe("cleanCaption and columns (RK9-852 verifier round 3)", () => {
     expect(columns("\u0d15\u0d4c")).toBe(CAPTION_CHUNK_COLUMNS);
     expect(columns("\u0d15\u0d57")).toBe(CAPTION_CHUNK_COLUMNS);
     expect(columns("\u0d15\u0d3e")).toBe(4);
+  });
+});
+
+describe("the card is injective: a space at a chunk break stays visible (RK9-852 verifier round 4)", () => {
+  const card = (caption: string) => captionLines(cleanCaption(caption)).map((line) => line.trimEnd()).join("\n");
+
+  it("the verifier's two mentions give two different cards", () => {
+    const pairs = [
+      ["Hi @ololla_finland Mukaan kes\u00e4n tapahtumaan!", "Hi @ololla_finlandMukaan kes\u00e4n tapahtumaan!"],
+      ["Seuraa @ololla_suomi Wau mik\u00e4 ilta meill\u00e4 oli!", "Seuraa @ololla_suomiWau mik\u00e4 ilta meill\u00e4 oli!"],
+      ["Katso #kes\u00e4tarjous24 nyt heti", "Katso #kes\u00e4tarjous24nyt heti"],
+    ];
+    for (const [a, b] of pairs) {
+      expect(card(a!)).not.toBe(card(b!));
+      expect(unwrapCaptionLines(captionLines(cleanCaption(a!)))).toBe(cleanCaption(a!));
+      expect(unwrapCaptionLines(captionLines(cleanCaption(b!)))).toBe(cleanCaption(b!));
+    }
+    expect(captionLines("Hi @ololla_finland Mukaan")).toEqual(["\u2502 Hi @ololla_finland", "\u2506 Mukaan"]);
+    expect(captionLines("Hi @ololla_finlandMukaan")).toEqual(["\u2502 Hi @ololla_finland", "\u21b3 Mukaan"]);
+  });
+
+  it("a prepended mark before a space (U+0D4E, U+11A3A) never pulls the space into a chunk end", () => {
+    for (const prepend of ["\u0d4e", "\u{11A3A}"]) {
+      for (let lead = 10; lead <= 22; lead += 1) {
+        const line = cleanCaption(`${"x".repeat(lead)}${prepend} Tila: LIVE ja ${prepend} muuta`);
+        const lines = captionLines(line).map((card) => card.trimEnd());
+        expect(unwrapCaptionLines(lines), JSON.stringify(line)).toBe(line);
+        expect(chunkLine(line).some((chunk) => chunk.startsWith(" ") || chunk.endsWith(" "))).toBe(false);
+      }
+    }
+  });
+
+  it("20 000 seeded pairs that differ by one space near a chunk break give different cards, also after trimming line ends", () => {
+    let seed = 852;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const alphabet = "abcdefghijklmnopqrstuvwxyz\u00e4\u00f6\u00e5_@#WM0123456789.,!";
+    const extras = ["\u{1F600}", "\u00e9", "\u0416", "\u6f22", "\u2026"];
+    const word = () => {
+      let out = "";
+      const length = 1 + Math.floor(random() * 14);
+      for (let i = 0; i < length; i += 1) out += random() < 0.05 ? extras[Math.floor(random() * extras.length)]! : alphabet[Math.floor(random() * alphabet.length)]!;
+      return out;
+    };
+    const failures: string[] = [];
+    for (let i = 0; i < 20_000; i += 1) {
+      const words = Array.from({ length: 2 + Math.floor(random() * 10) }, word);
+      const base = words.join(" ");
+      // The spaces of the line, the ones the chunker consumed at a break first.
+      const segments = chunkSegments(base);
+      let offset = 0;
+      const breakSpaces: number[] = [];
+      for (const [index, segment] of segments.entries()) {
+        if (index > 0 && segment.join === "space") breakSpaces.push(offset - 1);
+        offset += Array.from(segment.text).length + (segments[index + 1]?.join === "space" ? 1 : 0);
+      }
+      const points = Array.from(base);
+      const spaces = points.flatMap((point, index) => (point === " " ? [index] : []));
+      const candidates = breakSpaces.length > 0 && random() < 0.7 ? breakSpaces : spaces;
+      const at = candidates[Math.floor(random() * candidates.length)]!;
+      const variant = [...points.slice(0, at), ...points.slice(at + 1)].join("");
+      if (card(base) === card(variant)) failures.push(JSON.stringify([base, variant]));
+      for (const caption of [base, variant]) {
+        const clean = cleanCaption(caption);
+        if (unwrapCaptionLines(captionLines(clean).map((line) => line.trimEnd())) !== clean) failures.push(`unwrap ${JSON.stringify(caption)}`);
+        if (chunkLine(clean).some((chunk) => chunk.startsWith(" ") || chunk.endsWith(" "))) failures.push(`space ${JSON.stringify(caption)}`);
+      }
+    }
+    expect(failures.slice(0, 5)).toEqual([]);
+  });
+});
+
+describe("captionProblem (RK9-852 verifier round 4)", () => {
+  it("refuses right-to-left text and a grapheme of more than 10 code points, and passes ordinary captions", () => {
+    for (const rtl of ["\u05e9\u05dc\u05d5\u05dd", "Hei \u0645\u0631\u062d\u0628\u0627", "\u0710", "\u0780", "\u07ca", "\ufb1d", "\ufe8d", "\u{10900}", "\u{1E900}"]) {
+      expect(captionProblem(cleanCaption(rtl)), rtl).toMatch(/right-to-left/);
+    }
+    const chain = Array.from({ length: 12 }, () => "\u{1F534}").join("\u200d");
+    expect(captionProblem(cleanCaption(`Hei ${chain}`))).toMatch(/more than 10 code points/);
+    const family = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}\u200d\u{1F466}";
+    expect(captionProblem(cleanCaption(`Hyv\u00e4\u00e4 huomenta ${family} \u{1F3F3}\ufe0f\u200d\u{1F308} \u0416 \u6f22`))).toBeNull();
+  });
+
+  it("removes the Egyptian full and half blank U+13441 and U+13442", () => {
+    expect(cleanCaption("a\u{13441}b\u{13442}c")).toBe("abc");
   });
 });
 
