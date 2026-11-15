@@ -566,6 +566,16 @@ export function createPublishService(deps: PublishServiceDeps) {
     }
   }
 
+  /** Throws when the publication's staged creative is gone or was marked a dry run since submit. */
+  async function assertCreativeStillPublishable(companyId: string, creativeId: string | null): Promise<void> {
+    if (!creativeId) return;
+    const creative = await deps.creatives.get(companyId, creativeId);
+    if (!creative) throw new PublishError("creative_not_found", `creative ${creativeId} not found for this company`);
+    if (creative.stagingDryRun) {
+      throw new PublishError("creative_not_publishable", "the creative was staged in dry-run mode after the submit; stage it again with meta.stagingMode live first");
+    }
+  }
+
   async function run(companyId: string, id: string, initiator: Initiator): Promise<void> {
     let record = await deps.store.get(companyId, id);
     if (!record || record.status !== "pending") return;
@@ -578,6 +588,9 @@ export function createPublishService(deps: PublishServiceDeps) {
       if (record.brandCode !== config.brandCode) throw new Error(`the publication is for brand ${record.brandCode}, the config is ${config.brandCode}`);
       if (!record.adsetId || !record.adName) throw new Error("the publication has no ad set or ad name");
       if (deps.assertLaunchReady) await deps.assertLaunchReady(companyId, config);
+      // RK9-853: a dry-run stage of the same media can mark the creative after submit()
+      // checked it. Read it again before the first Meta write of this run.
+      await assertCreativeStillPublishable(companyId, record.creativeId);
       client = deps.writeClient(companyId, config, initiator);
       const account = config.meta.adAccountId;
       const payload = record.payload;

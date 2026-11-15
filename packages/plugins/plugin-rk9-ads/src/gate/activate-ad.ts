@@ -79,11 +79,13 @@ export interface AdOwner {
   id: string;
   contentHash: string;
   metaCreativeId: string | null;
-  /**
-   * True when the publication's staged creative is a dry run, or its row is
-   * missing (RK9-849); such an ad is never activated.
-   */
+  /** True when the publication's staged creative is a dry run (RK9-849); such an ad is never activated. */
   creativeDryRun?: boolean;
+  /**
+   * True when the publication names a staged creative whose row is gone
+   * (RK9-853). The foreign key prevents it in prod; it is denied fail closed.
+   */
+  creativeMissing?: boolean;
 }
 
 export interface ActivateAdDeps {
@@ -166,6 +168,8 @@ const REASON_TEXT: Record<string, string> = {
   creative_changed: "mainoksen creative on vaihtunut kortin lähettämisen jälkeen",
   publication_unavailable: "mainoksen julkaisua ei voitu lukea",
   content_changed: "mainoksen julkaisu tai sisältö on vaihtunut kortin lähettämisen jälkeen",
+  creative_dry_run: "creative on vaiheistettu kuivaharjoituksena",
+  creative_missing: "julkaisun creative-rivi puuttuu",
   halted: "hätäkatkaisin on painettu: pysäytystila on päällä, kunnes board poistaa sen",
   "halted:scheduled_pause": "ajastettu pysäytys on päällä: pysäytystila on voimassa aamuun asti, ellei board poista sitä",
   "halted:pause_all_cap": "kulutuskatto 90 % ylittyi: pysäytystila on voimassa kuun loppuun, ellei board poista sitä",
@@ -300,10 +304,17 @@ export function createActivateAdHandler(deps: ActivateAdDeps): GateHandler {
       });
     }
 
+    if (owner.creativeMissing) {
+      return deny(request, decidedBy, binding, {
+        reason: "creative_missing",
+        detail: `publication ${owner.id} names a staged creative whose row is missing`,
+        lines: ["Julkaisun creative puuttuu: vaiheista creative ja julkaise mainos uudelleen."],
+      });
+    }
     if (owner.creativeDryRun) {
       return deny(request, decidedBy, binding, {
         reason: "creative_dry_run",
-        detail: `publication ${owner.id} uses a creative staged in dry-run mode, or its creative row is missing`,
+        detail: `publication ${owner.id} uses a creative staged in dry-run mode`,
         lines: ["Creative on kuivaharjoitus: vaiheista se uudelleen live-tilassa."],
       });
     }

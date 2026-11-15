@@ -214,8 +214,11 @@ through a dry-run Meta client that returns the planned `advideos` call.
   `payload.plannedCalls`. The creative view shows `stagingMode` and
   `plannedCalls`. A video stays `staged`, an image is `ready` as in live mode.
 - Publication (`plan` and `publish`) refuses the creative with
-  `creative_not_publishable`. Activation denies an ad whose publication uses
-  it (`creative_dry_run`). A live organic card refuses it
+  `creative_not_publishable`. The publication run reads the creative again
+  before its first Meta write, so a dry-run stage that lands after the submit
+  also fails the run (`creative_not_publishable`, or `creative_not_found` when
+  the row is gone). Activation denies an ad whose publication uses it
+  (`creative_dry_run`). A live organic card refuses it
   (`creative_unusable`), and so does the tap on a live card. An organic
   `dry_run` card accepts it.
 - Staging the same media again with `stagingMode: live` stages it anew: the
@@ -226,7 +229,39 @@ through a dry-run Meta client that returns the planned `advideos` call.
   Meta video id yet (`staged`, `failed`, stale `uploading`). An ad already
   made from that row is then denied at activation. This fails closed.
 - Activation also denies an ad whose publication names a creative row that no
-  longer exists.
+  longer exists (`creative_missing`). The foreign key prevents this in prod.
+  A creative read that fails denies the activation too
+  (`publication_unavailable`).
+- A dry-run video sets its marker in the same write that claims the upload,
+  so a worker that dies mid-stage leaves a marked row, never an unmarked
+  `uploading` one.
+- An empty value (`null`) of `meta.stagingMode` counts as `live`, as in the
+  other enum fields of the config.
+
+`meta.dryRunMediaCheck` is `head` (the default) or `skip` (RK9-853). With
+`skip` a dry-run stage sends no media HEAD, and the creative gets
+`payload.mediaCheck = "skipped"`, which the creative view shows as
+`mediaCheck`. The config refuses `skip` unless `meta.stagingMode` is
+`dry_run`, and live staging always sends the HEAD. Use `skip` only on a dev
+instance whose media host the plugin's host fetch cannot reach: the host fetch
+refuses private addresses, and on paperclip-01 every `*.rk9.fi` dev host
+resolves to a LAN address. A dev run must not host its media on a brand's
+prod media host.
+
+**What `dry_run` does not cover.** `meta.stagingMode` governs creative
+staging only. It is not a brand-wide dry run. In a `dry_run` brand:
+
+- A publication of a creative without the marker (one staged live earlier)
+  still uses the live write client and creates PAUSED Meta objects.
+- A live organic post of such a creative still posts.
+- The plugin jobs (`insights-hourly`, `insights-daily-close`,
+  `scheduled-pause`, `rules-evaluate`, the smoke job, `digest-tick`,
+  `organic-reconcile`) still run and can call Meta with the brand's token.
+
+So a dev acceptance run keeps those paths off by setup, not by this field:
+the brand's token is a fake secret, the plugin jobs are paused, there is no
+`telegram` block, and nobody publishes
+(`docs/implementation-notes/rk9-ads-dev-acceptance.md` at the repo root).
 
 Use `dry_run` only on a dev instance for an acceptance run. The prod configs
 keep the default.
