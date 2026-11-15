@@ -32,8 +32,10 @@ export interface OrganicCardFacts {
   warnings?: string[];
 }
 
+/** Clips to `max` graphemes, so no surrogate pair or emoji sequence is cut in half. */
 function clip(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  const parts = Array.from(graphemes.segment(text), (segment) => segment.segment);
+  return parts.length <= max ? text : `${parts.slice(0, max - 1).join("")}…`;
 }
 
 /**
@@ -212,9 +214,13 @@ function continuePrefix(join: ChunkJoin): string {
   return join === "word" ? CAPTION_WORD_CONTINUE : CAPTION_CONTINUE;
 }
 
+/** The card line for an empty caption: the plugin's own text without the caption quote, so no caption can look like it. */
+export const CAPTION_EMPTY = "(ei teksti\u00e4)";
+
 /** The caption as card lines: "\u2502 " opens each caption line, "\u2506 " a chunk after a space, "\u21b3 " a chunk inside a word. */
 export function captionLines(caption: string): string[] {
-  const lines = caption.length > 0 ? caption.split("\n") : ["(ei teksti\u00e4)"];
+  if (caption.length === 0) return [CAPTION_EMPTY];
+  const lines = caption.split("\n");
   return lines.flatMap((line) => chunkSegments(line).map((chunk) => `${chunk.join === "first" ? CAPTION_QUOTE : continuePrefix(chunk.join)}${chunk.text}`));
 }
 
@@ -225,6 +231,7 @@ export function captionLines(caption: string): string[] {
  * an empty caption line. Returns null for a line without a caption prefix.
  */
 export function unwrapCaptionLines(lines: readonly string[]): string | null {
+  if (lines.length === 1 && lines[0] === CAPTION_EMPTY) return "";
   const out: string[] = [];
   for (const line of lines) {
     if (line === CAPTION_QUOTE.trimEnd() || line.startsWith(CAPTION_QUOTE)) out.push(line.slice(CAPTION_QUOTE.length));

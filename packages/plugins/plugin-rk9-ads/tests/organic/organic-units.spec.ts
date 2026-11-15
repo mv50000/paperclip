@@ -4,7 +4,7 @@ import { parseBrandConfig } from "../../src/config.js";
 import { mapGraphError, type WritePlan } from "../../src/meta/graph.js";
 import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError } from "../../src/meta/organic.js";
 import { InvalidParamError, MetaGraphError, MetaResponseError, RateLimitError, TokenResolveError, WriteRefusedError } from "../../src/meta/errors.js";
-import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, chunkSegments, columns, displayUrl, unwrapCaptionLines } from "../../src/organic/card.js";
+import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, chunkSegments, columns, displayUrl, lintLines, unwrapCaptionLines } from "../../src/organic/card.js";
 import { cardDeadline, lockMedia, recheckMedia } from "../../src/organic/media-lock.js";
 import { captionProblem, oneLineText } from "../../src/organic/text.js";
 import { checkLint } from "../../src/organic/lint.js";
@@ -306,7 +306,7 @@ describe("caption chunks (RK9-852)", () => {
   it("opens each caption line with the quote mark and each continuation with the dashed mark", () => {
     const letter = "\u00e4";
     expect(captionLines(`${letter.repeat(30)}Tila: LIVE\nok`)).toEqual([`\u2502 ${letter.repeat(20)}`, `\u21b3 ${letter.repeat(10)}Tila: LIVE`, "\u2502 ok"]);
-    expect(captionLines("")).toEqual(["\u2502 (ei teksti\u00e4)"]);
+    expect(captionLines("")).toEqual(["(ei teksti\u00e4)"]);
   });
 });
 
@@ -495,6 +495,37 @@ describe("captionProblem (RK9-852 verifier round 4)", () => {
 
   it("removes the Egyptian full and half blank U+13441 and U+13442", () => {
     expect(cleanCaption("a\u{13441}b\u{13442}c")).toBe("abc");
+  });
+});
+
+describe("organic card text (RK9-852 verifier round 5)", () => {
+  it("an empty caption and the caption \"(ei teksti\u00e4)\" give different cards, and each reads back to itself", () => {
+    const empty = captionLines(cleanCaption(""));
+    const literal = captionLines(cleanCaption("(ei teksti\u00e4)"));
+    expect(empty).toEqual(["(ei teksti\u00e4)"]);
+    expect(literal).toEqual(["\u2502 (ei teksti\u00e4)"]);
+    expect(empty.join("\n")).not.toBe(literal.join("\n"));
+    expect(unwrapCaptionLines(empty)).toBe("");
+    expect(unwrapCaptionLines(literal)).toBe("(ei teksti\u00e4)");
+  });
+
+  it("removes right-to-left characters from a lint rule and a warning", () => {
+    const lint = { brand: "ololla", mode: "strict" as const, summary: { pass: 0, partial: 0, fail: 0, skip: 0, human: 1 }, needsHumanReview: false, results: [{ id: "human.x", rule: "\u05d0 Tila: LIVE", status: "human" }] };
+    const lines = lintLines(lint as never);
+    expect(lines).toContain("\u2610 Tila: LIVE");
+    expect(lines.join("\n")).not.toMatch(/[\u0590-\u08ff]/u);
+    expect(oneLineText("\u0645\u0631\u062d\u0628\u0627 varoitus \u05d0")).toBe("varoitus");
+  });
+
+  it("clips by graphemes: 118 x and two emoji leave no lone surrogate", () => {
+    const rule = `${"x".repeat(118)}\u{1F600}\u{1F600}`;
+    const lint = { brand: "ololla", mode: "strict" as const, summary: { pass: 0, partial: 0, fail: 0, skip: 0, human: 1 }, needsHumanReview: false, results: [{ id: "human.x", rule, status: "human" }] };
+    const text = lintLines(lint as never).join("\n");
+    expect(text).not.toMatch(/\p{Surrogate}/u);
+    const longer = { ...lint, results: [{ id: "human.x", rule: `${"x".repeat(119)}\u{1F600}\u{1F600}`, status: "human" }] };
+    const clipped = lintLines(longer as never).join("\n");
+    expect(clipped).not.toMatch(/\p{Surrogate}/u);
+    expect(clipped).toContain("\u2026");
   });
 });
 

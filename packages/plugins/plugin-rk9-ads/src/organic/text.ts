@@ -52,6 +52,9 @@ const SCRIPT_RES: ReadonlyArray<RegExp> = MARK_SCRIPTS.flatMap((name) => {
   }
 });
 
+// Right-to-left text (see captionProblem).
+const RTL_RE = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufeff\u{10800}-\u{10fff}\u{1E800}-\u{1EFFF}]/u;
+const RTL_ALL_RE = new RegExp(RTL_RE.source, "gu");
 const LINE_BREAK_RE = /\r\n?|[\u0085\u2028\u2029]/g;
 const LONE_SURROGATE_RE = /\p{Surrogate}/gu;
 // Every space separator and the braille blank U+2800 (a visible-as-nothing space) become U+0020.
@@ -136,11 +139,13 @@ export function cleanCaption(text: string): string {
 }
 
 /**
- * Agent-supplied text on one line: cleaned like a caption, then every run of
- * whitespace (the line feed included) becomes one space.
+ * Agent-supplied text on one line (a lint rule, a warning): cleaned like a
+ * caption, right-to-left characters removed (a card line cannot show mixed
+ * direction faithfully), then every run of whitespace (the line feed
+ * included) becomes one space.
  */
 export function oneLineText(text: string): string {
-  return cleanCaption(text).replace(/\s+/g, " ");
+  return cleanCaption(text).replace(RTL_ALL_RE, "").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -150,7 +155,6 @@ export function oneLineText(text: string): string {
  * and digits). Not supported (RK9-852): the card cannot show the visual order
  * a phone gives mixed-direction text, so such a caption is refused.
  */
-const RTL_RE = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufeff\u{10800}-\u{10fff}\u{1E800}-\u{1EFFF}]/u;
 /** A grapheme of more code points than the longest RGI emoji (10). */
 const MAX_GRAPHEME_CODE_POINTS = 10;
 const captionGraphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });

@@ -399,6 +399,9 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (mode !== post.mode) {
       return close("⛔ Julkaisutila on muuttunut kortin jälkeen: ei julkaistu. Pyydä uusi kortti.", `mode_changed: card ${post.mode}, config ${mode}`);
     }
+    // The stored caption must still pass the caption rules (a row written before them, or by another path, is refused).
+    const captionIssue = captionProblem(post.caption);
+    if (captionIssue) return close("⛔ Julkaisun teksti ei kelpaa: ei julkaistu. Pyydä uusi kortti.", `caption_refused: ${captionIssue}`);
     // M2 (RK9-852): the file Meta fetches must still be the one the card locked.
     const lock = readLock(post.payload.mediaLock);
     if (!lock) return close("⛔ Kortin mediaa ei ole lukittu: ei julkaistu. Pyydä uusi kortti.", "media_unlocked");
@@ -721,7 +724,8 @@ export function organicClientFactory(ctx: MetaClientContext): OrganicClientFacto
       mode: config.organic?.mode === "live" ? "live" : "dryRun",
       guardedWrite: organicWriteGuard(target),
       // A publish POST never goes out twice: a rate-limit answer is final, and its result is read by the reconcile (RK9-852).
-      retry: { maxAttempts: 1 },
+      // Reads (the container poll) keep the default retries.
+      retry: { writeMaxAttempts: 1 },
     });
   };
 }

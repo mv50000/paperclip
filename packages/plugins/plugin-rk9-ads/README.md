@@ -835,7 +835,11 @@ plugin must not see).
    after a space starts with "┆ " (the space itself is not shown), and a chunk
    that continues inside a word starts with "↳ ". Two captions that differ by
    one space therefore never give the same card, and the card explains the
-   two marks in one line above the caption when it uses them. The width estimate (`columns` in
+   two marks in one line above the caption when it uses them. An empty
+   caption shows "(ei tekstiä)" as the card's own line, without "│ ", so it
+   differs from a caption with that text. Rule and warning text is cleaned
+   like the caption, right-to-left characters are removed from it, and it is
+   clipped by graphemes. The width estimate (`columns` in
    `src/organic/card.ts`) overestimates the known cases and sums every code
    point of a grapheme: printable ASCII, the Latin-1 letters and the Finnish,
    Swedish, Estonian and German letters count 1 (W, M, @, % and AE count 2),
@@ -900,9 +904,12 @@ plugin must not see).
    may still be live, and so may an
    IG `media_publish` error while the container is not yet ERROR or EXPIRED. The post then stays in `publishing`
    with `error: "result unknown: …"`, so the same content gets no second card.
-   The publish client sends each POST once (`retry.maxAttempts: 1`): a
-   rate-limit answer is not retried, because the first POST may have gone
-   live
+   The publish client sends each write once (`retry.writeMaxAttempts: 1`): a
+   rate-limit answer to a POST is not retried, because the first POST may
+   have gone live; reads such as the container poll keep their retries. The
+   handler also runs the caption rules on the stored caption before the
+   publish, and a refused caption closes the post (`caption_refused`) without
+   a Meta call
    (see "Reconcile"). An error Meta answered closes the post as `failed`.
 3. **Reject.** "❌ Hylkää" edits the same card to the reason buttons (visual,
    text, claim, brand, topic, repeat). A reply to the card stores a typed

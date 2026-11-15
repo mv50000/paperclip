@@ -54,13 +54,15 @@ const MAX_ATTEMPTS_CEILING = 5;
 export interface RetryPolicy {
   /** Requests per call, the first one included. */
   maxAttempts: number;
+  /** Requests per write call (POST, DELETE); defaults to maxAttempts. 1 means a write is never sent twice. */
+  writeMaxAttempts: number;
   /** First backoff; it doubles per attempt. */
   baseDelayMs: number;
   /** Total sleep per call. Clamped below the host's 30 s budget. */
   maxTotalWaitMs: number;
 }
 
-export const DEFAULT_RETRY: Readonly<RetryPolicy> = { maxAttempts: 3, baseDelayMs: 1_000, maxTotalWaitMs: 20_000 };
+export const DEFAULT_RETRY: Readonly<RetryPolicy> = { maxAttempts: 3, writeMaxAttempts: 3, baseDelayMs: 1_000, maxTotalWaitMs: 20_000 };
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 export type MetaClientMode = "live" | "readOnly" | "dryRun";
@@ -432,8 +434,10 @@ export class MetaGraphClient {
     this.#mode = mode;
     const retry = options.retry ?? {};
     // A missing, NaN or infinite value falls back to the default; every value has a hard ceiling.
+    const maxAttempts = Math.floor(retryValue(retry.maxAttempts, DEFAULT_RETRY.maxAttempts, 1, MAX_ATTEMPTS_CEILING));
     this.retry = {
-      maxAttempts: Math.floor(retryValue(retry.maxAttempts, DEFAULT_RETRY.maxAttempts, 1, MAX_ATTEMPTS_CEILING)),
+      maxAttempts,
+      writeMaxAttempts: Math.floor(retryValue(retry.writeMaxAttempts, maxAttempts, 1, MAX_ATTEMPTS_CEILING)),
       baseDelayMs: retryValue(retry.baseDelayMs, DEFAULT_RETRY.baseDelayMs, 0, 10_000),
       // Never plan a wait the host would cut off.
       maxTotalWaitMs: retryValue(retry.maxTotalWaitMs, DEFAULT_RETRY.maxTotalWaitMs, 0, HOST_CALL_BUDGET_MS - 5_000),
@@ -594,7 +598,8 @@ export class MetaGraphClient {
       const regainMs = regainAccessMs(response.headers);
       const backoffMs = this.retry.baseDelayMs * 2 ** (attempt - 1);
       const delayMs = Math.max(backoffMs, regainMs ?? 0);
-      if (attempt >= this.retry.maxAttempts || this.now() - started + delayMs + slowestFetchMs > this.retry.maxTotalWaitMs) {
+      const attemptCap = method === "GET" ? this.retry.maxAttempts : this.retry.writeMaxAttempts;
+      if (attempt >= attemptCap || this.now() - started + delayMs + slowestFetchMs > this.retry.maxTotalWaitMs) {
         throw new RateLimitError(error.message, {
           httpStatus: error.httpStatus,
           code: error.code,

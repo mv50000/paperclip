@@ -27,7 +27,7 @@ import { useCompanyConfigs, useCompanySecrets } from "../../src/kit/testing/harn
 import { telegramBotKey } from "../../src/kit/telegram/bot-api.js";
 import { memoryCreativeSource, type CreativeRow } from "../../src/publish/store.js";
 import { memoryOrganicPostStore } from "../../src/organic/store.js";
-import type { OrganicService } from "../../src/organic/service.js";
+import { organicContentHash, type OrganicService } from "../../src/organic/service.js";
 import { CAPTION_LEGEND } from "../../src/organic/card.js";
 import { brandConfig, COMPANY_A, SECRET_A_BOT, SECRET_A_META, secretRef } from "../fixtures.js";
 import { FakeTelegram } from "../helpers/fake-telegram.js";
@@ -217,7 +217,9 @@ function cardText(r: Rig, messageId: number): string {
 function quotedCaption(text: string): string {
   const lines = text.split("\n");
   const out: string[] = [];
-  for (const line of lines.slice(lines.indexOf("Julkaistava teksti:") + 1)) {
+  const caption = lines.slice(lines.indexOf("Julkaistava teksti:") + 1);
+  if (caption.length === 1 && caption[0] === "(ei tekstiä)") return "";
+  for (const line of caption) {
     if (line.startsWith("│ ")) out.push(line.slice(2));
     else if (line.startsWith("┆ ")) out[out.length - 1] += ` ${line.slice(2)}`;
     else if (line.startsWith("↳ ")) out[out.length - 1] += line.slice(2);
@@ -381,6 +383,54 @@ describe("organic verifier round 4 (RK9-852)", () => {
     const text = String(r.fake.callsOf("sendVideo").at(-1)!.params.caption);
     expect(text).toContain(CAPTION_LEGEND);
     expect(text.indexOf(CAPTION_LEGEND)).toBeLessThan(text.indexOf("Julkaistava teksti:"));
+  });
+});
+
+describe("organic verifier round 5 (RK9-852)", () => {
+  it("retries a rate-limited container poll (a read) but sends each POST once", async () => {
+    let polls = 0;
+    const meta = graph().on(`GET ${CONTAINER}`, () => {
+      polls += 1;
+      return polls === 1
+        ? { status: 400, body: { error: { message: "Application request limit reached", type: "OAuthException", code: 4, fbtrace_id: "t" } } }
+        : { body: { status_code: "FINISHED" } };
+    });
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(publishWrites(r).map((call) => call.key)).toEqual([`POST ${IG}/media`, `POST ${IG}/media_publish`]);
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "published", metaMediaId: MEDIA });
+  });
+
+  it("checks the stored caption again before the publish: a refused caption closes fail-closed without a Meta call", async () => {
+    const r = await rig();
+    const { gateRequestId, postId } = await request(r);
+    const row = r.posts.rows.find((entry) => entry.id === postId)!;
+    // A row written by another path: its content hash matches, only the caption rules refuse it.
+    row.caption = "Valo palaa \u05e9\u05dc\u05d5\u05dd";
+    row.contentHash = organicContentHash(COMPANY_A, (await r.creatives.get(COMPANY_A, row.creativeId))!.sha256, row.channel, row.caption);
+    (r.gates.rows.get(gateRequestId)!.payload!.organic as { contentHash: string }).contentHash = row.contentHash;
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    const post = r.posts.rows.find((entry) => entry.id === postId)!;
+    expect(post.status).toBe("failed");
+    expect(post.error).toMatch(/^not published: caption_refused: caption contains right-to-left text/);
+    expect(publishWrites(r)).toEqual([]);
+    expect(cardText(r, messageId)).toContain("Julkaisun teksti ei kelpaa");
+  });
+
+  it("an empty caption shows the plugin's placeholder line, not a quoted caption line", async () => {
+    const r = await rig();
+    await request(r, { caption: "" });
+    const text = String(r.fake.callsOf("sendVideo").at(-1)!.params.caption);
+    expect(text.split("\n").at(-1)).toBe("(ei teksti\u00e4)");
+    expect(quotedCaption(text)).toBe("");
+    await request(r, { caption: "(ei teksti\u00e4)", creativeId: IMAGE_ID, channel: "ig_feed" });
+    const literal = String(r.fake.callsOf("sendPhoto").at(-1)?.params.caption ?? r.fake.callsOf("sendVideo").at(-1)!.params.caption);
+    expect(literal.split("\n").at(-1)).toBe("\u2502 (ei teksti\u00e4)");
+    expect(quotedCaption(literal)).toBe("(ei teksti\u00e4)");
   });
 });
 
