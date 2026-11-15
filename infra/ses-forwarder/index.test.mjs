@@ -199,8 +199,29 @@ test("rewrite() does not let a bare CR or a control-character header name smuggl
     "utf8",
   );
   const out = rewrite(raw, "forwarder@ololla.fi", { commonHeaders: { from: ["a@example.com"] } }, "tuki@ololla.fi").toString("utf8");
-  assert.ok(!out.includes("tietosuoja@ololla.fi"), "smuggled arrival address must not survive");
+  const h = out.split("\r\n\r\n")[0];
+  assert.ok(!/\r(?!\n)/.test(h), "no lone CR left in the headers");
+  assert.equal((h.match(/^X-Original-To/gim) || []).length, 1, "only our X-Original-To starts a header line");
   assert.match(out, /\r\nX-Original-To: tuki@ololla\.fi\r\n/);
+});
+
+test("rewrite() keeps the header block intact around a stray CR (\\r\\r\\n) and whitespace before a colon", () => {
+  const raw = Buffer.from(
+    "From: a@example.com\r\nSubject: x\r\r\nSubject2\t: y\r\nContent-Type: text/html\r\n\r\n<b>hi</b>\r\n",
+    "utf8",
+  );
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
+  const [h, body] = out.split("\r\n\r\n");
+  assert.match(h, /^Content-Type: text\/html$/m, "Content-Type stays in the headers");
+  assert.match(h, /^Subject2\t: y$/m, "obsolete whitespace-before-colon header is kept");
+  assert.equal(body, "<b>hi</b>\r\n");
+});
+
+test("rewrite() never copies a From that would be cut by its many folds", () => {
+  const raw = plain(["From:" + "\r\n ".repeat(2665) + "victim@example.com", "Subject: x"]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: [] } }, "hei@sunspot.fi");
+  const rt = header(out, "Reply-To");
+  assert.ok(rt === null || rt === "victim@example.com", `Reply-To is whole or absent, got ${rt}`);
 });
 
 test("rewrite() omits Reply-To rather than cutting an oversized From mid-address", () => {

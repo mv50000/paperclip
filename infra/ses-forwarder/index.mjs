@@ -228,32 +228,40 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
 
   // Group header lines into logical blocks (header + its folded continuation lines)
   const blocks = [];
-  // A lone CR or LF also ends a line here: otherwise `Subject: x\rX-Original-To: …`
-  // would carry a second header through inside a kept one.
-  for (const line of headerPart.split(/\r\n|\r|\n/)) {
+  // A lone CR becomes a space: a receiver that treats it as a line end would
+  // otherwise see `Subject: x\rX-Original-To: …` as a second header. Not a line end
+  // here either, so `\r\r\n` from a double line-ending conversion cannot end the
+  // header block early and push Content-Type into the body.
+  for (const line of headerPart.replace(/\r(?!\n)/g, " ").split(/\r?\n/)) {
     if (/^[ \t]/.test(line) && blocks.length) blocks[blocks.length - 1].push(line);
     else blocks.push([line]);
   }
   const nameOf = (b) => (b[0].split(":")[0] || "").toLowerCase().trim();
   // A header whose name holds control characters (`X-Original-To\0:`) is dropped too.
+  // Tab is allowed: obsolete syntax permits whitespace before the colon (nameOf trims it).
   const kept = blocks
-    .filter((b) => !DROP_HEADERS.has(nameOf(b)) && !/[\x00-\x1f\x7f]/.test(b[0].split(":")[0]))
+    .filter((b) => !DROP_HEADERS.has(nameOf(b)) && !/[\x00-\x08\x0a-\x1f\x7f]/.test(b[0].split(":")[0]))
     .map((b) => b.join("\r\n"));
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
     return b ? b.join("\r\n").slice(b[0].indexOf(":") + 1) : "";
   };
   // Only a value that fits one header line is copied; a cut address is worse than none.
-  const fitting = (v) => (v && Buffer.byteLength(v, "utf8") <= 900 ? v : "");
+  // The raw value is bounded first, so sanitizeHeaderValue() never truncates it.
+  const copyable = (rawValue) => {
+    if (!rawValue || rawValue.length > 8192) return "";
+    const v = sanitizeHeaderValue(rawValue, 8192);
+    return Buffer.byteLength(v, "utf8") <= 900 ? v : "";
+  };
 
   // The original From exactly as the sender wrote it (encoded-words intact), so
   // replying reaches them; SES's decoded commonHeaders value is the fallback.
   const rawFrom = rawValueOf("from");
   const commonFrom = mail?.commonHeaders?.from?.[0] || "";
-  const origFrom = fitting(sanitizeHeaderValue(rawFrom, 2000)) || fitting(sanitizeHeaderValue(commonFrom, 2000));
+  const origFrom = copyable(rawFrom) || copyable(commonFrom);
   // The sender's own Reply-To (e.g. a contact form's customer address) would be lost
   // with Reply-To rewritten to the sender, so it travels as X-Original-Reply-To.
-  const origReplyTo = fitting(sanitizeHeaderValue(rawValueOf("reply-to"), 2000));
+  const origReplyTo = copyable(rawValueOf("reply-to"));
 
   const domain = String(fromAddr).split("@")[1] || "";
   const label = senderLabel(commonFrom || rawFrom);

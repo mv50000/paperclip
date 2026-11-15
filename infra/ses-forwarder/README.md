@@ -128,6 +128,7 @@ set_env() {  # usage: set_env '{"ROUTED_DOMAINS":"sunspot.fi"}'
    aws lambda get-function-configuration --function-name $F --query Environment.Variables --output json \
      | jq -c '{Variables: (del(.FORWARD_TO))}' > /tmp/fwd-env.json
    aws lambda update-function-configuration --function-name $F --environment file:///tmp/fwd-env.json > /dev/null
+   aws lambda wait function-updated --function-name $F
    ```
 
 Before step 1, confirm that `FORWARD_TO` is set in the live configuration
@@ -143,11 +144,14 @@ Rollback:
   with no redeploy (`FORWARD_TO` must still be set).
 - Everything: `aws lambda update-function-code --function-name $F --zip-file
   fileb://~/rk9-mail-backup/<timestamp>/lambda-code-BEFORE.zip`, then restore
-  the variables (the old code ignores a leftover `ROUTED_DOMAINS`):
+  the variables (the old code ignores a leftover `ROUTED_DOMAINS`). Lambda
+  refuses a configuration update while the code update runs, so wait first:
 
   ```bash
+  aws lambda wait function-updated --function-name $F
   jq -c '{Variables: .Environment.Variables}' ~/rk9-mail-backup/<timestamp>/lambda-config-BEFORE.json > /tmp/fwd-env.json
   aws lambda update-function-configuration --function-name $F --environment file:///tmp/fwd-env.json > /dev/null
+  aws lambda wait function-updated --function-name $F
   ```
 
 Messages forwarded nowhere during a fault are not lost: replay them from
