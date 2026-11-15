@@ -34,16 +34,38 @@
 // already present in the raw bytes SES delivers to S3; forwarding it verbatim makes
 // SES's own outbound raw-message validator (and any standards-compliant MIME parser)
 // fail to parse the WHOLE message. See sanitizeDanglingBoundaries() below.
+//
+// 2026-11-15 (RK9-874): per-address routing replaces the single FORWARD_TO. Nothing is
+// forwarded to the operator's personal mailbox any more: routes.json maps each address
+// to a target (Aava by default) or to "s3-only". See routing.mjs. The forwarded From is
+// now `"<original name or address> via <domain>" <forwarder@domain>`, Reply-To is the
+// original sender, and X-Original-To lists the address(es) the message arrived at.
+import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
+import { parseRoutes, planDeliveries, domainIsRouted } from "./routing.mjs";
 
 const REGION = process.env.AWS_REGION || "eu-north-1";
 const s3 = new S3Client({ region: REGION });
 const ses = new SESClient({ region: REGION });
 
 const BUCKET = process.env.BUCKET || "rk9-ses-inbound";
-const FORWARD_TO = (process.env.FORWARD_TO || "mikko-ville.lahti@rk9.fi")
-  .split(",").map(s => s.trim()).filter(Boolean);
+const ROUTES_URL = new URL("./routes.json", import.meta.url);
+
+/** Loaded once per container. A load or validation error is cached too: the file
+ *  cannot change without a redeploy, and every routed message must then fail loudly
+ *  (logged, rethrown, kept in S3) rather than be forwarded anywhere by guesswork. */
+let routesCache;
+function loadRoutes() {
+  if (!routesCache) {
+    try {
+      routesCache = { config: parseRoutes(JSON.parse(fs.readFileSync(ROUTES_URL, "utf8"))) };
+    } catch (err) {
+      routesCache = { error: err };
+    }
+  }
+  return routesCache;
+}
 
 // domain -> S3 key prefix (MUST match the receipt rule's ObjectKeyPrefix)
 const PREFIX = { "sunspot.fi": "", "ololla.fi": "ololla/", "saatavilla.fi": "saatavilla/" };
@@ -56,6 +78,9 @@ const fromFor = (domain) => `forwarder@${domain}`;
 const DROP_HEADERS = new Set([
   // original identity — replaced by the rewrite
   "from", "return-path", "sender", "message-id", "dkim-signature", "reply-to", "x-original-from",
+  // ours to write: an inbound X-Original-To would let any sender fake which address
+  // the message arrived at (e.g. tietosuoja@), and Aava acts on that header
+  "x-original-to",
   // inbound-hop artifacts — never forward someone else's verdict
   "authentication-results", "received-spf",
   "arc-seal", "arc-message-signature", "arc-authentication-results",
@@ -118,6 +143,80 @@ function blockedBy(receipt) {
   return null;
 }
 
+/** One header value made safe to place on a single header line: folding and any
+ *  stray CR/LF collapse to a space, other control characters are removed. Every
+ *  value we copy out of the inbound message passes through here, because the
+ *  message is attacker-controlled and a bare CR/LF would inject a header. */
+export function sanitizeHeaderValue(v, max = 900) {
+  const clean = String(v ?? "")
+    .replace(/\r?\n[ \t]*/g, " ")
+    .replace(/[\r\n]/g, " ")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .trim();
+  return [...clean].slice(0, max).join("");
+}
+
+const ENCODED_WORD = /=\?([^?\s]+)\?([bBqQ])\?([^?\s]*)\?=/g;
+
+/** Decode RFC 2047 encoded-words (`=?UTF-8?B?...?=`) in a display name. A word in an
+ *  unknown charset or with bad encoding is left as is; never throws. */
+export function decodeEncodedWords(s) {
+  return String(s)
+    .replace(/(\?=)\s+(?==\?)/g, "$1") // whitespace between adjacent encoded-words is not content
+    .replace(ENCODED_WORD, (word, charset, enc, text) => {
+      try {
+        const bytes = enc.toUpperCase() === "B"
+          ? Buffer.from(text, "base64")
+          : Buffer.from(
+              text.replace(/_/g, " ").replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))),
+              "latin1",
+            );
+        return new TextDecoder(charset.split("*")[0]).decode(bytes);
+      } catch {
+        return word;
+      }
+    });
+}
+
+/** The human-readable part of the original sender: the display name if there is
+ *  one, otherwise the bare address. Quotes, backslashes and angle brackets are
+ *  removed so the result can sit inside our own quoted-string or encoded-word. */
+export function senderLabel(fromValue) {
+  const v = decodeEncodedWords(sanitizeHeaderValue(fromValue));
+  const m = v.match(/^(.*)<([^<>]*)>\s*$/);
+  const name = (m ? m[1] : "").replace(/["\\<>]/g, "").replace(/\s+/g, " ").trim();
+  const addr = (m ? m[2] : v).replace(/["\\<>]/g, "").replace(/\s+/g, " ").trim();
+  const label = sanitizeHeaderValue(name || addr, 64);
+  return label || "unknown sender";
+}
+
+/** A display-name phrase for the From header. Printable ASCII becomes a quoted
+ *  string; anything else becomes RFC 2047 UTF-8 encoded-words of at most 75
+ *  characters each, split on code-point boundaries and folded onto new lines. */
+export function encodePhrase(phrase) {
+  if (/^[\x20-\x7e]*$/.test(phrase)) return `"${phrase.replace(/["\\]/g, "")}"`;
+  const words = [];
+  let chunk = [];
+  let len = 0;
+  for (const ch of phrase) {
+    const b = Buffer.from(ch, "utf8");
+    if (len + b.length > 45 && chunk.length) {
+      words.push(Buffer.concat(chunk));
+      chunk = [];
+      len = 0;
+    }
+    chunk.push(b);
+    len += b.length;
+  }
+  if (chunk.length) words.push(Buffer.concat(chunk));
+  return words.map((w) => `=?UTF-8?B?${w.toString("base64")}?=`).join("\r\n ");
+}
+
+/** Rewrite the raw inbound message for forwarding.
+ *  - From: `"<original name or address> via <domain>" <fromAddr>` (DKIM-aligned)
+ *  - Reply-To and X-Original-From: the original From header
+ *  - X-Original-To: the address(es) the message arrived at (string or array)
+ *  - the original identity and the inbound hop's verdict headers are dropped */
 export function rewrite(raw, fromAddr, mail, originalTo) {
   const text = sanitizeDanglingBoundaries(raw.toString("utf8"));
   const m = text.match(/\r?\n\r?\n/);
@@ -131,20 +230,30 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
     if (/^[ \t]/.test(line) && blocks.length) blocks[blocks.length - 1].push(line);
     else blocks.push([line]);
   }
-  const kept = blocks
-    .filter(b => !DROP_HEADERS.has((b[0].split(":")[0] || "").toLowerCase().trim()))
-    .map(b => b.join("\r\n"));
+  const nameOf = (b) => (b[0].split(":")[0] || "").toLowerCase().trim();
+  const kept = blocks.filter((b) => !DROP_HEADERS.has(nameOf(b))).map((b) => b.join("\r\n"));
 
-  const origFrom = (mail.commonHeaders && mail.commonHeaders.from && mail.commonHeaders.from[0]) || "unknown sender";
-  const display = origFrom.replace(/<[^>]*>/g, "").replace(/"/g, "").trim() || "Forwarded";
+  // The original From exactly as the sender wrote it (encoded-words intact), so
+  // replying reaches them; SES's decoded commonHeaders value is the fallback.
+  const rawFromBlock = blocks.find((b) => nameOf(b) === "from");
+  const rawFrom = rawFromBlock ? rawFromBlock.join("\r\n").slice(rawFromBlock[0].indexOf(":") + 1) : "";
+  const commonFrom = mail?.commonHeaders?.from?.[0] || "";
+  const origFrom = sanitizeHeaderValue(rawFrom) || sanitizeHeaderValue(commonFrom);
+
+  const domain = String(fromAddr).split("@")[1] || "";
+  const label = senderLabel(commonFrom || rawFrom);
+  const phrase = encodePhrase(`${label} via ${domain}`);
+
+  const toList = (Array.isArray(originalTo) ? originalTo : [originalTo])
+    .map((a) => sanitizeHeaderValue(a, 320))
+    .filter(Boolean);
 
   const newHeaders = [
-    `From: ${display} via RK9 <${fromAddr}>`,
-    `Reply-To: ${origFrom}`,
-    `X-Original-From: ${origFrom}`,
-    // Which catch-all address this actually arrived at — the To: header alone can be
-    // anything (bcc, alias, list), and on a domain catch-all that is the useful fact.
-    ...(originalTo ? [`X-Original-To: ${originalTo}`] : []),
+    `From: ${phrase} <${fromAddr}>`,
+    ...(origFrom ? [`Reply-To: ${origFrom}`, `X-Original-From: ${origFrom}`] : []),
+    // Which address this actually arrived at — the To: header alone can be anything
+    // (bcc, alias, list), and on a domain catch-all that is the useful fact.
+    ...(toList.length ? [`X-Original-To: ${toList.join(", ")}`] : []),
     ...kept,
   ].join("\r\n");
   return Buffer.from(newHeaders + "\r\n\r\n" + body, "utf8");
@@ -169,16 +278,34 @@ export const handler = async (event) => {
       continue;
     }
 
+    let plan;
+    try {
+      const routes = loadRoutes();
+      if (routes.error && domainIsRouted(domain, process.env)) throw routes.error;
+      plan = planDeliveries({ config: routes.config ?? null, domain, recipients, env: process.env });
+    } catch (err) {
+      // Never guess a destination: the message stays in S3 under `key` for replay.
+      console.error(`FAIL ${messageId} (${domain}) key=${key} routing: ${err?.message || err}`);
+      throw err;
+    }
+
+    for (const r of plan.s3Only) {
+      console.log(`S3-ONLY ${messageId} (${domain}) rcpt=${r} ${verdicts} key=${key}`);
+    }
+    if (plan.deliveries.length === 0) continue;
+
     try {
       const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
       const raw = await streamToBuffer(obj.Body);
-      const forwarded = rewrite(raw, fromAddr, mail, recipients[0]);
-      await ses.send(new SendRawEmailCommand({
-        Destinations: FORWARD_TO,
-        Source: fromAddr,
-        RawMessage: { Data: forwarded },
-      }));
-      console.log(`OK forwarded ${messageId} (${domain}) ${verdicts} -> ${FORWARD_TO.join(",")}`);
+      for (const d of plan.deliveries) {
+        const forwarded = rewrite(raw, fromAddr, mail, d.recipients);
+        await ses.send(new SendRawEmailCommand({
+          Destinations: d.destinations,
+          Source: fromAddr,
+          RawMessage: { Data: forwarded },
+        }));
+        console.log(`OK forwarded ${messageId} (${domain}) ${verdicts} rcpt=${d.recipients.join(",")} target=${d.target} -> ${d.destinations.join(",")}`);
+      }
     } catch (err) {
       console.error(`FAIL ${messageId} (${domain}) key=${key}: ${err}`);
       throw err; // surface in CloudWatch; SES action is async so no bounce
