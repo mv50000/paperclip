@@ -23,6 +23,10 @@ test("the shipped table forwards only to aava@rk9.fi", () => {
 // RK9-870 inventory, section 1: every listed address routes as the report says.
 test("every inventoried address routes to the inventory's target", () => {
   const expected = {
+    // envelope sender of forwarded copies: a bounce must not loop (verifier M1)
+    "forwarder@saatavilla.fi": S3_ONLY,
+    "forwarder@sunspot.fi": S3_ONLY,
+    "forwarder@ololla.fi": S3_ONLY,
     "tuki@saatavilla.fi": "aava",
     "tietosuoja@saatavilla.fi": "aava",
     "admin@saatavilla.fi": "aava",

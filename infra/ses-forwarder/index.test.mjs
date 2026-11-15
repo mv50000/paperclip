@@ -185,6 +185,32 @@ test("decodeEncodedWords() leaves an unknown charset untouched", () => {
   assert.equal(decodeEncodedWords("=?x-nonexistent?B?YWJj?="), "=?x-nonexistent?B?YWJj?=");
 });
 
+test("rewrite() keeps the sender's own Reply-To as X-Original-Reply-To", () => {
+  const raw = plain(["From: noreply@vendor.example", "Reply-To: Customer <customer@example.com>", "X-Original-Reply-To: forged@example.com", "Subject: x"]);
+  const out = rewrite(raw, "forwarder@saatavilla.fi", { commonHeaders: { from: ["noreply@vendor.example"] } }, "tuki@saatavilla.fi");
+  assert.equal(header(out, "Reply-To"), "noreply@vendor.example");
+  assert.equal(header(out, "X-Original-Reply-To"), "Customer <customer@example.com>");
+  assert.equal((headersOf(out).match(/^X-Original-Reply-To:/gim) || []).length, 1);
+});
+
+test("rewrite() does not let a bare CR or a control-character header name smuggle X-Original-To", () => {
+  const raw = Buffer.from(
+    "From: a@example.com\r\nSubject: hi\rX-Original-To: tietosuoja@ololla.fi\r\nX-Original-To\0: tietosuoja@ololla.fi\r\n\r\nbody\r\n",
+    "utf8",
+  );
+  const out = rewrite(raw, "forwarder@ololla.fi", { commonHeaders: { from: ["a@example.com"] } }, "tuki@ololla.fi").toString("utf8");
+  assert.ok(!out.includes("tietosuoja@ololla.fi"), "smuggled arrival address must not survive");
+  assert.match(out, /\r\nX-Original-To: tuki@ololla\.fi\r\n/);
+});
+
+test("rewrite() omits Reply-To rather than cutting an oversized From mid-address", () => {
+  const huge = "x".repeat(2000) + "@example.com";
+  const raw = plain([`From: ${huge}`, "Subject: x"]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: [huge] } }, "hei@sunspot.fi");
+  assert.equal(header(out, "Reply-To"), null);
+  for (const line of headersOf(out).split("\r\n")) assert.ok(Buffer.byteLength(line) <= 998, "header line within 998 octets");
+});
+
 // ---- RK9-874: handler routing (AWS clients stubbed) ---------------------------
 
 function sesEvent(recipients, { spam = "PASS", virus = "PASS" } = {}) {
@@ -240,6 +266,11 @@ test("handler forwards a routed address to Aava only, never to FORWARD_TO", asyn
   const sent = Buffer.from(calls.ses[0].RawMessage.Data).toString("utf8");
   assert.match(sent, /^From: "Matti via saatavilla\.fi" <forwarder@saatavilla\.fi>\r\n/);
   assert.match(sent, /\r\nX-Original-To: tuki@saatavilla\.fi\r\n/);
+});
+
+test("handler keeps a bounce to forwarder@<domain> in S3 (no loop)", async () => {
+  const { calls } = await runHandler(sesEvent(["forwarder@sunspot.fi"]));
+  assert.equal(calls.ses.length, 0);
 });
 
 test("handler keeps an s3-only address in S3 without fetching or sending", async () => {

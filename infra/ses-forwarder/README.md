@@ -47,7 +47,9 @@ directory must be kept in sync (see **Deploying** below).
    `"<original name or address> via <domain>" <forwarder@<domain>>`
    (RFC 2047-encoded when the name is not ASCII), sets `Reply-To` and
    `X-Original-From` to the original `From`, and sets `X-Original-To` to the
-   address(es) the message arrived at. An inbound `X-Original-To` is dropped,
+   address(es) the message arrived at. The sender's own `Reply-To` (for
+   example a contact form's customer address) is kept as
+   `X-Original-Reply-To`. An inbound `X-Original-To` is dropped,
    so a sender cannot fake it. Every copied value is stripped of CR/LF.
 4. Looks up each recipient in `routes.json` (see **Routing** below) and sends
    one rewritten copy per target via SES `SendRawEmail`. Recipients routed to
@@ -76,10 +78,15 @@ See the file-header comment in `index.mjs` for the change history
 - Keys that start with `$` are comments.
 - `routing.mjs` `parseRoutes()` rejects the whole table on any defect: an
   unknown target, a malformed address, a route for a domain this Lambda does
-  not serve, a duplicate, or a destination on one of the three SES domains
+  not serve, two keys that differ only by case, or a destination on one of the three SES domains
   (mail loop). A rejected or missing table never falls back to any address:
   each routed message fails with `FAIL … routing:` in CloudWatch and stays in
   S3. `deploy.sh` and the tests validate the table before it ships.
+  `JSON.parse` keeps the last of two identical keys without an error, so
+  check a new key with `grep` before adding it.
+- `forwarder@<domain>` is `s3-only`: it is the envelope sender of every
+  forwarded copy, so a bounce from the destination lands there. Forwarding
+  it would loop while the destination bounces.
 - The current table follows the RK9-870 inventory, section 1. The
   operator's personal address is not a destination for any address.
 - Open before the ololla.fi switch: the inventory marks the prod value of
@@ -115,16 +122,33 @@ set_env() {  # usage: set_env '{"ROUTED_DOMAINS":"sunspot.fi"}'
    `S3-ONLY …`.
 4. Add the next domain: `set_env '{"ROUTED_DOMAINS":"sunspot.fi,ololla.fi"}'`,
    test again, then `saatavilla.fi`.
-5. Final state: `set_env '{"ROUTED_DOMAINS":"*"}'`, then drop `FORWARD_TO`
-   from the variables.
+5. Final state: `set_env '{"ROUTED_DOMAINS":"*"}'`, then drop `FORWARD_TO`:
+
+   ```bash
+   aws lambda get-function-configuration --function-name $F --query Environment.Variables --output json \
+     | jq -c '{Variables: (del(.FORWARD_TO))}' > /tmp/fwd-env.json
+   aws lambda update-function-configuration --function-name $F --environment file:///tmp/fwd-env.json > /dev/null
+   ```
+
+Before step 1, confirm that `FORWARD_TO` is set in the live configuration
+(`aws lambda get-function-configuration --function-name $F --query
+Environment.Variables`). A domain outside `ROUTED_DOMAINS` with no
+`FORWARD_TO` fails loudly and keeps its mail in S3. Also send one test
+message straight to `aava@rk9.fi` first: a bouncing destination stops all
+forwarding.
 
 Rollback:
 
 - One domain: remove it from `ROUTED_DOMAINS`. It goes back to `FORWARD_TO`
   with no redeploy (`FORWARD_TO` must still be set).
 - Everything: `aws lambda update-function-code --function-name $F --zip-file
-  fileb://~/rk9-mail-backup/<timestamp>/lambda-code-BEFORE.zip` and restore
-  the variables from `lambda-config-BEFORE.json`.
+  fileb://~/rk9-mail-backup/<timestamp>/lambda-code-BEFORE.zip`, then restore
+  the variables (the old code ignores a leftover `ROUTED_DOMAINS`):
+
+  ```bash
+  jq -c '{Variables: .Environment.Variables}' ~/rk9-mail-backup/<timestamp>/lambda-config-BEFORE.json > /tmp/fwd-env.json
+  aws lambda update-function-configuration --function-name $F --environment file:///tmp/fwd-env.json > /dev/null
+  ```
 
 Messages forwarded nowhere during a fault are not lost: replay them from
 `s3://rk9-ses-inbound/<prefix><messageId>`.

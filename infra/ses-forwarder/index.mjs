@@ -78,6 +78,7 @@ const fromFor = (domain) => `forwarder@${domain}`;
 const DROP_HEADERS = new Set([
   // original identity — replaced by the rewrite
   "from", "return-path", "sender", "message-id", "dkim-signature", "reply-to", "x-original-from",
+  "x-original-reply-to",
   // ours to write: an inbound X-Original-To would let any sender fake which address
   // the message arrived at (e.g. tietosuoja@), and Aava acts on that header
   "x-original-to",
@@ -149,6 +150,7 @@ function blockedBy(receipt) {
  *  message is attacker-controlled and a bare CR/LF would inject a header. */
 export function sanitizeHeaderValue(v, max = 900) {
   const clean = String(v ?? "")
+    .slice(0, max * 4) // bound the work on a huge header before the code-point split
     .replace(/\r?\n[ \t]*/g, " ")
     .replace(/[\r\n]/g, " ")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
@@ -226,19 +228,32 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
 
   // Group header lines into logical blocks (header + its folded continuation lines)
   const blocks = [];
-  for (const line of headerPart.split(/\r?\n/)) {
+  // A lone CR or LF also ends a line here: otherwise `Subject: x\rX-Original-To: …`
+  // would carry a second header through inside a kept one.
+  for (const line of headerPart.split(/\r\n|\r|\n/)) {
     if (/^[ \t]/.test(line) && blocks.length) blocks[blocks.length - 1].push(line);
     else blocks.push([line]);
   }
   const nameOf = (b) => (b[0].split(":")[0] || "").toLowerCase().trim();
-  const kept = blocks.filter((b) => !DROP_HEADERS.has(nameOf(b))).map((b) => b.join("\r\n"));
+  // A header whose name holds control characters (`X-Original-To\0:`) is dropped too.
+  const kept = blocks
+    .filter((b) => !DROP_HEADERS.has(nameOf(b)) && !/[\x00-\x1f\x7f]/.test(b[0].split(":")[0]))
+    .map((b) => b.join("\r\n"));
+  const rawValueOf = (name) => {
+    const b = blocks.find((x) => nameOf(x) === name);
+    return b ? b.join("\r\n").slice(b[0].indexOf(":") + 1) : "";
+  };
+  // Only a value that fits one header line is copied; a cut address is worse than none.
+  const fitting = (v) => (v && Buffer.byteLength(v, "utf8") <= 900 ? v : "");
 
   // The original From exactly as the sender wrote it (encoded-words intact), so
   // replying reaches them; SES's decoded commonHeaders value is the fallback.
-  const rawFromBlock = blocks.find((b) => nameOf(b) === "from");
-  const rawFrom = rawFromBlock ? rawFromBlock.join("\r\n").slice(rawFromBlock[0].indexOf(":") + 1) : "";
+  const rawFrom = rawValueOf("from");
   const commonFrom = mail?.commonHeaders?.from?.[0] || "";
-  const origFrom = sanitizeHeaderValue(rawFrom) || sanitizeHeaderValue(commonFrom);
+  const origFrom = fitting(sanitizeHeaderValue(rawFrom, 2000)) || fitting(sanitizeHeaderValue(commonFrom, 2000));
+  // The sender's own Reply-To (e.g. a contact form's customer address) would be lost
+  // with Reply-To rewritten to the sender, so it travels as X-Original-Reply-To.
+  const origReplyTo = fitting(sanitizeHeaderValue(rawValueOf("reply-to"), 2000));
 
   const domain = String(fromAddr).split("@")[1] || "";
   const label = senderLabel(commonFrom || rawFrom);
@@ -253,7 +268,8 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
     ...(origFrom ? [`Reply-To: ${origFrom}`, `X-Original-From: ${origFrom}`] : []),
     // Which address this actually arrived at — the To: header alone can be anything
     // (bcc, alias, list), and on a domain catch-all that is the useful fact.
-    ...(toList.length ? [`X-Original-To: ${toList.join(", ")}`] : []),
+    ...(origReplyTo ? [`X-Original-Reply-To: ${origReplyTo}`] : []),
+    ...(toList.length ? [`X-Original-To: ${toList.join(",\r\n ")}`] : []),
     ...kept,
   ].join("\r\n");
   return Buffer.from(newHeaders + "\r\n\r\n" + body, "utf8");
@@ -289,6 +305,7 @@ export const handler = async (event) => {
       throw err;
     }
 
+    if (recipients.length === 0) console.error(`WARN ${messageId} (${domain}) no recipients in receipt, key=${key}`);
     for (const r of plan.s3Only) {
       console.log(`S3-ONLY ${messageId} (${domain}) rcpt=${r} ${verdicts} key=${key}`);
     }
