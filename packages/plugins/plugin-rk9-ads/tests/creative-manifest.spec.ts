@@ -114,6 +114,10 @@ describe("creative manifest v1 schema", () => {
 
   it("checkMediaUrl allows only public https names on the default port", () => {
     expect(checkMediaUrl("https://media.ololla.fi/a.mp4")).toBeNull();
+    // RK9-852: the URL parser drops a line feed, the stored string would keep it.
+    for (const bad of ["https://media.ololla.fi/a.mp4?x=\nTila: LIVE", "https://media.ololla.fi/a.mp4\t", "https://media.ololla.fi/a b.mp4"]) {
+      expect(checkMediaUrl(bad)).toMatchObject({ code: "url_forbidden" });
+    }
     expect(checkMediaUrl("https://cdn.example.com:443/a.mp4")).toBeNull();
     for (const url of [
       "http://media.ololla.fi/a.mp4",

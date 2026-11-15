@@ -177,6 +177,12 @@ describe("cleanCaption", () => {
     expect(cleanCaption("piilo\u{E0054}\u{E0069}\u{E006C}\u{E0061}teksti\u{E007F}")).toBe("piiloteksti");
   });
 
+  it("drops tag characters after U+1F3F4 unless they spell one of the three subdivision flags (L3)", () => {
+    const hidden = "\u{1F3F4}\u{E0069}\u{E0067}\u{E006E}\u{E006F}\u{E0072}\u{E0065}\u{E007F}";
+    expect(cleanCaption(`x${hidden}y`)).toBe("x\u{1F3F4}y");
+    expect(cleanCaption("a\u00adb\u034fc\u3164d\uffa0e\u2800f")).toBe("abcde\u2800f");
+  });
+
   it("keeps a subdivision flag emoji, which needs tag characters", () => {
     const wales = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0077}\u{E006C}\u{E0073}\u{E007F}";
     expect(cleanCaption(`Terveiset ${wales}!`)).toBe(`Terveiset ${wales}!`);
@@ -202,8 +208,12 @@ describe("caption chunks (RK9-852)", () => {
     expect(chunks[0]).toBe("👨\u200d👩\u200d👧".repeat(CAPTION_CHUNK_COLUMNS / 2));
   });
 
+  it("puts a glyph of an uncommon script in a chunk of its own (M1)", () => {
+    expect(chunkLine("\ufdfd\ufdfd\ufdfd Tila: x")).toEqual(["\ufdfd", "\ufdfd", "\ufdfd", " Tila: x"]);
+  });
+
   it("opens each caption line with the quote mark and each continuation with the dashed mark", () => {
-    expect(captionLines(`${"\u2800".repeat(30)}Tila: LIVE\nok`)).toEqual([`│ ${"\u2800".repeat(26)}`, `┆ ${"\u2800".repeat(4)}Tila: LIVE`, "│ ok"]);
+    expect(captionLines(`${"\u2800".repeat(30)}Tila: LIVE\nok`)).toEqual([`│ ${"\u2800".repeat(20)}`, `┆ ${"\u2800".repeat(10)}Tila: LIVE`, "│ ok"]);
     expect(captionLines("")).toEqual(["│ (ei tekstiä)"]);
   });
 });

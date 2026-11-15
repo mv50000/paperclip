@@ -77,6 +77,8 @@ export const RECONCILE_AFTER_MINUTES = 30;
 export const UNKNOWN_SETTLE_MINUTES = 5;
 /** Marks a media id taken from a caption match: a board delete refuses it. */
 export const MEDIA_ID_FROM_CAPTION_MATCH = "caption_match";
+/** Container states in which media_publish never made the post live (it runs only after FINISHED, and only once). */
+const CONTAINER_UNPUBLISHED = new Set(["FINISHED", "IN_PROGRESS", "ERROR", "EXPIRED"]);
 
 export const ORGANIC_LABELS = { approve: "📣 Julkaise", deny: "❌ Hylkää" } as const;
 /** A dry-run card says on its button that the tap publishes nothing. */
@@ -119,6 +121,8 @@ export interface OrganicServiceDeps {
   writeClient: OrganicClientFactory;
   /** Read-only client on meta.accessTokenRef (the scope check, the IG reconcile). */
   readClient(companyId: string, config: BrandConfig): MetaGraphClient;
+  /** Read-only client on organic.pageAccessTokenRef (the FB reconcile). */
+  pageReadClient(companyId: string, config: BrandConfig): MetaGraphClient;
   /** The host fetch for the media HEAD (ctx.http.fetch; its SSRF guard applies). */
   fetch: FetchLike;
   wait?: ContainerWaitOptions;
@@ -168,6 +172,11 @@ export function channelProblem(config: BrandConfig, channel: OrganicChannel): st
 
 function creativeProblem(creative: CreativeRow, channel: OrganicChannel, mode: OrganicMode, now: Date): string | null {
   if (!USABLE_CREATIVE_STATUSES.has(creative.status)) return `the creative is ${creative.status}`;
+  // A stored URL with whitespace or a control character could open a card line (RK9-852).
+  // eslint-disable-next-line no-control-regex
+  if ([creative.mediaUrl, creative.posterUrl ?? ""].some((url) => /[\s\u0000-\u001f\u007f-\u009f]/.test(url))) {
+    return "the creative's media URL contains whitespace or a control character; stage it again";
+  }
   // RK9-849: a dry-run staging is fit for a dry-run card only, never for a live post.
   if (mode === "live" && creative.stagingDryRun) return "the creative was staged in dry-run mode; stage it again in live mode";
   if (creative.validUntil && Date.parse(creative.validUntil) <= now.getTime()) return "the creative is past its validUntil";
@@ -394,7 +403,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (!lock) return close("⛔ Kortin mediaa ei ole lukittu: ei julkaistu. Pyydä uusi kortti.", "media_unlocked");
     const drift = await recheckMedia(deps.fetch, lock, { url: mediaUrl, mode, mediaHosts: cfg.organic!.mediaHosts, now: now() });
     if (drift) return close("⛔ Media on muuttunut tai vanhentunut kortin jälkeen: ei julkaistu.", drift);
-    const publishingPayload = { ...post.payload, publishMode: mode };
+    // containerTracking: this publish stores the IG container id before media_publish (the reconcile relies on it).
+    const publishingPayload = { ...post.payload, publishMode: mode, containerTracking: true };
     if (
       !(await deps.posts.update(companyId, post.id, "pending", {
         status: "publishing",
@@ -585,7 +595,12 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (post.channel.startsWith("ig_")) {
       if (!cfg.meta.igUserId) return { kind: "unknown", reason: "meta.igUserId is not set" };
       // media_publish runs only after the container id is stored, so without one nothing went live.
-      if (!post.metaContainerId) return { kind: "absent", reason: "no IG container was stored, so media_publish never ran" };
+      // A row from before RK9-852 did not store it first, so its absence proves nothing.
+      if (!post.metaContainerId) {
+        return post.payload.containerTracking === true
+          ? { kind: "absent", reason: "no IG container was stored, so media_publish never ran" }
+          : { kind: "unknown", reason: "the row predates the container tracking; check the account" };
+      }
       const client = deps.readClient(post.companyId, cfg);
       let status: string | null;
       try {
@@ -593,7 +608,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       } catch (error) {
         return { kind: "unknown", reason: `the container status could not be read: ${safe(error)}` };
       }
-      if (status !== "PUBLISHED") return { kind: "absent", reason: `the IG container reports ${status ?? "no status"}` };
+      if (status !== null && CONTAINER_UNPUBLISHED.has(status)) return { kind: "absent", reason: `the IG container reports ${status}` };
+      if (status !== "PUBLISHED") return { kind: "unknown", reason: `the IG container reports ${status ?? "no status"}` };
       let mediaId: string | null = null;
       try {
         mediaId = await findIgMedia(client, cfg.meta.igUserId, { caption: post.caption, sinceMs, kind: post.channel === "ig_reel" ? "reel" : "image", excludeMediaIds });
@@ -602,7 +618,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       }
       return { kind: "published", mediaId, fromCaption: mediaId !== null };
     }
-    const client = deps.writeClient(post.companyId, cfg, post.channel, targetOf(cfg));
+    if (!cfg.organic?.pageAccessTokenRef) return { kind: "unknown", reason: "organic.pageAccessTokenRef is not set" };
+    const client = deps.pageReadClient(post.companyId, cfg);
     try {
       const mediaId = await findFbObject(client, cfg.meta.pageId, { kind: post.channel === "fb_photo" ? "photo" : "video", caption: post.caption, sinceMs, excludeMediaIds });
       return mediaId ? { kind: "published", mediaId, fromCaption: true } : { kind: "unknown", reason: "no single Page post with this text was found" };
@@ -656,6 +673,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       return { status: stored ? "published" : "not_publishing", postId };
     }
     if (verdict.kind === "unknown" && !options.closeUnknown) {
+      // Touch the row, so the job checks the other stuck rows before this one again.
+      await deps.posts.update(companyId, post.id, "publishing", { payload: { ...post.payload, lastReconcileAt: now().toISOString() } });
       return { status: "unknown", postId, detail: verdict.reason };
     }
     const error =

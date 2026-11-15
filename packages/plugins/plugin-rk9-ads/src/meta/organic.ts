@@ -275,17 +275,22 @@ export async function igContainerStatus(client: MetaGraphClient, containerId: st
   return typeof raw.status_code === "string" ? raw.status_code : null;
 }
 
+/** Container states that prove media_publish did not (and will not) make it live. */
+const CONTAINER_NOT_LIVE = new Set(["ERROR", "EXPIRED"]);
+
 /**
  * media_publish can answer an error although the post went live (seen in
- * Sunspot's publish-ig.mjs). The container's status_code then says PUBLISHED,
- * and the media id comes from `findIgMedia` (null unless the match is unique).
- * Returns false when the container is not published; throws
- * OrganicOutcomeUnknownError when its status or the media list cannot be read.
+ * Sunspot's publish-ig.mjs), and the container can say so only later. When
+ * the container says PUBLISHED, the media id comes from `findIgMedia` (null
+ * unless the match is unique). Returns false only when the container is
+ * ERROR or EXPIRED; any other state (FINISHED may lag behind the publish)
+ * throws OrganicOutcomeUnknownError, and the reconcile reads it again later.
  */
 async function recoverPublished(
   client: MetaGraphClient,
   igUserId: string,
   containerId: string,
+  cause: unknown,
   input: { startedAtMs: number; caption: string; kind: IgMediaKind; excludeMediaIds?: ReadonlySet<string> },
 ): Promise<string | null | false> {
   let status: string | null;
@@ -294,7 +299,8 @@ async function recoverPublished(
   } catch (error) {
     throw unknownOutcome(error, "container status", containerId);
   }
-  if (status !== "PUBLISHED") return false;
+  if (status !== null && CONTAINER_NOT_LIVE.has(status)) return false;
+  if (status !== "PUBLISHED") throw unknownOutcome(cause, `media_publish (container ${status ?? "without status"})`, containerId);
   try {
     return await findIgMedia(client, igUserId, { caption: input.caption, sinceMs: input.startedAtMs, kind: input.kind, ...(input.excludeMediaIds ? { excludeMediaIds: input.excludeMediaIds } : {}) });
   } catch {
@@ -330,19 +336,14 @@ async function publishIgContainer(
     mediaId = requireId(published.id, "id");
   } catch (error) {
     if (!(error instanceof MetaGraphError)) throw unknownOutcome(error, "media_publish", containerId);
-    const unknown = outcomeUnknown(error);
-    const found = await recoverPublished(client, igUserId, containerId, {
+    const found = await recoverPublished(client, igUserId, containerId, error, {
       startedAtMs,
       caption: typeof fields.caption === "string" ? fields.caption : "",
       kind,
       ...(hooks.excludeMediaIds ? { excludeMediaIds: hooks.excludeMediaIds } : {}),
     });
-    if (found === false) {
-      // Graph answered an error and the container is not published: nothing is live.
-      // An unanswered publish can still be in flight, so its result stays unknown.
-      if (unknown) throw unknownOutcome(error, "media_publish", containerId);
-      throw error;
-    }
+    // The container is ERROR or EXPIRED: nothing is live.
+    if (found === false) throw error;
     mediaId = found;
     recovered = true;
   }
@@ -409,7 +410,13 @@ export async function publishFbPhoto(client: MetaGraphClient, pageId: string, in
     throw outcomeUnknown(error) ? unknownOutcome(error, "Page photo", null) : error;
   }
   if (isDryRun(result)) return { dryRun: true, planned: [result.planned] };
-  const mediaId = requireId(result.id, "id");
+  let mediaId: string;
+  try {
+    mediaId = requireId(result.id, "id");
+  } catch (error) {
+    // Graph said yes but the body has no id: the photo may be live.
+    throw unknownOutcome(error, "Page photo", null);
+  }
   const postId = typeof result.post_id === "string" && /^\d+_\d+$/.test(result.post_id) ? result.post_id : null;
   return { dryRun: false, mediaId, containerId: null, postId, permalink: await fbPermalink(client, postId), recovered: false };
 }
@@ -425,7 +432,12 @@ export async function publishFbVideo(client: MetaGraphClient, pageId: string, in
     throw outcomeUnknown(error) ? unknownOutcome(error, "Page video", null) : error;
   }
   if (isDryRun(result)) return { dryRun: true, planned: [result.planned] };
-  const mediaId = requireId(result.id, "id");
+  let mediaId: string;
+  try {
+    mediaId = requireId(result.id, "id");
+  } catch (error) {
+    throw unknownOutcome(error, "Page video", null);
+  }
   return { dryRun: false, mediaId, containerId: null, postId: null, permalink: null, recovered: false };
 }
 

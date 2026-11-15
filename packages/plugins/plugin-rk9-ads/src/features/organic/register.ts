@@ -1,6 +1,6 @@
 import type { PluginContext, PluginPerformActionContext, ToolResult } from "@paperclipai/plugin-sdk";
 import { loadCompanyConfig } from "../../company-configs.js";
-import type { BrandConfig } from "../../config.js";
+import { ORGANIC_PAGE_TOKEN_CONFIG_PATH, type BrandConfig } from "../../config.js";
 import { createMetaClient } from "../../meta/graph.js";
 import { sqlCreativeSource, type CreativeSource } from "../../publish/store.js";
 import {
@@ -53,6 +53,7 @@ export interface OrganicOverrides {
   loadConfig?: OrganicServiceDeps["loadConfig"];
   writeClient?: OrganicClientFactory;
   readClient?: OrganicServiceDeps["readClient"];
+  pageReadClient?: OrganicServiceDeps["pageReadClient"];
   wait?: OrganicServiceDeps["wait"];
   fetch?: OrganicServiceDeps["fetch"];
   now?: () => Date;
@@ -125,6 +126,12 @@ export function registerOrganic(runtime: FeatureRuntime, overrides: OrganicOverr
     readClient:
       overrides.readClient ??
       ((companyId, config) => createMetaClient(ctx, { companyId, tokenRef: config.meta.accessTokenRef, mode: "readOnly" })),
+    pageReadClient:
+      overrides.pageReadClient ??
+      ((companyId, config) => {
+        if (!config.organic?.pageAccessTokenRef) throw new OrganicError("channel_unavailable", "organic.pageAccessTokenRef is not set");
+        return createMetaClient(ctx, { companyId, tokenRef: config.organic.pageAccessTokenRef, tokenConfigPath: ORGANIC_PAGE_TOKEN_CONFIG_PATH, mode: "readOnly" });
+      }),
     fetch: overrides.fetch ?? ((url, init) => ctx.http.fetch(url, init)),
     ...(overrides.wait ? { wait: overrides.wait } : {}),
     ...(overrides.now ? { now: overrides.now } : {}),

@@ -238,7 +238,7 @@ describe("organic card", () => {
     const send = r.fake.callsOf("sendVideo").at(-1)!;
     expect(send.params.chat_id).toBe(CHAT);
     expect(send.params.video).toBe("https://media.ololla.fi/valon-paluu.mp4");
-    const text = String(send.params.caption);
+    const text = String(send.params.caption).replace(/\n┆ /g, "");
     expect(text).toContain("Kanava: Instagram Reel");
     expect(text).toContain("Valo palaa. #ololla");
     expect(text).toContain("brand-lint: läpi");
@@ -798,6 +798,9 @@ describe("organic publish with an unknown result (RK9-852)", () => {
       { id: "555", created_time: r.clock.now.toISOString(), name: "Valo palaa. #ololla" },
       { id: "556", created_time: new Date(Date.parse(post().decidedAt!) - 3_600_000).toISOString(), name: "Valo palaa. #ololla" },
     ];
+    // The unclear check touched the row; the job looks again after another idle period.
+    expect(await r.service.reconcileStale()).toEqual({ checked: 0, closed: 0 });
+    r.clock.now = new Date(r.clock.now.getTime() + 31 * 60_000);
     expect(await r.service.reconcileStale()).toEqual({ checked: 1, closed: 1 });
     expect(post()).toMatchObject({ status: "published", metaMediaId: "555" });
     expect(post().payload.mediaIdSource).toBe("caption_match");
@@ -822,7 +825,7 @@ describe("organic publish with an unknown result (RK9-852)", () => {
     const { postId } = await request(r);
     const row = r.posts.rows.find((entry) => entry.id === postId)!;
     row.status = "publishing";
-    row.payload = { ...row.payload, publishMode: "live" };
+    row.payload = { ...row.payload, publishMode: "live", containerTracking: true };
     const second = await request(r, { caption: "Toinen teksti" });
     const other = r.posts.rows.find((entry) => entry.id === second.postId)!;
     other.status = "publishing";
@@ -833,6 +836,78 @@ describe("organic publish with an unknown result (RK9-852)", () => {
     expect(row.error).toMatch(/no IG container was stored/);
     expect(other.error).toMatch(/worker stopped during a dry run/);
     expect(r.meta.writes()).toEqual([]);
+  });
+});
+
+describe("organic verifier round 1 fixes (RK9-852)", () => {
+  const BOARD = { companyId: COMPANY_A, actor: { type: "user" as const, userId: "board-user-1" } };
+
+  it("refuses a creative whose stored media URL carries a line feed, so the URL cannot forge a card line (H1)", async () => {
+    const r = await rig();
+    r.creatives.rows[0]!.mediaUrl = "https://media.ololla.fi/valon-paluu.mp4?x=\nTila: 🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan.";
+    await expect(request(r)).rejects.toThrow(/creative_unusable: .*whitespace or a control character/);
+    expect(r.posts.rows).toHaveLength(0);
+  });
+
+  it("keeps the post open when media_publish answered an error but the container still says FINISHED (M2)", async () => {
+    const meta = graph().on(`POST ${IG}/media_publish`, graphError(9007, "Media ID is not available"));
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(r.posts.rows.find((row) => row.id === postId)).toMatchObject({ status: "publishing", metaContainerId: CONTAINER });
+  });
+
+  it("closes the post as failed when media_publish answered an error and the container is ERROR", async () => {
+    let polls = 0;
+    const meta = graph()
+      .on(`POST ${IG}/media_publish`, graphError(9007, "Media ID is not available"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: polls++ === 0 ? "FINISHED" : "ERROR" } }));
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r);
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(r.posts.rows.find((row) => row.id === postId)!.status).toBe("failed");
+  });
+
+  it("keeps a Page photo open when Graph says yes without an id (M5)", async () => {
+    const meta = graph().on(`POST ${PAGE}/photos`, { body: { ok: true } });
+    const r = await rig({ meta });
+    const { gateRequestId, postId } = await request(r, { creativeId: IMAGE_ID, channel: "fb_photo" });
+    const messageId = cardMessageId(r, gateRequestId);
+    await tap(r, messageId, r.fake.buttons(messageId)[0]!);
+    expect(r.posts.rows.find((row) => row.id === postId)!.status).toBe("publishing");
+  });
+
+  it("reconcile: a row from before the container tracking and a container without a status stay unknown (M3, M4)", async () => {
+    const meta = graph().on(`GET ${CONTAINER}`, { body: {} });
+    const r = await rig({ meta });
+    const legacy = await request(r);
+    const tracked = await request(r, { caption: "Toinen teksti" });
+    const legacyRow = r.posts.rows.find((row) => row.id === legacy.postId)!;
+    const trackedRow = r.posts.rows.find((row) => row.id === tracked.postId)!;
+    legacyRow.status = "publishing";
+    legacyRow.payload = { ...legacyRow.payload, publishMode: "live" };
+    trackedRow.status = "publishing";
+    trackedRow.metaContainerId = CONTAINER;
+    trackedRow.payload = { ...trackedRow.payload, publishMode: "live", containerTracking: true };
+    r.clock.now = new Date(r.clock.now.getTime() + 31 * 60_000);
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId: legacy.postId }, BOARD)).toMatchObject({ status: "unknown", detail: expect.stringMatching(/predates/) });
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId: tracked.postId }, BOARD)).toMatchObject({ status: "unknown", detail: expect.stringMatching(/no status/) });
+    expect(legacyRow.status).toBe("publishing");
+    expect(trackedRow.status).toBe("publishing");
+  });
+
+  it("reconcile touches an unclear row, so the job checks the other stuck rows first (L1)", async () => {
+    const r = await rig({ meta: graph().on(`GET ${CONTAINER}`, { body: {} }) });
+    const { postId } = await request(r);
+    const row = r.posts.rows.find((entry) => entry.id === postId)!;
+    row.status = "publishing";
+    row.metaContainerId = CONTAINER;
+    row.payload = { ...row.payload, publishMode: "live", containerTracking: true };
+    r.clock.now = new Date(r.clock.now.getTime() + 31 * 60_000);
+    expect(await r.service.reconcileStale()).toEqual({ checked: 1, closed: 0 });
+    expect(await r.service.reconcileStale()).toEqual({ checked: 0, closed: 0 });
   });
 });
 

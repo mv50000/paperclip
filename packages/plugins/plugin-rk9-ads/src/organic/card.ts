@@ -83,14 +83,23 @@ export const CAPTION_CONTINUE = "┆ ";
  * at the start of a screen line (RK9-852). A chunk this short fits one line of
  * a narrow phone screen at the default font size.
  */
-export const CAPTION_CHUNK_COLUMNS = 26;
+export const CAPTION_CHUNK_COLUMNS = 20;
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 // Emoji and East Asian wide characters take two columns.
 const WIDE_RE = /\p{Extended_Pictographic}|[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|[\u{20000}-\u{3fffd}]/u;
+// Scripts whose width a phone font makes about one column: Latin, Greek, Cyrillic, common punctuation, braille.
+const NARROW_RE = /^[\u0020-\u024f\u0370-\u03ff\u0400-\u04ff\u1e00-\u1eff\u2000-\u206f\u20a0-\u20cf\u2100-\u214f\u2190-\u21ff\u2500-\u257f\u2800-\u28ff]/u;
 
+/**
+ * An estimate that errs wide: a glyph of another script (a ligature such as
+ * U+FDFD, cuneiform) fills a chunk alone, so no wide glyph can push the
+ * rest of its chunk onto an unquoted screen line.
+ */
 function columns(grapheme: string): number {
-  return WIDE_RE.test(grapheme) ? 2 : 1;
+  if (WIDE_RE.test(grapheme)) return 2;
+  if (NARROW_RE.test(grapheme)) return 1;
+  return CAPTION_CHUNK_COLUMNS;
 }
 
 /**
@@ -136,13 +145,27 @@ export function organicCardText(facts: OrganicCardFacts): string {
   return lines.join("\n");
 }
 
+/**
+ * The media URL as the card shows it: the parser's normalised form, which has
+ * no whitespace or control character, so a URL cannot open a card line.
+ */
+export function displayUrl(mediaUrl: string): string {
+  try {
+    const href = new URL(mediaUrl).href;
+    // eslint-disable-next-line no-control-regex
+    return /[\s\u0000-\u001f\u007f-\u009f]/.test(href) ? "(virheellinen osoite)" : href;
+  } catch {
+    return "(virheellinen osoite)";
+  }
+}
+
 /** The line a card without the media itself starts with. */
 export function posterNotice(mediaUrl: string): string {
-  return `⚠️ Kuva on videon kansikuva, ei itse video. Katso video ennen hyväksyntää:\n🔗 ${mediaUrl}`;
+  return `⚠️ Kuva on videon kansikuva, ei itse video. Katso video ennen hyväksyntää:\n🔗 ${displayUrl(mediaUrl)}`;
 }
 
 export function textCardNotice(mediaUrl: string): string {
-  return `⚠️ Media ei näy kortissa. Katso se ennen hyväksyntää:\n🔗 ${mediaUrl}`;
+  return `⚠️ Media ei näy kortissa. Katso se ennen hyväksyntää:\n🔗 ${displayUrl(mediaUrl)}`;
 }
 
 /**

@@ -829,16 +829,22 @@ plugin must not see).
    line ("Tila: 🔴 LIVE" or "Tila: 🧪 Kuivaharjoitus"), the lint summary,
    every `human` rule as a "☐" line, and last the caption, with each line
    quoted as "│ ". A caption therefore cannot pass for a line of the card.
-   A caption line, a rule line or a warning longer than 26 columns goes on in
+   A caption line, a rule line or a warning longer than 20 columns goes on in
    chunks that start with "┆ ", so a phone never wraps agent text onto an
-   unquoted screen line (RK9-852). The rule text is cleaned like the caption.
+   unquoted screen line (RK9-852). The width estimate errs wide: an emoji or
+   East Asian character counts 2, a glyph outside Latin, Greek, Cyrillic,
+   common punctuation and braille fills a chunk alone. A very large phone
+   font can still wrap a chunk; a Telegram blockquote entity would close that
+   gap (follow-up). A media URL with whitespace or a control character is
+   refused at staging and on the card, and the card shows only the parsed URL. The rule text is cleaned like the caption.
    When the card cannot show the video itself (it falls back to the poster or
    to a text card), its first line says so and links the media.
    The buttons are "📣 Julkaise" (live) or "🧪 Kuivaharjoita" (dry run) and
    "❌ Hylkää". The card writes nothing to Meta. The caption is cleaned of
    control characters (NEL included), bidi controls, zero-width spaces, the
-   invisible operators U+2060-2064, U+061C, U+180E and tag characters outside
-   a subdivision flag emoji. The card locks its media (see "Media lock"). The
+   invisible operators U+2060-2064, U+061C, U+180E, the fillers U+00AD,
+   U+034F, U+115F, U+1160, U+3164 and U+FFA0, and tag characters outside the
+   England, Scotland and Wales flag emoji. The braille blank U+2800 stays. The card locks its media (see "Media lock"). The
    same content (company, creative sha256, channel, caption) gets one open
    card; a second request returns the open post.
 2. **Publish.** The tap goes through the kit router (chat, approver list,
@@ -858,7 +864,8 @@ plugin must not see).
    text. A change of `organic.mode` after the card closes the card without
    a Meta write: the approver saw the mode on the card.
    A publish whose answer never came (network error, a Graph 5xx, an
-   unreadable body) may still be live. The post then stays in `publishing`
+   unreadable body or a 2xx without an id) may still be live, and so may an
+   IG `media_publish` error while the container is not yet ERROR or EXPIRED. The post then stays in `publishing`
    with `error: "result unknown: …"`, so the same content gets no second card
    (see "Reconcile"). An error Meta answered closes the post as `failed`.
 3. **Reject.** "❌ Hylkää" edits the same card to the reason buttons (visual,
@@ -924,12 +931,17 @@ without an update, or 5 min after an unknown result.
 | Case | Result |
 |---|---|
 | Dry run | `failed`: nothing was sent to Meta |
-| IG, no stored container | `failed`: `media_publish` never ran |
-| IG container not `PUBLISHED` | `failed` |
+| IG, no stored container (row written by this code) | `failed`: `media_publish` never ran |
+| IG, no stored container (row from before RK9-852) | stays open: the old code stored the id only at the end |
+| IG container `FINISHED`, `IN_PROGRESS`, `ERROR` or `EXPIRED` | `failed` |
+| IG container with no or another status | stays open |
 | IG container `PUBLISHED` | `published`; the media id only from a unique caption match |
 | FB, exactly one Page photo or video with the text since the tap | `published` (caption-matched id) |
 | Anything unclear | stays `publishing`; the board closes it with `closeUnknown: true` after checking the account (`failed`) |
 
+An unclear check touches the row, so the job (at most 20 rows a run, oldest
+first) looks at it again only after another 30 min and reaches the other
+stuck rows first. The FB check uses a read-only client on the Page token.
 A caption-matched media id cannot be deleted from the board. A pending post
 that never got a card id (the worker stopped between the insert and the card)
 reads as `expired` after 10 min, so its content can get a new card.

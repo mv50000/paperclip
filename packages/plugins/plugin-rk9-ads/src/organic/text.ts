@@ -9,17 +9,21 @@
  * Mongolian vowel separator U+180E, zero-width spaces, LRM/RLM, bidi
  * embeddings, overrides and isolates, the word joiner and the invisible
  * operators U+2060-2064, the deprecated format controls U+206A-206F, the
- * interlinear annotation marks U+FFF9-FFFB and the BOM.
+ * interlinear annotation marks U+FFF9-FFFB, the BOM, and the invisible fillers
+ * U+00AD, U+034F, U+115F, U+1160, U+3164 and U+FFA0. The braille blank U+2800
+ * stays: Instagram captions use it for spacing, and the card quotes it.
  */
 // eslint-disable-next-line no-control-regex
-const INVISIBLE_RE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u180e\u200b\u200c\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g;
+const INVISIBLE_RE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b\u200c\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb]/g;
 
 /**
- * Tag characters U+E0000-E007F. They are kept only inside a subdivision flag
- * emoji (U+1F3F4, tag letters or digits, CANCEL TAG U+E007F), such as the flag
- * of Wales; anywhere else they carry text a reader cannot see.
+ * Tag characters U+E0000-E007F. They are kept only inside the three
+ * recommended subdivision flags (England, Scotland, Wales: U+1F3F4, the tag
+ * letters gbeng, gbsct or gbwls, CANCEL TAG U+E007F); anywhere else they carry
+ * text a reader cannot see.
  */
-const TAG_RE = /(\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]{1,6}\u{E007F})|[\u{E0000}-\u{E007F}]/gu;
+const TAG_RE =
+  /(\u{1F3F4}\u{E0067}\u{E0062}(?:\u{E0065}\u{E006E}\u{E0067}|\u{E0073}\u{E0063}\u{E0074}|\u{E0077}\u{E006C}\u{E0073})\u{E007F})|[\u{E0000}-\u{E007F}]/gu;
 
 /**
  * Normalises a caption: CR LF, CR and U+2028/2029 become line feeds, the
