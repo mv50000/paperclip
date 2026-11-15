@@ -66,6 +66,10 @@ export interface OrganicPostStore {
   list(companyId: string, limit: number): Promise<OrganicPostView[]>;
   /** Posts that changed in the last `hours` hours (digest). */
   recent(companyId: string, hours: number, limit: number): Promise<OrganicPostView[]>;
+  /** Meta object ids the company's other posts hold: a caption match never takes one. */
+  otherMediaIds(companyId: string, postId: string): Promise<Set<string>>;
+  /** Publishing posts of every company not updated for `minutes` minutes, oldest first (the reconcile job). */
+  stalePublishing(minutes: number, limit: number): Promise<Array<{ companyId: string; id: string }>>;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -138,9 +142,22 @@ function toView(row: Record<string, unknown>): OrganicPostView {
   };
 }
 
+/**
+ * A pending post that never got a card id this long after it was created lost
+ * its worker between the insert and the card (RK9-852). A card send takes
+ * seconds; without this the row would block the same content for good.
+ */
+export const STALE_PENDING_MINUTES = 10;
+
 /** A pending post whose card can no longer be approved reads as expired. */
-export function effectiveStatus(post: Pick<OrganicPostView, "status" | "gateStatus" | "gateLive">): OrganicPostStatus {
+export function effectiveStatus(
+  post: Pick<OrganicPostView, "status" | "gateStatus" | "gateLive"> & Partial<Pick<OrganicPostView, "gateRequestId" | "createdAt">>,
+  now: Date = new Date(),
+): OrganicPostStatus {
   if (post.status !== "pending") return post.status;
+  if (!post.gateRequestId && post.gateStatus === null && post.createdAt && Date.parse(post.createdAt) <= now.getTime() - STALE_PENDING_MINUTES * 60_000) {
+    return "expired";
+  }
   if (post.gateStatus === "pending" && post.gateLive === false) return "expired";
   // A card that is decided or closed (expired, denied, skipped, failed) can no longer publish this post.
   if (post.gateStatus !== null && post.gateStatus !== "pending" && post.gateStatus !== "approved") return "expired";
@@ -244,6 +261,24 @@ export function sqlOrganicPostStore(db: PluginDatabaseClient, ledger: Ledger): O
         [companyId],
       );
       return rows.map(toView);
+    },
+    async otherMediaIds(companyId, postId) {
+      assertCompany(companyId);
+      const rows = await db.query<{ meta_media_id: unknown }>(
+        `SELECT meta_media_id FROM ${posts} WHERE company_id = $1 AND id <> $2 AND meta_media_id IS NOT NULL`,
+        [companyId, UUID_RE.test(postId) ? postId : "00000000-0000-0000-0000-000000000000"],
+      );
+      return new Set(rows.map((row) => String(row.meta_media_id)));
+    },
+    async stalePublishing(minutes, limit) {
+      const boundedMinutes = Math.min(Math.max(Math.floor(minutes), 1), 24 * 60);
+      const bounded = Math.min(Math.max(Math.floor(limit), 1), 100);
+      const rows = await db.query<{ company_id: unknown; id: unknown }>(
+        `SELECT company_id, id FROM ${posts} WHERE status = 'publishing' AND updated_at < now() - interval '${boundedMinutes} minutes' ` +
+          `ORDER BY updated_at ASC LIMIT ${bounded}`,
+        [],
+      );
+      return rows.map((row) => ({ companyId: String(row.company_id), id: String(row.id) }));
     },
   };
 }
@@ -349,6 +384,17 @@ export function memoryOrganicPostStore(
         .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
         .slice(0, limit)
         .map(view);
+    },
+    async otherMediaIds(companyId, postId) {
+      return new Set(rows.filter((row) => row.companyId === companyId && row.id !== postId && row.metaMediaId).map((row) => row.metaMediaId!));
+    },
+    async stalePublishing(minutes, limit) {
+      const before = now().getTime() - minutes * 60_000;
+      return rows
+        .filter((row) => row.status === "publishing" && Date.parse(row.updatedAt) < before)
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+        .slice(0, limit)
+        .map((row) => ({ companyId: row.companyId, id: row.id }));
     },
   };
 }

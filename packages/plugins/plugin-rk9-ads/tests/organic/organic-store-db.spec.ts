@@ -167,4 +167,21 @@ describeDb("organic posts SQL on real Postgres", () => {
     const b = await card(companyB, 501);
     expect((await gates.findByMessage!("-100777", 501))?.id).toBe(b.id);
   });
+  it("lists the media ids of the company's other posts, and publishing posts idle for N minutes across companies (RK9-852)", async () => {
+    const mine = await newPost(companyA, "7".repeat(64));
+    const other = await newPost(companyA, "8".repeat(64));
+    const foreign = await newPost(companyB, "8".repeat(64));
+    await posts.update(companyA, other!.id, "pending", { status: "publishing", metaMediaId: "17900000000000077" });
+    await posts.update(companyB, foreign!.id, "pending", { status: "publishing", metaMediaId: "17900000000000088" });
+    const ids = await posts.otherMediaIds(companyA, mine!.id);
+    expect(ids.has("17900000000000077")).toBe(true);
+    expect(ids.has("17900000000000088")).toBe(false);
+    expect((await posts.otherMediaIds(companyA, other!.id)).has("17900000000000077")).toBe(false);
+
+    expect(await posts.stalePublishing(30, 10)).toEqual([]);
+    await testDb.client.execute(`UPDATE ${ledger.qualified("organic_posts")} SET updated_at = now() - interval '31 minutes' WHERE id IN ($1, $2)`, [other!.id, foreign!.id]);
+    const stale = await posts.stalePublishing(30, 10);
+    expect(stale).toEqual(expect.arrayContaining([{ companyId: companyA, id: other!.id }, { companyId: companyB, id: foreign!.id }]));
+    expect(stale).toHaveLength(2);
+  });
 });

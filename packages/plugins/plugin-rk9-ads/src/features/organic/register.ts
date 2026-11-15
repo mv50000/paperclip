@@ -1,6 +1,6 @@
 import type { PluginContext, PluginPerformActionContext, ToolResult } from "@paperclipai/plugin-sdk";
 import { loadCompanyConfig } from "../../company-configs.js";
-import type { BrandConfig } from "../../config.js";
+import { ORGANIC_PAGE_TOKEN_CONFIG_PATH, type BrandConfig } from "../../config.js";
 import { createMetaClient } from "../../meta/graph.js";
 import { sqlCreativeSource, type CreativeSource } from "../../publish/store.js";
 import {
@@ -33,7 +33,9 @@ import { organicDeclarations } from "./declarations.js";
  *   a deny asks for the reason on the card itself;
  * - tool `rk9ads_request_organic_post` and action `organic.request`: open one card;
  * - action `organic.delete` (board only, dry run by default): deletes a live post at Meta;
- * - action `organic.posts`: the posts and their state.
+ * - action `organic.posts`: the posts and their state;
+ * - job `organic-reconcile` and action `organic.reconcile` (board only): close a post stuck
+ *   in publishing from what Meta reports (RK9-852). They read Meta and never write to it.
  * No new Telegram messages besides the card: notices go to the digest.
  */
 
@@ -41,6 +43,8 @@ export const ORGANIC_TOOL = "rk9ads_request_organic_post";
 export const ORGANIC_REQUEST_ACTION_KEY = "organic.request";
 export const ORGANIC_DELETE_ACTION_KEY = "organic.delete";
 export const ORGANIC_POSTS_ACTION_KEY = "organic.posts";
+export const ORGANIC_RECONCILE_ACTION_KEY = "organic.reconcile";
+export const ORGANIC_RECONCILE_JOB_KEY = "organic-reconcile";
 
 export interface OrganicOverrides {
   posts?: OrganicPostStore;
@@ -49,7 +53,9 @@ export interface OrganicOverrides {
   loadConfig?: OrganicServiceDeps["loadConfig"];
   writeClient?: OrganicClientFactory;
   readClient?: OrganicServiceDeps["readClient"];
+  pageReadClient?: OrganicServiceDeps["pageReadClient"];
   wait?: OrganicServiceDeps["wait"];
+  fetch?: OrganicServiceDeps["fetch"];
   now?: () => Date;
 }
 
@@ -120,6 +126,13 @@ export function registerOrganic(runtime: FeatureRuntime, overrides: OrganicOverr
     readClient:
       overrides.readClient ??
       ((companyId, config) => createMetaClient(ctx, { companyId, tokenRef: config.meta.accessTokenRef, mode: "readOnly" })),
+    pageReadClient:
+      overrides.pageReadClient ??
+      ((companyId, config) => {
+        if (!config.organic?.pageAccessTokenRef) throw new OrganicError("channel_unavailable", "organic.pageAccessTokenRef is not set");
+        return createMetaClient(ctx, { companyId, tokenRef: config.organic.pageAccessTokenRef, tokenConfigPath: ORGANIC_PAGE_TOKEN_CONFIG_PATH, mode: "readOnly" });
+      }),
+    fetch: overrides.fetch ?? ((url, init) => ctx.http.fetch(url, init)),
     ...(overrides.wait ? { wait: overrides.wait } : {}),
     ...(overrides.now ? { now: overrides.now } : {}),
   });
@@ -178,6 +191,25 @@ export function registerOrganic(runtime: FeatureRuntime, overrides: OrganicOverr
     } catch (error) {
       throw new Error(errorText(error));
     }
+  });
+
+  ctx.actions.register(ORGANIC_RECONCILE_ACTION_KEY, async (params, context: PluginPerformActionContext) => {
+    const companyId = context.companyId;
+    if (!companyId) throw new Error("company context is required");
+    if (context.actor.type !== "user") throw new Error("board_only: reconciling a post is board-only");
+    try {
+      return await service.reconcile(companyId, params.postId as string, {
+        closeUnknown: params.closeUnknown === true,
+        by: `board:${context.actor.userId ?? "user"}`,
+      });
+    } catch (error) {
+      throw new Error(errorText(error));
+    }
+  });
+
+  ctx.jobs.register(ORGANIC_RECONCILE_JOB_KEY, async () => {
+    const result = await service.reconcileStale();
+    if (result.checked > 0) ctx.logger.info("rk9-ads organic: reconciled publishing posts", result);
   });
 
   ctx.actions.register(ORGANIC_POSTS_ACTION_KEY, async (params, context: PluginPerformActionContext) => {

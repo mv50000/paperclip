@@ -79,6 +79,8 @@ export const DEFAULT_ORGANIC_CARD_TTL_HOURS = 24;
 export const STAGING_MODES = ["live", "dry_run"] as const;
 export type StagingMode = (typeof STAGING_MODES)[number];
 export const ORGANIC_PAGE_TOKEN_CONFIG_PATH = "organic.pageAccessTokenRef";
+/** A bare DNS hostname: labels of letters, digits and hyphens, at least one dot, no port. */
+const MEDIA_HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 /** Activation card validity (A9, RK9-517). */
 export const DEFAULT_GATE_TTL_HOURS = 24;
 export const MAX_GATE_TTL_HOURS = 168;
@@ -175,6 +177,19 @@ export interface BrandConfig {
     pageAccessTokenRef?: SecretRef;
     /** How long an organic card can be approved. Default 24. */
     cardTtlHours: number;
+    /**
+     * Hosts (exact hostnames) a media URL may come from (RK9-852). A live card
+     * needs its media on one of them; a dry-run card only warns. Meta fetches
+     * the URL after the tap, so only a host the operator trusts not to swap
+     * the file may serve it. Empty: no live organic post.
+     */
+    mediaHosts: string[];
+    /**
+     * How long the media host keeps a file, counted from its Last-Modified
+     * header (Sunspot's host: 2 h). A card then expires before the file does,
+     * and a publish after that is refused without a Meta call.
+     */
+    mediaHostTtlHours?: number;
   };
 }
 
@@ -383,6 +398,17 @@ export const BRAND_CONFIG_JSON_SCHEMA = {
           title: "Organic card validity, hours (default 24)",
           minimum: 1,
           maximum: MAX_GATE_TTL_HOURS,
+        },
+        mediaHosts: {
+          type: "array",
+          title: "Trusted media hosts (exact hostnames); a live post takes media only from these",
+          items: { type: "string" },
+        },
+        mediaHostTtlHours: {
+          type: "number",
+          title: "How long the media host keeps a file, hours from its Last-Modified (unset: no limit)",
+          exclusiveMinimum: 0,
+          maximum: MAX_GATE_TTL_HOURS * 4,
         },
       },
     },
@@ -791,7 +817,7 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
   let organic: BrandConfig["organic"];
   const organicRaw = c.record(raw, "organic", root, false);
   if (organicRaw && Object.keys(organicRaw).length > 0) {
-    c.known(organicRaw, ["enabled", "mode", "channels", "pageAccessTokenRef", "cardTtlHours"], "organic");
+    c.known(organicRaw, ["enabled", "mode", "channels", "pageAccessTokenRef", "cardTtlHours", "mediaHosts", "mediaHostTtlHours"], "organic");
     const enabled = c.boolean(organicRaw, "enabled", "organic", false);
     const mode = c.enumValue(organicRaw, "mode", "organic", ORGANIC_MODES, "dry_run");
     const rawChannels = c.stringArray(organicRaw, "channels", "organic");
@@ -810,8 +836,21 @@ export function parseBrandConfig(raw: unknown): BrandConfigParseResult {
       c.add("organic.channels", "an ig_* channel needs meta.igUserId");
     }
     const cardTtlHours = c.number(organicRaw, "cardTtlHours", "organic", { fallback: DEFAULT_ORGANIC_CARD_TTL_HOURS, min: 1, max: MAX_GATE_TTL_HOURS });
+    const mediaHosts = [...new Set(c.stringArray(organicRaw, "mediaHosts", "organic", { pattern: MEDIA_HOST_RE }).map((host) => host.toLowerCase()))];
+    const mediaHostTtlHours =
+      organicRaw.mediaHostTtlHours === undefined || organicRaw.mediaHostTtlHours === null
+        ? undefined
+        : c.number(organicRaw, "mediaHostTtlHours", "organic", { min: 0, exclusiveMin: true, max: MAX_GATE_TTL_HOURS * 4 });
     if (mode && cardTtlHours !== undefined) {
-      organic = { enabled, mode, channels, ...(pageAccessTokenRef ? { pageAccessTokenRef } : {}), cardTtlHours };
+      organic = {
+        enabled,
+        mode,
+        channels,
+        ...(pageAccessTokenRef ? { pageAccessTokenRef } : {}),
+        cardTtlHours,
+        mediaHosts,
+        ...(mediaHostTtlHours !== undefined ? { mediaHostTtlHours } : {}),
+      };
     }
   }
 

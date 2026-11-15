@@ -105,6 +105,9 @@ export type UrlProblem = { code: "url_not_https" | "url_forbidden"; message: str
  * private-only host name (Tailscale MagicDNS names included).
  */
 export function checkMediaUrl(value: string): UrlProblem | null {
+  // The URL parser drops tabs and line feeds silently; the stored string would keep them (RK9-852).
+  // eslint-disable-next-line no-control-regex
+  if (/[\s\u0000-\u001f\u007f-\u009f]/.test(value)) return { code: "url_forbidden", message: "must not contain whitespace or control characters" };
   let url: URL;
   try {
     url = new URL(value);

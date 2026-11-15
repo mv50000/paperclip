@@ -28,6 +28,8 @@ export interface MetaGraphErrorDetails {
   /** Graph's own end-user title and message, when it sent them. */
   userTitle?: string | null;
   userMessage?: string | null;
+  /** Graph's `is_transient` flag: the error may clear on retry, so the write's result is not known. */
+  isTransient?: boolean | null;
 }
 
 const EMPTY_DETAILS: MetaGraphErrorDetails = {
@@ -47,6 +49,7 @@ export class MetaGraphError extends Error {
   readonly fbtraceId: string | null;
   readonly userTitle: string | null;
   readonly userMessage: string | null;
+  readonly isTransient: boolean;
 
   constructor(message: string, details: Partial<MetaGraphErrorDetails> = {}) {
     super(message);
@@ -59,6 +62,7 @@ export class MetaGraphError extends Error {
     this.fbtraceId = merged.fbtraceId;
     this.userTitle = merged.userTitle ?? null;
     this.userMessage = merged.userMessage ?? null;
+    this.isTransient = merged.isTransient === true;
   }
 
   /** Plain, log-safe summary (no stack, no cause). */

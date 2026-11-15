@@ -18,7 +18,14 @@ import type { Company } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
 import { createLedger } from "../src/db.js";
-import { registerOrganic, ORGANIC_DELETE_ACTION_KEY, ORGANIC_POSTS_ACTION_KEY, ORGANIC_REQUEST_ACTION_KEY, ORGANIC_TOOL } from "../src/features/organic/register.js";
+import {
+  registerOrganic,
+  ORGANIC_DELETE_ACTION_KEY,
+  ORGANIC_POSTS_ACTION_KEY,
+  ORGANIC_RECONCILE_ACTION_KEY,
+  ORGANIC_REQUEST_ACTION_KEY,
+  ORGANIC_TOOL,
+} from "../src/features/organic/register.js";
 import { gateRegistry, resetGateRegistry } from "../src/features/telegram/gates.js";
 import type { FeatureRuntime } from "../src/features/types.js";
 import type { GateRequestRecord } from "../src/kit/gate/state-machine.js";
@@ -28,6 +35,7 @@ import { memoryOrganicPostStore } from "../src/organic/store.js";
 import type { OrganicCardTransport } from "../src/organic/service.js";
 import { brandConfig, COMPANY_A, PACKAGE_ROOT, SECRET_A_META, secretRef } from "./fixtures.js";
 import { FakeRoutes } from "./brand/fake-routes.js";
+import { FakeMedia } from "./helpers/fake-media-host.js";
 
 const SRC = join(PACKAGE_ROOT, "src");
 const SERVICE = "src/organic/service.ts";
@@ -103,7 +111,13 @@ function publishWrites(meta: FakeRoutes) {
 function organicConfig() {
   return brandConfig({
     meta: { adAccountId: "act_29231592883113369", pageId: PAGE, igUserId: IG, accessTokenRef: secretRef(SECRET_A_META) },
-    organic: { enabled: true, mode: "live", channels: ["ig_reel", "ig_feed", "fb_video", "fb_photo"], pageAccessTokenRef: secretRef(SECRET_A_PAGE) },
+    organic: {
+      enabled: true,
+      mode: "live",
+      channels: ["ig_reel", "ig_feed", "fb_video", "fb_photo"],
+      pageAccessTokenRef: secretRef(SECRET_A_PAGE),
+      mediaHosts: ["media.ololla.fi"],
+    },
   });
 }
 
@@ -123,8 +137,10 @@ function harnessWith(meta: FakeRoutes): TestHarness {
   harness.seed({ companies: [{ id: COMPANY_A, name: "Ololla" } as Company] });
   useCompanyConfigs(harness, { [COMPANY_A]: organicConfig() });
   useCompanySecrets(harness, { [COMPANY_A]: { [SECRET_A_META]: "EAAG-organic-sole-path-000000", [SECRET_A_PAGE]: "EAAG-organic-page-sole-path-0000" } });
+  const media = new FakeMedia();
   harness.ctx.http.fetch = async (url: string, init?: RequestInit) => {
     if (url.startsWith("https://graph.facebook.com/")) return meta.fetch(url, init);
+    if (media.handles(url)) return media.fetch(url, init);
     throw new Error(`no route for ${url}`);
   };
   return harness;
@@ -181,7 +197,7 @@ describe("organic sole path (runtime)", () => {
     const lint = { brand: "sunspot", mode: "strict", ok: true, results: [{ id: "a", rule: "r", status: "pass" }] };
     for (const options of ACTORS) {
       for (const params of [...HOSTILE, { creativeId: VIDEO_ID, channel: "ig_reel", brandLint: lint }]) {
-        for (const key of [ORGANIC_REQUEST_ACTION_KEY, ORGANIC_DELETE_ACTION_KEY, ORGANIC_POSTS_ACTION_KEY]) {
+        for (const key of [ORGANIC_REQUEST_ACTION_KEY, ORGANIC_DELETE_ACTION_KEY, ORGANIC_POSTS_ACTION_KEY, ORGANIC_RECONCILE_ACTION_KEY]) {
           await harness.performAction(key, params, options).catch(() => undefined);
         }
         await harness.executeTool(ORGANIC_TOOL, params, { companyId: COMPANY_A }).catch(() => undefined);

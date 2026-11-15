@@ -11,6 +11,12 @@
  * Notices go to the Ads digest (digest/run.ts reads organic_posts), never as
  * new Telegram messages: the only Telegram writes here are the card and its
  * edits (RK9-815).
+ *
+ * RK9-852: the card locks its media (organic/media-lock.ts) and the publish
+ * checks the lock again first. A publish whose result Meta never answered
+ * keeps the post in `publishing`, so the same content gets no second card;
+ * `reconcile` (the organic-reconcile job and a board action) reads the
+ * result from Meta and closes the row.
  */
 
 import { createHash } from "node:crypto";
@@ -21,8 +27,13 @@ import type { GateCard, GateRequestRecord } from "../kit/gate/state-machine.js";
 import { createMetaClient, type MetaClientContext, type MetaGraphClient } from "../meta/graph.js";
 import { getTokenPermissions } from "../meta/methods.js";
 import {
+  CONTAINER_NOT_LIVE,
   deleteOrganicObject,
+  findFbObject,
+  findIgMedia,
+  igContainerStatus,
   ORGANIC_CAPTION_MAX_CHARS,
+  OrganicOutcomeUnknownError,
   organicWriteGuard,
   publishFbPhoto,
   publishFbVideo,
@@ -36,7 +47,9 @@ import { redactText } from "../meta/redact.js";
 import type { CreativeRow, CreativeSource } from "../publish/store.js";
 import { fitsTextCard, organicCardCandidates, organicCardText } from "./card.js";
 import { checkLint } from "./lint.js";
+import { cardDeadline, lockMedia, MIN_CARD_MS, readLock, recheckMedia, type FetchLike } from "./media-lock.js";
 import { effectiveStatus, type OrganicPostStore } from "./store.js";
+import { captionProblem, cleanCaption } from "./text.js";
 import {
   CHANNEL_ASPECT_RATIOS,
   CHANNEL_LABELS,
@@ -56,6 +69,15 @@ const MAX_HASHTAGS = 30;
 const USABLE_CREATIVE_STATUSES = new Set(["staged", "uploading", "ready", "published"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ID_RE = /^\d+$/;
+
+export { cleanCaption };
+
+/** A publishing post this long untouched lost its worker; the reconcile job checks it at Meta. */
+export const RECONCILE_AFTER_MINUTES = 30;
+/** A publish with an unknown result is checked at Meta no sooner than this, so an in-flight publish can land first. */
+export const UNKNOWN_SETTLE_MINUTES = 5;
+/** Marks a media id taken from a caption match: a board delete refuses it. */
+export const MEDIA_ID_FROM_CAPTION_MATCH = "caption_match";
 
 export const ORGANIC_LABELS = { approve: "📣 Julkaise", deny: "❌ Hylkää" } as const;
 /** A dry-run card says on its button that the tap publishes nothing. */
@@ -96,8 +118,12 @@ export interface OrganicServiceDeps {
   loadConfig: LoadConfig;
   /** Write client with the organic guard. Mode: live only when config.organic.mode is live. */
   writeClient: OrganicClientFactory;
-  /** Read-only client on meta.accessTokenRef (the scope check). */
+  /** Read-only client on meta.accessTokenRef (the scope check, the IG reconcile). */
   readClient(companyId: string, config: BrandConfig): MetaGraphClient;
+  /** Read-only client on organic.pageAccessTokenRef (the FB reconcile). */
+  pageReadClient(companyId: string, config: BrandConfig): MetaGraphClient;
+  /** The host fetch for the media HEAD (ctx.http.fetch; its SSRF guard applies). */
+  fetch: FetchLike;
   wait?: ContainerWaitOptions;
   now?: () => Date;
 }
@@ -143,24 +169,13 @@ export function channelProblem(config: BrandConfig, channel: OrganicChannel): st
   return null;
 }
 
-/**
- * Control characters other than the line feed, bidi controls (LRM, RLM,
- * embeddings, overrides, isolates), zero-width spaces and the BOM are
- * dropped, so the card shows the text Meta gets. U+2028/2029 become line
- * feeds. The zero-width joiner U+200D stays: emoji sequences need it.
- */
-export function cleanCaption(text: string): string {
-  return (
-    text
-      .replace(/\r\n?|[\u2028\u2029]/g, "\n")
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b\u200c\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "")
-      .trim()
-  );
-}
-
 function creativeProblem(creative: CreativeRow, channel: OrganicChannel, mode: OrganicMode, now: Date): string | null {
   if (!USABLE_CREATIVE_STATUSES.has(creative.status)) return `the creative is ${creative.status}`;
+  // A stored URL with whitespace or a control character could open a card line (RK9-852).
+  // eslint-disable-next-line no-control-regex
+  if ([creative.mediaUrl, creative.posterUrl ?? ""].some((url) => /[\s\u0000-\u001f\u007f-\u009f]/.test(url))) {
+    return "the creative's media URL contains whitespace or a control character; stage it again";
+  }
   // RK9-849: a dry-run staging is fit for a dry-run card only, never for a live post.
   if (mode === "live" && creative.stagingDryRun) return "the creative was staged in dry-run mode; stage it again in live mode";
   if (creative.validUntil && Date.parse(creative.validUntil) <= now.getTime()) return "the creative is past its validUntil";
@@ -230,6 +245,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (input.caption !== undefined && typeof input.caption !== "string") throw new OrganicError("invalid_request", "caption must be a string");
     const caption = cleanCaption(input.caption ?? creative.copy?.message ?? "");
     if (caption.length > ORGANIC_CAPTION_MAX_CHARS) throw new OrganicError("invalid_caption", `caption exceeds ${ORGANIC_CAPTION_MAX_CHARS} characters`);
+    const captionIssue = captionProblem(caption);
+    if (captionIssue) throw new OrganicError("invalid_caption", captionIssue);
     if ((caption.match(/#[\p{L}\p{N}_]+/gu) ?? []).length > MAX_HASHTAGS) throw new OrganicError("invalid_caption", `caption has more than ${MAX_HASHTAGS} hashtags`);
 
     // The card must show a brand-lint result (RK9-832): a missing one is refused.
@@ -246,7 +263,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const contentHash = organicContentHash(companyId, creative.sha256, channel, caption);
     const existing = await deps.posts.findOpen(companyId, contentHash);
     if (existing) {
-      if (effectiveStatus(existing) !== "expired") {
+      if (effectiveStatus(existing, now()) !== "expired") {
         return { status: "exists", postId: existing.id, postStatus: existing.status, channel };
       }
       await deps.posts.update(companyId, existing.id, "pending", { status: "expired" });
@@ -254,8 +271,30 @@ export function createOrganicService(deps: OrganicServiceDeps) {
 
     const transport = deps.transport();
     if (!transport) throw new OrganicError("telegram_unavailable", "Telegram is not configured or not ready for this company");
-    const validUntil = new Date(now().getTime() + cfg.organic!.cardTtlHours * 3_600_000);
-    const text = organicCardText({ brandCode: cfg.brandCode, channel, mode, caption, lint, validUntil, timeZone: cfg.timeZone, creativeId: creative.id });
+    // M2 (RK9-852): lock the media the card shows; the publish checks the lock again.
+    const locked = await lockMedia(deps.fetch, {
+      url: creative.mediaUrl,
+      mode,
+      mediaHosts: cfg.organic!.mediaHosts,
+      ...(cfg.organic!.mediaHostTtlHours !== undefined ? { mediaHostTtlHours: cfg.organic!.mediaHostTtlHours } : {}),
+      now: now(),
+    });
+    if (!locked.ok) throw new OrganicError(locked.code, locked.message);
+    const validUntil = cardDeadline(locked.lock, new Date(now().getTime() + cfg.organic!.cardTtlHours * 3_600_000));
+    if (validUntil.getTime() - now().getTime() < MIN_CARD_MS) {
+      throw new OrganicError("media_expiring", "the media host drops the file before a card could be decided; host it again");
+    }
+    const text = organicCardText({
+      brandCode: cfg.brandCode,
+      channel,
+      mode,
+      caption,
+      lint,
+      validUntil,
+      timeZone: cfg.timeZone,
+      creativeId: creative.id,
+      warnings: locked.warnings,
+    });
     if (!fitsTextCard(text, creative.mediaUrl)) throw new OrganicError("invalid_caption", "the card does not fit a Telegram message");
 
     const post = await deps.posts.insertPending(companyId, {
@@ -266,7 +305,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       contentHash,
       mode,
       lint,
-      payload: { initiator, mediaUrl: creative.mediaUrl },
+      payload: { initiator, mediaUrl: creative.mediaUrl, mediaLock: locked.lock },
     });
     if (!post) {
       const raced = await deps.posts.findOpen(companyId, contentHash);
@@ -360,13 +399,23 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (mode !== post.mode) {
       return close("⛔ Julkaisutila on muuttunut kortin jälkeen: ei julkaistu. Pyydä uusi kortti.", `mode_changed: card ${post.mode}, config ${mode}`);
     }
+    // The stored caption must still pass the caption rules (a row written before them, or by another path, is refused).
+    const captionIssue = captionProblem(post.caption);
+    if (captionIssue) return close("⛔ Julkaisun teksti ei kelpaa: ei julkaistu. Pyydä uusi kortti.", `caption_refused: ${captionIssue}`);
+    // M2 (RK9-852): the file Meta fetches must still be the one the card locked.
+    const lock = readLock(post.payload.mediaLock);
+    if (!lock) return close("⛔ Kortin mediaa ei ole lukittu: ei julkaistu. Pyydä uusi kortti.", "media_unlocked");
+    const drift = await recheckMedia(deps.fetch, lock, { url: mediaUrl, mode, mediaHosts: cfg.organic!.mediaHosts, now: now() });
+    if (drift) return close("⛔ Media on muuttunut tai vanhentunut kortin jälkeen: ei julkaistu.", drift);
+    // containerTracking: this publish stores the IG container id before media_publish (the reconcile relies on it).
+    const publishingPayload = { ...post.payload, publishMode: mode, containerTracking: true };
     if (
       !(await deps.posts.update(companyId, post.id, "pending", {
         status: "publishing",
         gateRequestId: request.id,
         decidedByTgUserId: tgUserId,
         decidedAt: now(),
-        payload: { ...post.payload, publishMode: mode },
+        payload: publishingPayload,
       }))
     ) {
       return refuse("⛔ Postaus käsitelty jo: ei julkaistu.", "post_not_pending", binding, tgUserId);
@@ -378,6 +427,21 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       result = await publish(client, cfg, post, mediaUrl);
     } catch (error) {
       const message = safe(error);
+      if (error instanceof OrganicOutcomeUnknownError) {
+        // The post may be live: keep it open so no second card posts it again.
+        await deps.posts.update(companyId, post.id, "publishing", {
+          error: `result unknown: ${message}`.slice(0, 300),
+          ...(error.containerId ? { metaContainerId: error.containerId } : {}),
+          payload: { ...publishingPayload, outcomeUnknownAt: now().toISOString() },
+        });
+        await audit(companyId, post.id, "publish result unknown", { channel: post.channel, mode, gateRequestId: request.id, containerId: error.containerId, error: message });
+        return {
+          status: "failed",
+          statusText: `⚠️ Julkaisun tulos on epäselvä (${CHANNEL_LABELS[post.channel]}). Postaus pysyy avoimena, kunnes tila on tarkistettu Metasta; samaa sisältöä ei julkaista uudelleen sillä välin.`,
+          outcome: { handler: "done", result: "unknown", postId: post.id, decidedBy: { tgUserId } },
+          error: message,
+        };
+      }
       await deps.posts.update(companyId, post.id, "publishing", { status: "failed", error: message });
       await audit(companyId, post.id, "publish failed", { channel: post.channel, mode, gateRequestId: request.id, error: message });
       return {
@@ -389,7 +453,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     }
 
     if (result.dryRun) {
-      await deps.posts.update(companyId, post.id, "publishing", { status: "dry_run", payload: { ...post.payload, publishMode: mode, planned: result.planned } });
+      await deps.posts.update(companyId, post.id, "publishing", { status: "dry_run", payload: { ...publishingPayload, planned: result.planned } });
       await audit(companyId, post.id, "dry run", { channel: post.channel, gateRequestId: request.id, planned: result.planned.map((step) => `${step.method} ${step.path}`) });
       return {
         statusText: "🧪 Kuivaharjoitus hyväksytty: mitään ei julkaistu.",
@@ -404,7 +468,12 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       metaPostId: result.postId,
       permalink: result.permalink,
       publishedAt: now(),
-      ...(result.recovered ? { error: "media_publish answered an error; the container reports PUBLISHED" } : {}),
+      ...(result.recovered
+        ? {
+            error: "media_publish answered an error; the container reports PUBLISHED",
+            payload: { ...publishingPayload, ...(result.mediaId ? { mediaIdSource: MEDIA_ID_FROM_CAPTION_MATCH } : {}) },
+          }
+        : {}),
     });
     if (!stored) deps.ctx.logger.error("rk9-ads organic: published but the row was not updated", { postId: post.id, mediaId: result.mediaId });
     await audit(companyId, post.id, "published", {
@@ -422,11 +491,20 @@ export function createOrganicService(deps: OrganicServiceDeps) {
   };
 
   async function publish(client: MetaGraphClient, cfg: BrandConfig, post: OrganicPost, mediaUrl: string): Promise<OrganicPublishResult> {
+    const hooks = {
+      // Stored before media_publish, so a reconcile can read the container after a crash.
+      onContainer: async (containerId: string) => {
+        if (!(await deps.posts.update(post.companyId, post.id, "publishing", { metaContainerId: containerId }))) {
+          throw new OrganicError("post_changed", "the post left publishing before media_publish; nothing was published");
+        }
+      },
+      excludeMediaIds: await deps.posts.otherMediaIds(post.companyId, post.id),
+    };
     switch (post.channel) {
       case "ig_reel":
-        return publishIgReel(client, cfg.meta.igUserId!, { videoUrl: mediaUrl, caption: post.caption }, deps.wait);
+        return publishIgReel(client, cfg.meta.igUserId!, { videoUrl: mediaUrl, caption: post.caption }, deps.wait, hooks);
       case "ig_feed":
-        return publishIgImage(client, cfg.meta.igUserId!, { imageUrl: mediaUrl, caption: post.caption }, deps.wait);
+        return publishIgImage(client, cfg.meta.igUserId!, { imageUrl: mediaUrl, caption: post.caption }, deps.wait, hooks);
       case "fb_photo":
         return publishFbPhoto(client, cfg.meta.pageId, { url: mediaUrl, caption: post.caption });
       case "fb_video":
@@ -452,7 +530,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const binding = bindingOf(request);
     if (!binding) return;
     // A reason tap can overtake onDenied; the denied gate decides, so close the post first.
-    await onDenied(request, tgUserId);
+    // The decider is whoever tapped deny (the gate row), not necessarily who gave the reason.
+    await onDenied(request, request.decidedByTgUserId ?? tgUserId);
     const preset = ORGANIC_REJECT_REASONS.some((reason) => reason.code === code);
     const stored = await deps.posts.setRejectReason(request.companyId, binding.postId, code, preset ? null : text);
     if (stored) {
@@ -480,6 +559,10 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     if (!post.metaMediaId || !ID_RE.test(post.metaMediaId)) {
       throw new OrganicError("no_media_id", "the post has no stored Meta object id; delete it in the Meta app");
     }
+    if (post.payload.mediaIdSource === MEDIA_ID_FROM_CAPTION_MATCH) {
+      // A caption match after an unclear publish may name another publisher's post with the same text.
+      throw new OrganicError("media_id_unverified", "the Meta object id came from a caption match after an unclear publish; delete the post in the Meta app");
+    }
     const cfg = await config(companyId);
     if (cfg.brandCode !== post.brandCode) throw new OrganicError("brand_changed", "the brand code changed since the post was published");
     if (post.channel.startsWith("fb_") && !cfg.organic?.pageAccessTokenRef) throw new OrganicError("channel_unavailable", "organic.pageAccessTokenRef is not set");
@@ -505,8 +588,126 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     return { status: "deleted", postId: post.id };
   }
 
-  return { requestCard, publishApproved, onDenied, onReason, deletePost };
+  type ReconcileVerdict =
+    | { kind: "published"; mediaId: string | null; fromCaption: boolean }
+    | { kind: "absent"; reason: string }
+    | { kind: "unknown"; reason: string };
+
+  async function readOutcome(cfg: BrandConfig, post: OrganicPost): Promise<ReconcileVerdict> {
+    const sinceMs = Date.parse(post.decidedAt ?? post.updatedAt);
+    const excludeMediaIds = await deps.posts.otherMediaIds(post.companyId, post.id);
+    if (post.channel.startsWith("ig_")) {
+      if (!cfg.meta.igUserId) return { kind: "unknown", reason: "meta.igUserId is not set" };
+      // media_publish runs only after the container id is stored, so without one nothing went live.
+      // A row from before RK9-852 did not store it first, so its absence proves nothing.
+      if (!post.metaContainerId) {
+        return post.payload.containerTracking === true
+          ? { kind: "absent", reason: "no IG container was stored, so media_publish never ran" }
+          : { kind: "unknown", reason: "the row predates the container tracking; check the account" };
+      }
+      const client = deps.readClient(post.companyId, cfg);
+      let status: string | null;
+      try {
+        status = await igContainerStatus(client, post.metaContainerId);
+      } catch (error) {
+        return { kind: "unknown", reason: `the container status could not be read: ${safe(error)}` };
+      }
+      if (status !== null && CONTAINER_NOT_LIVE.has(status)) return { kind: "absent", reason: `the IG container reports ${status}` };
+      if (status !== "PUBLISHED") return { kind: "unknown", reason: `the IG container reports ${status ?? "no status"}` };
+      let mediaId: string | null = null;
+      try {
+        mediaId = await findIgMedia(client, cfg.meta.igUserId, { caption: post.caption, sinceMs, kind: post.channel === "ig_reel" ? "reel" : "image", excludeMediaIds });
+      } catch {
+        mediaId = null;
+      }
+      return { kind: "published", mediaId, fromCaption: mediaId !== null };
+    }
+    if (!cfg.organic?.pageAccessTokenRef) return { kind: "unknown", reason: "organic.pageAccessTokenRef is not set" };
+    const client = deps.pageReadClient(post.companyId, cfg);
+    try {
+      const mediaId = await findFbObject(client, cfg.meta.pageId, { kind: post.channel === "fb_photo" ? "photo" : "video", caption: post.caption, sinceMs, excludeMediaIds });
+      return mediaId ? { kind: "published", mediaId, fromCaption: true } : { kind: "unknown", reason: "no single Page post with this text was found" };
+    } catch (error) {
+      return { kind: "unknown", reason: `the Page posts could not be read: ${safe(error)}` };
+    }
+  }
+
+  /**
+   * Closes one post stuck in `publishing` from what Meta reports (L3,
+   * RK9-852). It waits until the publisher is surely done: 30 min without an
+   * update, or 5 min after a publish with an unknown result. A post Meta
+   * shows becomes published (a caption-matched id cannot be deleted from the
+   * board); one Meta does not have becomes failed. An unclear result stays
+   * open unless the board closes it with `closeUnknown` after checking the
+   * account itself. Writes nothing to Meta.
+   */
+  async function reconcile(
+    companyId: string,
+    postId: string,
+    options: { closeUnknown?: boolean; by: string },
+  ): Promise<{ status: "published" | "failed" | "unknown" | "not_publishing" | "too_early"; postId: string; detail?: string }> {
+    if (!UUID_RE.test(companyId)) throw new OrganicError("invalid_request", "company context is required");
+    if (typeof postId !== "string" || !UUID_RE.test(postId)) throw new OrganicError("invalid_request", "postId must be a uuid");
+    const post = await deps.posts.get(companyId, postId);
+    if (!post) throw new OrganicError("not_found", "post not found");
+    if (post.status !== "publishing") return { status: "not_publishing", postId, detail: post.status };
+    const at = now().getTime();
+    const unknownAt = typeof post.payload.outcomeUnknownAt === "string" ? Date.parse(post.payload.outcomeUnknownAt) : Number.NaN;
+    const idle = at - Date.parse(post.updatedAt) >= RECONCILE_AFTER_MINUTES * 60_000;
+    const settled = Number.isFinite(unknownAt) && at - unknownAt >= UNKNOWN_SETTLE_MINUTES * 60_000;
+    if (!idle && !settled) return { status: "too_early", postId, detail: "the publish may still be running" };
+
+    const publishMode = post.payload.publishMode === "live" || post.payload.publishMode === "dry_run" ? post.payload.publishMode : post.mode;
+    let verdict: ReconcileVerdict;
+    if (publishMode !== "live") {
+      verdict = { kind: "absent", reason: "the worker stopped during a dry run; nothing was sent to Meta" };
+    } else {
+      verdict = await readOutcome(await config(companyId), post);
+    }
+
+    if (verdict.kind === "published") {
+      const stored = await deps.posts.update(companyId, post.id, "publishing", {
+        status: "published",
+        metaMediaId: verdict.mediaId,
+        publishedAt: now(),
+        error: `reconciled by ${options.by}: Meta shows the post${verdict.mediaId ? "" : "; its object id is unknown, delete it in the Meta app"}`,
+        payload: { ...post.payload, ...(verdict.fromCaption ? { mediaIdSource: MEDIA_ID_FROM_CAPTION_MATCH } : {}) },
+      });
+      if (stored) await audit(companyId, post.id, "reconciled", { result: "published", mediaId: verdict.mediaId, by: options.by });
+      return { status: stored ? "published" : "not_publishing", postId };
+    }
+    if (verdict.kind === "unknown" && !options.closeUnknown) {
+      // Touch the row, so the job checks the other stuck rows before this one again.
+      await deps.posts.update(companyId, post.id, "publishing", { payload: { ...post.payload, lastReconcileAt: now().toISOString() } });
+      return { status: "unknown", postId, detail: verdict.reason };
+    }
+    const error =
+      verdict.kind === "absent"
+        ? `not published (reconciled by ${options.by}): ${verdict.reason}`
+        : `closed by ${options.by} without a Meta result: ${verdict.reason}; check the account before a new card`;
+    const stored = await deps.posts.update(companyId, post.id, "publishing", { status: "failed", error: error.slice(0, 300) });
+    if (stored) await audit(companyId, post.id, "reconciled", { result: "failed", reason: verdict.reason.slice(0, 300), by: options.by });
+    return { status: stored ? "failed" : "not_publishing", postId, detail: verdict.reason };
+  }
+
+  /** The organic-reconcile job: every company's publishing posts idle for RECONCILE_AFTER_MINUTES. */
+  async function reconcileStale(limit = 20): Promise<{ checked: number; closed: number }> {
+    const stale = await deps.posts.stalePublishing(RECONCILE_AFTER_MINUTES, limit);
+    let closed = 0;
+    for (const row of stale) {
+      try {
+        const result = await reconcile(row.companyId, row.id, { by: "job" });
+        if (result.status === "published" || result.status === "failed") closed += 1;
+      } catch (error) {
+        deps.ctx.logger.warn("rk9-ads organic: reconcile failed", { postId: row.id, detail: safe(error) });
+      }
+    }
+    return { checked: stale.length, closed };
+  }
+
+  return { requestCard, publishApproved, onDenied, onReason, deletePost, reconcile, reconcileStale };
 }
+
 
 export type OrganicService = ReturnType<typeof createOrganicService>;
 
@@ -522,6 +723,9 @@ export function organicClientFactory(ctx: MetaClientContext): OrganicClientFacto
       tokenConfigPath: page ? ORGANIC_PAGE_TOKEN_CONFIG_PATH : "meta.accessTokenRef",
       mode: config.organic?.mode === "live" ? "live" : "dryRun",
       guardedWrite: organicWriteGuard(target),
+      // A publish POST never goes out twice: a rate-limit answer is final, and its result is read by the reconcile (RK9-852).
+      // Reads (the container poll) keep the default retries.
+      retry: { writeMaxAttempts: 1 },
     });
   };
 }
