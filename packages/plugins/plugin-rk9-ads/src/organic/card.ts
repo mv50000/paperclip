@@ -94,11 +94,11 @@ const WIDE_NARROW_RE = /^[MWmw@%\u00c6\u00e6]/u;
 const LETTER_RE = /^[\p{L}\p{N}]$/u;
 const BOUNDED_SCRIPT_RE =
   /^[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Armenian}\p{Script=Georgian}\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Devanagari}\p{Script=Bengali}\p{Script=Gurmukhi}\p{Script=Gujarati}\p{Script=Oriya}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Sinhala}\p{Script=Thai}\p{Script=Lao}\p{Script=Tibetan}\p{Script=Myanmar}\p{Script=Khmer}\p{Script=Ethiopic}\p{Script=Cherokee}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]$/u;
-// Letters known to be drawn wider than two columns: Latin digraphs and ligatures (U+01C4-01CC, U+01F1-01F3, U+0132/0133, U+1EFA-1EFF, U+FB00-FB06), number forms (U+2167), Arabic presentation ligatures (U+FDFD), Cyrillic Extended-B (U+A66E), and the widest Tamil and Malayalam letters.
-const EXTRA_WIDE_LETTER_RE = /^[\u0132\u0133\u01c4-\u01cc\u01f1-\u01f3\u1efa-\u1eff\ufb00-\ufb06\u2150-\u218f\ufb50-\ufdff\ua640-\ua69f\u0b94\u0bf0-\u0bfa\u0d14\u0d4c\u0d57]$/u;
-// Two columns: emoji, skin tones, regional indicators, and a short list of common symbols (Latin-1 symbols, dashes, quotes, bullets and the ellipsis, primes, currency, a few letterlike and math signs, short arrows, circled digits and letters, box drawing, blocks, geometric shapes, miscellaneous symbols and dingbats, braille, CJK punctuation and enclosed CJK, fullwidth forms). Long arrows, brackets spanning several lines and every other symbol fill a chunk alone.
+// Code points known to be drawn wider than two columns, checked before every other rule: Latin digraphs and ligatures (U+01C4-01CC, U+01F1-01F3, U+0132/0133, U+1EFA-1EFF, U+FB00-FB06), number forms (U+2167), Arabic presentation ligatures (U+FDFD), Cyrillic Extended-B (U+A66E), and the widest Tamil and Malayalam letters, numbers and vowel signs (U+0B94, U+0BF0-0BFA, U+0D14, U+0D4C, U+0D57).
+const EXTRA_WIDE_RE = /^[\u0132\u0133\u01c4-\u01cc\u01f1-\u01f3\u1efa-\u1eff\ufb00-\ufb06\u2150-\u218f\ufb50-\ufdff\ua640-\ua69f\u0b94\u0bf0-\u0bfa\u0d14\u0d4c\u0d57]$/u;
+// Two columns: emoji, skin tones, regional indicators, and a short list of common symbols (Latin-1 symbols, dashes, quotes, bullets and the ellipsis, primes, currency, the trade mark sign, a few math signs, short arrows, circled digits and letters, box drawing, blocks, geometric shapes, miscellaneous symbols and dingbats, braille, CJK punctuation and enclosed CJK, fullwidth forms). Long arrows, brackets spanning several lines and every other symbol fill a chunk alone.
 const BOUNDED_SYMBOL_RE =
-  /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[\u00a1-\u00bf\u00d7\u00f7\u2010-\u2027\u2030\u2032-\u2037\u2039\u203a\u20a0-\u20c0\u2103\u2109\u2116\u2122\u2190-\u2199\u2212\u2213\u221e\u2248\u2260\u2264\u2265\u2460-\u2473\u24b6-\u24e9\u2500-\u27bf\u2801-\u28ff\u3001-\u303f\u3200-\u32ff\uff01-\uff60\uffe0-\uffe6])$/u;
+  /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[\u00a1-\u00bf\u00d7\u00f7\u2010-\u2027\u2030\u2032-\u2037\u2039\u203a\u20a0-\u20c0\u2122\u2190-\u2199\u2212\u2213\u221e\u2248\u2260\u2264\u2265\u2460-\u2473\u24b6-\u24e9\u2500-\u27bf\u2801-\u28ff\u3001-\u303f\u3200-\u32ff\uff01-\uff60\uffe0-\uffe6])$/u;
 // Never counted: private use, unassigned and surrogate code points fill a chunk alone.
 const UNASSIGNED_RE = /^[\p{Co}\p{Cn}\p{Cs}]$/u;
 const NONSPACING_MARK_RE = /^\p{Mn}$/u;
@@ -113,16 +113,18 @@ const MAX_GRAPHEME_CODE_POINTS = 10;
  * known cases (RK9-852): a chunk that breaks too early costs a line, one that
  * breaks too late lets the rest of a chunk wrap onto an unquoted screen line.
  * Summed over the code points:
+ * - a private-use or unassigned code point, or one known to be drawn wider
+ *   (a digraph or ligature, the widest Tamil and Malayalam letters and vowel
+ *   signs), fills a chunk alone before any other rule applies;
  * - 1 for printable ASCII, a Latin-1 letter and the Finnish, Swedish,
  *   Estonian and German letters (2 for W, M, @, % and AE);
  * - 1 for each nonspacing mark (Mn), 2 for each spacing mark (Mc);
  * - 0 for the ZWJ that joins two emoji (each emoji counts on its own);
  * - 2 for any other Latin letter, a letter or digit of a script listed above,
  *   an emoji, a skin tone, a regional indicator or a listed symbol;
- * - anything else (an enclosing mark, a digraph or ligature, a long arrow, a
- *   space other than U+0020, an unlisted symbol or script, a private-use or
- *   unassigned code point, a grapheme of more than 10 code points) fills a
- *   chunk alone.
+ * - anything else (an enclosing mark, a long arrow, a space other than
+ *   U+0020, an unlisted symbol or script such as U+2103, U+2109 or U+2116, a
+ *   grapheme of more than 10 code points) fills a chunk alone.
  */
 export function columns(grapheme: string): number {
   const points = Array.from(grapheme);
@@ -130,11 +132,11 @@ export function columns(grapheme: string): number {
   let width = 0;
   for (const point of points) {
     if (point === ZWJ) continue;
-    if (UNASSIGNED_RE.test(point)) return CAPTION_CHUNK_COLUMNS;
+    if (UNASSIGNED_RE.test(point) || EXTRA_WIDE_RE.test(point)) return CAPTION_CHUNK_COLUMNS;
     if (NARROW_RE.test(point)) width += WIDE_NARROW_RE.test(point) ? 2 : 1;
     else if (NONSPACING_MARK_RE.test(point)) width += 1;
     else if (SPACING_MARK_RE.test(point)) width += 2;
-    else if (LETTER_RE.test(point) && BOUNDED_SCRIPT_RE.test(point) && !EXTRA_WIDE_LETTER_RE.test(point)) width += 2;
+    else if (LETTER_RE.test(point) && BOUNDED_SCRIPT_RE.test(point)) width += 2;
     else if (BOUNDED_SYMBOL_RE.test(point)) width += 2;
     else return CAPTION_CHUNK_COLUMNS;
   }

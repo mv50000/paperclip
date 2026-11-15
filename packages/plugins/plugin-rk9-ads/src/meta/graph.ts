@@ -601,6 +601,7 @@ export class MetaGraphClient {
           subcode: error.subcode,
           type: error.graphType,
           fbtraceId: error.fbtraceId,
+          isTransient: error.isTransient,
           retryAfterMs: regainMs,
           attempts: attempt,
         });

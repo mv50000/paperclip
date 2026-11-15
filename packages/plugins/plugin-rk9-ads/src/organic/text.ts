@@ -7,12 +7,13 @@
  * known bad characters):
  * - Line breaks (CR LF, CR, NEL, U+2028, U+2029) become one line feed.
  * - Every other control (Cc), format character (Cf), default-ignorable code
- *   point and lone surrogate is removed. The only exceptions are U+FE0F right
+ *   point and lone surrogate is removed, and so are U+FFFC, U+FFFD and U+1D159,
+ *   which render as a box or nothing. The only exceptions are U+FE0F right
  *   after an emoji (at most one per emoji) and U+200D between two emoji.
  *   Variation selectors, tag characters, the Khmer and Mongolian invisible
  *   signs, the Hangul fillers and ZWJ runs therefore cannot carry hidden text.
  * - Every space separator (Zs) and the braille blank U+2800 become U+0020.
- *   Runs of spaces become one space, spaces at the end of a line go, and
+ *   Runs of spaces become one space, spaces at the start and end of a line go, and
  *   more than two line feeds in a row become two, so whitespace cannot carry
  *   a hidden message.
  * - A base character must be a letter, digit, punctuation, symbol, U+0020 or
@@ -55,7 +56,9 @@ const LINE_BREAK_RE = /\r\n?|[\u0085\u2028\u2029]/g;
 const LONE_SURROGATE_RE = /\p{Surrogate}/gu;
 // Every space separator and the braille blank U+2800 (a visible-as-nothing space) become U+0020.
 const SPACE_RE = /[\p{Zs}\u2800]/gu;
-const HIDDEN_RE = /^[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]$/u;
+// Also removed: symbols and fillers that render as a blank or a box (object replacement U+FFFC, replacement character U+FFFD,
+// musical null notehead U+1D159, Hangul fillers, Khitan filler U+16FE4).
+const HIDDEN_RE = /^(?:[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]|[\ufffc\ufffd\u3164\u115f\u1160\uffa0\u{1D159}\u{16FE4}])$/u;
 const EMOJI_RE = /^\p{Extended_Pictographic}$/u;
 const SKIN_TONE_RE = /^\p{Emoji_Modifier}$/u;
 // A visible base: a letter, digit, punctuation or symbol. Private use (Co), unassigned (Cn) and noncharacters are not.
@@ -126,6 +129,7 @@ export function cleanCaption(text: string): string {
   return keepVisible(normalised)
     .replace(/ {2,}/g, " ")
     .replace(/ +$/gm, "")
+    .replace(/^ +/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .normalize("NFC")
     .trim();

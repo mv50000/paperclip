@@ -324,7 +324,7 @@ describe("cleanCaption: hidden channels (RK9-852 verifier round 2)", () => {
     const lines = Array.from(Buffer.from("SECRET42")).map((byte) => `rivi${" ".repeat(byte & 0x0f)}`);
     expect(cleanCaption(`${lines.join("\n")}\nloppu`)).toBe(`${Array.from({ length: 8 }, () => "rivi").join("\n")}\nloppu`);
     expect(cleanCaption("a   b\u2003\u2003c")).toBe("a b c");
-    expect(cleanCaption("a\n\n\n\n\nb\n \n \n c")).toBe("a\n\nb\n\n c");
+    expect(cleanCaption("a\n\n\n\n\nb\n \n \n c")).toBe("a\n\nb\n\nc");
   });
 
   it("removes private-use, unassigned and noncharacter code points as base characters", () => {
@@ -383,8 +383,31 @@ describe("caption chunks: the width list (RK9-852 verifier round 2)", () => {
     for (const glyph of ["\u27ff", "\u27f7", "\u23dc", "\u23de", "\u2b33", "\u2031", "\u2e3a", "\u2e3b", "\u216b", "\u338f", "\u337b", "\u0bf5"]) {
       expect(columns(glyph), glyph).toBe(CAPTION_CHUNK_COLUMNS);
     }
-    for (const glyph of ["\u263a", "\u00a9", "\u2122", "\u2194", "\u2026", "\u2116", "\u2103", "\u3231"]) expect(columns(glyph), glyph).toBe(2);
+    for (const glyph of ["\u263a", "\u00a9", "\u2122", "\u2194", "\u2026", "\u3231"]) expect(columns(glyph), glyph).toBe(2);
     expect(captionLines(cleanCaption("\u27ff\u27ff\u27ffTila: \u{1F534}")).at(-1)).toBe("\u2506 Tila: \u{1F534}");
+  });
+});
+
+describe("cleanCaption and columns (RK9-852 verifier round 3)", () => {
+  it("removes U+FFFC, U+FFFD, U+1D159 and the fillers; a line of only such characters is left empty", () => {
+    expect(cleanCaption("a\u{1D159}b")).toBe("ab");
+    expect(cleanCaption("a\ufffcb")).toBe("ab");
+    expect(cleanCaption("a\ufffdb\u3164c\u115fd\u1160e\uffa0f\u{16FE4}g")).toBe("abcdefg");
+    expect(cleanCaption("a\u1680b")).toBe("a b");
+    expect(cleanCaption("a\n\u{1D159}")).toBe("a");
+    expect(cleanCaption("a\n\u{1D159}\u{1D159}\nb")).toBe("a\n\nb");
+    expect(cleanCaption("a\n\u{1D159}\n\u{1D159}\n\u{1D159}\nb")).toBe("a\n\nb");
+  });
+
+  it("drops spaces at the start of a line", () => {
+    for (const input of ["a \n b", "a\n\u2800b", "a\n\u3000b", "a\n   b"]) expect(cleanCaption(input), JSON.stringify(input)).toBe("a\nb");
+  });
+
+  it("U+2103, U+2109 and U+2116 fill a chunk; the wide Malayalam vowel signs fill a chunk before the spacing-mark rule", () => {
+    for (const glyph of ["\u2103", "\u2109", "\u2116"]) expect(columns(glyph), glyph).toBe(CAPTION_CHUNK_COLUMNS);
+    expect(columns("\u0d15\u0d4c")).toBe(CAPTION_CHUNK_COLUMNS);
+    expect(columns("\u0d15\u0d57")).toBe(CAPTION_CHUNK_COLUMNS);
+    expect(columns("\u0d15\u0d3e")).toBe(4);
   });
 });
 

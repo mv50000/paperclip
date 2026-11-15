@@ -39,6 +39,7 @@ import {
   uploadVideoByUrl,
   waitForVideoReady,
 } from "../../src/meta/methods.js";
+import { outcomeUnknown } from "../../src/meta/organic.js";
 import { isDryRun } from "../../src/meta/types.js";
 import { ACT, COMPANY, FakeGraph, fixture, makeClient, SENTINEL_TOKEN, TOKEN_REF } from "./fake-graph.js";
 
@@ -416,6 +417,20 @@ describe("rate limits", () => {
     expect(error.attempts).toBe(3);
     expect(graph.calls).toHaveLength(3);
     expect(captured.sleeps.reduce((a, b) => a + b, 0)).toBeLessThan(30_000);
+  });
+
+  it("carries Graph's is_transient flag on the rebuilt RateLimitError, so an organic publish reads it as unknown (RK9-852)", async () => {
+    for (const code of [4, 17]) {
+      for (const transient of [true, false]) {
+        const body = { error: { message: "Application request limit reached", type: "OAuthException", code, fbtrace_id: "t", ...(transient ? { is_transient: true } : {}) } };
+        const graph = new FakeGraph({ status: 400, body }, { status: 400, body }, { status: 400, body });
+        const { client } = makeClient(graph);
+        const error = (await getAccountSummary(client, ACT).catch((e: unknown) => e)) as RateLimitError;
+        expect(error, `code ${code} transient ${transient}`).toBeInstanceOf(RateLimitError);
+        expect(error.isTransient).toBe(transient);
+        expect(outcomeUnknown(error)).toBe(transient);
+      }
+    }
   });
 
   it("fails at once when Meta's own estimate exceeds the wait budget", async () => {
