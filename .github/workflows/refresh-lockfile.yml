@@ -94,17 +94,23 @@ jobs:
       # --- RK9 Custom (RK9-856) ---
       # The fork does not allow auto-merge (enablePullRequestAutoMerge), so
       # "gh pr merge --auto" fails there. The pull request is the result of this
-      # job. Auto-merge is an extra: when it is not available, leave the pull
-      # request open for a manual merge and keep the job green.
+      # job. Auto-merge is an extra: when the repository does not allow it, leave
+      # the pull request open for a manual merge and keep the job green. Any
+      # other failure of the command still fails the job.
       - name: Enable auto-merge for lockfile PR
         if: steps.upsert-pr.outputs.pr_url != ''
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ steps.upsert-pr.outputs.pr_url }}
         run: |
-          if gh pr merge --auto --squash --delete-branch "$PR_URL"; then
+          if output="$(gh pr merge --auto --squash --delete-branch "$PR_URL" 2>&1)"; then
+            printf '%s\n' "$output"
             echo "Auto-merge enabled: $PR_URL"
-          else
-            echo "::warning title=Lockfile PR needs a manual merge::Auto-merge could not be enabled. Merge $PR_URL by hand."
+          elif printf '%s\n' "$output" | grep -Fq 'enablePullRequestAutoMerge'; then
+            printf '%s\n' "$output"
+            echo "::warning title=Lockfile PR needs a manual merge::This repository does not allow auto-merge. Merge $PR_URL by hand."
             echo "Lockfile PR is open and needs a manual merge: $PR_URL" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "$output"
+            exit 1
           fi
