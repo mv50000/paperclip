@@ -4,7 +4,8 @@
 // (small + GitHub-PR-sized unsigned POSTs through the real proxy chain), and
 // prints throttled "ALERT:" lines if any failures were found. Slack posting
 // was removed in RK9-697; since RK9-710 the same throttled alert also goes to
-// Telegram (operator decision 2026-11-03).
+// Telegram (operator decision 2026-11-03). Since RK9-827 it is an rk9_notify
+// alert: rk9claude webhook plus Telegram, with Telegram as the fallback.
 //
 // Why this exists: 2026-04-29 incident — /opt/paperclip got checked out onto
 // origin/master (upstream), the github-webhook route disappeared, and PR #78
@@ -24,7 +25,14 @@
 //                           /etc/paperclip/approval-telegram.env (EnvironmentFile,
 //                           added by the operator, RK9-710). Missing values log one
 //                           WARN line and the monitor runs without Telegram.
-//   PAPERCLIP_WEBHOOK_MONITOR_LOG - log path named in the Telegram text
+//   PAPERCLIP_WEBHOOK_MONITOR_LOG - log path named in the alert text
+//   RK9CLAUDE_WEBHOOK_URL, RK9CLAUDE_WEBHOOK_TOKEN - optional rk9claude webhook
+//                           (EnvironmentFile on the unit). Without them the file
+//                           ${RK9_NOTIFY_WEBHOOK_ENV:-~/.config/rk9/rk9claude-webhook.env}
+//                           is read. Missing values log one WARN line and the
+//                           alert goes to Telegram only.
+//   RK9_NOTIFY_ALERT_MODE - both (default) or webhook; see
+//                           docs/implementation-notes/ops-telegram-alerts.md
 //
 // Exits 0 on healthy, 1 on degraded (failures or blind spots), 2 on script error.
 
@@ -35,13 +43,19 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   readTelegramAlertConfig,
-  sendTelegramAlert,
   TELEGRAM_CONFIG_MISSING_WARNING,
 } from "../src/services/ops-telegram-alert.js";
+import {
+  readRk9AlertChannels,
+  RK9CLAUDE_WEBHOOK_MISSING_WARNING,
+  sendRk9Alert,
+  shouldRecordAlert,
+} from "../src/services/rk9-notify-alert.js";
 import {
   buildWebhookTelegramMessage,
   selectAlertableRepos,
   splitHealth,
+  webhookAlertKey,
 } from "../src/services/webhook-monitor-alerting.js";
 
 const execFileAsync = promisify(execFile);
@@ -403,8 +417,12 @@ async function main() {
   }
   const telegram = readTelegramAlertConfig(process.env);
   if (!telegram) console.warn(TELEGRAM_CONFIG_MISSING_WARNING);
-  // The probe curl children do not need the token in their environment.
+  const channels = readRk9AlertChannels(process.env, telegram);
+  if (!channels.webhook && !channels.legacy) console.warn(RK9CLAUDE_WEBHOOK_MISSING_WARNING);
+  // The probe curl children do not need the tokens in their environment.
   delete process.env.TG_BOT_TOKEN;
+  delete process.env.RK9CLAUDE_WEBHOOK_TOKEN;
+  delete process.env.RK9CLAUDE_WEBHOOK_URL;
 
   const cutoffMs = Date.now() - LOOKBACK_HOURS * 3600 * 1000;
   const [results, probes] = await Promise.all([
@@ -560,24 +578,45 @@ async function main() {
   }
 
   if (args.dryRun) {
-    console.log("--dry-run: alert state not persisted, Telegram not sent");
+    console.log("--dry-run: alert state not persisted, alert not sent");
     process.exit(1);
   }
 
   // Same throttle as the ALERT lines: only repos and probe failures that passed
-  // it in this run reach Telegram. A send failure is logged, never fatal.
-  const telegramText = buildWebhookTelegramMessage({
+  // it in this run are sent. The alert goes to the rk9claude webhook and to
+  // Telegram (rk9_notify alert class, RK9-827). A send failure is logged, never
+  // fatal, and it does not change the exit code.
+  const alerted = {
     alertable: newUnhealthy,
     alertableProbeFailures: shouldAlertProbe ? probeFailures : [],
+  };
+  const alertText = buildWebhookTelegramMessage({
+    ...alerted,
     lookbackHours: LOOKBACK_HOURS,
     host: hostname().split(".")[0] || "paperclip-01",
     logPath: MONITOR_LOG,
   });
-  if (telegramText) await sendTelegramAlert(telegram, telegramText);
+  const alertKey = webhookAlertKey(alerted);
+  // An alert that reached no channel must not start the throttle: the next
+  // run sends it again. Without any configured channel the monitor is
+  // log-only, and the throttle works as before. The state of repos that
+  // recovered is still cleared below.
+  let recordAlert = true;
+  if (alertText && alertKey) {
+    const outcome = await sendRk9Alert({ key: alertKey, message: alertText }, channels);
+    recordAlert = shouldRecordAlert(outcome);
+    if (!recordAlert) {
+      console.warn(
+        "WARN: hälytystä ei toimitettu, joten sitä ei merkitä hälytetyksi. Seuraava ajo yrittää uudelleen.",
+      );
+    }
+  }
 
   try {
     mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-    const merged = Array.from(new Set([...seenIds, ...newFailureIds]));
+    const merged = Array.from(
+      new Set([...seenIds, ...(recordAlert ? newFailureIds : [])]),
+    );
     const nowIso = new Date().toISOString();
     const updatedAlertedAt = { ...repoAlertedAt };
     const updatedFailureCount = { ...repoLastFailureCount };
@@ -591,7 +630,7 @@ async function main() {
       delete updatedFailureCount[r.repo];
       delete updatedLastError[r.repo];
     }
-    for (const r of newUnhealthy) {
+    for (const r of recordAlert ? newUnhealthy : []) {
       updatedAlertedAt[r.repo] = nowIso;
       updatedFailureCount[r.repo] = r.recentFailures;
       if (r.error) updatedLastError[r.repo] = r.error;
@@ -607,9 +646,8 @@ async function main() {
         // Keep the throttle timestamp while the probe is failing so the
         // healthy path can clear it; refresh it when this alert covered
         // a probe failure.
-        probeFailureAlertedAt: shouldAlertProbe
-          ? nowIso
-          : probeAlertedAtIso,
+        probeFailureAlertedAt:
+          shouldAlertProbe && recordAlert ? nowIso : probeAlertedAtIso,
       }),
     );
   } catch (err) {

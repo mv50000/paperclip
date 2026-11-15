@@ -89,8 +89,29 @@ export interface WebhookTelegramInput<T extends RepoHealthLike> {
 }
 
 /**
- * Short Finnish Telegram text: what is broken, on which host, which log.
+ * rk9_notify key for the alert (RK9-827): alertname PaperclipWebhookMonitor and
+ * a qualifier that names the fault classes in this alert, for example
+ * `PaperclipWebhookMonitor:delivery+probe`. Null when nothing passed the throttle.
+ */
+export function webhookAlertKey<T extends RepoHealthLike>(
+  input: Pick<WebhookTelegramInput<T>, "alertable" | "alertableProbeFailures">,
+): string | null {
+  const { failing, blind } = splitHealth(input.alertable);
+  const parts: string[] = [];
+  if (failing.length > 0) parts.push("delivery");
+  if (blind.length > 0) parts.push("blind");
+  if (input.alertableProbeFailures.length > 0) parts.push("probe");
+  return parts.length === 0 ? null : `PaperclipWebhookMonitor:${parts.join("+")}`;
+}
+
+/**
+ * Short Finnish alert text: what is broken, on which host, which log.
  * Null when nothing passed the throttle, so a throttled run sends nothing.
+ *
+ * The same text goes to Telegram and to the rk9claude webhook. It holds only
+ * repo names from the monitor's own list, counts and the monitor's own probe
+ * detail. The GitHub API error text of a blind repo stays in the log: it is
+ * external text and must not reach rk9claude's analysis.
  */
 export function buildWebhookTelegramMessage<T extends RepoHealthLike & { recentTotal?: number }>(
   input: WebhookTelegramInput<T>,

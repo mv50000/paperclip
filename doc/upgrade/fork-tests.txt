@@ -120,3 +120,5 @@ server/src/__tests__/rk9-agent-pause.test.ts
 # RK9-701 review 13.11.: kuititon ajo ei lukitse budjettia; taint-ajo ei saa agentin avainta.
 server/src/__tests__/budgets-pending-accounting-rk9.test.ts
 server/src/__tests__/agent-identity-taint-rk9.test.ts
+# RK9-827: webhook-monitorin rk9_notify-hälytys (rk9claude-webhook, varareitti Telegram).
+server/src/services/rk9-notify-alert.test.ts
