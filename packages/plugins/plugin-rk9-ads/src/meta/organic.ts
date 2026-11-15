@@ -48,16 +48,20 @@ export class OrganicOutcomeUnknownError extends MetaGraphError {
 /**
  * True when a failed write may still have reached Meta: the request got no
  * Graph answer (a plain MetaGraphError without an HTTP status is a fetch
- * failure), the body was unreadable, Graph answered 5xx, or the error is not
- * a Meta client error at all. A local refusal (guard, token, bad parameter)
- * and a Graph 4xx error answer mean the write did not happen.
+ * failure), the body was unreadable, Graph answered 5xx, a 4xx came without a
+ * readable Graph error body, or the error is not a Meta client error at all. A
+ * local refusal (guard, token, bad parameter) and a Graph 4xx error answer mean
+ * the write did not happen.
  */
 export function outcomeUnknown(error: unknown): boolean {
   if (error instanceof OrganicOutcomeUnknownError) return true;
   if (!(error instanceof MetaGraphError)) return true;
   if (error instanceof MetaResponseError) return true;
   if (error.constructor === MetaGraphError && error.httpStatus === null) return true;
-  return error.httpStatus !== null && error.httpStatus >= 500;
+  if (error.httpStatus === null) return false;
+  // A 4xx without a readable Graph error body (no error code) is not an answer from Graph: a proxy or edge may have sent it.
+  if (error.httpStatus < 500 && error.code === null && error.graphType === null) return true;
+  return error.httpStatus >= 500;
 }
 
 function unknownOutcome(error: unknown, step: string, containerId: string | null): OrganicOutcomeUnknownError {
@@ -276,7 +280,7 @@ export async function igContainerStatus(client: MetaGraphClient, containerId: st
 }
 
 /** Container states that prove media_publish did not (and will not) make it live. */
-const CONTAINER_NOT_LIVE = new Set(["ERROR", "EXPIRED"]);
+export const CONTAINER_NOT_LIVE: ReadonlySet<string> = new Set(["ERROR", "EXPIRED"]);
 
 /**
  * media_publish can answer an error although the post went live (seen in

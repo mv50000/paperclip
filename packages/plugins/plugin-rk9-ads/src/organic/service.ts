@@ -27,6 +27,7 @@ import type { GateCard, GateRequestRecord } from "../kit/gate/state-machine.js";
 import { createMetaClient, type MetaClientContext, type MetaGraphClient } from "../meta/graph.js";
 import { getTokenPermissions } from "../meta/methods.js";
 import {
+  CONTAINER_NOT_LIVE,
   deleteOrganicObject,
   findFbObject,
   findIgMedia,
@@ -77,8 +78,6 @@ export const RECONCILE_AFTER_MINUTES = 30;
 export const UNKNOWN_SETTLE_MINUTES = 5;
 /** Marks a media id taken from a caption match: a board delete refuses it. */
 export const MEDIA_ID_FROM_CAPTION_MATCH = "caption_match";
-/** Container states in which media_publish never made the post live (it runs only after FINISHED, and only once). */
-const CONTAINER_UNPUBLISHED = new Set(["FINISHED", "IN_PROGRESS", "ERROR", "EXPIRED"]);
 
 export const ORGANIC_LABELS = { approve: "📣 Julkaise", deny: "❌ Hylkää" } as const;
 /** A dry-run card says on its button that the tap publishes nothing. */
@@ -608,7 +607,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       } catch (error) {
         return { kind: "unknown", reason: `the container status could not be read: ${safe(error)}` };
       }
-      if (status !== null && CONTAINER_UNPUBLISHED.has(status)) return { kind: "absent", reason: `the IG container reports ${status}` };
+      if (status !== null && CONTAINER_NOT_LIVE.has(status)) return { kind: "absent", reason: `the IG container reports ${status}` };
       if (status !== "PUBLISHED") return { kind: "unknown", reason: `the IG container reports ${status ?? "no status"}` };
       let mediaId: string | null = null;
       try {

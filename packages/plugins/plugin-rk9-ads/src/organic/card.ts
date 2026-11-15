@@ -86,53 +86,50 @@ export const CAPTION_CONTINUE = "┆ ";
 export const CAPTION_CHUNK_COLUMNS = 20;
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-// Emoji and East Asian wide characters take two columns.
-const WIDE_RE = /\p{Extended_Pictographic}|[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|[\u{20000}-\u{3fffd}]/u;
-// Scripts whose width a phone font makes about one column: Latin, Greek, Cyrillic, common punctuation, braille.
-// ZWJ, variation selectors and tag characters: they render nothing of their own.
-const INVISIBLE_JOIN_RE = /^[\u200d\ufe00-\ufe0f\u{E0020}-\u{E007F}\u{E0100}-\u{E01EF}]$/u;
-const SKIN_TONE_RE = /^[\u{1F3FB}-\u{1F3FF}]$/u;
-const MODIFIER_BASE_RE = /^\p{Emoji_Modifier_Base}$/u;
-const MARK_RE = /^[\p{Mn}\p{Me}]$/u;
-const REGIONAL_RE = /^[\u{1F1E6}-\u{1F1FF}]$/u;
-const NARROW_RE = /^[\u0020-\u024f\u0370-\u03ff\u0400-\u04ff\u1e00-\u1eff\u2000-\u206f\u20a0-\u20cf\u2100-\u214f\u2190-\u21ff\u2500-\u257f\u2800-\u28ff]/u;
+// One column: printable ASCII, and the letters of Latin-1, Latin Extended-A/B and Latin Extended Additional.
+const NARROW_RE = /^[ -~\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff]$/u;
+// Two columns: a letter or digit of a script whose glyphs a phone font keeps within two columns.
+const LETTER_RE = /^[\p{L}\p{N}]$/u;
+const BOUNDED_SCRIPT_RE =
+  /^[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Armenian}\p{Script=Georgian}\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Devanagari}\p{Script=Bengali}\p{Script=Gurmukhi}\p{Script=Gujarati}\p{Script=Oriya}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Sinhala}\p{Script=Thai}\p{Script=Lao}\p{Script=Tibetan}\p{Script=Myanmar}\p{Script=Khmer}\p{Script=Ethiopic}\p{Script=Cherokee}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]$/u;
+// Letters drawn wider than two columns: Latin ligatures, number forms (U+2167 and the like), Arabic presentation ligatures, Cyrillic Extended-B (U+A66E).
+const EXTRA_WIDE_LETTER_RE = /^[\ufb00-\ufb06\u2150-\u218f\ufb50-\ufdff\ua640-\ua69f]$/u;
+// Two columns: emoji, skin tones, regional indicators and the common symbol blocks.
+const BOUNDED_SYMBOL_RE =
+  /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|[\u00a0-\u00bf\u00d7\u00f7\u2010-\u2027\u2030-\u205e\u2070-\u209f\u20a0-\u20c0\u2190-\u23ff\u2460-\u27ff\u2800-\u28ff\u2900-\u2bff\u3000-\u303f\u3200-\u32ff\ufe30-\ufe4f\uff00-\uffef])$/u;
+const MARK_RE = /^[\p{Mn}\p{Mc}]$/u;
+// The widest Latin glyphs (W, M, @, %, the AE and OE ligatures) count two, with or without a diacritic.
+const WIDE_LATIN_BASE_RE = /^[MWmw@%\u00c6\u00e6\u0152\u0153]/u;
+const ZWJ = "\u200d";
 
 /** A grapheme of more code points than the longest RGI emoji (10) fills a chunk alone. */
 const MAX_GRAPHEME_CODE_POINTS = 10;
-/** More combining marks than this on one base fill a chunk alone (a phone may draw a stray mark wide). */
-const MAX_MARKS = 2;
 
 /**
- * An estimate that errs wide, summed over the code points of the grapheme
- * (a ZWJ chain shows as several emoji). Zero width only for what renders as
- * nothing of its own: the ZWJ, a variation selector, a tag character, a
- * skin-tone modifier right after an emoji that takes one, and at most two
- * combining marks. An emoji or East Asian character counts 2, a regional
- * indicator or a narrow-script character 1. Anything else (a spacing mark, a
- * visible format character such as U+06DD, a ligature such as U+FDFD, a
- * stray skin-tone swatch run, a long mark run) makes the grapheme fill a
- * chunk alone, so no wide glyph can push the rest of its chunk onto an
- * unquoted screen line.
+ * Columns a phone font may give one grapheme. The estimate may only err wide
+ * (RK9-852): a chunk that breaks too early costs a line, one that breaks too
+ * late lets the rest of a chunk wrap onto an unquoted screen line. Summed
+ * over the code points:
+ * - 1 for printable ASCII and a Latin-1 or Latin Extended letter, 2 for the
+ *   widest of them (W, M, @, %, AE, OE);
+ * - 1 for each combining mark (Mn, Mc) that survived the cleaning;
+ * - 0 for the ZWJ that joins two emoji (each emoji counts on its own);
+ * - 2 for a letter or digit of a script listed above, an emoji, a skin tone,
+ *   a regional indicator or a character of the common symbol blocks;
+ * - anything else (an enclosing mark, a ligature, a space other than U+0020,
+ *   a script not listed, a grapheme of more than 10 code points) fills a
+ *   chunk alone.
  */
 export function columns(grapheme: string): number {
   const points = Array.from(grapheme);
   if (points.length > MAX_GRAPHEME_CODE_POINTS) return CAPTION_CHUNK_COLUMNS;
   let width = 0;
-  let marks = 0;
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index]!;
-    if (INVISIBLE_JOIN_RE.test(point)) continue;
-    if (SKIN_TONE_RE.test(point)) {
-      if (index > 0 && MODIFIER_BASE_RE.test(points[index - 1]!)) continue;
-      return CAPTION_CHUNK_COLUMNS;
-    }
-    if (MARK_RE.test(point)) {
-      marks += 1;
-      if (marks > MAX_MARKS) return CAPTION_CHUNK_COLUMNS;
-      continue;
-    }
-    if (WIDE_RE.test(point)) width += 2;
-    else if (NARROW_RE.test(point) || REGIONAL_RE.test(point)) width += 1;
+  for (const point of points) {
+    if (point === ZWJ) continue;
+    if (NARROW_RE.test(point)) width += WIDE_LATIN_BASE_RE.test(point.normalize("NFD")) ? 2 : 1;
+    else if (MARK_RE.test(point)) width += 1;
+    else if (LETTER_RE.test(point) && BOUNDED_SCRIPT_RE.test(point) && !EXTRA_WIDE_LETTER_RE.test(point)) width += 2;
+    else if (BOUNDED_SYMBOL_RE.test(point)) width += 2;
     else return CAPTION_CHUNK_COLUMNS;
   }
   return Math.min(Math.max(width, 1), CAPTION_CHUNK_COLUMNS);

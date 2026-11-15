@@ -831,22 +831,32 @@ plugin must not see).
    quoted as "│ ". A caption therefore cannot pass for a line of the card.
    A caption line, a rule line or a warning longer than 20 columns goes on in
    chunks that start with "┆ ", so a phone never wraps agent text onto an
-   unquoted screen line (RK9-852). The width estimate errs wide and sums every
-   code point of a grapheme: an emoji or East Asian character counts 2 (each
-   emoji of a ZWJ chain too), a mark or format character 0, and a code point
-   outside Latin, Greek, Cyrillic, common punctuation and braille (a spacing
-   mark, a ligature) makes its grapheme fill a chunk alone. A very large phone
+   unquoted screen line (RK9-852). The width estimate (`columns` in
+   `src/organic/card.ts`) may err wide, never narrow, and sums every code
+   point of a grapheme: printable ASCII and a Latin-1 or Latin Extended letter
+   count 1 (W, M, @, %, AE and OE count 2), each combining mark 1, the ZWJ
+   between two emoji 0, and a letter of another listed script, an emoji, a
+   skin tone, a regional indicator or a common symbol 2. Anything else (an
+   enclosing mark, a ligature, a space other than U+0020, an unlisted script,
+   a grapheme of more than 10 code points) fills a chunk alone. A very large phone
    font can still wrap a chunk; a Telegram blockquote entity would close that
    gap (follow-up). A media URL with whitespace or a control character is
    refused at staging and on the card, and the card shows only the parsed URL. The rule text is cleaned like the caption.
    When the card cannot show the video itself (it falls back to the poster or
    to a text card), its first line says so and links the media.
    The buttons are "📣 Julkaise" (live) or "🧪 Kuivaharjoita" (dry run) and
-   "❌ Hylkää". The card writes nothing to Meta. The caption is cleaned of
-   control characters (NEL included), bidi controls, zero-width spaces, the
-   invisible operators U+2060-2064, U+061C, U+180E, the fillers U+00AD,
-   U+034F, U+115F, U+1160, U+3164 and U+FFA0, and tag characters outside the
-   England, Scotland and Wales flag emoji. The braille blank U+2800 stays. The card locks its media (see "Media lock"). The
+   "❌ Hylkää". The card writes nothing to Meta. The caption is cleaned by an
+   allowlist (`cleanCaption` in `src/organic/text.ts`), and the card shows the
+   same cleaned string that the publish sends, so no hidden text reaches Meta:
+   line breaks (NEL, U+2028 and U+2029 included) become a line feed; every
+   other control, format character (Cf), default-ignorable code point and
+   lone surrogate is removed, except U+FE0F once right after an emoji and the
+   ZWJ between two emoji; every space separator becomes U+0020; the text is
+   normalised to NFC; a combining mark stays only on a base of its own script
+   (or when it is Inherited or Common), two in a row at most; an enclosing
+   mark is always removed. Variation selectors and tag characters therefore
+   go, so a subdivision flag (England, Scotland, Wales) shows as the black
+   flag and a keycap emoji as its digit. The braille blank U+2800 stays. The card locks its media (see "Media lock"). The
    same content (company, creative sha256, channel, caption) gets one open
    card; a second request returns the open post.
 2. **Publish.** The tap goes through the kit router (chat, approver list,
@@ -866,7 +876,8 @@ plugin must not see).
    text. A change of `organic.mode` after the card closes the card without
    a Meta write: the approver saw the mode on the card.
    A publish whose answer never came (network error, a Graph 5xx, an
-   unreadable body or a 2xx without an id) may still be live, and so may an
+   unreadable body, a 4xx without a Graph error body, or a 2xx without an id)
+   may still be live, and so may an
    IG `media_publish` error while the container is not yet ERROR or EXPIRED. The post then stays in `publishing`
    with `error: "result unknown: …"`, so the same content gets no second card
    (see "Reconcile"). An error Meta answered closes the post as `failed`.
@@ -910,10 +921,12 @@ byte for byte. The lock is fail-closed instead (`src/organic/media-lock.ts`):
    The card ends 10 min before that; a card shorter than 5 min is not sent
    (`media_expiring`), and a later publish is refused (`media_expired`).
 
-Limits: a host that serves other bytes with the same length and validators,
-or swaps the file in the seconds between the second HEAD and Meta's fetch,
-goes unseen. That is why only a host the operator trusts qualifies. The
-manifest sha256 is still not checked against the bytes.
+**Limit (open, RK9-860): the lock compares HEAD headers, not bytes.** A host
+that serves other bytes with the same length and validators, or swaps the file
+in the seconds between the second HEAD and Meta's fetch, goes unseen. That is
+why only a host the operator trusts qualifies. The manifest sha256 is still
+not checked against the bytes. A live config without `organic.mediaHosts`
+refuses every live card (`media_untrusted`).
 
 Sunspot's media host (`/api/social/media/[slug]`, `src/lib/server/social/mediaStore.ts`
 in rk9-ai/sunspot, read 15.11.2026) keeps a file 120 min
@@ -935,8 +948,8 @@ without an update, or 5 min after an unknown result.
 | Dry run | `failed`: nothing was sent to Meta |
 | IG, no stored container (row written by this code) | `failed`: `media_publish` never ran |
 | IG, no stored container (row from before RK9-852) | stays open: the old code stored the id only at the end |
-| IG container `FINISHED`, `IN_PROGRESS`, `ERROR` or `EXPIRED` | `failed` |
-| IG container with no or another status | stays open |
+| IG container `ERROR` or `EXPIRED` | `failed` |
+| IG container `FINISHED`, `IN_PROGRESS`, no or another status | stays open: as in the publish path, `media_publish` may have run |
 | IG container `PUBLISHED` | `published`; the media id only from a unique caption match |
 | FB, exactly one Page photo or video with the text since the tap | `published` (caption-matched id) |
 | Anything unclear | stays `publishing`; the board closes it with `closeUnknown: true` after checking the account (`failed`) |
