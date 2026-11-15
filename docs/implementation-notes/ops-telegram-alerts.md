@@ -49,7 +49,7 @@ bash-kirjastoa, joten toteutus on `server/src/services/rk9-notify-alert.ts`. io-
   (tila `both`, oletus). Tilassa `webhook` Telegram on vain varareitti.
 - Tila tulee muuttujasta `RK9_NOTIFY_ALERT_MODE` tai kytkintiedostosta
   `~/.config/rk9/notify-alert-mode`. Monitorin `HOME` on `/var/lib/paperclip`, joten
-  operaattorin oma kytkin (`/home/rk9admin/...`) ei koske monitoria. Aseta tila yksikköön
+  operaattorin oma kytkin (operaattorin kotihakemistossa) ei koske monitoria. Aseta tila yksikköön
   rivillä `Environment=RK9_NOTIFY_ALERT_MODE=webhook`.
 - rk9claude on ottanut alertin vastaan vain, kun vastaus on HTTP 200 tyhjällä rungolla.
   Muu vastaus, verkkovirhe tai aikakatkaisu lähettää viestin Telegramiin, ja viestin loppuun
@@ -74,16 +74,23 @@ bash-kirjastoa, joten toteutus on `server/src/services/rk9-notify-alert.ts`. io-
   kaiken suoraan Telegramiin.
 - Monitorilla on oma throttle, joten kirjaston dedup-leimaa ei ole (sama kuin
   `RK9_NOTIFY_COOLDOWN=0`). `notify-failed.log`ia ei kirjoiteta: epäonnistuminen näkyy
-  monitorin lokissa WARN-rivinä.
+  monitorin lokissa WARN-rivinä. `RK9_NOTIFY_PIN_BOTH`ia ei ole, koska monitori ei ole
+  kiintiö- eikä viimeisen turvaverkon hälytys.
+- Tunnustiedoston jäsennin ei tulkitse shell-syntaksia (rivin lopun kommentti, `$VAR`,
+  kenoviiva). Sellainen arvo hylätään tai antaa väärän tokenin, jolloin webhook vastaa 401
+  ja hälytys lähtee varareittiä.
 
 ### Toimitus ja throttle
 
-- Tilassa `both` toimitus seuraa Telegramia. Webhookin kuittaus yksin ei riitä, koska
-  rk9claude voi päättää olla näyttämättä alerttia. Poikkeus: jos Telegramia ei ole määritetty
-  lainkaan, webhookin kuittaus riittää.
-- Jos hälytys ei mennyt perille yhteenkään kanavaan, monitori ei tallenna throttle-tilaa.
-  Seuraava tunnin ajo lähettää saman hälytyksen uudelleen. Ennen RK9-827:ää throttle käynnistyi
-  myös epäonnistuneesta lähetyksestä, ja hälytys jäi 6 tunniksi pelkkään lokiin.
+- Hälytys on toimitettu, kun Telegram vahvisti sen tai rk9claude kuittasi sen. Tämä poikkeaa
+  bash-kirjastosta, jossa tilan `both` paluukoodi seuraa Telegramia ja kutsuja yrittää
+  uudelleen. Tunneittain ajettava monitori lähettäisi silloin saman alertin rk9claudelle
+  joka tunti niin kauan kuin Telegram on alhaalla (RK9-226:n hälytystulva). Telegram-virhe
+  näkyy lokissa WARN-rivinä.
+- Jos hälytys ei mennyt perille yhteenkään kanavaan, monitori ei merkitse sitä hälytetyksi.
+  Seuraava tunnin ajo lähettää saman hälytyksen uudelleen. Toipuneiden repojen tila
+  siivotaan silti. Ennen RK9-827:ää throttle käynnistyi myös epäonnistuneesta lähetyksestä,
+  ja hälytys jäi 6 tunniksi pelkkään lokiin.
 - Jos yhtään kanavaa ei ole määritetty, monitori toimii kuten ennen RK9-710:tä: `ALERT:`-rivit
   lokiin ja throttle normaalisti.
 
@@ -94,11 +101,12 @@ Lisää yksikköön `paperclip-webhook-monitor.service` drop-in, esimerkiksi
 
 ```ini
 [Service]
-EnvironmentFile=-/home/rk9admin/.config/rk9/rk9claude-webhook.env
+EnvironmentFile=-/home/<operaattori>/.config/rk9/rk9claude-webhook.env
 ```
 
-systemd lukee tiedoston rootina, joten tokenia ei tarvitse kopioida eikä tiedoston oikeuksia
-(600, rk9admin) muuttaa. Aja `sudo systemctl daemon-reload`. Monitori lukee uuden ympäristön
+`<operaattori>` on tili, jonka kotihakemistossa claude-configin tunnustiedosto on. systemd lukee
+tiedoston rootina, joten tokenia ei tarvitse kopioida eikä tiedoston oikeuksia (600) muuttaa.
+Token on silloin yksikön prosessien ympäristössä ajon ajan, kuten `TG_BOT_TOKEN` jo nyt. Aja `sudo systemctl daemon-reload`. Monitori lukee uuden ympäristön
 seuraavalla ajastetulla ajolla. Ilman drop-inia monitori toimii kuten ennen ja kirjoittaa
 yhden WARN-rivin.
 

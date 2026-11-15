@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import {
   readRk9claudeWebhookConfig,
   type Rk9AlertChannels,
   sendRk9Alert,
+  shouldRecordAlert,
   truncateUtf8,
 } from "./rk9-notify-alert.js";
 
@@ -211,6 +213,40 @@ describe("readRk9AlertMode", () => {
     expect(readRk9AlertMode({ RK9_NOTIFY_ALERT_MODE_FILE: dir }, out.warn)).toBe("both");
     expect(out.lines).toHaveLength(1);
   });
+
+  it("refuses a FIFO without waiting for a writer", () => {
+    execFileSync("mkfifo", [modeFile()]);
+    const out = collect();
+    expect(readRk9AlertMode({ RK9_NOTIFY_ALERT_MODE_FILE: modeFile() }, out.warn)).toBe("both");
+    expect(out.lines).toHaveLength(1);
+    expect(out.lines[0]).toContain("ei ole ajajan oma tavallinen tiedosto");
+  });
+
+  it("refuses a file that another user owns", () => {
+    writeFileSync(modeFile(), "webhook\n");
+    const euid = process.geteuid?.() ?? 0;
+    const spy = vi.spyOn(process, "geteuid").mockReturnValue(euid + 1);
+    try {
+      const out = collect();
+      expect(readRk9AlertMode({ RK9_NOTIFY_ALERT_MODE_FILE: modeFile() }, out.warn)).toBe("both");
+      expect(out.lines).toHaveLength(1);
+      expect(out.lines[0]).toContain("ei ole ajajan oma tavallinen tiedosto");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(readRk9AlertMode({ RK9_NOTIFY_ALERT_MODE_FILE: modeFile() })).toBe("webhook");
+  });
+
+  it("strips only space and tab before the word, like the bash library", () => {
+    writeFileSync(modeFile(), " \twebhook\n");
+    expect(readRk9AlertMode({ RK9_NOTIFY_ALERT_MODE_FILE: modeFile() })).toBe("webhook");
+    for (const prefix of ["\ufeff", "\f", "\u00a0"]) {
+      writeFileSync(modeFile(), `${prefix}webhook\n`);
+      const out = collect();
+      expect(readRk9AlertMode({ RK9_NOTIFY_ALERT_MODE_FILE: modeFile() }, out.warn)).toBe("both");
+      expect(out.lines).toHaveLength(1);
+    }
+  });
 });
 
 describe("readRk9AlertChannels", () => {
@@ -347,6 +383,7 @@ describe("sendRk9Alert", () => {
     expect(url).toBe(WEBHOOK_URL);
     expect(init.method).toBe("POST");
     expect(init.redirect).toBe("manual");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(init.headers).toEqual({
       Authorization: `Bearer ${WEBHOOK_TOKEN}`,
       "Content-Type": "application/json",
@@ -377,6 +414,10 @@ describe("sendRk9Alert", () => {
 
   const rejections: Array<[string, () => Response | Promise<Response>, string]> = [
     ["503", () => new Response(null, { status: 503 }), "HTTP 503"],
+    ["204 with no body", () => new Response(null, { status: 204 }), "HTTP 204"],
+    ["201 with no body", () => new Response(null, { status: 201 }), "HTTP 201"],
+    ["200 with a space", () => new Response(" ", { status: 200 }), "HTTP 200, odottamaton runko"],
+    ["200 with a newline", () => new Response("\n", { status: 200 }), "HTTP 200, odottamaton runko"],
     ["401", () => new Response("unauthorized", { status: 401 }), "HTTP 401"],
     ["a redirect", () => new Response(null, { status: 302, headers: { Location: "http://x/" } }), "HTTP 302"],
     ["200 with a body", () => new Response("<html>proxy</html>", { status: 200 }), "HTTP 200, odottamaton runko"],
@@ -468,12 +509,15 @@ describe("sendRk9Alert", () => {
     expect(out.lines.join("\n")).toContain("webhook ja Telegram epäonnistuivat");
   });
 
-  it("does not count a webhook acknowledgement as a delivery in both mode when Telegram fails", async () => {
+  // An hourly retry would post the same alert to rk9claude every hour while
+  // Telegram is down, so the acknowledgement starts the caller's throttle.
+  it("counts a webhook acknowledgement as a delivery in both mode when Telegram fails", async () => {
     const fetchImpl = fakeFetch(ack, () => new Response(JSON.stringify({ ok: false }), { status: 500 }));
     const out = collect();
     const res = await sendRk9Alert(input, channels(), { fetchImpl, ...out });
-    expect(res).toMatchObject({ delivered: false, webhook: "acked", telegram: "failed" });
-    expect(out.lines.join("\n")).toContain("Webhookin kuittaus ei riitä tilassa both");
+    expect(res).toMatchObject({ delivered: true, webhook: "acked", telegram: "failed" });
+    expect(out.lines.join("\n")).toContain("Telegram epäonnistui, mutta rk9claude kuittasi");
+    expect(shouldRecordAlert(res)).toBe(true);
   });
 
   it("counts the acknowledgement when Telegram is not configured at all", async () => {
@@ -536,5 +580,33 @@ describe("sendRk9Alert", () => {
     const text = telegramText(split(fetchImpl).telegram[0]);
     expect(text.length).toBeLessThan(3500);
     expect(text.endsWith("Varareitti: rk9claude-webhook ei vastannut (HTTP 503)")).toBe(true);
+  });
+});
+
+describe("shouldRecordAlert", () => {
+  it("marks a delivered alert", () => {
+    expect(shouldRecordAlert({ delivered: true, configured: true })).toBe(true);
+  });
+
+  it("does not mark an alert that reached no configured channel", () => {
+    expect(shouldRecordAlert({ delivered: false, configured: true })).toBe(false);
+  });
+
+  it("keeps the log-only monitor on its throttle when no channel is configured", () => {
+    expect(shouldRecordAlert({ delivered: false, configured: false })).toBe(true);
+  });
+
+  it("follows the send result end to end", async () => {
+    const down = fakeFetch(
+      () => new Response(null, { status: 503 }),
+      () => new Response(JSON.stringify({ ok: false }), { status: 500 }),
+    );
+    const input = { key: KEY, message: MESSAGE };
+    expect(shouldRecordAlert(await sendRk9Alert(input, channels(), { fetchImpl: down, ...collect() }))).toBe(false);
+    const none = await sendRk9Alert(input, channels({ telegram: null, webhook: null }), {
+      fetchImpl: down,
+      ...collect(),
+    });
+    expect(shouldRecordAlert(none)).toBe(true);
   });
 });

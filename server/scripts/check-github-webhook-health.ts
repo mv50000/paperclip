@@ -49,6 +49,7 @@ import {
   readRk9AlertChannels,
   RK9CLAUDE_WEBHOOK_MISSING_WARNING,
   sendRk9Alert,
+  shouldRecordAlert,
 } from "../src/services/rk9-notify-alert.js";
 import {
   buildWebhookTelegramMessage,
@@ -421,6 +422,7 @@ async function main() {
   // The probe curl children do not need the tokens in their environment.
   delete process.env.TG_BOT_TOKEN;
   delete process.env.RK9CLAUDE_WEBHOOK_TOKEN;
+  delete process.env.RK9CLAUDE_WEBHOOK_URL;
 
   const cutoffMs = Date.now() - LOOKBACK_HOURS * 3600 * 1000;
   const [results, probes] = await Promise.all([
@@ -595,22 +597,26 @@ async function main() {
     logPath: MONITOR_LOG,
   });
   const alertKey = webhookAlertKey(alerted);
+  // An alert that reached no channel must not start the throttle: the next
+  // run sends it again. Without any configured channel the monitor is
+  // log-only, and the throttle works as before. The state of repos that
+  // recovered is still cleared below.
+  let recordAlert = true;
   if (alertText && alertKey) {
     const outcome = await sendRk9Alert({ key: alertKey, message: alertText }, channels);
-    // An alert that reached no channel must not start the throttle: the next
-    // run sends it again. Without any configured channel the monitor is
-    // log-only, and the throttle works as before.
-    if (outcome.configured && !outcome.delivered) {
+    recordAlert = shouldRecordAlert(outcome);
+    if (!recordAlert) {
       console.warn(
-        "WARN: hälytystä ei toimitettu, joten throttle-tilaa ei tallenneta. Seuraava ajo yrittää uudelleen.",
+        "WARN: hälytystä ei toimitettu, joten sitä ei merkitä hälytetyksi. Seuraava ajo yrittää uudelleen.",
       );
-      process.exit(1);
     }
   }
 
   try {
     mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-    const merged = Array.from(new Set([...seenIds, ...newFailureIds]));
+    const merged = Array.from(
+      new Set([...seenIds, ...(recordAlert ? newFailureIds : [])]),
+    );
     const nowIso = new Date().toISOString();
     const updatedAlertedAt = { ...repoAlertedAt };
     const updatedFailureCount = { ...repoLastFailureCount };
@@ -624,7 +630,7 @@ async function main() {
       delete updatedFailureCount[r.repo];
       delete updatedLastError[r.repo];
     }
-    for (const r of newUnhealthy) {
+    for (const r of recordAlert ? newUnhealthy : []) {
       updatedAlertedAt[r.repo] = nowIso;
       updatedFailureCount[r.repo] = r.recentFailures;
       if (r.error) updatedLastError[r.repo] = r.error;
@@ -640,9 +646,8 @@ async function main() {
         // Keep the throttle timestamp while the probe is failing so the
         // healthy path can clear it; refresh it when this alert covered
         // a probe failure.
-        probeFailureAlertedAt: shouldAlertProbe
-          ? nowIso
-          : probeAlertedAtIso,
+        probeFailureAlertedAt:
+          shouldAlertProbe && recordAlert ? nowIso : probeAlertedAtIso,
       }),
     );
   } catch (err) {

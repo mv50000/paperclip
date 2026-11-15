@@ -17,8 +17,14 @@
 //   - No call throws. The monitor's exit code is unchanged.
 //
 // Not implemented here, on purpose: the info and human classes, the dedup
-// stamp (the monitor has its own throttle, like RK9_NOTIFY_COOLDOWN=0 callers)
-// and notify-failed.log (the monitor's own log records every failure).
+// stamp (the monitor has its own throttle, like RK9_NOTIFY_COOLDOWN=0 callers),
+// notify-failed.log (the monitor's own log records every failure) and
+// RK9_NOTIFY_PIN_BOTH (the monitor is not a quota or last-resort alert).
+//
+// One deviation: a webhook acknowledgement counts as a delivery in both mode
+// too. The bash library follows Telegram there, and its caller retries. For an
+// hourly monitor that retry would post the same alert to rk9claude every hour
+// while Telegram is down (the RK9-226 alert-spam class).
 
 import { createHash } from "node:crypto";
 import {
@@ -209,8 +215,10 @@ export function readRk9AlertMode(
     }
     return "both";
   }
+  // Space and tab only, like the bash `read`: a BOM or another Unicode space
+  // before the word makes it an unknown value, not "webhook".
   const firstLine = read.text.replace(/[\0\r]/g, "").split("\n")[0] ?? "";
-  const word = firstLine.trim().split(/[ \t]+/)[0] ?? "";
+  const word = firstLine.replace(/^[ \t]+/, "").split(/[ \t]+/)[0] ?? "";
   if (word === "webhook") return "webhook";
   if (word === "" || word === "both") return "both";
   warn(
@@ -397,10 +405,8 @@ export interface Rk9AlertInput {
 
 export interface Rk9AlertResult {
   /**
-   * True when the alert reached the operator's side: Telegram confirmed it, or
-   * rk9claude acknowledged it in webhook mode or when Telegram is not
-   * configured. In both mode a webhook acknowledgement alone is not a delivery,
-   * because rk9claude may decide not to show the alert.
+   * True when at least one channel took the alert: Telegram confirmed it, or
+   * rk9claude acknowledged it.
    */
   delivered: boolean;
   /** False when neither channel is configured: the alert exists only in the log. */
@@ -468,15 +474,25 @@ export async function sendRk9Alert(
     text = `${body}\n\nVarareitti: rk9claude-webhook ei vastannut (${post.reason})`;
   }
   const telegram = await sendTelegramAlert(channels.telegram, text, telegramDeps);
-  const delivered = telegram === "sent" || (post.acked && telegram === "skipped");
-  if (!delivered && configured) {
+  const delivered = telegram === "sent" || post.acked;
+  if (post.acked && telegram === "failed") {
+    warn("WARN: rk9_notify: Telegram epäonnistui, mutta rk9claude kuittasi hälytyksen.");
+  } else if (!delivered && configured) {
     warn(
-      post.acked
-        ? "WARN: rk9_notify: Telegram epäonnistui. Webhookin kuittaus ei riitä tilassa both, joten hälytystä ei toimitettu."
-        : telegram === "skipped"
-          ? "WARN: rk9_notify: webhook epäonnistui eikä Telegramia ole määritetty, joten hälytystä ei toimitettu."
-          : "WARN: rk9_notify: webhook ja Telegram epäonnistuivat, joten hälytystä ei toimitettu.",
+      telegram === "skipped"
+        ? "WARN: rk9_notify: webhook epäonnistui eikä Telegramia ole määritetty, joten hälytystä ei toimitettu."
+        : "WARN: rk9_notify: webhook ja Telegram epäonnistuivat, joten hälytystä ei toimitettu.",
     );
   }
   return { delivered, configured, webhook, webhookReason: post.reason, telegram };
+}
+
+/**
+ * Whether the caller may mark the alert as sent in its own throttle state.
+ * An alert that reached no configured channel is not marked, so the next run
+ * sends it again. Without any configured channel the caller is log-only, and
+ * its throttle works as it did before the alert channels existed.
+ */
+export function shouldRecordAlert(result: Pick<Rk9AlertResult, "delivered" | "configured">): boolean {
+  return result.delivered || !result.configured;
 }
