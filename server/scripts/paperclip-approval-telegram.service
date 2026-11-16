@@ -1,24 +1,55 @@
-# Telegram approval gate for Paperclip email_send approvals (RK9-85) and
-# outreach drafts (RK9-222, docs/implementation-notes/outreach-telegram-approvals.md).
-# Install:
-#   sudo cp server/scripts/paperclip-approval-telegram.service /etc/systemd/system/
-#   sudo install -m 600 -o root /dev/null /etc/paperclip/approval-telegram.env
+# Telegram approval gate for Paperclip email_send approvals (RK9-85), outreach
+# drafts (RK9-222, docs/implementation-notes/outreach-telegram-approvals.md) and
+# signed Aava send approvals (RK9-894, RK9-922,
+# docs/implementation-notes/aava-send-telegram-cards.md).
+#
+# RK9-922: the listener runs as its own system user pcp-approve, not as
+# paperclip: Paperclip agents run as paperclip and must not read the Aava
+# signing key or write the listener state. The script runs from a root-owned
+# copy, so the listener user cannot change its own code.
+#
+# Install (operator/orchestrator, as root):
+#   useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin pcp-approve
+#   install -d -o root -g root -m 0755 /opt/pcp-approve
+#   install -o root -g root -m 0644 server/scripts/approval-telegram-listener.mjs /opt/pcp-approve/
+#   # create the env file only once: a re-run must not empty an existing file
+#   test -e /etc/paperclip/approval-telegram.env || install -m 600 -o root -g root /dev/null /etc/paperclip/approval-telegram.env
 #   # fill: PAPERCLIP_API_URL, PAPERCLIP_TOKEN (board), TG_BOT_TOKEN, TG_CHAT_ID
-#   sudo install -d -o paperclip -g paperclip /var/lib/paperclip/approval-telegram
-#   sudo systemctl daemon-reload && sudo systemctl enable --now paperclip-approval-telegram
+#   # optional: AAVA_TG_APPROVER_IDS (needed only when TG_CHAT_ID is a group)
+#   install -o pcp-approve -g pcp-approve -m 0400 <generated key> /etc/paperclip/aava-approve-ed25519.key
+#   # /etc/paperclip must be traversable (o+x) by pcp-approve
+#   # move the old state once (open Aava cards are re-posted with a row MAC):
+#   #   install -d -o pcp-approve -g pcp-approve -m 0700 /var/lib/pcp-approve
+#   #   install -o pcp-approve -g pcp-approve -m 0600 /var/lib/paperclip/approval-telegram/state.json /var/lib/pcp-approve/state.json
+#   cp server/scripts/paperclip-approval-telegram.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now paperclip-approval-telegram
+# Update: an automatic update of /opt/paperclip (or of the repo) does NOT touch
+# the copy in /opt/pcp-approve. Every listener change needs a new copy:
+#   install -o root -g root -m 0644 server/scripts/approval-telegram-listener.mjs /opt/pcp-approve/
+#   systemctl restart paperclip-approval-telegram
 [Unit]
-Description=Paperclip email_send approvals and outreach drafts via Telegram inline buttons
+Description=Paperclip approvals, outreach drafts and signed Aava send approvals via Telegram inline buttons
 After=network-online.target paperclip.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=paperclip
-Group=paperclip
+User=pcp-approve
+Group=pcp-approve
+# systemd reads the env file as root before it drops to pcp-approve
 EnvironmentFile=/etc/paperclip/approval-telegram.env
-Environment=STATE_DIR=/var/lib/paperclip/approval-telegram
-WorkingDirectory=/opt/paperclip
-ExecStart=/usr/bin/node /opt/paperclip/server/scripts/approval-telegram-listener.mjs
+# /var/lib/pcp-approve, owned by pcp-approve, mode 0700
+StateDirectory=pcp-approve
+StateDirectoryMode=0700
+Environment=STATE_DIR=/var/lib/pcp-approve
+Environment=AAVA_TG_SIGN_KEY_FILE=/etc/paperclip/aava-approve-ed25519.key
+UMask=0077
+WorkingDirectory=/var/lib/pcp-approve
+ExecStart=/usr/bin/node /opt/pcp-approve/approval-telegram-listener.mjs
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
 Restart=always
 RestartSec=10
 StandardOutput=append:/var/log/paperclip-approval-telegram.log

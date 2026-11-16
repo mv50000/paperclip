@@ -52,6 +52,9 @@ let nextTgMessageId = 500;
 let approveMode: "normal" | "lost" | "lost-after-apply" | "500-after-apply" = "normal";
 // RK9-502: drops the connection on GET /api/approvals/:id.
 let approvalReadDown = false;
+// RK9-922: a ✅ reads the approval first and refuses when that read fails, so
+// a test that needs the read down after the approve turns it down here.
+let approvalReadDownAfterApprove = false;
 
 async function readJson(req: IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
@@ -114,6 +117,7 @@ beforeAll(async () => {
       if (req.method !== "POST") return send(404, { error: "unmatched", path: p });
       if (approval.status !== "pending") return send(409, { error: "already decided" });
       if (action === "approve" && approveMode !== "normal") {
+        if (approvalReadDownAfterApprove) approvalReadDown = true;
         if (approveMode !== "lost") {
           approval.status = "approved";
           approval.decidedAt = new Date().toISOString();
@@ -158,6 +162,8 @@ function runOnce(): Promise<{ code: number | null; out: string }> {
         TG_CHAT_ID: CHAT,
         TG_API_BASE: baseUrl,
         STATE_DIR: stateDir,
+        // RK9-922: never the host's real key path
+        AAVA_TG_SIGN_KEY_FILE: join(stateDir, "no-aava-key"),
       },
     });
     let out = "";
@@ -496,9 +502,10 @@ describe("approval-telegram-listener — voice_action (RK9-481)", () => {
       const cardId = await postCard(8);
       const before = apiCalls.length;
       approveMode = "lost-after-apply";
-      approvalReadDown = true;
+      approvalReadDownAfterApprove = true;
       await tap(`pa:a:${uuid(8)}`, cardId);
       approveMode = "normal";
+      approvalReadDownAfterApprove = false;
       expect(editsOf(cardId).at(-1)?.body.text).toMatch(/^⚠️ Palvelin ei vastannut \(yhteysvirhe\)\. Hyväksynnän tila ei selvinnyt/);
       expect(readState().posted[uuid(8)].awaitingSince).toEqual(expect.any(Number));
 
