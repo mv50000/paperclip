@@ -231,9 +231,10 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     });
     // a well-formed aava_send in another company
     addAava(3, { companyId: SAA.id });
-    // contract breaks: bad hash, wrong version, empty recipients
-    addAava(4, {}, { sha256: "not-a-hash" });
+    // contract breaks: bad gate id, wrong version, empty recipients, unmasked non-address
+    addAava(4, {}, { gateId: "g-short" });
     addAava(5, {}, { version: 2 });
+    addAava(16, {}, { to: ["not an address"] });
     addAava(6, {}, { to: [] });
     await runOk();
 
@@ -284,10 +285,34 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(text).toMatch(/✂️ Runko katkaistu: näytetty \d+ \/ 30200 merkkiä/);
   });
 
-  it("warns when the API masked a credential-looking value in the body", async () => {
+  it("masked content or a missing hash yields a ❌-only card that cannot be approved", async () => {
+    // the approvals API masks credential-looking values (REDACTED_EVENT_VALUE)
     addAava(9, {}, { body: "Avain: token=***REDACTED***" });
+    addAava(17, {}, { to: ["***REDACTED***"] });
+    addAava(18, {}, { sha256: "not-a-hash" });
     await runOk();
-    expect(sentCards()[0].body.text).toContain("⚠️ Viestissä on salaisuudelta näyttävä arvo");
+
+    const cards = sentCards();
+    expect(cards).toHaveLength(3);
+    for (const card of cards) {
+      expect(card.body.text).toContain("⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.");
+      expect(card.body.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+    }
+    expect(cards[2].body.text).toContain("sha256 puuttuu tai virheellinen");
+
+    // a forged ✅ on the masked card is refused
+    const card = readState().posted[uuid(9)].messageId as number;
+    updatesQueue.push([callback(`pa:a:${uuid(9)}`, card)]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(0);
+    expect(lastAnswer()).toMatch(/^Sisältöä on peitetty — tätä ei voi hyväksyä/);
+
+    // ❌ still works
+    updatesQueue.push([callback(`pa:r:${uuid(9)}`, card)]);
+    await runOk();
+    updatesQueue.push([reply("Peitetty sisältö", nextTgMessageId - 1)]);
+    await runOk();
+    expect(decisionCalls().map((c) => c.url)).toEqual([`/api/approvals/${uuid(9)}/reject`]);
   });
 
   it("✅ calls the approve route once; a second tap does not approve again", async () => {

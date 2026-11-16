@@ -213,10 +213,13 @@ const voiceSignature = (payload) => {
   return JSON.stringify([p.action, p.issueId, p.identifier, p.body, p.status]);
 };
 
-const buildMarkup = (approvalId, type) => ({
+// `rejectOnly`: an Aava card whose content is masked offers ❌ only (RK9-894).
+const buildMarkup = (approvalId, type, rejectOnly = false) => ({
   inline_keyboard: [
     [
-      { text: type === BOARD_APPROVAL ? "✅ Lähetä" : "✅ Hyväksy", callback_data: `pa:a:${approvalId}` },
+      ...(rejectOnly
+        ? []
+        : [{ text: type === BOARD_APPROVAL ? "✅ Lähetä" : "✅ Hyväksy", callback_data: `pa:a:${approvalId}` }]),
       { text: "❌ Hylkää", callback_data: `pa:r:${approvalId}` },
       ...(type === EMAIL_SEND ? [{ text: "✏️ Revisio", callback_data: `pa:v:${approvalId}` }] : []),
     ],
@@ -236,28 +239,43 @@ const AAVA_GATE_ID_RE = /^g-[0-9a-f]{16}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const EMAIL_RE = /^[^\s@<>"]{1,200}@[^\s@<>"]{1,200}$/;
 const isEmail = (v) => typeof v === "string" && EMAIL_RE.test(v);
+// The approvals API masks credential-looking values before it answers
+// (redactEventPayload, server/src/redaction.ts REDACTED_EVENT_VALUE and
+// adapter-utils REDACTED_COMMAND_TEXT_VALUE: both this exact string).
+const REDACTED_MARK = "***REDACTED***";
 
-function isAavaSendPayload(p) {
-  return (
-    !!p &&
-    typeof p === "object" &&
-    p.kind === AAVA_SEND &&
-    p.version === 1 &&
-    typeof p.gateId === "string" &&
-    AAVA_GATE_ID_RE.test(p.gateId) &&
-    (p.op === "reply" || p.op === "new") &&
-    isEmail(p.from) &&
-    Array.isArray(p.to) &&
-    p.to.length > 0 &&
-    p.to.every(isEmail) &&
-    typeof p.subject === "string" &&
-    typeof p.body === "string" &&
-    Array.isArray(p.reasons) &&
-    p.reasons.every((r) => typeof r === "string") &&
-    typeof p.sha256 === "string" &&
-    SHA256_RE.test(p.sha256)
-  );
+// null: no card. { masked: true }: the card cannot show the message the gate
+// would send (a masked value, or no valid sha256), so it offers ❌ only.
+function aavaShape(p) {
+  if (
+    !p ||
+    typeof p !== "object" ||
+    p.kind !== AAVA_SEND ||
+    p.version !== 1 ||
+    typeof p.gateId !== "string" ||
+    !AAVA_GATE_ID_RE.test(p.gateId) ||
+    (p.op !== "reply" && p.op !== "new") ||
+    typeof p.from !== "string" ||
+    !Array.isArray(p.to) ||
+    p.to.length === 0 ||
+    !p.to.every((a) => typeof a === "string") ||
+    typeof p.subject !== "string" ||
+    typeof p.body !== "string" ||
+    !Array.isArray(p.reasons) ||
+    !p.reasons.every((r) => typeof r === "string")
+  ) {
+    return null;
+  }
+  const masked =
+    [p.from, ...p.to, p.subject, p.body].some((v) => v.includes(REDACTED_MARK)) ||
+    typeof p.sha256 !== "string" ||
+    !SHA256_RE.test(p.sha256);
+  if (!masked && !(isEmail(p.from) && p.to.every(isEmail))) return null;
+  return { masked };
 }
+
+// Only an unmasked, contract-true payload may be approved.
+const isAavaSendPayload = (p) => aavaShape(p)?.masked === false;
 
 // What an Aava card shows, plus the hash the gate checks. A changed signature
 // closes the open card and posts a fresh one (same rule as voiceSignature).
@@ -292,9 +310,6 @@ function aavaReason(code) {
   return AAVA_REASON_LABELS[c] ?? headerText(c, 60);
 }
 
-// The approvals API masks credential-looking values before it answers
-// (redactEventPayload). The gate still sends the original text.
-const REDACTED_MARK = "***REDACTED***";
 // Telegram's cap is 4096 chars; String#length counts UTF-16 units, which is
 // never less than the char count, so this budget leaves room for the footer.
 const AAVA_CARD_MAX = 3900;
@@ -309,7 +324,7 @@ function aavaRecipients(to) {
 // Shown after the decision, so a decided card still says what it was about.
 const aavaLabel = (p) => `To: ${headerText(aavaRecipients(p.to), 300)}\nAihe: ${headerText(p.subject, 200) || "(ei aihetta)"}`;
 
-function renderAavaSend(companyName, approval) {
+function renderAavaSend(companyName, approval, masked) {
   const p = approval.payload;
   const head = [
     `📨 Aava: lähetys odottaa — ${headerText(companyName, 100)}`,
@@ -319,10 +334,13 @@ function renderAavaSend(companyName, approval) {
     `Tyyppi: ${p.op === "reply" ? "vastaus ketjuun" : "uusi viesti"}`,
     `Syyt: ${p.reasons.length ? p.reasons.map(aavaReason).join(", ") : "(ei syytä)"}`,
   ];
-  if (`${p.subject}\n${p.body}`.includes(REDACTED_MARK)) {
-    head.push(`⚠️ Viestissä on salaisuudelta näyttävä arvo (${REDACTED_MARK}). Viesti lähtee alkuperäisenä, ei peitettynä.`);
-  }
-  head.push(`Tunniste: ${p.gateId} · sha256 ${p.sha256.slice(0, 12)}…`, "──────────");
+  if (masked) head.push("⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.");
+  head.push(
+    `Tunniste: ${p.gateId} · sha256 ${
+      typeof p.sha256 === "string" && SHA256_RE.test(p.sha256) ? `${p.sha256.slice(0, 12)}…` : "puuttuu tai virheellinen"
+    }`,
+    "──────────",
+  );
 
   const bodyLines = p.body.length ? p.body.split(LINE_BREAK_RE) : ["(ei runkoa)"];
   let text = head.join("\n");
@@ -447,7 +465,7 @@ function cardKind(company, approval) {
   if (approval.type === EMAIL_SEND || approval.type === VOICE_ACTION) return approval.type;
   if (approval.type !== BOARD_APPROVAL || approval.payload?.kind !== AAVA_SEND) return null;
   if (!AAVA_COMPANY_PREFIX || company.issuePrefix !== AAVA_COMPANY_PREFIX) return null;
-  if (isAavaSendPayload(approval.payload)) return AAVA_SEND;
+  if (aavaShape(approval.payload)) return AAVA_SEND;
   if (!badAavaLogged.has(approval.id)) {
     badAavaLogged.add(approval.id);
     console.error(`aava_send approval ${approval.id}: payload breaks the RK9-894 contract — no card`);
@@ -493,7 +511,7 @@ async function scan() {
           kind === VOICE_ACTION
             ? await renderVoiceAction(company.name, approval)
             : kind === AAVA_SEND
-              ? renderAavaSend(company.name, approval)
+              ? renderAavaSend(company.name, approval, aavaShape(approval.payload).masked)
               : renderApproval(company.name, approval);
       } catch (e) {
         console.error(`render approval ${approval.id}:`, e.message);
@@ -502,7 +520,7 @@ async function scan() {
       const msg = await tg("sendMessage", {
         chat_id: TG_CHAT,
         text,
-        reply_markup: buildMarkup(approval.id, approval.type),
+        reply_markup: buildMarkup(approval.id, approval.type, kind === AAVA_SEND && aavaShape(approval.payload).masked),
         // a URL in an untrusted body must not unfurl a preview into the card
         ...(kind === AAVA_SEND ? { link_preview_options: { is_disabled: true } } : {}),
       });
@@ -1005,7 +1023,10 @@ async function handleCallback(cq) {
     if (!fresh) {
       await tg("answerCallbackQuery", {
         callback_query_id: cq.id,
-        text: "Lähetyspyyntö on muuttunut tai jo käsitelty — käytä uusinta korttia tai Paperclip-UI:ta.",
+        text:
+          current?.status === "pending" && aavaShape(current.payload)?.masked
+            ? "Sisältöä on peitetty — tätä ei voi hyväksyä. Hylkää tai käsittele Paperclip-UI:ssa."
+            : "Lähetyspyyntö on muuttunut tai jo käsitelty — käytä uusinta korttia tai Paperclip-UI:ta.",
       });
       return;
     }

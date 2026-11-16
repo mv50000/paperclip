@@ -7,7 +7,8 @@
 Kortin saa approval, jonka tyyppi on `request_board_approval`, `payload.kind` on `aava_send` ja yhtiön `issuePrefix` on `AAVA_TG_COMPANY_PREFIX` (oletus `RK9`). Tyhjä arvo sulkee lähteen.
 
 - Muut `request_board_approval`it (esim. tool-gatewayn formaali approval) ohitetaan. Niiden napautus (väärennetty callback tai tilasta kadonnut rivi) torjutaan, eikä approve- tai reject-reittiä kutsuta.
-- Payloadin pitää täyttää RK9-894:n sopimus: `version: 1`, `gateId` muotoa `g-<16 heksaa>`, `op` on `reply` tai `new`, `from` ja jokainen `to` ovat osoitteita, `to` ei ole tyhjä, `subject`, `body` ja `reasons` ovat merkkijonoja ja `sha256` on 64 heksaa. Rikkova payload ei saa korttia. Kuuntelija lokittaa sen kerran per prosessi.
+- Payloadin pitää täyttää RK9-894:n sopimus: `version: 1`, `gateId` muotoa `g-<16 heksaa>`, `op` on `reply` tai `new`, `from` ja jokainen `to` ovat osoitteita, `to` ei ole tyhjä, ja `subject`, `body` ja `reasons` ovat merkkijonoja. Rikkova payload ei saa korttia. Kuuntelija lokittaa sen kerran per prosessi.
+- Peitetty sisältö tai virheellinen `sha256` tuottaa ❌-kortin, ks. alla.
 
 ## Kortti
 
@@ -39,9 +40,18 @@ From, To, aihe ja runko voivat tulla ulkopuoliselta lähettäjältä. Kuuntelija
 - Rungon jokainen rivi alkaa merkeillä `│ `. Runko ei siksi voi näyttää kortin omalta riviltä, kuten väärennetyltä `To:`- tai `✅ Hyväksytty`-riviltä.
 - Runko katkaistaan niin, että kortti pysyy Telegramin 4096 merkin rajan alla. Katkaistun kortin lopussa on rivi `✂️ Runko katkaistu: näytetty N / M merkkiä`.
 
-### Peitetty arvo
+### Peitetty sisältö: vain ❌
 
-Approvalien lukureitit ajavat payloadin `redactEventPayload`in läpi. Ne peittävät salaisuudelta näyttävät arvot (esim. `token=…` → `***REDACTED***`). Kortti näkee siis peitetyn rungon, mutta portti lähettää alkuperäisen. Kun aiheessa tai rungossa on `***REDACTED***`, kortti varoittaa: viestissä on salaisuudelta näyttävä arvo, ja se lähtee peittämättömänä.
+Approvalien lukureitit ajavat payloadin `redactEventPayload`in läpi (`server/src/redaction.ts`). Ne korvaavat salaisuudelta näyttävät arvot merkkijonolla `***REDACTED***` (`REDACTED_EVENT_VALUE`, sama kuin adapter-utilsin `REDACTED_COMMAND_TEXT_VALUE`). Esimerkiksi `token=abc` → `token=***REDACTED***`, `Authorization: Bearer …` → `Authorization: ***REDACTED***`. Portti lähettäisi silti alkuperäisen viestin.
+
+Operaattori ei saa hyväksyä viestiä, jota hän ei nähnyt kokonaan (orkestroijan päätös 16.11.2026). Kortti on siksi ❌-kortti, kun jokin näistä pätee:
+
+- `from`, jokin `to`-osoite, `subject` tai `body` sisältää merkkijonon `***REDACTED***`
+- `sha256` puuttuu tai ei ole 64 pientä heksaa.
+
+Kortti näyttää silloin rivin `⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.` ja vain napin `❌ Hylkää`. Väärennetty tai vanha ✅ torjutaan, koska ✅ lukee approvalin ja vaatii peittämättömän payloadin. Relay (RK9-903) tarkistaa saman omalla puolellaan: se vertaa approvalista takaisin luettua runkoa lähettämäänsä eikä kutsu `decide approve`a, jos ne eroavat.
+
+Kentät `sha256` ja `gateId` eivät peity: avaimet eivät osu salaisuusavainten kaavaan, eikä arvoskanneri peitä heksaa. Tarkistettu 16.11.2026 ajamalla `redactEventPayload` 5000 satunnaiselle tiivisteelle ja tunnisteelle, ja yksikään ei peittynyt. Kenttämuotoa ei siksi tarvitse vaihtaa.
 
 ## Päätös
 
