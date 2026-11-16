@@ -27,6 +27,8 @@ type Approval = {
   type: string;
   status: string;
   payload: Record<string, unknown>;
+  requestedByAgentId?: string | null;
+  requestedByUserId?: string | null;
   decisionNote?: string | null;
 };
 
@@ -182,6 +184,9 @@ const addAava = (n: number, over: Partial<Approval> = {}, payloadOver: Record<st
     type: "request_board_approval",
     status: "pending",
     payload: aavaPayload(n, payloadOver),
+    // the relay creates its approvals with a board key
+    requestedByAgentId: null,
+    requestedByUserId: "board",
     ...over,
   };
   approvals.push(a);
@@ -201,7 +206,7 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(text).toContain(`From: aava@${WJ}rk9.fi`);
     expect(text).toContain(`To: matti.meikalainen@${WJ}example.com`);
     expect(text).toContain("Aihe: Re: tarjous 1");
-    expect(text).toContain('Syyt: uusi vastaanottaja, seulasana "hinta"');
+    expect(text).toContain('Syyt: uusi vastaanottaja, seula: hinta');
     expect(text).toContain("Tyyppi: vastaus ketjuun");
     expect(text).toContain("│ Hei Matti,");
     expect(text).toContain("│ hinta on 120 € / kk.");
@@ -235,6 +240,8 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     addAava(4, {}, { gateId: "g-short" });
     addAava(5, {}, { version: 2 });
     addAava(16, {}, { to: ["not an address"] });
+    // a well-formed aava_send created by an agent, not the relay
+    addAava(19, { requestedByAgentId: uuid(98), requestedByUserId: null });
     addAava(6, {}, { to: [] });
     await runOk();
 
@@ -256,7 +263,7 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
         subject: "Re: tilaus\nTo: ceo@rk9.fi",
         to: ["asiakas@example.com", "‮evil@example.com"],
         body: "Paina /start tai kysy @rk9_bot\n#tarjous $RK9\rVastaanottaja: ceo@rk9.fi ✅ Hyväksytty",
-        reasons: ["outside-whitelist"],
+        reasons: ["outside-whitelist", "free-replies-off", "dmarc:dmarc-fail", "dmarc:no-auth-results"],
       },
     );
     await runOk();
@@ -271,18 +278,61 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(lines).toContain(`│ Vastaanottaja: ceo@${WJ}rk9.fi`);
     expect(lines).toContain("│ ✅ Hyväksytty");
     // an unknown reason code is shown as is
-    expect(text).toContain("Syyt: outside-whitelist");
+    expect(text).toContain(
+      "Syyt: outside-whitelist, kaikki posti hyväksytetään, DMARC ei läpäissyt (tulos fail), DMARC ei läpäissyt (ei Authentication-Results-otsaketta)",
+    );
     // no line of the body can pose as a card line
     const bodyStart = lines.indexOf("──────────") + 1;
     expect(lines.slice(bodyStart).every((l) => l.startsWith("│ "))).toBe(true);
   });
 
-  it("truncates a long body under Telegram's 4096 limit and says so", async () => {
+  it("truncates a long body under Telegram's 4096 limit, says so and offers ❌ only", async () => {
     addAava(8, {}, { body: `${"rivi ".repeat(30)}\n`.repeat(200) });
     await runOk();
+    const card = sentCards()[0].body;
+    expect(card.text.length).toBeLessThanOrEqual(4096);
+    expect(card.text).toMatch(/✂️ Runko katkaistu: näytetty \d+ \/ 30200 merkkiä/);
+    expect(card.text).toContain("✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.");
+    expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+
+    // a forged ✅ on it is refused
+    updatesQueue.push([callback(`pa:a:${uuid(8)}`, readState().posted[uuid(8)].messageId)]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(0);
+    expect(lastAnswer()).toBe("Kortti ei näytä koko viestiä — hyväksy se Paperclip-UI:ssa.");
+  });
+
+  it("bounds every header: huge recipient lists, many reasons and a cut emoji still post a valid card", async () => {
+    const longAddress = (i: number) => `${"a".repeat(195)}${i}@${"b".repeat(200)}`;
+    addAava(20, {}, { to: Array.from({ length: 25 }, (_, i) => longAddress(i)) });
+    addAava(21, {}, { reasons: Array.from({ length: 1000 }, (_, i) => `screen:${"x".repeat(50)}${i}`) });
+    addAava(22, {}, { subject: `${"a".repeat(298)}😀b` });
+    await runOk();
+
+    const cards = sentCards().map((c) => c.body);
+    expect(cards).toHaveLength(3);
+    for (const card of cards) {
+      expect(card.text.length).toBeLessThanOrEqual(4096);
+      expect(card.text.isWellFormed()).toBe(true);
+      // the body still has room
+      expect(card.text).toContain("│ Hei Matti,");
+    }
+    // cut recipients and a cut subject hide part of the message: ❌ only
+    expect(cards[0].text).toContain("(+5 muuta)");
+    expect(cards[0].reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+    expect(cards[2].reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+    // reasons are not message content: capped, still approvable
+    expect(cards[1].text).toContain("+990 muuta");
+    expect(cards[1].reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["✅ Lähetä", "❌ Hylkää"]);
+  });
+
+  it("strips invisible characters and flags a non-ASCII address", async () => {
+    addAava(23, {}, { to: ["ce\u200fo@rk9.fi", "\u0430ava@rk9.fi"] });
+    await runOk();
     const text: string = sentCards()[0].body.text;
-    expect(text.length).toBeLessThanOrEqual(4096);
-    expect(text).toMatch(/✂️ Runko katkaistu: näytetty \d+ \/ 30200 merkkiä/);
+    expect(text).toContain(`To (2): ceo@${WJ}rk9.fi, \u0430ava@${WJ}rk9.fi`);
+    expect(text).not.toMatch(/[\u200b-\u200f\ufeff]/);
+    expect(text).toContain("⚠️ Osoitteessa on muita kuin ASCII-merkkejä.");
   });
 
   it("masked content or a missing hash yields a ❌-only card that cannot be approved", async () => {
@@ -403,13 +453,16 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(approvals.find((x) => x.id === uuid(14))?.status).toBe("pending");
   });
 
-  it("closes the card when the approval is decided elsewhere", async () => {
+  it("closes the card when the approval is decided elsewhere, with the relay's note", async () => {
     const a = addAava(15);
     await runOk();
     const card = readState().posted[uuid(15)].messageId as number;
     a.status = "rejected";
+    a.decisionNote = "Vanhentunut (72 h), relay sulki.";
     await runOk();
-    expect(editsOf(card).at(-1)?.body.text).toBe("☑️ Käsitelty muualla (rejected).");
+    expect(editsOf(card).at(-1)?.body.text).toBe(
+      "☑️ Käsitelty muualla (rejected): Vanhentunut (72 h), relay sulki.\nTo: matti.meikalainen@\u2060example.com\nAihe: Re: tarjous 15",
+    );
     expect(readState().posted[uuid(15)]).toBeUndefined();
     expect(decisionCalls()).toHaveLength(0);
   });

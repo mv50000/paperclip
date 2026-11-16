@@ -229,7 +229,9 @@ const buildMarkup = (approvalId, type, rejectOnly = false) => ({
 // One line, at most `max` chars: titles and names must not break the card layout.
 const oneLine = (value, max) => {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  if (text.length <= max) return text;
+  // never leave half of a surrogate pair at the cut: Telegram refuses it
+  return text.slice(0, max - 1).replace(/[\ud800-\udbff]$/, "") + "…";
 };
 
 // ── RK9-894: Aava send requests ───────────────────────────────────────────────
@@ -286,7 +288,9 @@ const aavaSignature = (payload) => {
 
 // Bidi overrides/isolates can reorder an address on screen; C0 controls have no
 // business in a card.
-const UNSAFE_CHARS_RE = /[\u0000-\u0008\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g;
+// Zero-width and other invisible format characters can hide inside an address.
+const UNSAFE_CHARS_RE =
+  /[\u0000-\u0008\u000e-\u001f\u007f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 // Telegram turns /cmd, @name, #tag and $TAG in plain text into tappable
 // entities. A WORD JOINER after the sigil keeps the look and breaks the entity.
 const AUTOLINK_SIGIL_RE = /([/@#$])(?=[\p{L}\p{N}_])/gu;
@@ -294,19 +298,37 @@ const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").rep
 // A header value: one line, neutralised, at most `max` chars.
 const headerText = (value, max) => oneLine(neutralize(String(value ?? "").split(LINE_BREAK_RE).join(" ")), max);
 
+// Reason codes as hosts/aava/aava-gate.py emits them (RK9-903, exact strings).
 const AAVA_REASON_LABELS = {
   "new-recipient": "uusi vastaanottaja",
   "added-recipient": "lisätty vastaanottaja",
-  "new-message": "uusi viesti, ei ketjuvastaus",
-  cc: "kopio (Cc)",
-  "no-dmarc": "lähettäjän DMARC ei läpäissyt",
-  "dmarc-fail": "lähettäjän DMARC ei läpäissyt",
-  automated: "emoviesti on automaattiposti",
+  "own-address": "vastaanottaja on oma osoite",
+  "brand-address": "vastaanottaja on brändiosoite",
+  "not-own-address": "osoite ei ole Aavan oma",
+  "reply-to-mismatch": "Reply-To eroaa lähettäjästä",
+  "reply-to-bad": "virheellinen Reply-To",
+  "no-message-id": "emoviestiltä puuttuu Message-ID",
+  auto: "emoviesti on automaattiposti",
+  "caller-hold": "Aava pyysi hyväksyntää",
+  "free-replies-off": "kaikki posti hyväksytetään",
+};
+const AAVA_DMARC_LABELS = {
+  "no-received": "ei Received-otsaketta",
+  "no-auth-results": "ei Authentication-Results-otsaketta",
+  authserv: "väärä tarkistuspalvelin",
+  "no-dmarc": "ei DMARC-tulosta",
+  ambiguous: "monitulkintainen tulos",
+  "header-from": "From-otsake ei täsmää",
 };
 
 function aavaReason(code) {
   const c = String(code);
-  if (c.startsWith("screen:")) return `seulasana "${headerText(c.slice("screen:".length), 60)}"`;
+  if (c.startsWith("screen:")) return `seula: ${headerText(c.slice("screen:".length), 60)}`;
+  if (c.startsWith("dmarc:")) {
+    const why = c.slice("dmarc:".length);
+    const label = why.startsWith("dmarc-") ? `tulos ${why.slice("dmarc-".length)}` : AAVA_DMARC_LABELS[why] ?? why;
+    return `DMARC ei läpäissyt (${headerText(label, 60)})`;
+  }
   return AAVA_REASON_LABELS[c] ?? headerText(c, 60);
 }
 
@@ -314,9 +336,15 @@ function aavaReason(code) {
 // never less than the char count, so this budget leaves room for the footer.
 const AAVA_CARD_MAX = 3900;
 const AAVA_RECIPIENTS_SHOWN = 20;
+const AAVA_ADDRESS_MAX = 200;
+const AAVA_TO_LINE_MAX = 1200;
+const AAVA_SUBJECT_MAX = 300;
+const AAVA_REASONS_SHOWN = 10;
+const AAVA_INCOMPLETE_LINE = "✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.";
+const NON_ASCII_RE = /[^\x20-\x7e]/;
 
 function aavaRecipients(to) {
-  const shown = to.slice(0, AAVA_RECIPIENTS_SHOWN).map((a) => headerText(a, 200));
+  const shown = to.slice(0, AAVA_RECIPIENTS_SHOWN).map((a) => headerText(a, AAVA_ADDRESS_MAX));
   const more = to.length - shown.length;
   return `${shown.join(", ")}${more > 0 ? ` (+${more} muuta)` : ""}`;
 }
@@ -324,51 +352,92 @@ function aavaRecipients(to) {
 // Shown after the decision, so a decided card still says what it was about.
 const aavaLabel = (p) => `To: ${headerText(aavaRecipients(p.to), 300)}\nAihe: ${headerText(p.subject, 200) || "(ei aihetta)"}`;
 
+// Every header is bounded, so the head stays near 3000 chars and the body
+// always has room. `complete` is false when the card cannot show the whole
+// message (masked content, a cut header, hidden recipients, a cut body): the
+// operator must not approve what they did not see, so such a card offers ❌
+// only and ✅ is refused (orchestrator decision, RK9-894).
 function renderAavaSend(companyName, approval, masked) {
   const p = approval.payload;
+  let complete = !masked;
+  const hdr = (value, max) => {
+    if (headerText(value, Infinity).length > max) complete = false;
+    return headerText(value, max);
+  };
+
+  const recipients = p.to.slice(0, AAVA_RECIPIENTS_SHOWN).map((a) => hdr(a, AAVA_ADDRESS_MAX));
+  if (p.to.length > AAVA_RECIPIENTS_SHOWN) complete = false;
+  const more = p.to.length > recipients.length ? ` (+${p.to.length - recipients.length} muuta)` : "";
+  let toLine = recipients.join(", ");
+  if (toLine.length + more.length > AAVA_TO_LINE_MAX) {
+    complete = false;
+    toLine = oneLine(toLine, AAVA_TO_LINE_MAX - more.length);
+  }
+  toLine += more;
+  const reasons = p.reasons.slice(0, AAVA_REASONS_SHOWN).map(aavaReason);
+  if (p.reasons.length > reasons.length) reasons.push(`+${p.reasons.length - reasons.length} muuta`);
+
   const head = [
     `📨 Aava: lähetys odottaa — ${headerText(companyName, 100)}`,
-    `From: ${headerText(p.from, 200)}`,
-    `To${p.to.length > 1 ? ` (${p.to.length})` : ""}: ${aavaRecipients(p.to)}`,
-    `Aihe: ${headerText(p.subject, 300) || "(ei aihetta)"}`,
+    `From: ${hdr(p.from, AAVA_ADDRESS_MAX)}`,
+    `To${p.to.length > 1 ? ` (${p.to.length})` : ""}: ${toLine}`,
+    `Aihe: ${hdr(p.subject, AAVA_SUBJECT_MAX) || "(ei aihetta)"}`,
     `Tyyppi: ${p.op === "reply" ? "vastaus ketjuun" : "uusi viesti"}`,
-    `Syyt: ${p.reasons.length ? p.reasons.map(aavaReason).join(", ") : "(ei syytä)"}`,
+    `Syyt: ${reasons.length ? reasons.join(", ") : "(ei syytä)"}`,
   ];
+  if ([p.from, ...p.to].some((a) => NON_ASCII_RE.test(a))) {
+    head.push("⚠️ Osoitteessa on muita kuin ASCII-merkkejä. Tarkista, ettei se jäljittele tuttua osoitetta.");
+  }
   if (masked) head.push("⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.");
-  head.push(
+  const tail = [
     `Tunniste: ${p.gateId} · sha256 ${
       typeof p.sha256 === "string" && SHA256_RE.test(p.sha256) ? `${p.sha256.slice(0, 12)}…` : "puuttuu tai virheellinen"
     }`,
     "──────────",
-  );
+  ];
 
+  // the incomplete line is decided after the body, so its room is reserved now
+  const headLength = [...head, AAVA_INCOMPLETE_LINE, ...tail].join("\n").length;
+  const footer = (shown) => `\n──────────\n✂️ Runko katkaistu: näytetty ${shown} / ${p.body.length} merkkiä.`;
+  const budget = AAVA_CARD_MAX - headLength - footer(p.body.length).length;
   const bodyLines = p.body.length ? p.body.split(LINE_BREAK_RE) : ["(ei runkoa)"];
-  let text = head.join("\n");
-  const footer = (shown) =>
-    `\n──────────\n✂️ Runko katkaistu: näytetty ${shown} / ${p.body.length} merkkiä. Lue koko viesti Paperclip-UI:sta ennen lähetystä.`;
-  const budget = AAVA_CARD_MAX - footer(p.body.length).length;
+  let body = "";
   let shownChars = 0;
   let truncated = false;
   for (const raw of bodyLines) {
     const line = `\n│ ${neutralize(raw)}`;
-    if (text.length + line.length <= budget) {
-      text += line;
+    if (body.length + line.length <= budget) {
+      body += line;
       shownChars += raw.length + 1;
       continue;
     }
-    let part = line.slice(0, Math.max(0, budget - text.length - 1));
+    let part = line.slice(0, Math.max(0, budget - body.length - 1));
     // never leave half of a surrogate pair at the cut
     if (/[\ud800-\udbff]$/.test(part)) part = part.slice(0, -1);
     if (part.length > 3) {
-      text += part + "…";
+      body += part + "…";
       shownChars += Math.max(0, part.length - 3);
     }
     truncated = true;
     break;
   }
-  if (truncated) text += footer(Math.min(shownChars, p.body.length));
-  return text;
+  if (truncated) {
+    complete = false;
+    body += footer(Math.min(shownChars, p.body.length));
+  }
+  if (!complete && !masked) head.push(AAVA_INCOMPLETE_LINE);
+  return { text: [...head, ...tail].join("\n") + body, complete };
 }
+
+// RK9-894: the relay creates its approvals with a board key. An agent-created
+// approval always carries requestedByAgentId (the route fills in the caller),
+// so an aava_send from an agent is a forgery attempt and gets no card.
+const isBoardCreated = (approval) => !approval?.requestedByAgentId;
+
+// ✅ is allowed only on a board-created, unmasked, contract-true payload that
+// the card can show in full.
+const aavaApprovable = (approval) =>
+  isBoardCreated(approval) && isAavaSendPayload(approval.payload) && renderAavaSend("", approval, false).complete;
 
 // RK9-481: one voice_action card. The issue and its assignee are read live so
 // the card shows the issue as it is now; a lookup that answers with an error
@@ -465,10 +534,14 @@ function cardKind(company, approval) {
   if (approval.type === EMAIL_SEND || approval.type === VOICE_ACTION) return approval.type;
   if (approval.type !== BOARD_APPROVAL || approval.payload?.kind !== AAVA_SEND) return null;
   if (!AAVA_COMPANY_PREFIX || company.issuePrefix !== AAVA_COMPANY_PREFIX) return null;
-  if (aavaShape(approval.payload)) return AAVA_SEND;
+  if (aavaShape(approval.payload) && isBoardCreated(approval)) return AAVA_SEND;
   if (!badAavaLogged.has(approval.id)) {
     badAavaLogged.add(approval.id);
-    console.error(`aava_send approval ${approval.id}: payload breaks the RK9-894 contract — no card`);
+    console.error(
+      `aava_send approval ${approval.id}: ${
+        isBoardCreated(approval) ? "payload breaks the RK9-894 contract" : "created by an agent, not the relay"
+      } — no card`,
+    );
   }
   return null;
 }
@@ -506,13 +579,16 @@ async function scan() {
         continue;
       }
       let text;
+      let rejectOnly = false;
       try {
-        text =
-          kind === VOICE_ACTION
-            ? await renderVoiceAction(company.name, approval)
-            : kind === AAVA_SEND
-              ? renderAavaSend(company.name, approval, aavaShape(approval.payload).masked)
-              : renderApproval(company.name, approval);
+        if (kind === AAVA_SEND) {
+          const card = renderAavaSend(company.name, approval, aavaShape(approval.payload).masked);
+          text = card.text;
+          rejectOnly = !card.complete;
+        } else {
+          text =
+            kind === VOICE_ACTION ? await renderVoiceAction(company.name, approval) : renderApproval(company.name, approval);
+        }
       } catch (e) {
         console.error(`render approval ${approval.id}:`, e.message);
         continue; // retried next scan; the other cards and the cleanup still run
@@ -520,7 +596,7 @@ async function scan() {
       const msg = await tg("sendMessage", {
         chat_id: TG_CHAT,
         text,
-        reply_markup: buildMarkup(approval.id, approval.type, kind === AAVA_SEND && aavaShape(approval.payload).masked),
+        reply_markup: buildMarkup(approval.id, approval.type, rejectOnly),
         // a URL in an untrusted body must not unfurl a preview into the card
         ...(kind === AAVA_SEND ? { link_preview_options: { is_disabled: true } } : {}),
       });
@@ -551,7 +627,15 @@ async function scan() {
     const res = await pcp("GET", `/approvals/${approvalId}`);
     const status = res.json?.status;
     if (res.status === 404 || (status && status !== "pending")) {
-      await editDone(entry.messageId, `☑️ Käsitelty muualla (${status ?? "poistettu"}).`);
+      // RK9-903: the relay rejects an expired or gate-rejected request with a
+      // decisionNote ("Vanhentunut (72 h), relay sulki."); show it on Aava cards.
+      const note = entry.kind === AAVA_SEND && typeof res.json?.decisionNote === "string" ? res.json.decisionNote : "";
+      await editDone(
+        entry.messageId,
+        note
+          ? `☑️ Käsitelty muualla (${status}): ${headerText(note, 300)}\n${entry.label ?? ""}`.trimEnd()
+          : `☑️ Käsitelty muualla (${status ?? "poistettu"}).`,
+      );
       delete state.posted[approvalId];
       saveState(state);
     }
@@ -978,6 +1062,13 @@ async function handleCallback(cq) {
   const isVoice = entry.type === VOICE_ACTION;
   const isAava = entry.kind === AAVA_SEND;
 
+  // A ✅ whose approval type is unknown (state row lost and the lookup failed)
+  // cannot pass the per-type checks below: refused.
+  if (action === "a" && !entry.type) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Hyväksynnän tyyppi ei selvinnyt — käsittele Paperclip-UI:ssa." });
+    return;
+  }
+
   // RK9-894: this listener only ever posts Aava cards of the generic board
   // type. Any other request_board_approval (e.g. a tool-gateway formal
   // approval) is never decided from Telegram.
@@ -1014,18 +1105,16 @@ async function handleCallback(cq) {
   // scan posts a fresh card.
   if (action === "a" && isAava) {
     const current = await fetchApproval(approvalId);
-    const fresh =
-      current?.status === "pending" &&
-      current.type === BOARD_APPROVAL &&
-      isAavaSendPayload(current.payload) &&
-      !!entry.sig &&
-      aavaSignature(current.payload) === entry.sig;
+    const pending = current?.status === "pending" && current.type === BOARD_APPROVAL;
+    const fresh = pending && aavaApprovable(current) && !!entry.sig && aavaSignature(current.payload) === entry.sig;
     if (!fresh) {
+      const shape = pending ? aavaShape(current.payload) : null;
       await tg("answerCallbackQuery", {
         callback_query_id: cq.id,
-        text:
-          current?.status === "pending" && aavaShape(current.payload)?.masked
-            ? "Sisältöä on peitetty — tätä ei voi hyväksyä. Hylkää tai käsittele Paperclip-UI:ssa."
+        text: shape?.masked
+          ? "Sisältöä on peitetty — tätä ei voi hyväksyä. Hylkää tai käsittele Paperclip-UI:ssa."
+          : shape && isBoardCreated(current) && aavaSignature(current.payload) === entry.sig
+            ? "Kortti ei näytä koko viestiä — hyväksy se Paperclip-UI:ssa."
             : "Lähetyspyyntö on muuttunut tai jo käsitelty — käytä uusinta korttia tai Paperclip-UI:ta.",
       });
       return;
