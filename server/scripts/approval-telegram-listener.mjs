@@ -37,7 +37,20 @@
 //   ✅ Lähetä    → POST /api/approvals/:id/approve. The server sends nothing; the
 //                  relay reads the decision and hands it to the gate, which sends
 //                  only the stored message whose sha256 matches.
-//   ❌ Hylkää    → ForceReply prompt; the reply text becomes decisionNote
+//                  RK9-922: the listener signs the decision with an Ed25519 key
+//                  and puts the signature in decisionNote:
+//                    "Hyväksytty Telegramista · aava-sig:v1:<base64>"
+//                  The signed message is exactly these five lines (UTF-8, "\n",
+//                  no trailing newline), built from the card's posting-time
+//                  fingerprint:
+//                    aava-send-v1 / <approvalId> / <gateId> / <sha256> / approve
+//                  The gate (RK9-920) checks it with the public key, so an
+//                  `approved` status alone no longer sends mail. Without a usable
+//                  key (missing, unreadable, readable by group/others, not
+//                  Ed25519) an Aava ✅ approves nothing: the card says why and
+//                  offers ❌ only. The key, the signed message and the signature
+//                  are never logged or sent to Telegram.
+//   ❌ Hylkää    → ForceReply prompt; the reply text becomes decisionNote (not signed)
 //   (no ✏️ — the gate holds one fixed message, a revision has nothing to revise)
 //   From, To, subject and body are untrusted text: line breaks, bidi controls
 //   and Telegram auto-links (/command, @mention, #tag) are neutralised, and
@@ -74,12 +87,17 @@
 //                       OUTREACH_TG_ENABLED=0 to turn the source off, not 0 here)
 //   AAVA_TG_COMPANY_PREFIX default RK9; the company whose aava_send approvals get
 //                       a card ("" turns the Aava source off)
+//   AAVA_TG_SIGN_KEY_FILE default /etc/paperclip/aava-approve-ed25519.key; the
+//                       Ed25519 private key (PKCS8 PEM, owner paperclip, mode
+//                       0400) that signs Aava ✅ decisions (RK9-922). Read once
+//                       at start-up; a fixed key needs a listener restart.
 //
 //   node approval-telegram-listener.mjs            # long-poll listener (systemd)
 //   node approval-telegram-listener.mjs --once     # one scan+drain, then exit (smoke)
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, fstatSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 
 const API_URL = (process.env.PAPERCLIP_API_URL ?? "http://localhost:3100").replace(/\/$/, "");
 const PCP_TOKEN = process.env.PAPERCLIP_TOKEN ?? "";
@@ -101,6 +119,50 @@ const AAVA_COMPANY_PREFIX = (process.env.AAVA_TG_COMPANY_PREFIX ?? "RK9").trim()
 if (!PCP_TOKEN || !TG_TOKEN || !TG_CHAT) {
   console.error("Missing PAPERCLIP_TOKEN / TG_BOT_TOKEN / TG_CHAT_ID");
   process.exit(1);
+}
+
+// ── RK9-922: Ed25519 key that signs Aava ✅ decisions ─────────────────────────
+// Read once at start-up. On any problem the listener keeps running: other
+// cards work as before, and an Aava card offers ❌ only and says why. The
+// reason is plain Finnish and never holds key material; the log line names
+// the file path but not its content.
+const AAVA_SIGN_KEY_FILE = process.env.AAVA_TG_SIGN_KEY_FILE || "/etc/paperclip/aava-approve-ed25519.key";
+function loadAavaSignKey(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+  } catch (e) {
+    return { key: null, reason: e.code === "ENOENT" ? "avaintiedostoa ei ole" : "avaintiedostoa ei voi avata", log: e.code ?? "open failed" };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { key: null, reason: "avaintiedosto ei ole tavallinen tiedosto", log: "not a regular file" };
+    if ((st.mode & 0o077) !== 0) {
+      return {
+        key: null,
+        reason: "avaintiedoston oikeudet sallivat ryhmän tai muiden käytön",
+        log: `mode ${(st.mode & 0o777).toString(8)} allows group/others (want 0400)`,
+      };
+    }
+    let key;
+    try {
+      key = createPrivateKey({ key: readFileSync(fd), format: "pem" });
+    } catch {
+      return { key: null, reason: "avaintiedosto ei ole kelvollinen PEM-avain", log: "not a valid PEM private key" };
+    }
+    if (key.asymmetricKeyType !== "ed25519") {
+      return { key: null, reason: "avain ei ole Ed25519-avain", log: `key type ${key.asymmetricKeyType ?? "?"}, want ed25519` };
+    }
+    return { key, reason: null, log: null };
+  } catch (e) {
+    return { key: null, reason: "avaintiedostoa ei voi lukea", log: e.code ?? "read failed" };
+  } finally {
+    closeSync(fd);
+  }
+}
+const AAVA_SIGN = AAVA_COMPANY_PREFIX ? loadAavaSignKey(AAVA_SIGN_KEY_FILE) : { key: null, reason: null, log: null };
+if (AAVA_COMPANY_PREFIX && !AAVA_SIGN.key) {
+  console.error(`aava signing key ${AAVA_SIGN_KEY_FILE} unusable: ${AAVA_SIGN.log} — Aava ✅ disabled, cards offer ❌ only`);
 }
 
 // TG_API_BASE is only overridden by the test harness (points both APIs at a mock server).
@@ -476,7 +538,9 @@ const aavaLabel = (p) => `To: ${headerText(aavaRecipients(p.to), 300)}\nAihe: ${
 // message (masked content, a cut header, hidden recipients, a cut body): the
 // operator must not approve what they did not see, so such a card offers ❌
 // only and ✅ is refused (orchestrator decision, RK9-894).
-function renderAavaSend(companyName, approval, masked) {
+// `keyReason` (RK9-922): the signing key is unusable; the card says why. The
+// caller offers ❌ only. The tap-time check (aavaApprovable) never passes it.
+function renderAavaSend(companyName, approval, masked, keyReason = null) {
   const p = approval.payload;
   let complete = !masked;
   const hdr = (value, max) => {
@@ -505,6 +569,7 @@ function renderAavaSend(companyName, approval, masked) {
     `Syyt: ${reasons.length ? reasons.join(", ") : "⟨ei syitä⟩"}`,
   ];
   if (masked) head.push("⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.");
+  if (keyReason) head.push(aavaKeyLine(keyReason));
   const blocker = aavaApprovalBlocker(p);
   if (blocker) {
     complete = false;
@@ -562,6 +627,52 @@ const isBoardCreated = (approval) => !approval?.requestedByAgentId;
 // the card can show in full.
 const aavaApprovable = (approval) =>
   isBoardCreated(approval) && isAavaSendPayload(approval.payload) && renderAavaSend("", approval, false).complete;
+
+// ── RK9-922: signed Aava approval ─────────────────────────────────────────────
+// Binding contract shared with the gate (RK9-920): five lines, UTF-8, "\n",
+// no trailing newline; plain Ed25519 (no pre-hash), standard padded base64.
+const APPROVE_NOTE = "Hyväksytty Telegramista";
+const aavaSignedMessage = (approvalId, gateId, sha256) =>
+  ["aava-send-v1", approvalId, gateId, sha256, "approve"].join("\n");
+
+// Plain-language line for a card that cannot offer ✅ because the key is unusable.
+const aavaKeyLine = (reason) =>
+  `🔑 ✅ ei käytössä: hyväksynnän allekirjoitusavain ei toimi (${reason}). Ylläpito korjaa avaimen ja käynnistää kuuntelijan uudelleen, ja kortti tulee silloin uudelleen.`;
+
+// Signs the ✅ of the card as it was posted: gateId and sha256 come from the
+// posting-time fingerprint (the state row's `sig`, see aavaSignature), never
+// from a later read. Returns { note } or { refusal } (text for the operator).
+// The message and the signature are never logged.
+function aavaSignedNote(approvalId, postedSig) {
+  if (!AAVA_SIGN.key) return { refusal: `Allekirjoitusavain ei toimi (${AAVA_SIGN.reason}) — tätä ei voi hyväksyä.` };
+  let fingerprint = null;
+  try {
+    fingerprint = JSON.parse(postedSig ?? "");
+  } catch {
+    /* no fingerprint: refused below */
+  }
+  const id = String(approvalId ?? "").toLowerCase();
+  const gateId = Array.isArray(fingerprint) ? fingerprint[0] : null;
+  const sha256 = Array.isArray(fingerprint) ? fingerprint[7] : null;
+  if (
+    !UUID_RE.test(id) ||
+    typeof gateId !== "string" ||
+    !AAVA_GATE_ID_RE.test(gateId) ||
+    typeof sha256 !== "string" ||
+    !SHA256_RE.test(sha256)
+  ) {
+    return { refusal: "Kortin tunnisteet eivät kelpaa allekirjoitukseen — käytä uusinta korttia." };
+  }
+  let signature;
+  try {
+    signature = cryptoSign(null, Buffer.from(aavaSignedMessage(id, gateId, sha256), "utf8"), AAVA_SIGN.key);
+  } catch (e) {
+    console.error(`aava approval ${id}: signing failed (${e.code ?? e.name ?? "error"})`);
+    signature = null;
+  }
+  if (!signature || signature.length !== 64) return { refusal: "Allekirjoitus epäonnistui — tätä ei hyväksytty." };
+  return { note: `${APPROVE_NOTE} · aava-sig:v1:${signature.toString("base64")}` };
+}
 
 // RK9-481: one voice_action card. The issue and its assignee are read live so
 // the card shows the issue as it is now; a lookup that answers with an error
@@ -699,6 +810,12 @@ async function scan() {
         );
         delete state.posted[approval.id];
         saveState(state);
+      } else if (posted && posted.noKey && AAVA_SIGN.key && !posted.handling) {
+        // RK9-922: posted while the signing key was unusable (❌ only); the
+        // listener restarted with a working key, so the card can offer ✅ now.
+        await editDone(posted.messageId, "🔑 Allekirjoitusavain toimii nyt — uusi kortti alla. Tämä kortti ei enää päde.");
+        delete state.posted[approval.id];
+        saveState(state);
       } else if (posted) {
         continue;
       }
@@ -706,9 +823,9 @@ async function scan() {
       let rejectOnly = false;
       try {
         if (kind === AAVA_SEND) {
-          const card = renderAavaSend(company.name, approval, aavaShape(approval.payload).masked);
+          const card = renderAavaSend(company.name, approval, aavaShape(approval.payload).masked, AAVA_SIGN.reason);
           text = card.text;
-          rejectOnly = !card.complete;
+          rejectOnly = !card.complete || !AAVA_SIGN.key;
         } else {
           text =
             kind === VOICE_ACTION ? await renderVoiceAction(company.name, approval) : renderApproval(company.name, approval);
@@ -732,6 +849,7 @@ async function scan() {
           type: approval.type,
           ...(sig ? { sig } : {}),
           ...(kind === AAVA_SEND ? { kind: AAVA_SEND, label: aavaLabel(approval.payload) } : {}),
+          ...(kind === AAVA_SEND && !AAVA_SIGN.key ? { noKey: true } : {}),
         };
         saveState(state);
         console.log(`posted approval ${approval.id} (${company.name})`);
@@ -1024,12 +1142,12 @@ async function latestOutcomeComment(approvalId, approval) {
   return outcome?.body ?? null;
 }
 
-async function doApprove(approvalId, entry) {
+// `decisionNote` carries the RK9-922 signature on an Aava card; every other
+// card keeps the plain note.
+async function doApprove(approvalId, entry, decisionNote = APPROVE_NOTE) {
   let res;
   try {
-    res = await pcp("POST", `/approvals/${approvalId}/approve`, {
-      decisionNote: "Hyväksytty Telegramista",
-    });
+    res = await pcp("POST", `/approvals/${approvalId}/approve`, { decisionNote });
   } catch (e) {
     console.error(`approve ${approvalId}:`, e.message);
     entry.why = e.name === "TimeoutError" ? "aikakatkaisu" : "yhteysvirhe";
@@ -1227,6 +1345,18 @@ async function handleCallback(cq) {
   // RK9-894: ✅ sends mail, so the card must still show what is pending now.
   // A row lost from state.json has no signature to compare: refused, the next
   // scan posts a fresh card.
+  // RK9-922: without a usable signing key an Aava ✅ approves nothing; the gate
+  // would refuse an unsigned approval anyway.
+  if (action === "a" && isAava && !AAVA_SIGN.key) {
+    console.error(`aava approval ${approvalId}: ✅ refused, signing key unusable (${AAVA_SIGN.log})`);
+    await tg("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: `Allekirjoitusavain ei toimi (${AAVA_SIGN.reason}) — tätä ei voi hyväksyä.`,
+    });
+    return;
+  }
+
+  let aavaNote = null;
   if (action === "a" && isAava) {
     const current = await fetchApproval(approvalId);
     const pending = current?.status === "pending" && current.type === BOARD_APPROVAL;
@@ -1243,6 +1373,14 @@ async function handleCallback(cq) {
       });
       return;
     }
+    // The payload now matches the card's posting-time fingerprint; sign that.
+    const signed = aavaSignedNote(approvalId, entry.sig);
+    if (!signed.note) {
+      console.error(`aava approval ${approvalId}: ✅ refused, not signed`);
+      await tg("answerCallbackQuery", { callback_query_id: cq.id, text: signed.refusal });
+      return;
+    }
+    aavaNote = signed.note;
   }
 
   if (action === "a") {
@@ -1255,7 +1393,7 @@ async function handleCallback(cq) {
       entry.messageId,
       isVoice ? "⏳ Hyväksytään — palvelin toteuttaa…" : isAava ? "⏳ Hyväksytään…" : "⏳ Hyväksytään — palvelin lähettää…",
     );
-    await doApprove(approvalId, entry);
+    await doApprove(approvalId, entry, aavaNote ?? APPROVE_NOTE);
     return;
   }
 

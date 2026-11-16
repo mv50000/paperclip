@@ -89,11 +89,35 @@ Kentät `sha256` ja `gateId` eivät peity: avaimet eivät osu salaisuusavainten 
 ## Päätös
 
 - ✅ lukee ensin approvalin (`GET /approvals/:id`). Kuuntelija hyväksyy vain, kun approval on yhä `pending` ja board-avaimella luotu, payload täyttää sopimuksen ilman peitettyä sisältöä, kortti näyttää koko viestin ja allekirjoitus on sama kuin kortilla. Muuten napautus torjutaan, ja seuraava skannaus postaa uuden kortin. Tilasta kadonneella rivillä ei ole allekirjoitusta, joten sen ✅ torjutaan aina. Tämä kaventaa `voice_action`-muistion rajaa (revisio skannausten välissä), mutta ei poista sitä: GET:n ja POST:n väliin jää alle sekunnin ikkuna.
-- ✅ kutsuu `POST /approvals/:id/approve` kerran. Palvelin ei lähetä tälle tyypille mitään, joten hyväksyntä on lopputulos. Kortiksi päivittyy `✅ Hyväksytty. Relay vie päätöksen Aavan portille…` ja vastaanottaja ja aihe.
+- ✅ allekirjoittaa päätöksen (RK9-922, ks. seuraava kohta) ja kutsuu `POST /approvals/:id/approve` kerran. Palvelin ei lähetä tälle tyypille mitään, joten hyväksyntä on lopputulos. Kortiksi päivittyy `✅ Hyväksytty. Relay vie päätöksen Aavan portille…` ja vastaanottaja ja aihe.
 - ❌ pyytää perustelun ForceReplyllä ja kutsuu `POST /approvals/:id/reject` kerran. Perustelu tallentuu `decisionNote`ksi.
 - Jos approve aikakatkaistaan tai saa 5xx:n, kuuntelija ei hyväksy uudelleen (RK9-502). Kun approval näkyy `approved`-tilassa, kortti päivittyy samaan lopputulokseen ilman 30 minuutin odotusta palvelimen kommentille.
 - Jos tilan rivi on kadonnut ja tyyppihaku epäonnistuu, mikään ✅ ei hyväksy (koskee kaikkia korttityyppejä).
 - Muualla päätetty kortti suljetaan seuraavassa skannauksessa (`☑️ Käsitelty muualla`). Aava-kortti näyttää myös päätöksen `decisionNote`n. Relay sulkee vanhentuneen tai portin hylkäämän pyynnön hylkäyksellä, jonka perustelu on `Vanhentunut (72 h), relay sulki.` tai `Portti hylkäsi pyynnön, relay sulki.`
+
+## Allekirjoitettu hyväksyntä (RK9-922)
+
+Pelkkä approvalin tila `approved` ei enää riitä lähetykseen. Kuuntelija allekirjoittaa Aava-kortin ✅:n Ed25519-avaimella, ja portti (RK9-920) tarkistaa allekirjoituksen julkisella avaimella ennen lähetystä. Sopimus on sama molemmissa tiketeissä:
+
+- Allekirjoitettava viesti on täsmälleen viisi riviä, UTF-8, rivinvaihto `\n`, ei rivinvaihtoa lopussa: `aava-send-v1`, approvalin UUID pienillä kirjaimilla, `payload.gateId`, `payload.sha256` ja `approve`.
+- Allekirjoitus on puhdas Ed25519 (ei esitiivistystä), 64 tavua, tavallinen base64 täytemerkein.
+- `decisionNote` on täsmälleen `Hyväksytty Telegramista · aava-sig:v1:<base64>`.
+- `gateId` ja `sha256` luetaan kortin postaushetken sormenjäljestä (tilan rivin `sig`). Painallus lukee approvalin ensin. Jos payload on muuttunut postauksen jälkeen, kuuntelija ei allekirjoita eikä hyväksy.
+- Hylkäystä (❌) ei allekirjoiteta. Muut kortit (`email_send`, `voice_action`) hyväksyvät kuten ennen, `decisionNote` on `Hyväksytty Telegramista`.
+
+Avain:
+
+- Yksityinen avain on PEM-tiedosto (PKCS8). Polku tulee muuttujasta `AAVA_TG_SIGN_KEY_FILE`, oletus `/etc/paperclip/aava-approve-ed25519.key`. Tiedoston omistaa käyttäjä `paperclip`, oikeudet `0400`. Orkestroija luo ja asentaa avaimen.
+- Kuuntelija lukee avaimen käynnistyksessä. Se hylkää avaimen, jos tiedostoa ei ole, sitä ei voi avata, oikeudet sallivat ryhmän tai muiden käytön, tiedosto ei ole PEM-avain tai avain ei ole Ed25519. Kuuntelija kirjaa syyn lokiin (polku ja syy, ei sisältöä) eikä kaadu.
+- Ilman toimivaa avainta Aava-kortti tarjoaa vain ❌:n ja näyttää rivin `🔑 ✅ ei käytössä: hyväksynnän allekirjoitusavain ei toimi (<syy>)…`. Väärennetty ✅ torjutaan samalla syyllä. Muut kortit toimivat.
+- Avaimen korjaus vaatii kuuntelijan uudelleenkäynnistyksen. Seuraava skannaus sulkee ilman avainta postatun kortin (`🔑 Allekirjoitusavain toimii nyt — uusi kortti alla.`) ja postaa uuden kortin, jossa on ✅.
+- Avainta, allekirjoitettavaa viestiä tai allekirjoitusta ei kirjoiteta lokiin, Telegramiin eikä `state.json`iin. Allekirjoitus päätyy vain approvalin `decisionNote`en.
+
+Testivektori, jota myös portin toteutus käyttää: RFC 8032:n kohdan 7.1 TEST 1 -avain (siemen `9d61b19d…7f60`, julkinen avain `d75a9801…511a`), `approvalId` `4f8c2a1e-9b3d-4e7a-8c5f-0d1e2f3a4b5c`, `gateId` `g-0123456789abcdef`, `sha256` `e3b0c442…b855` (tyhjän merkkijonon tiiviste). Odotettu allekirjoitus on `1kAq6ROEOQqg3F7TtMggtEaiikZC3BUFI0lwxQgIp6/USriNp7jGhDgNKW5jqmr+IWAyvCNq/YTdlALiM8lIAA==`. Täydet arvot ovat testissä.
+
+Rehellinen raja: salasanaton pääkäyttäjä paperclip-01:llä voi lukea avaimen. Uhkamalli on mallin virhe ja saapuvan postin käsky, ei tahallinen ohitus.
+
+Paperclip-UI:n hyväksyntä ei allekirjoita. Kun portti vaatii allekirjoituksen, UI:ssa hyväksytty Aava-pyyntö ei lähde. Korttien tekstit, jotka ohjaavat hyväksymään Paperclip-UI:ssa, eivät silloin pidä paikkaansa.
 
 ## Muuttunut payload
 
@@ -113,6 +137,6 @@ Kortin rivi tallentaa allekirjoituksen kentistä `gateId`, `op`, `from`, `to`, `
 
 ## Käyttöönotto
 
-Palvelu ajaa skriptin polusta `/opt/paperclip/server/scripts/approval-telegram-listener.mjs` (`paperclip-approval-telegram.service`). Päivitä `/opt/paperclip` mergetyn masterin tasolle ja aja `sudo systemctl restart paperclip-approval-telegram`. Paperclip-palvelin ei tarvitse restarttia. Ympäristömuuttujaa ei tarvitse lisätä, koska `AAVA_TG_COMPANY_PREFIX` on oletuksena `RK9`.
+Palvelu ajaa skriptin polusta `/opt/paperclip/server/scripts/approval-telegram-listener.mjs` (`paperclip-approval-telegram.service`). Päivitä `/opt/paperclip` mergetyn masterin tasolle ja aja `sudo systemctl restart paperclip-approval-telegram`. Paperclip-palvelin ei tarvitse restarttia. Ympäristömuuttujaa ei tarvitse lisätä, koska `AAVA_TG_COMPANY_PREFIX` on oletuksena `RK9` ja `AAVA_TG_SIGN_KEY_FILE` oletuksena `/etc/paperclip/aava-approve-ed25519.key`. RK9-922: asenna avain ennen restarttia (`paperclip:paperclip`, `0400`), muuten Aava-kortit ovat ❌-kortteja. Käynnistyslokin rivi `aava signing key … unusable` kertoo, ettei avain kelpaa.
 
 Testi: `server/src/__tests__/approval-telegram-listener-aava-send.test.ts`.
