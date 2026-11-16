@@ -12,6 +12,25 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("../../scripts/approval-telegram-listener.mjs", import.meta.url));
+
+// The character rules live in one self-contained block of the script, marked
+// `// <aava-charset>` … `// </aava-charset>`; load it on its own.
+const charset = (() => {
+  const src = readFileSync(SCRIPT, "utf8");
+  const start = src.indexOf("// <aava-charset>");
+  const end = src.indexOf("// </aava-charset>");
+  if (start < 0 || end < start) throw new Error("aava-charset block not found");
+  return new Function(
+    `${src.slice(start, end)}\nreturn { isAavaTextCodePoint, aavaApprovalBlocker, aavaReasonLabel };`,
+  )() as {
+    isAavaTextCodePoint: (cp: number) => boolean;
+    aavaApprovalBlocker: (p: Record<string, unknown>) => { field: string; rule: string; codePoint?: number } | null;
+    aavaReasonLabel: (code: unknown) => string | null;
+  };
+})();
+const LIST_EXTRAS = [0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x201e, 0x2022, 0x2026, 0x20ac];
+const inList = (cp: number) => (cp >= 0x20 && cp <= 0x7e) || (cp >= 0xa1 && cp <= 0x17f && cp !== 0xad) || LIST_EXTRAS.includes(cp);
+const buttons = (card: any) => card.reply_markup.inline_keyboard[0].map((b: any) => b.text);
 const RK9 = { id: "c-rk9", name: "RK9", issuePrefix: "RK9" };
 const SAA = { id: "c-saa", name: "Saatavilla", issuePrefix: "SAA" };
 const TG_TOKEN = "tok";
@@ -284,14 +303,17 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     // no line of the body can pose as a card line
     const bodyStart = lines.indexOf("──────────") + 1;
     expect(lines.slice(bodyStart).every((l) => l.startsWith("│ "))).toBe(true);
+    // the line break in the subject blocks ✅ (first rule hit: the bidi control in To)
+    expect(text).toContain("⛔ ✅ estetty — To: kielletty merkki U+202E.");
+    expect(buttons(sentCards()[0].body)).toEqual(["❌ Hylkää"]);
   });
 
   it("truncates a long body under Telegram's 4096 limit, says so and offers ❌ only", async () => {
-    addAava(8, {}, { body: `${"rivi ".repeat(30)}\n`.repeat(200) });
+    addAava(8, {}, { body: `${"rivi ".repeat(29)}rivi\n`.repeat(200) });
     await runOk();
     const card = sentCards()[0].body;
     expect(card.text.length).toBeLessThanOrEqual(4096);
-    expect(card.text).toMatch(/✂️ Runko katkaistu: näytetty \d+ \/ 30200 merkkiä/);
+    expect(card.text).toMatch(/✂️ Runko katkaistu: näytetty \d+ \/ 30000 merkkiä/);
     expect(card.text).toContain("✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.");
     expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
 
@@ -321,9 +343,10 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(cards[0].text).toContain("(+5 muuta)");
     expect(cards[0].reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
     expect(cards[2].reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
-    // reasons are not message content: capped, still approvable
+    // more than 10 reasons: some are hidden, so ✅ is blocked
     expect(cards[1].text).toContain("+990 muuta");
-    expect(cards[1].reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["✅ Lähetä", "❌ Hylkää"]);
+    expect(cards[1].text).toContain("⛔ ✅ estetty — Syyt: yli 10 syytä.");
+    expect(buttons(cards[1])).toEqual(["❌ Hylkää"]);
   });
 
   it("strips invisible characters and flags a non-ASCII address", async () => {
@@ -332,9 +355,8 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     const text: string = sentCards()[0].body.text;
     expect(text).toContain(`To (2): ceo@${WJ}rk9.fi, \u0430ava@${WJ}rk9.fi`);
     expect(text).not.toMatch(/[\u200b-\u200f\ufeff]/);
-    expect(text).toContain("⚠️ Osoitteessa on muita kuin ASCII-merkkejä.");
-    // the stripped U+200F is content the card cannot show: ❌ only
-    expect(text).toContain("⚠️ Viestissä on 1 näkymätöntä tai epätavallista merkkiä, joita kortti ei voi näyttää.");
+    // the stripped U+200F is the first character outside the list: ❌ only
+    expect(text).toContain("⛔ ✅ estetty — To: kielletty merkki U+200F.");
     expect(sentCards()[0].body.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
   });
 
@@ -351,10 +373,10 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     const cards = sentCards().map((c) => c.body);
     expect(cards).toHaveLength(2);
     for (const card of cards) {
-      expect(card.text).toMatch(/⚠️ Viestissä on \d+ näkymätöntä tai epätavallista merkkiä/);
-      expect(card.text).toContain("✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.");
       expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
     }
+    expect(cards[0].text).toContain("⛔ ✅ estetty — Runko: kielletty merkki U+200C.");
+    expect(cards[1].text).toContain("⛔ ✅ estetty — Aihe: kielletty merkki U+E0041.");
     expect(cards[0].text).toContain("│ Kiitos viestistä!");
     expect(cards[0].text).not.toMatch(/[\u200b-\u200d]/);
     expect(cards[1].text).toContain("Aihe: Re: kysymys\n");
@@ -382,7 +404,7 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     const cards = sentCards().map((c) => c.body);
     expect(cards).toHaveLength(bodies.length + 1);
     for (const card of cards) {
-      expect(card.text).toMatch(/⚠️ Viestissä on \d+ näkymätöntä tai epätavallista merkkiä/);
+      expect(card.text).toMatch(/⛔ ✅ estetty — (Runko|Aihe): /);
       expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
       expect(card.text).not.toMatch(/[\u0080-\u009f]/);
     }
@@ -518,5 +540,114 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     );
     expect(readState().posted[uuid(15)]).toBeUndefined();
     expect(decisionCalls()).toHaveLength(0);
+  });
+});
+
+describe("Aava card character list (RK9-894, orchestrator decision after verifier round 4)", () => {
+  const base = (over: Record<string, unknown> = {}) => aavaPayload(1, over);
+
+  it("allows ✅ for exactly the listed code points, U+0000–U+10FFFF (subject, body, address)", () => {
+    const wrong = { predicate: [] as number[], subject: [] as number[], body: [] as number[], address: [] as number[] };
+    // one payload per field, mutated in place: 3.3 M blocker calls stay fast
+    const pSubject = base();
+    const pBody = base();
+    const pAddress = base();
+    const toList = ["x"];
+    pAddress.to = toList;
+    for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+      const ch = String.fromCodePoint(cp);
+      const listed = inList(cp);
+      if (charset.isAavaTextCodePoint(cp) !== listed) wrong.predicate.push(cp);
+      pSubject.subject = `a${ch}a`;
+      if ((charset.aavaApprovalBlocker(pSubject) === null) !== listed) wrong.subject.push(cp);
+      // the body also allows "\n" (and nothing else that breaks a line)
+      pBody.body = `a${ch}a`;
+      if ((charset.aavaApprovalBlocker(pBody) === null) !== (listed || cp === 0x0a)) wrong.body.push(cp);
+      toList[0] = `a${ch}b@example.com`;
+      const asciiAddress = cp >= 0x21 && cp <= 0x7e && !'@<>"'.includes(ch);
+      if ((charset.aavaApprovalBlocker(pAddress) === null) !== asciiAddress) wrong.address.push(cp);
+    }
+    expect(wrong).toEqual({ predicate: [], subject: [], body: [], address: [] });
+  }, 120_000);
+
+  it("each rule blocks on its own (one input per rule)", () => {
+    const cases: Array<[Record<string, unknown>, { field: string; rule: string; codePoint?: number } | null]> = [
+      [{}, null],
+      [{ body: "Hei\r\nMoi" }, null], // CRLF is normalised
+      [{ body: "Hei\n\n-- \nAava" }, null], // the signature delimiter may end in a space
+      [{ from: "aava@\u0430rk9.fi" }, { field: "from", rule: "char", codePoint: 0x430 }],
+      [{ from: "aava rk9.fi" }, { field: "from", rule: "char", codePoint: 0x20 }],
+      [{ to: ["asiakas@example.com\u0085"] }, { field: "to", rule: "char", codePoint: 0x85 }],
+      [{ to: ["ok@example.com", "a@b@c"] }, { field: "to", rule: "address" }],
+      [{ subject: "" }, { field: "subject", rule: "empty" }],
+      [{ subject: "Re: Hei\n" }, { field: "subject", rule: "char", codePoint: 0x0a }],
+      [{ subject: " Re: Hei" }, { field: "subject", rule: "edge-space" }],
+      [{ subject: "Re: Hei " }, { field: "subject", rule: "edge-space" }],
+      [{ subject: "Re:  Hei" }, { field: "subject", rule: "space-run" }],
+      [{ body: "" }, { field: "body", rule: "empty" }],
+      [{ body: "Hei\rMoi" }, { field: "body", rule: "char", codePoint: 0x0d }],
+      [{ body: "Maksamme teille 1\u0085000 €." }, { field: "body", rule: "char", codePoint: 0x85 }],
+      [{ body: "Hei\u2028Moi" }, { field: "body", rule: "char", codePoint: 0x2028 }],
+      [{ body: "Hei \nMoi" }, { field: "body", rule: "trailing-space" }],
+      [{ body: "Hei\n--  \nMoi" }, { field: "body", rule: "space-run" }],
+      [{ body: "Hei  Moi" }, { field: "body", rule: "space-run" }],
+      [{ body: "\u2800" }, { field: "body", rule: "char", codePoint: 0x2800 }],
+      [{ body: "a\ud800" }, { field: "body", rule: "char", codePoint: 0xd800 }],
+      [{ reasons: Array.from({ length: 11 }, () => "auto") }, { field: "reasons", rule: "too-many" }],
+      [{ reasons: Array.from({ length: 10 }, () => "auto") }, null],
+      [{ reasons: ["constructor"] }, { field: "reasons", rule: "unknown-reason" }],
+      [{ reasons: ["screen:"] }, { field: "reasons", rule: "unknown-reason" }],
+      [{ reasons: ["dmarc:bogus"] }, { field: "reasons", rule: "unknown-reason" }],
+      [{ reasons: ["outside-whitelist"] }, { field: "reasons", rule: "unknown-reason" }],
+    ];
+    for (const [over, expected] of cases) {
+      expect(charset.aavaApprovalBlocker(base(over)), JSON.stringify(over)).toEqual(expected);
+    }
+  });
+
+  it("knows every gate reason code and no other", () => {
+    const known = [
+      "new-recipient", "added-recipient", "own-address", "brand-address", "not-own-address", "reply-to-mismatch",
+      "reply-to-bad", "no-message-id", "auto", "caller-hold", "free-replies-off", "dmarc:no-received",
+      "dmarc:no-auth-results", "dmarc:authserv", "dmarc:no-dmarc", "dmarc:ambiguous", "dmarc:header-from",
+      "dmarc:dmarc-fail", "screen:hinta", "screen:money", "screen:percent", "screen:script",
+    ];
+    for (const code of known) expect(charset.aavaReasonLabel(code), code).toEqual(expect.any(String));
+    expect(charset.aavaReasonLabel("free-replies-off")).toBe("kaikki posti hyväksytetään");
+    for (const code of ["constructor", "toString", "__proto__", "new-message", "cc", "automated", "dmarc:", "screen:Hinta"]) {
+      expect(charset.aavaReasonLabel(code), code).toBeNull();
+    }
+  });
+});
+
+describe("Aava card blocks hidden line breaks and blanks (RK9-894 verifier round 4)", () => {
+  it("line-break variants and U+2800 give a ❌-only card that names the field and code point", async () => {
+    addAava(50, {}, { subject: "Re: Hei" + "\n\r\v\f\u0085  ".repeat(700) });
+    addAava(51, {}, { body: "Maksamme teille 1\u0085000 €." });
+    addAava(52, {}, { to: ["asiakas@example.com\u0085"] });
+    addAava(53, {}, { body: "Kiitos!\u2800\u2800\u2800" });
+    addAava(54, {}, { subject: "" });
+    addAava(55, {}, { body: "Hei \nMoi" });
+    await runOk();
+    const cards = sentCards().map((c) => c.body);
+    expect(cards).toHaveLength(6);
+    for (const card of cards) expect(buttons(card)).toEqual(["❌ Hylkää"]);
+    expect(cards[0].text).toContain("⛔ ✅ estetty — Aihe: kielletty merkki U+000A.");
+    expect(cards[1].text).toContain("⛔ ✅ estetty — Runko: kielletty merkki U+0085.");
+    expect(cards[2].text).toContain("⛔ ✅ estetty — To: kielletty merkki U+0085.");
+    expect(cards[3].text).toContain("⛔ ✅ estetty — Runko: kielletty merkki U+2800.");
+    expect(cards[4].text).toContain("Aihe: ⟨tyhjä aihe⟩");
+    expect(cards[4].text).toContain("⛔ ✅ estetty — Aihe: tyhjä.");
+    expect(cards[5].text).toContain("⛔ ✅ estetty — Runko: välilyönti rivin lopussa.");
+
+    updatesQueue.push([callback(`pa:a:${uuid(51)}`, readState().posted[uuid(51)].messageId)]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(0);
+  });
+
+  it("a CRLF body with listed characters keeps ✅", async () => {
+    addAava(56, {}, { body: "Hei “Matti”,\r\n\r\nhinta on 120 € – sopimus • ok…\r\n\r\n-- \r\nAava" });
+    await runOk();
+    expect(buttons(sentCards()[0].body)).toEqual(["✅ Lähetä", "❌ Hylkää"]);
   });
 });

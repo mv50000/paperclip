@@ -300,60 +300,134 @@ const AUTOLINK_SIGIL_RE = /([/@#$])(?=[\p{L}\p{N}_])/gu;
 // that holds any cannot be shown in full (RK9-894 verifier round 2).
 const INVISIBLE_RE =
   /[\p{Cf}\u0000-\u0008\u000e-\u001f\u007f\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2060-\u206f\u3164\ufe00-\ufe0f\uffa0\ufff0-\ufff8\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/gu;
-// Allowlist (verifier round 3): only letters, marks, digits, punctuation,
-// symbols and a plain space count as visible. Everything else (C0/C1
-// controls, format, private-use, unassigned, lone surrogates, any other
-// whitespace) is content the operator cannot read off the card.
-const VISIBLE_CHAR_RE = /^[\p{L}\p{M}\p{N}\p{P}\p{S} ]$/u;
-const INVISIBLE_ONE_RE = new RegExp(INVISIBLE_RE.source, "u");
-// Spaces can carry hidden bits too: a run of spaces, or spaces at the end of a
-// line. The plain-text signature delimiter "-- " is the one exception.
-function countInvisible(text) {
-  let n = 0;
-  for (const line of String(text ?? "").split(LINE_BREAK_RE)) {
-    for (const ch of line) if (!VISIBLE_CHAR_RE.test(ch) || INVISIBLE_ONE_RE.test(ch)) n += 1;
-    if (line !== "-- " && / $/.test(line)) n += 1;
-    n += (line.match(/ {2,}/g) ?? []).length;
-  }
-  return n;
-}
-const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").replace(INVISIBLE_RE, "").replace(AUTOLINK_SIGIL_RE, "$1\u2060");
+const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").replace(INVISIBLE_RE, "").replace(/\p{Cs}/gu, "").replace(AUTOLINK_SIGIL_RE, "$1\u2060");
 // A header value: one line, neutralised, at most `max` chars.
 const headerText = (value, max) => oneLine(neutralize(String(value ?? "").split(LINE_BREAK_RE).join(" ")), max);
 
-// Reason codes as hosts/aava/aava-gate.py emits them (RK9-903, exact strings).
-const AAVA_REASON_LABELS = {
-  "new-recipient": "uusi vastaanottaja",
-  "added-recipient": "lisätty vastaanottaja",
-  "own-address": "vastaanottaja on oma osoite",
-  "brand-address": "vastaanottaja on brändiosoite",
-  "not-own-address": "osoite ei ole Aavan oma",
-  "reply-to-mismatch": "Reply-To eroaa lähettäjästä",
-  "reply-to-bad": "virheellinen Reply-To",
-  "no-message-id": "emoviestiltä puuttuu Message-ID",
-  auto: "emoviesti on automaattiposti",
-  "caller-hold": "Aava pyysi hyväksyntää",
-  "free-replies-off": "kaikki posti hyväksytetään",
-};
-const AAVA_DMARC_LABELS = {
-  "no-received": "ei Received-otsaketta",
-  "no-auth-results": "ei Authentication-Results-otsaketta",
-  authserv: "väärä tarkistuspalvelin",
-  "no-dmarc": "ei DMARC-tulosta",
-  ambiguous: "monitulkintainen tulos",
-  "header-from": "From-otsake ei täsmää",
-};
-
-function aavaReason(code) {
-  const c = String(code);
-  if (c.startsWith("screen:")) return `seula: ${headerText(c.slice("screen:".length), 60)}`;
-  if (c.startsWith("dmarc:")) {
-    const why = c.slice("dmarc:".length);
-    const label = why.startsWith("dmarc-") ? `tulos ${why.slice("dmarc-".length)}` : AAVA_DMARC_LABELS[why] ?? why;
-    return `DMARC ei läpäissyt (${headerText(label, 60)})`;
-  }
-  return AAVA_REASON_LABELS[c] ?? headerText(c, 60);
+// <aava-charset>
+// RK9-894 (orchestrator, binding after verifier round 4): ✅ is offered only
+// when from, to, subject and body consist of a closed list of characters the
+// operator can read off the card. Unicode classes are not used on purpose: a
+// class such as So holds blanks (U+2800) and line breaks were missed. Emoji
+// and other scripts stay ❌-only; the gate normalises outgoing text to the
+// same list in a separate ticket. This block is self-contained: the test
+// evaluates it on its own and walks U+0000–U+10FFFF through it.
+const AAVA_EXTRA_CODE_POINTS = new Set([
+  0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x201e, 0x2022, 0x2026, 0x20ac,
+]);
+function isAavaTextCodePoint(cp) {
+  return (cp >= 0x20 && cp <= 0x7e) || (cp >= 0xa1 && cp <= 0x17f && cp !== 0xad) || AAVA_EXTRA_CODE_POINTS.has(cp);
 }
+
+// Reason codes as hosts/aava/aava-gate.py emits them (RK9-903, exact strings).
+// Maps, not object literals: "constructor" must not resolve to a function.
+const AAVA_REASON_LABELS = new Map([
+  ["new-recipient", "uusi vastaanottaja"],
+  ["added-recipient", "lisätty vastaanottaja"],
+  ["own-address", "vastaanottaja on oma osoite"],
+  ["brand-address", "vastaanottaja on brändiosoite"],
+  ["not-own-address", "osoite ei ole Aavan oma"],
+  ["reply-to-mismatch", "Reply-To eroaa lähettäjästä"],
+  ["reply-to-bad", "virheellinen Reply-To"],
+  ["no-message-id", "emoviestiltä puuttuu Message-ID"],
+  ["auto", "emoviesti on automaattiposti"],
+  ["caller-hold", "Aava pyysi hyväksyntää"],
+  ["free-replies-off", "kaikki posti hyväksytetään"],
+]);
+const AAVA_DMARC_LABELS = new Map([
+  ["no-received", "ei Received-otsaketta"],
+  ["no-auth-results", "ei Authentication-Results-otsaketta"],
+  ["authserv", "väärä tarkistuspalvelin"],
+  ["no-dmarc", "ei DMARC-tulosta"],
+  ["ambiguous", "monitulkintainen tulos"],
+  ["header-from", "From-otsake ei täsmää"],
+]);
+const AAVA_REASON_TOKEN_RE = /^[a-z0-9_-]{1,40}$/;
+const AAVA_REASONS_MAX = 10;
+
+// The plain-language label of a gate reason code, or null for an unknown code.
+function aavaReasonLabel(code) {
+  if (typeof code !== "string") return null;
+  if (AAVA_REASON_LABELS.has(code)) return AAVA_REASON_LABELS.get(code);
+  if (code.startsWith("screen:")) {
+    const hit = code.slice("screen:".length);
+    return AAVA_REASON_TOKEN_RE.test(hit) ? `seula: ${hit}` : null;
+  }
+  if (code.startsWith("dmarc:")) {
+    const why = code.slice("dmarc:".length);
+    if (AAVA_DMARC_LABELS.has(why)) return `DMARC ei läpäissyt (${AAVA_DMARC_LABELS.get(why)})`;
+    const result = why.startsWith("dmarc-") ? why.slice("dmarc-".length) : "";
+    return AAVA_REASON_TOKEN_RE.test(result) ? `DMARC ei läpäissyt (tulos ${result})` : null;
+  }
+  return null;
+}
+
+// Each rule returns { field, rule, codePoint? } for the first thing that blocks ✅.
+function aavaTextBlocker(field, value, multiline) {
+  if (value.length === 0) return { field, rule: "empty" };
+  const text = multiline ? value.replace(/\r\n/g, "\n") : value;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (multiline && cp === 0x0a) continue;
+    if (!isAavaTextCodePoint(cp)) return { field, rule: "char", codePoint: cp };
+  }
+  if (!multiline && (text.startsWith(" ") || text.endsWith(" "))) return { field, rule: "edge-space" };
+  for (const line of multiline ? text.split("\n") : [text]) {
+    if (line.includes("  ")) return { field, rule: "space-run" };
+    // the plain-text signature delimiter "-- " is the one line that may end in a space
+    if (multiline && line !== "-- " && line.endsWith(" ")) return { field, rule: "trailing-space" };
+  }
+  return null;
+}
+
+function aavaAddressBlocker(field, value) {
+  for (const ch of value) {
+    const cp = ch.codePointAt(0);
+    if (cp < 0x21 || cp > 0x7e) return { field, rule: "char", codePoint: cp };
+  }
+  return /^[^@<>"]{1,200}@[^@<>"]{1,200}$/.test(value) ? null : { field, rule: "address" };
+}
+
+function aavaReasonsBlocker(reasons) {
+  if (reasons.length > AAVA_REASONS_MAX) return { field: "reasons", rule: "too-many" };
+  for (const r of reasons) if (aavaReasonLabel(r) === null) return { field: "reasons", rule: "unknown-reason" };
+  return null;
+}
+
+// null: the character and spacing rules allow ✅. Expects a payload that
+// passed aavaShape (strings and arrays of strings).
+function aavaApprovalBlocker(p) {
+  return (
+    aavaAddressBlocker("from", p.from) ??
+    p.to.reduce((found, a) => found ?? aavaAddressBlocker("to", a), null) ??
+    aavaTextBlocker("subject", p.subject, false) ??
+    aavaTextBlocker("body", p.body, true) ??
+    aavaReasonsBlocker(p.reasons)
+  );
+}
+// </aava-charset>
+
+const AAVA_FIELD_LABELS = { from: "From", to: "To", subject: "Aihe", body: "Runko", reasons: "Syyt" };
+const AAVA_RULE_TEXTS = {
+  empty: "tyhjä",
+  "edge-space": "välilyönti alussa tai lopussa",
+  "space-run": "useampi välilyönti peräkkäin",
+  "trailing-space": "välilyönti rivin lopussa",
+  address: "virheellinen osoite",
+  "too-many": `yli ${AAVA_REASONS_MAX} syytä`,
+  "unknown-reason": "tuntematon syykoodi",
+};
+const aavaBlockerLine = (b) =>
+  `⛔ ✅ estetty — ${AAVA_FIELD_LABELS[b.field]}: ${
+    b.rule === "char" ? `kielletty merkki U+${b.codePoint.toString(16).toUpperCase().padStart(4, "0")}` : AAVA_RULE_TEXTS[b.rule]
+  }. Hyväksy Paperclip-UI:ssa, jos viesti on kunnossa.`;
+
+// Display only: an unknown code (which blocks ✅) is shown neutralised.
+const aavaReason = (code) => aavaReasonLabel(code) ?? headerText(code, 60);
+// Placeholders use ⟨ ⟩, which are outside the list: a card that offers ✅
+// can never show text that looks like a placeholder.
+const AAVA_EMPTY_SUBJECT = "⟨tyhjä aihe⟩";
+const AAVA_EMPTY_BODY = "⟨tyhjä runko⟩";
 
 // Telegram's cap is 4096 chars; String#length counts UTF-16 units, which is
 // never less than the char count, so this budget leaves room for the footer.
@@ -364,7 +438,6 @@ const AAVA_TO_LINE_MAX = 1200;
 const AAVA_SUBJECT_MAX = 300;
 const AAVA_REASONS_SHOWN = 10;
 const AAVA_INCOMPLETE_LINE = "✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.";
-const NON_ASCII_RE = /[^\x20-\x7e]/;
 
 function aavaRecipients(to) {
   const shown = to.slice(0, AAVA_RECIPIENTS_SHOWN).map((a) => headerText(a, AAVA_ADDRESS_MAX));
@@ -373,7 +446,7 @@ function aavaRecipients(to) {
 }
 
 // Shown after the decision, so a decided card still says what it was about.
-const aavaLabel = (p) => `To: ${headerText(aavaRecipients(p.to), 300)}\nAihe: ${headerText(p.subject, 200) || "(ei aihetta)"}`;
+const aavaLabel = (p) => `To: ${headerText(aavaRecipients(p.to), 300)}\nAihe: ${headerText(p.subject, 200) || AAVA_EMPTY_SUBJECT}`;
 
 // Every header is bounded, so the head stays near 3000 chars and the body
 // always has room. `complete` is false when the card cannot show the whole
@@ -404,18 +477,15 @@ function renderAavaSend(companyName, approval, masked) {
     `📨 Aava: lähetys odottaa — ${headerText(companyName, 100)}`,
     `From: ${hdr(p.from, AAVA_ADDRESS_MAX)}`,
     `To${p.to.length > 1 ? ` (${p.to.length})` : ""}: ${toLine}`,
-    `Aihe: ${hdr(p.subject, AAVA_SUBJECT_MAX) || "(ei aihetta)"}`,
+    `Aihe: ${hdr(p.subject, AAVA_SUBJECT_MAX) || AAVA_EMPTY_SUBJECT}`,
     `Tyyppi: ${p.op === "reply" ? "vastaus ketjuun" : "uusi viesti"}`,
-    `Syyt: ${reasons.length ? reasons.join(", ") : "(ei syytä)"}`,
+    `Syyt: ${reasons.length ? reasons.join(", ") : "⟨ei syitä⟩"}`,
   ];
-  if ([p.from, ...p.to].some((a) => NON_ASCII_RE.test(a))) {
-    head.push("⚠️ Osoitteessa on muita kuin ASCII-merkkejä. Tarkista, ettei se jäljittele tuttua osoitetta.");
-  }
   if (masked) head.push("⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.");
-  const invisible = [p.from, ...p.to, p.subject, p.body].reduce((n, v) => n + countInvisible(v), 0);
-  if (invisible > 0) {
+  const blocker = aavaApprovalBlocker(p);
+  if (blocker) {
     complete = false;
-    head.push(`⚠️ Viestissä on ${invisible} näkymätöntä tai epätavallista merkkiä, joita kortti ei voi näyttää.`);
+    head.push(aavaBlockerLine(blocker));
   }
   const tail = [
     `Tunniste: ${p.gateId} · sha256 ${
@@ -431,7 +501,7 @@ function renderAavaSend(companyName, approval, masked) {
   const headLength = [`${head[0].split(" — ")[0]} — ${"x".repeat(100)}`, ...head.slice(1), AAVA_INCOMPLETE_LINE, ...tail].join("\n").length;
   const footer = (shown) => `\n──────────\n✂️ Runko katkaistu: näytetty ${shown} / ${p.body.length} merkkiä.`;
   const budget = AAVA_CARD_MAX - headLength - footer(p.body.length).length;
-  const bodyLines = p.body.length ? p.body.split(LINE_BREAK_RE) : ["(ei runkoa)"];
+  const bodyLines = p.body.length ? p.body.split(LINE_BREAK_RE) : [AAVA_EMPTY_BODY];
   let body = "";
   let shownChars = 0;
   let truncated = false;
@@ -456,7 +526,7 @@ function renderAavaSend(companyName, approval, masked) {
     complete = false;
     body += footer(Math.min(shownChars, p.body.length));
   }
-  if (!complete && !masked) head.push(AAVA_INCOMPLETE_LINE);
+  if (!complete && !masked && !blocker) head.push(AAVA_INCOMPLETE_LINE);
   return { text: [...head, ...tail].join("\n") + body, complete };
 }
 
