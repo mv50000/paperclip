@@ -175,11 +175,17 @@ for (const file of process.argv.slice(2)) {
 process.exit(failed ? 1 : 0);
 ```
 
-Hand the manifest to the plugin in one of two ways. Both call the same
+Hand the manifest to the plugin in one of three ways. All call the same
 `stageCreative()` and return the same body.
 
 - An agent calls the tool `rk9ads_stage_creative` with `{ "manifest": { ... } }`.
   The company is the agent run's own company.
+- A host-side run (RK9-910), such as rk9-motion `host-run.sh`, holds the
+  company's agent key but no heartbeat run, so it cannot call the tool. It
+  calls the action `stage-creative` with
+  `POST /api/plugins/<pluginId>/actions/stage-creative` and
+  `{ "companyId": "<uuid>", "params": { "manifest": { ... } } }`. A board user
+  may call it too.
 - A board user or an agent calls
   `POST /api/plugins/<pluginId>/api/creatives` with
   `{ "companyId": "<uuid>", "manifest": { ... } }`. The host checks that the
@@ -199,7 +205,24 @@ Responses:
 | 503 | `{ "error": {...} }` | `config_unavailable` |
 
 The tool returns the same body as `data`, and on an error also an `error` text
-that starts with the code. A staged creative holds at most a Meta video id:
+that starts with the code. The action returns `{ "status", "body" }` as
+`data`: `status` is the status in the table above, `body` the same body.
+
+| Key | Kind | What it does |
+|---|---|---|
+| `rk9ads_stage_creative` | tool | Stages a manifest for the agent run's company |
+| `stage-creative` | action | The same for an agent key or a board user without a heartbeat run (RK9-910) |
+| `stage-creative` | API route | `POST /creatives`, the same with `body.companyId` |
+
+The action gives a caller nothing the tool does not: the same checks, the
+same dry-run marker and the same idempotency. The company is the host's
+`context.companyId`. The host checks the caller's access to that company (an
+agent key reaches only its own) and writes it over `params.companyId`; a
+differing `params.companyId` is refused all the same. A call without a
+company, and a caller that is neither an agent nor a board user, is refused.
+The initiator (agent or board user, with its id) comes from the host's actor
+context and goes into the activity metadata (`initiator`), as it does for the
+tool. A staged creative holds at most a Meta video id:
 nothing in it can spend money. Publishing and activation belong to the publish
 pipeline and the Telegram gate.
 

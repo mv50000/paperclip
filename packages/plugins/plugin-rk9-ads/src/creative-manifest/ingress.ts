@@ -1,6 +1,7 @@
 /**
  * Creative ingress (RK9-513): the one `stageCreative()` behind the agent tool
- * `rk9ads_stage_creative` and the API route `POST /creatives`.
+ * `rk9ads_stage_creative`, the action `stage-creative` (RK9-910) and the API
+ * route `POST /creatives`.
  *
  * Steps: validate the manifest, check it against the company's brand config,
  * return an existing record on a dedupe hit (or stage an expired or rejected
@@ -125,6 +126,18 @@ export type StageResponseBody =
 export interface StageResult {
   status: number;
   body: StageResponseBody;
+}
+
+/**
+ * Who asked for the staging, as the host reported it (never from params).
+ * The host writes plugin activity as the plugin, so this goes into the
+ * activity metadata.
+ */
+export interface StageInitiator {
+  source: "agent" | "board";
+  agentId: string | null;
+  userId: string | null;
+  runId: string | null;
 }
 
 export interface StageDeps {
@@ -455,10 +468,11 @@ function needsUpload(row: LedgerRow): boolean {
 
 /**
  * Stages one creative manifest for `companyId`. The caller has already proved
- * the company: the tool takes it from the agent run, the route from the host's
- * company access check.
+ * the company: the tool takes it from the agent run, the action and the route
+ * from the host's company access check. `initiator` only goes into the
+ * activity metadata.
  */
-export async function stageCreative(deps: StageDeps, companyId: string, input: unknown): Promise<StageResult> {
+export async function stageCreative(deps: StageDeps, companyId: string, input: unknown, initiator?: StageInitiator): Promise<StageResult> {
   const now = deps.now?.() ?? new Date();
 
   const parsed = parseCreativeManifest(input);
@@ -522,7 +536,14 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
         message: "rk9-ads creative restaged",
         entityType: "rk9ads_creative",
         entityId: String(existing.row.id),
-        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256, previousStatus, stagingMode: dryRun ? "dry_run" : "live" },
+        metadata: {
+          brand: manifest.brand,
+          kind: manifest.kind,
+          sha256: manifest.sha256,
+          previousStatus,
+          stagingMode: dryRun ? "dry_run" : "live",
+          ...(initiator ? { initiator } : {}),
+        },
       });
     }
     // Restaged now or by a concurrent call: either way the row holds a manifest from this round.
@@ -544,7 +565,13 @@ export async function stageCreative(deps: StageDeps, companyId: string, input: u
         message: "rk9-ads creative staged",
         entityType: "rk9ads_creative",
         entityId: id,
-        metadata: { brand: manifest.brand, kind: manifest.kind, sha256: manifest.sha256, stagingMode: dryRun ? "dry_run" : "live" },
+        metadata: {
+          brand: manifest.brand,
+          kind: manifest.kind,
+          sha256: manifest.sha256,
+          stagingMode: dryRun ? "dry_run" : "live",
+          ...(initiator ? { initiator } : {}),
+        },
       });
     } else {
       // A concurrent call inserted the same creative first.
