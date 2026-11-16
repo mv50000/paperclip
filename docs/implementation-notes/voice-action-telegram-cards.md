@@ -40,6 +40,6 @@ Jos napautetun kortin rivi puuttuu tilasta tai siltä puuttuu tyyppi, kuuntelija
 
 ## Käyttöönotto
 
-Kopioi skripti hakemistoon `/opt/paperclip/` ja aja `systemctl restart paperclip-approval-telegram`. Paperclip-palvelin ei tarvitse restarttia.
+RK9-922 alkaen kuuntelija ajetaan root-omisteisesta kopiosta `/opt/pcp-approve/approval-telegram-listener.mjs` käyttäjänä `pcp-approve`. Kopioi skripti sinne (`install -o root -g root -m 0644 server/scripts/approval-telegram-listener.mjs /opt/pcp-approve/`) ja aja `systemctl restart paperclip-approval-telegram`. Hakemiston `/opt/paperclip` automaattipäivitys ei päivitä kopiota. Paperclip-palvelin ei tarvitse restarttia. Asennusohje: `server/scripts/paperclip-approval-telegram.service`.
 
 Testi: `server/src/__tests__/approval-telegram-listener-voice-action.test.ts`.

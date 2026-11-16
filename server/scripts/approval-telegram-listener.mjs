@@ -45,8 +45,9 @@
 //                  fingerprint:
 //                    aava-send-v2 / <approvalId> / <gateId> / <sha256> /
 //                    <cardDigest> / approve
-//                  cardDigest is the SHA-256 of op, from, the recipients, subject
-//                  and body as the card showed them (the aava-sig block below).
+//                  cardDigest is the SHA-256 of op, from, the recipients, subject,
+//                  body and the hold reasons as the card showed them (the
+//                  aava-sig block below, header aava-card-v2).
 //                  The gate (RK9-920) checks it with the public key, so an
 //                  `approved` status alone no longer sends mail. Without a usable
 //                  key (missing, unreadable, readable by group/others, not
@@ -485,7 +486,9 @@ function aavaReasonLabel(code) {
 
 // Each rule returns { field, rule, codePoint? } for the first thing that blocks ✅.
 function aavaTextBlocker(field, value, multiline) {
-  const text = multiline ? value.replace(/\r\n/g, "\n") : value;
+  // RK9-922: no CRLF normalisation. A "\r" is outside the list in every
+  // field, so the bytes the digest covers are the lines the card shows.
+  const text = value;
   // only line breaks and spaces count as empty too (round 5, L1)
   if (/^[\n ]*$/.test(text)) return { field, rule: "empty" };
   for (const ch of text) {
@@ -679,7 +682,7 @@ const aavaApprovable = (approval) =>
   isBoardCreated(approval) && isAavaSendPayload(approval.payload) && renderAavaSend("", approval, false).complete;
 
 // ── RK9-922: signed Aava approval ─────────────────────────────────────────────
-// Binding contract shared with the gate (RK9-920): five lines, UTF-8, "\n",
+// Binding contract v2 shared with the gate (RK9-920): six lines, UTF-8, "\n",
 // no trailing newline; plain Ed25519 (no pre-hash), standard padded base64.
 const APPROVE_NOTE = "Hyväksytty Telegramista";
 
@@ -692,16 +695,18 @@ function aavaDigestField(value) {
   const bytes = Buffer.from(value, "utf8");
   return Buffer.concat([Buffer.from(`${bytes.length}:`, "ascii"), bytes, Buffer.from("\n", "ascii")]);
 }
-// SHA-256 (lowercase hex) of "aava-card-v1\n" and the fields op, from, the
-// recipient count, each recipient, subject, body. No normalisation, no trim.
-// null when a value is not a well-formed string (a lone surrogate does not
-// survive UTF-8, so the gate could never compute the same digest).
-function aavaCardDigest(op, from, to, subject, body) {
-  if (!Array.isArray(to)) return null;
-  const fields = [op, from, String(to.length), ...to, subject, body];
+// SHA-256 (lowercase hex) of "aava-card-v2\n" and the fields op, from, the
+// recipient count, each recipient, subject, body, the reason count and each
+// hold reason in payload order (contract clarification 17.11.2026). No
+// normalisation, no trim. null when a value is not a well-formed string (a
+// lone surrogate does not survive UTF-8, so the gate could never compute the
+// same digest).
+function aavaCardDigest(op, from, to, subject, body, reasons) {
+  if (!Array.isArray(to) || !Array.isArray(reasons)) return null;
+  const fields = [op, from, String(to.length), ...to, subject, body, String(reasons.length), ...reasons];
   if (!fields.every((v) => typeof v === "string" && v.isWellFormed())) return null;
   return createHash("sha256")
-    .update(Buffer.concat([Buffer.from("aava-card-v1\n", "ascii"), ...fields.map(aavaDigestField)]))
+    .update(Buffer.concat([Buffer.from("aava-card-v2\n", "ascii"), ...fields.map(aavaDigestField)]))
     .digest("hex");
 }
 const aavaSignedMessage = (approvalId, gateId, sha256, cardDigest) =>
@@ -718,7 +723,7 @@ const aavaKeyLine = (reason) =>
   `🔑 ✅ ei käytössä: hyväksynnän allekirjoitusavain ei toimi (${reason}). Ylläpito korjaa avaimen ja käynnistää kuuntelijan uudelleen, ja kortti tulee silloin uudelleen.`;
 
 // Signs the ✅ of the card as it was posted: gateId, sha256 and the cardDigest
-// fields come from the posting-time fingerprint (the state row's `sig`, see
+// fields (reasons included) come from the posting-time fingerprint (the state row's `sig`, see
 // aavaSignature, protected by the row MAC), never from a later read. Returns
 // { note } or { refusal } (text for the operator).
 // The message and the signature are never logged.
@@ -733,8 +738,8 @@ function aavaSignedNote(approvalId, postedSig) {
   const id = String(approvalId ?? "").toLowerCase();
   // aavaSignature: [gateId, op, from, to, subject, body, reasons, sha256]
   const fp = Array.isArray(fingerprint) && fingerprint.length === 8 ? fingerprint : [];
-  const [gateId, op, from, to, subject, body, , sha256] = fp;
-  const cardDigest = fp.length ? aavaCardDigest(op, from, to, subject, body) : null;
+  const [gateId, op, from, to, subject, body, reasons, sha256] = fp;
+  const cardDigest = fp.length ? aavaCardDigest(op, from, to, subject, body, reasons) : null;
   if (
     cardDigest === null ||
     !UUID_RE.test(id) ||
@@ -1426,12 +1431,21 @@ async function handleCallback(cq) {
     if (approval?.type === BOARD_APPROVAL && approval.payload?.kind === AAVA_SEND) entry.kind = AAVA_SEND;
   }
   // RK9-922: the row's type and kind decide whether ✅ is signed, and a
-  // tampered row could claim another type. A ✅ reads the live approval, and
-  // an Aava approval is handled as one whatever the row says (its row MAC
-  // then fails and the tap is refused).
-  if (action === "a" && entry.kind !== AAVA_SEND) {
+  // tampered row could claim another type. Every ✅ reads the live approval
+  // first; an Aava approval is handled as one whatever the row says (its row
+  // MAC then fails and the tap is refused). A failed read refuses the tap
+  // (fail closed): the row alone cannot tell whether a signature is needed.
+  if (action === "a") {
     const live = await fetchApproval(approvalId);
-    if (live?.type === BOARD_APPROVAL && live.payload?.kind === AAVA_SEND) entry.kind = AAVA_SEND;
+    if (!live) {
+      console.error(`approval ${approvalId}: ✅ refused, the live approval could not be read`);
+      await tg("answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "Hyväksynnän tilaa ei voitu lukea — mitään ei hyväksytty. Yritä hetken päästä uudelleen.",
+      });
+      return;
+    }
+    if (live.type === BOARD_APPROVAL && live.payload?.kind === AAVA_SEND) entry.kind = AAVA_SEND;
   }
   const isVoice = entry.type === VOICE_ACTION;
   const isAava = entry.kind === AAVA_SEND;

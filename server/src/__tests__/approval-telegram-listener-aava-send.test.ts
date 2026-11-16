@@ -39,7 +39,7 @@ const sigBlock = (() => {
     "createHash",
     `${src.slice(start, end)}\nreturn { aavaCardDigest, aavaSignedMessage, stripAavaSig, AAVA_SIG_TAG };`,
   )(createHash) as {
-    aavaCardDigest: (op: unknown, from: unknown, to: unknown, subject: unknown, body: unknown) => string | null;
+    aavaCardDigest: (op: unknown, from: unknown, to: unknown, subject: unknown, body: unknown, reasons: unknown) => string | null;
     aavaSignedMessage: (approvalId: string, gateId: string, sha256: string, cardDigest: string) => string;
     stripAavaSig: (note: string) => string;
     AAVA_SIG_TAG: string;
@@ -72,7 +72,7 @@ const verifyKey = createPublicKey({
 const SIGNED_NOTE_RE = /^Hyväksytty Telegramista · aava-sig:v2:([A-Za-z0-9+/]{86}==)$/;
 // Contract v2, written again here on purpose (not the listener's code): the
 // card digest and the six-line message the gate verifies.
-type CardFields = { op: string; from: string; to: string[]; subject: string; body: string };
+type CardFields = { op: string; from: string; to: string[]; subject: string; body: string; reasons: string[] };
 const digestField = (v: string) => {
   const b = Buffer.from(v, "utf8");
   return Buffer.concat([Buffer.from(`${b.length}:`, "ascii"), b, Buffer.from("\n", "ascii")]);
@@ -81,13 +81,15 @@ const cardDigest = (p: CardFields) =>
   createHash("sha256")
     .update(
       Buffer.concat([
-        Buffer.from("aava-card-v1\n", "ascii"),
+        Buffer.from("aava-card-v2\n", "ascii"),
         digestField(p.op),
         digestField(p.from),
         digestField(String(p.to.length)),
         ...p.to.map(digestField),
         digestField(p.subject),
         digestField(p.body),
+        digestField(String(p.reasons.length)),
+        ...p.reasons.map(digestField),
       ]),
     )
     .digest("hex");
@@ -133,6 +135,9 @@ const detailPayloadOverride = new Map<string, Record<string, unknown>>();
 const detailFieldOverride = new Map<string, Partial<Approval>>();
 // RK9-922: the approve route stores (and answers with) this note instead of the sent one.
 let storedNoteOverride: string | null = null;
+// RK9-922: GET /approvals/:id fails; approve applies, then answers 500.
+let failApprovalDetail = false;
+let approve500AfterApply = false;
 const apiCalls: Array<{ method: string; url: string; body: any }> = [];
 // RK9-922: the pending list answers 500, so a run's scan posts and re-posts
 // nothing and a tap meets the state row exactly as written.
@@ -198,6 +203,7 @@ beforeAll(async () => {
     if (m) {
       const a = approvals.find((x) => x.id === m![1]);
       if (!a) return send(404, { error: "Approval not found" });
+      if (failApprovalDetail) return send(500, { error: "down" });
       return send(200, { ...a, payload: detailPayloadOverride.get(a.id) ?? a.payload, ...detailFieldOverride.get(a.id) });
     }
     m = /^\/api\/approvals\/([0-9a-f-]{36})\/(approve|reject|request-revision)$/.exec(p);
@@ -207,6 +213,7 @@ beforeAll(async () => {
       if (a.status !== "pending") return send(422, { error: "Only pending approvals can be decided" });
       a.status = m[2] === "approve" ? "approved" : m[2] === "reject" ? "rejected" : "revision_requested";
       a.decisionNote = m[2] === "approve" && storedNoteOverride !== null ? storedNoteOverride : (body?.decisionNote ?? null);
+      if (approve500AfterApply) return send(500, { error: "follow-up failed" });
       return send(200, { ...a, decidedAt: new Date().toISOString() });
     }
     m = /^\/api\/approvals\/([0-9a-f-]{36})\/comments$/.exec(p);
@@ -229,6 +236,8 @@ beforeEach(() => {
   detailPayloadOverride.clear();
   detailFieldOverride.clear();
   storedNoteOverride = null;
+  failApprovalDetail = false;
+  approve500AfterApply = false;
   failApprovalList = false;
   apiCalls.length = 0;
   tgCalls.length = 0;
@@ -674,7 +683,8 @@ describe("Aava card character list (RK9-894, orchestrator decision after verifie
   it("each rule blocks on its own (one input per rule)", () => {
     const cases: Array<[Record<string, unknown>, { field: string; rule: string; codePoint?: number } | null]> = [
       [{}, null],
-      [{ body: "Hei\r\nMoi" }, null], // CRLF is normalised
+      // RK9-922: no CRLF normalisation, "\r" is outside the list
+      [{ body: "Hei\r\nMoi" }, { field: "body", rule: "char", codePoint: 0x0d }],
       [{ body: "Hei\n\n-- \nAava" }, null], // the signature delimiter may end in a space
       [{ from: "aava@\u0430rk9.fi" }, { field: "from", rule: "char", codePoint: 0x430 }],
       [{ from: "aava rk9.fi" }, { field: "from", rule: "char", codePoint: 0x20 }],
@@ -704,7 +714,8 @@ describe("Aava card character list (RK9-894, orchestrator decision after verifie
       [{ body: "Hei\nx-- \nAava" }, { field: "body", rule: "trailing-space" }],
       [{ body: "Hei\n -- \nAava" }, { field: "body", rule: "trailing-space" }],
       // round 5, L1: only line breaks or spaces is empty
-      [{ body: "\n \n\r\n" }, { field: "body", rule: "empty" }],
+      [{ body: "\n \n\n" }, { field: "body", rule: "empty" }],
+      [{ body: "\n \n\r\n" }, { field: "body", rule: "char", codePoint: 0x0d }],
       [{ body: "  " }, { field: "body", rule: "empty" }],
       [{ subject: " " }, { field: "subject", rule: "empty" }],
       // round 5, M1: blank-line floods and long bodies
@@ -763,10 +774,21 @@ describe("Aava card blocks hidden line breaks and blanks (RK9-894 verifier round
     expect(decisionCalls()).toHaveLength(0);
   });
 
-  it("a CRLF body with listed characters keeps ✅", async () => {
+  it("a CR anywhere gives a ❌-only card, so the digest bytes are the shown lines (RK9-922)", async () => {
     addAava(56, {}, { body: "Hei “Matti”,\r\n\r\nhinta on 120 € – sopimus • ok…\r\n\r\n-- \r\nAava" });
+    addAava(57, {}, { subject: "Re: tarjous\r" });
+    // an address with a CR fails the contract check already and gets no card at all
+    addAava(58, {}, { to: ["matti@example.com\r"] });
+    addAava(59, {}, { from: "aava@rk9.fi\r" });
+    // the same text with LF only keeps ✅
+    addAava(55, {}, { body: "Hei “Matti”,\n\nhinta on 120 € – sopimus • ok…\n\n-- \nAava" });
     await runOk();
-    expect(buttons(sentCards()[0].body)).toEqual(["✅ Lähetä", "❌ Hylkää"]);
+    const cards = sentCards().map((c) => c.body);
+    expect(cards.map(buttons)).toEqual([["❌ Hylkää"], ["❌ Hylkää"], ["✅ Lähetä", "❌ Hylkää"]]);
+    expect(cards[0].text).toContain("⛔ ✅ estetty — Runko: kielletty merkki U+000D.");
+    expect(cards[1].text).toContain("⛔ ✅ estetty — Aihe: kielletty merkki U+000D.");
+    expect(readState().posted[uuid(58)]).toBeUndefined();
+    expect(readState().posted[uuid(59)]).toBeUndefined();
   });
 });
 
@@ -841,9 +863,11 @@ describe("Aava card round-5 tightenings and mutation survivors (RK9-894)", () =>
 });
 
 describe("Aava ✅ is signed with the approve key (RK9-922)", () => {
-  // Contract v2 test vector, shared with the gate (RK9-920): RFC 8032 TEST 1
-  // key and these fields. cardDigest was computed with Python hashlib and the
-  // signature with OpenSSL (pkeyutl -sign -rawin), independently of this code.
+  // Contract v2 test vector (with the 17.11.2026 clarification: header
+  // aava-card-v2 and the hold reasons), shared with the gate (RK9-920): RFC
+  // 8032 TEST 1 key and these fields. cardDigest was computed with Python
+  // hashlib and the signature with OpenSSL (pkeyutl -sign -rawin),
+  // independently of this code. EMPTY_REASONS is the same with reasons [].
   const VECTOR = {
     approvalId: "4f8c2a1e-9b3d-4e7a-8c5f-0d1e2f3a4b5c",
     gateId: "g-0123456789abcdef",
@@ -853,22 +877,34 @@ describe("Aava ✅ is signed with the approve key (RK9-922)", () => {
     to: ["a@example.com", "ö@example.com"],
     subject: "Testi: äö",
     body: "Hei,\ntämä on testi.",
-    cardDigest: "c4c469870a83fff8011cd52800f4a8335f46fd1e935654d4a9bb7b68a36a3bed",
-    signature: "49vmeY+vheTvQyuQoxlMhIBuX9BwYOYzvpDyoBuoW+tVD98pY6++4l5NPVGu349vJ3eba1ZYpTkdetzywJdvBg==",
+    reasons: ["new-recipient", "screen:hinta"],
+    cardDigest: "fcbf814734c5cb5ca34d8e99180392b8640508a587795bcc3e390fed01d51446",
+    signature: "Y6fqPozUk2WJzcxGumbaRAZYrMKPtOjPnJDa9zZ5XBJffJjcZQRwP/gJvgo4Msrw2nmBV9hp3T7RHpSeKm2IBg==",
   };
+  const EMPTY_REASONS = {
+    ...VECTOR,
+    reasons: [] as string[],
+    cardDigest: "432eb5759ccae0f0b0feea3aa9c4b24dc5c92a0d5fc0f5622d67b662b6d30b79",
+    signature: "QQyhYIbRn9/hpg9fJ93ZtFQSPi01tGpA0LpDjpFzCEEdfP5etibstc0oM10HXk2X/1Qwjl9QfS7oqDFPeAZNAw==",
+  };
+  const blockDigest = (p: CardFields) => sigBlock.aavaCardDigest(p.op, p.from, p.to, p.subject, p.body, p.reasons);
   const KEY_LINE_RE = /^🔑 ✅ ei käytössä: hyväksynnän allekirjoitusavain ei toimi \((.+)\)\. /m;
 
   it("contract v2: the listener's digest and message match the shared vector byte for byte", () => {
     const v = VECTOR;
     expect(sigBlock.AAVA_SIG_TAG).toBe("aava-sig:v2:");
-    expect(sigBlock.aavaCardDigest(v.op, v.from, v.to, v.subject, v.body)).toBe(v.cardDigest);
-    expect(cardDigest(v)).toBe(v.cardDigest);
+    for (const vec of [VECTOR, EMPTY_REASONS]) {
+      expect(blockDigest(vec)).toBe(vec.cardDigest);
+      expect(cardDigest(vec)).toBe(vec.cardDigest);
+      const msg = sigBlock.aavaSignedMessage(vec.approvalId, vec.gateId, vec.sha256, vec.cardDigest);
+      expect(sign(null, Buffer.from(msg, "utf8"), signingKey).toString("base64")).toBe(vec.signature);
+    }
     const message = sigBlock.aavaSignedMessage(v.approvalId, v.gateId, v.sha256, v.cardDigest);
     expect(Buffer.from(message, "utf8").toString("hex")).toBe(
       Buffer.from(
         "aava-send-v2\n4f8c2a1e-9b3d-4e7a-8c5f-0d1e2f3a4b5c\ng-0123456789abcdef\n" +
           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n" +
-          "c4c469870a83fff8011cd52800f4a8335f46fd1e935654d4a9bb7b68a36a3bed\napprove",
+          "fcbf814734c5cb5ca34d8e99180392b8640508a587795bcc3e390fed01d51446\napprove",
         "utf8",
       ).toString("hex"),
     );
@@ -893,12 +929,32 @@ describe("Aava ✅ is signed with the approve key (RK9-922)", () => {
       { ...v, op: "reply" },
       // length prefixes keep field boundaries: moving a byte across fields changes the digest
       { ...v, subject: "Testi: äöH", body: "ei,\ntämä on testi." },
+      // removing a hold reason, or reordering them, changes the digest
+      { ...v, reasons: ["new-recipient"] },
+      { ...v, reasons: ["screen:hinta", "new-recipient"] },
+      { ...v, reasons: [] },
+      { ...v, reasons: ["new-recipient", "screen:hinta", ""] },
+      // a byte moved between body and reasons
+      { ...v, body: "Hei,\ntämä on testi.n", reasons: ["ew-recipient", "screen:hinta"] },
     ]) {
-      expect(sigBlock.aavaCardDigest(other.op, other.from, other.to, other.subject, other.body)).not.toBe(v.cardDigest);
+      expect(blockDigest(other), JSON.stringify(other)).not.toBe(v.cardDigest);
+    }
+    // no trim and no CRLF conversion: the digest covers the bytes as given
+    for (const tricky of [
+      { ...v, op: " new" },
+      { ...v, subject: "Testi: äö " },
+      { ...v, body: "Hei,\r\ntämä on testi." },
+      { ...v, body: "Hei,\ntämä on testi.\n" },
+      { ...v, reasons: [" new-recipient", "screen:hinta"] },
+    ]) {
+      expect(blockDigest(tricky), JSON.stringify(tricky)).toBe(cardDigest(tricky));
+      expect(blockDigest(tricky), JSON.stringify(tricky)).not.toBe(v.cardDigest);
     }
     // a value that does not survive UTF-8 gets no digest
-    expect(sigBlock.aavaCardDigest(v.op, v.from, v.to, v.subject, "Hei\ud800")).toBeNull();
-    expect(sigBlock.aavaCardDigest(v.op, v.from, "a@example.com", v.subject, v.body)).toBeNull();
+    expect(blockDigest({ ...v, body: "Hei\ud800" })).toBeNull();
+    expect(blockDigest({ ...v, reasons: ["a\udc00"] })).toBeNull();
+    expect(sigBlock.aavaCardDigest(v.op, v.from, "a@example.com", v.subject, v.body, v.reasons)).toBeNull();
+    expect(sigBlock.aavaCardDigest(v.op, v.from, v.to, v.subject, v.body, "new-recipient")).toBeNull();
     // display text never carries the signature
     expect(sigBlock.stripAavaSig(`Hyväksytty Telegramista · aava-sig:v2:${v.signature}`)).toBe("Hyväksytty Telegramista");
     expect(sigBlock.stripAavaSig("aava-sig:v2:x")).toBe("");
@@ -1241,6 +1297,92 @@ describe("Aava ✅ is signed with the approve key (RK9-922)", () => {
     expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").map((c) => c.body.text)).toEqual(
       Array(3).fill("Kortin tila ei täsmää — tätä ei hyväksytty. Uusi kortti tulee seuraavassa skannauksessa."),
     );
+  });
+
+  it("every hold reason is shown and signed: a removed or reordered reason changes the signed digest", async () => {
+    const all = [
+      "new-recipient", "added-recipient", "own-address", "brand-address", "not-own-address",
+      "reply-to-mismatch", "reply-to-bad", "no-message-id", "screen:hinta", "dmarc:dmarc-fail",
+    ];
+    addAava(1060, {}, { reasons: all });
+    addAava(1061, {}, { reasons: [] });
+    addAava(1062, {}, { reasons: ["new-recipient", "outo-koodi"] });
+    addAava(1063, {}, { reasons: ["new-recipient", "screen:hinta\r"] });
+    await runOk();
+    const cards = sentCards().map((c) => c.body);
+    expect(cards.map(buttons)).toEqual([["✅ Lähetä", "❌ Hylkää"], ["✅ Lähetä", "❌ Hylkää"], ["❌ Hylkää"], ["❌ Hylkää"]]);
+    const shown = /^Syyt: (.*)$/m.exec(cards[0].text)?.[1] ?? "";
+    // one distinct label per code, so two different lists never look the same
+    expect(new Set(shown.split(", ")).size).toBe(all.length);
+    expect(cards[1].text).toMatch(/^Syyt: ⟨ei syitä⟩$/m);
+    expect(cards[2].text).toContain("⛔ ✅ estetty — Syyt: tuntematon syykoodi.");
+    expect(cards[3].text).toContain("⛔ ✅ estetty — Syyt: tuntematon syykoodi.");
+
+    updatesQueue.push([
+      callback(`pa:a:${uuid(1060)}`, readState().posted[uuid(1060)].messageId),
+      callback(`pa:a:${uuid(1061)}`, readState().posted[uuid(1061)].messageId),
+    ]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(2);
+    for (const [i, n] of [[0, 1060], [1, 1061]]) {
+      const sig = SIGNED_NOTE_RE.exec(decisionCalls()[i].body.decisionNote)?.[1];
+      const p = approvals.find((a) => a.id === uuid(n))!.payload as unknown as CardFields & { gateId: string; sha256: string };
+      expect(verifies(signedMessage(uuid(n), p), sig!)).toBe(true);
+      for (const other of [p.reasons.slice(1), [...p.reasons].reverse(), [...p.reasons, "new-recipient"]]) {
+        if (JSON.stringify(other) === JSON.stringify(p.reasons)) continue;
+        expect(verifies(signedMessage(uuid(n), { ...p, reasons: other }), sig!)).toBe(false);
+      }
+    }
+  });
+
+  it("a tap without a sender never signs, even in the private chat", async () => {
+    addAava(1070);
+    await runOk();
+    const cb = callback(`pa:a:${uuid(1070)}`, readState().posted[uuid(1070)].messageId);
+    delete (cb.callback_query as { from?: unknown }).from;
+    updatesQueue.push([cb]);
+    // the chat id is listed too: a missing sender must not borrow it
+    await runOk({ AAVA_TG_APPROVER_IDS: CHAT });
+    expect(decisionCalls()).toHaveLength(0);
+    expect(lastAnswer()).toMatch(/^Et voi hyväksyä tätä: /);
+  });
+
+  it("a failed live read refuses every ✅, also on a row that claims another type", async () => {
+    addAava(1080);
+    await runOk();
+    const st = readState();
+    st.posted[uuid(1080)].type = "email_send";
+    delete st.posted[uuid(1080)].kind;
+    st.posted[uuid(1080)].handling = true;
+    writeFileSync(join(stateDir, "state.json"), JSON.stringify(st));
+    failApprovalList = true;
+    failApprovalDetail = true;
+    updatesQueue.push([callback(`pa:a:${uuid(1080)}`, st.posted[uuid(1080)].messageId)]);
+    const tap = await runOk();
+    expect(decisionCalls()).toHaveLength(0);
+    expect(tap.out).toContain(`approval ${uuid(1080)}: ✅ refused, the live approval could not be read`);
+    expect(lastAnswer()).toBe("Hyväksynnän tilaa ei voitu lukea — mitään ei hyväksytty. Yritä hetken päästä uudelleen.");
+  });
+
+  it("after an unknown approve result, the card says the mail goes only if the stored note is the signed one", async () => {
+    addAava(1090);
+    addAava(1091);
+    await runOk();
+    const card = (n: number) => readState().posted[uuid(n)].messageId as number;
+    const c0 = card(1090);
+    const c1 = card(1091);
+    approve500AfterApply = true;
+    updatesQueue.push([callback(`pa:a:${uuid(1090)}`, c0)]);
+    await runOk();
+    expect(editsOf(c0).at(-1)?.body.text).toMatch(/^✅ Hyväksytty\. Relay vie päätöksen Aavan portille/);
+    // the state keeps a digest of the note, never the note or its signature
+    expect(readFileSync(join(stateDir, "state.json"), "utf8")).not.toContain("aava-sig");
+
+    storedNoteOverride = "Hyväksytty Telegramista";
+    updatesQueue.push([callback(`pa:a:${uuid(1091)}`, c1)]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(2);
+    expect(editsOf(c1).at(-1)?.body.text).toMatch(/^⚠️ Hyväksyntä kirjautui, mutta allekirjoitettu päätös ei tallentunut sellaisenaan\./);
   });
 
   it("a payload that changed after the card was posted gets no signature and no approval", async () => {

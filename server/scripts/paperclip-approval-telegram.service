@@ -12,7 +12,8 @@
 #   useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin pcp-approve
 #   install -d -o root -g root -m 0755 /opt/pcp-approve
 #   install -o root -g root -m 0644 server/scripts/approval-telegram-listener.mjs /opt/pcp-approve/
-#   install -m 600 -o root -g root /dev/null /etc/paperclip/approval-telegram.env
+#   # create the env file only once: a re-run must not empty an existing file
+#   test -e /etc/paperclip/approval-telegram.env || install -m 600 -o root -g root /dev/null /etc/paperclip/approval-telegram.env
 #   # fill: PAPERCLIP_API_URL, PAPERCLIP_TOKEN (board), TG_BOT_TOKEN, TG_CHAT_ID
 #   # optional: AAVA_TG_APPROVER_IDS (needed only when TG_CHAT_ID is a group)
 #   install -o pcp-approve -g pcp-approve -m 0400 <generated key> /etc/paperclip/aava-approve-ed25519.key
@@ -22,7 +23,9 @@
 #   #   install -o pcp-approve -g pcp-approve -m 0600 /var/lib/paperclip/approval-telegram/state.json /var/lib/pcp-approve/state.json
 #   cp server/scripts/paperclip-approval-telegram.service /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now paperclip-approval-telegram
-# Update: install the new script copy again (root-owned, 0644), then
+# Update: an automatic update of /opt/paperclip (or of the repo) does NOT touch
+# the copy in /opt/pcp-approve. Every listener change needs a new copy:
+#   install -o root -g root -m 0644 server/scripts/approval-telegram-listener.mjs /opt/pcp-approve/
 #   systemctl restart paperclip-approval-telegram
 [Unit]
 Description=Paperclip approvals, outreach drafts and signed Aava send approvals via Telegram inline buttons

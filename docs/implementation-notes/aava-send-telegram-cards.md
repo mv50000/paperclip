@@ -57,7 +57,7 @@ Orkestroijan sitova päätös 16.11.2026 (verifier-kierros 4). Kierroksilla 2–
 
 Lisäsäännöt:
 
-- **Runko:** rivinvaihto on vain `\n`. `\r\n` normalisoidaan `\n`:ksi. Yksinäinen `\r` ja kaikki muut rivinvaihdot (U+000B, U+000C, U+0085, U+2028, U+2029) ovat kiellettyjä. Rivillä ei saa olla kahta välilyöntiä peräkkäin eikä välilyöntiä lopussa. Poikkeus on allekirjoituksen erotinrivi `-- `.
+- **Runko:** rivinvaihto on vain `\n`. `\r` on kielletty kaikissa neljässä kentässä, myös parina `\r\n` (RK9-922: kortin rivit ja tiivisteen tavut vastaavat toisiaan yksi yhteen). Myös muut rivinvaihdot (U+000B, U+000C, U+0085, U+2028, U+2029) ovat kiellettyjä. Rivillä ei saa olla kahta välilyöntiä peräkkäin eikä välilyöntiä lopussa. Poikkeus on allekirjoituksen erotinrivi `-- `.
 - **Aihe:** ei rivinvaihtoa, ei välilyöntiä alussa tai lopussa, ei kahta välilyöntiä peräkkäin. Kortti ei trimmaa välilyöntejä hiljaa.
 - **Osoitteet (From, To):** vain ASCII U+0021–U+007E (ei välilyöntiä), muoto `<paikallinen>@<domain>` ilman merkkejä `@ < > "` osissa.
 - **Rungon pituus (kierros 5):** yli 120 riviä tai yli kaksi tyhjää riviä peräkkäin estää ✅:n, koska rivitulva vie napit kauas otsakkeista.
@@ -106,6 +106,8 @@ Pelkkä approvalin tila `approved` ei enää riitä lähetykseen. Kuuntelija all
 - Allekirjoitus on puhdas Ed25519 (ei esitiivistystä), 64 tavua, tavallinen base64 täytemerkein.
 - `decisionNote` on täsmälleen `Hyväksytty Telegramista · aava-sig:v2:<base64>`.
 - Kaikki allekirjoitettavat arvot luetaan kortin postaushetken sormenjäljestä (tilan rivin `sig`, MAC suojaa sen), ei tuoreesta hausta. Painallus lukee approvalin ensin. Jos payload on muuttunut postauksen jälkeen, kuuntelija ei allekirjoita eikä hyväksy.
+- Pidätyssyyt (`reasons`) kuuluvat tiivisteeseen (täsmennys 17.11.2026). Kortti, joka tarjoaa ✅:n, näyttää jokaisen syyn: tunnettu koodi näytetään selkokielisenä, ja selkokieliset nimet ovat keskenään erilaiset, joten kaksi eri syylistaa ei näytä samalta. Tuntematon koodi tai yli 10 syytä tekee kortista ❌-kortin.
+- Jokainen ✅ lukee approvalin palvelimelta ensin. Jos luku epäonnistuu, ✅ torjutaan kaikilla korttityypeillä, koska tilarivi ei yksin kerro, tarvitaanko allekirjoitus.
 - Toteutus on skriptissä itsenäisessä lohkossa `// <aava-sig>` … `// </aava-sig>`. Testi ajaa lohkon erikseen testivektoria vasten.
 - Vain operaattori allekirjoittaa. Yksityisessä chatissa painajan pitää olla chatin oma käyttäjä. Ryhmächatissa painajan id:n pitää olla listalla `AAVA_TG_APPROVER_IDS` (pilkuin eroteltu). Muuten ✅ ei allekirjoita eikä hyväksy, ja painallus kertoo syyn.
 - Jos palvelimen vastauksen `decisionNote` ei ole täsmälleen lähetetty allekirjoitettu teksti, kortti ei väitä viestin lähtevän: `⚠️ Hyväksyntä kirjautui, mutta allekirjoitettu päätös ei tallentunut sellaisenaan. Portti ei lähetä viestiä.` Aikakatkaisun jälkeen sama tarkistus tehdään tilaan tallennetulla tiivisteellä (`noteSha`, ei itse allekirjoitusta).
@@ -159,7 +161,7 @@ Kortin rivi tallentaa allekirjoituksen kentistä `gateId`, `op`, `from`, `to`, `
 
 ## Käyttöönotto
 
-RK9-922 alkaen palvelu (`paperclip-approval-telegram.service`) ajaa skriptin root-omisteisesta kopiosta `/opt/pcp-approve/approval-telegram-listener.mjs` käyttäjänä `pcp-approve`. Tilahakemisto on `/var/lib/pcp-approve`. Tarkka asennusohje on palvelutiedoston alussa: käyttäjän luonti, kopion asennus, avaimen asennus (`pcp-approve`, `0400`), vanhan `state.json`in siirto ja systemd.
+RK9-922 alkaen palvelu (`paperclip-approval-telegram.service`) ajaa skriptin root-omisteisesta kopiosta. Hakemiston `/opt/paperclip` automaattipäivitys ei koske kopiota, joten jokainen kuuntelijan muutos vaatii uuden kopioinnin. Kopio on `/opt/pcp-approve/approval-telegram-listener.mjs` käyttäjänä `pcp-approve`. Tilahakemisto on `/var/lib/pcp-approve`. Tarkka asennusohje on palvelutiedoston alussa: käyttäjän luonti, kopion asennus, avaimen asennus (`pcp-approve`, `0400`), vanhan `state.json`in siirto ja systemd.
 
 - Päivitys: asenna skriptin kopio uudelleen (root, `0644`) mergetyn masterin tasolta ja aja `sudo systemctl restart paperclip-approval-telegram`. Paperclip-palvelin ei tarvitse restarttia.
 - Asenna avain ennen restarttia, muuten Aava-kortit ovat ❌-kortteja. Käynnistyslokin rivi `aava signing key … unusable` kertoo, ettei avain kelpaa.
