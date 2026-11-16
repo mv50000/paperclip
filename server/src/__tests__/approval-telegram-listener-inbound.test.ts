@@ -138,6 +138,8 @@ function runOnce(extraEnv: Record<string, string> = {}): Promise<{ code: number 
         TG_CHAT_ID: CHAT,
         TG_API_BASE: baseUrl,
         STATE_DIR: stateDir,
+        // RK9-922: never the host's real key path
+        AAVA_TG_SIGN_KEY_FILE: join(stateDir, "no-aava-key"),
         ...extraEnv,
       },
     });

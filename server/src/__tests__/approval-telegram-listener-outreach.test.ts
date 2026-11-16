@@ -147,6 +147,8 @@ function runOnce(): Promise<{ code: number | null; out: string }> {
         TG_CHAT_ID: CHAT,
         TG_API_BASE: baseUrl,
         STATE_DIR: stateDir,
+        // RK9-922: never the host's real key path
+        AAVA_TG_SIGN_KEY_FILE: join(stateDir, "no-aava-key"),
         OUTREACH_TG_MAX_OPEN: "2",
       },
     });
