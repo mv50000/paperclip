@@ -1,6 +1,7 @@
 // approval-telegram-listener.mjs — Telegram approval gate for Paperclip
-// email_send approvals (RK9-85), outreach drafts (RK9-222) and voice_action
-// approvals (RK9-481), plus a plain info card per inbound customer email (RK9-667). Mirrors the
+// email_send approvals (RK9-85), outreach drafts (RK9-222), voice_action
+// approvals (RK9-481) and Aava send requests (RK9-894), plus a plain info card
+// per inbound customer email (RK9-667). Mirrors the
 // sunspot-ig-listen pattern: pending items are posted to the operator's
 // Telegram chat with inline buttons, and a tap approves/rejects within ~1s
 // via a getUpdates long-poll.
@@ -27,6 +28,20 @@
 //   (no ✏️ — a voice proposal is not revised, Grok makes a new one)
 //   When the issue has an assignee agent, the card names it ("🔔 herättää"),
 //   because an approved action wakes that agent (operator decision, RK9-490).
+//
+// Aava send requests (RK9-894, same `pa:` prefix and endpoints as email_send):
+//   A `request_board_approval` whose payload.kind is "aava_send", created by
+//   aava-gate-relay (RK9-903) for a mail the Aava send gate holds. Only the RK9
+//   company's approvals get a card (AAVA_TG_COMPANY_PREFIX); every other
+//   request_board_approval is ignored, and a tap on one is refused.
+//   ✅ Lähetä    → POST /api/approvals/:id/approve. The server sends nothing; the
+//                  relay reads the decision and hands it to the gate, which sends
+//                  only the stored message whose sha256 matches.
+//   ❌ Hylkää    → ForceReply prompt; the reply text becomes decisionNote
+//   (no ✏️ — the gate holds one fixed message, a revision has nothing to revise)
+//   From, To, subject and body are untrusted text: line breaks, bidi controls
+//   and Telegram auto-links (/command, @mention, #tag) are neutralised, and
+//   every body line carries a "│ " prefix.
 //
 // inbound customer email (RK9-667, info card only: no buttons, no callback prefix):
 //   A card for every new human inbound message at any company's support inbox, so
@@ -57,6 +72,8 @@
 //   INBOUND_TG_ENABLED  default 1; "0" disables the inbound customer email source
 //   OUTREACH_TG_MAX_OPEN default 5; open outreach draft cards at a time (≥ 1; use
 //                       OUTREACH_TG_ENABLED=0 to turn the source off, not 0 here)
+//   AAVA_TG_COMPANY_PREFIX default RK9; the company whose aava_send approvals get
+//                       a card ("" turns the Aava source off)
 //
 //   node approval-telegram-listener.mjs            # long-poll listener (systemd)
 //   node approval-telegram-listener.mjs --once     # one scan+drain, then exit (smoke)
@@ -79,6 +96,7 @@ const APPROVE_PENDING_GRACE_MS = 60_000;
 const OUTREACH_ENABLED = (process.env.OUTREACH_TG_ENABLED ?? "1") !== "0";
 const INBOUND_ENABLED = (process.env.INBOUND_TG_ENABLED ?? "1") !== "0";
 const OUTREACH_MAX_OPEN = Math.max(1, Number.parseInt(process.env.OUTREACH_TG_MAX_OPEN ?? "5", 10) || 5);
+const AAVA_COMPANY_PREFIX = (process.env.AAVA_TG_COMPANY_PREFIX ?? "RK9").trim();
 
 if (!PCP_TOKEN || !TG_TOKEN || !TG_CHAT) {
   console.error("Missing PAPERCLIP_TOKEN / TG_BOT_TOKEN / TG_CHAT_ID");
@@ -177,7 +195,12 @@ function renderTaintLine(taint) {
   return `⚠️ Ajo luki epäluotettavaa sisältöä (lähde: ${kinds.length > 0 ? kinds.join(", ") : "tuntematon"})`;
 }
 
+const EMAIL_SEND = "email_send";
 const VOICE_ACTION = "voice_action";
+// RK9-894: Aava send requests ride on the generic board approval type, because
+// approving an email_send would make the server send the mail itself.
+const BOARD_APPROVAL = "request_board_approval";
+const AAVA_SEND = "aava_send";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Every character a Telegram client may draw as a line break.
 const LINE_BREAK_RE = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
@@ -193,9 +216,9 @@ const voiceSignature = (payload) => {
 const buildMarkup = (approvalId, type) => ({
   inline_keyboard: [
     [
-      { text: "✅ Hyväksy", callback_data: `pa:a:${approvalId}` },
+      { text: type === BOARD_APPROVAL ? "✅ Lähetä" : "✅ Hyväksy", callback_data: `pa:a:${approvalId}` },
       { text: "❌ Hylkää", callback_data: `pa:r:${approvalId}` },
-      ...(type === VOICE_ACTION ? [] : [{ text: "✏️ Revisio", callback_data: `pa:v:${approvalId}` }]),
+      ...(type === EMAIL_SEND ? [{ text: "✏️ Revisio", callback_data: `pa:v:${approvalId}` }] : []),
     ],
   ],
 });
@@ -205,6 +228,129 @@ const oneLine = (value, max) => {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > max ? text.slice(0, max - 1) + "…" : text;
 };
+
+// ── RK9-894: Aava send requests ───────────────────────────────────────────────
+// The relay (RK9-903) writes this exact payload. A payload that breaks the
+// contract gets no card: it never reaches the operator half-rendered.
+const AAVA_GATE_ID_RE = /^g-[0-9a-f]{16}$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
+const EMAIL_RE = /^[^\s@<>"]{1,200}@[^\s@<>"]{1,200}$/;
+const isEmail = (v) => typeof v === "string" && EMAIL_RE.test(v);
+
+function isAavaSendPayload(p) {
+  return (
+    !!p &&
+    typeof p === "object" &&
+    p.kind === AAVA_SEND &&
+    p.version === 1 &&
+    typeof p.gateId === "string" &&
+    AAVA_GATE_ID_RE.test(p.gateId) &&
+    (p.op === "reply" || p.op === "new") &&
+    isEmail(p.from) &&
+    Array.isArray(p.to) &&
+    p.to.length > 0 &&
+    p.to.every(isEmail) &&
+    typeof p.subject === "string" &&
+    typeof p.body === "string" &&
+    Array.isArray(p.reasons) &&
+    p.reasons.every((r) => typeof r === "string") &&
+    typeof p.sha256 === "string" &&
+    SHA256_RE.test(p.sha256)
+  );
+}
+
+// What an Aava card shows, plus the hash the gate checks. A changed signature
+// closes the open card and posts a fresh one (same rule as voiceSignature).
+const aavaSignature = (payload) => {
+  const p = payload ?? {};
+  return JSON.stringify([p.gateId, p.op, p.from, p.to, p.subject, p.body, p.reasons, p.sha256]);
+};
+
+// Bidi overrides/isolates can reorder an address on screen; C0 controls have no
+// business in a card.
+const UNSAFE_CHARS_RE = /[\u0000-\u0008\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g;
+// Telegram turns /cmd, @name, #tag and $TAG in plain text into tappable
+// entities. A WORD JOINER after the sigil keeps the look and breaks the entity.
+const AUTOLINK_SIGIL_RE = /([/@#$])(?=[\p{L}\p{N}_])/gu;
+const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").replace(AUTOLINK_SIGIL_RE, "$1\u2060");
+// A header value: one line, neutralised, at most `max` chars.
+const headerText = (value, max) => oneLine(neutralize(String(value ?? "").split(LINE_BREAK_RE).join(" ")), max);
+
+const AAVA_REASON_LABELS = {
+  "new-recipient": "uusi vastaanottaja",
+  "added-recipient": "lisätty vastaanottaja",
+  "new-message": "uusi viesti, ei ketjuvastaus",
+  cc: "kopio (Cc)",
+  "no-dmarc": "lähettäjän DMARC ei läpäissyt",
+  "dmarc-fail": "lähettäjän DMARC ei läpäissyt",
+  automated: "emoviesti on automaattiposti",
+};
+
+function aavaReason(code) {
+  const c = String(code);
+  if (c.startsWith("screen:")) return `seulasana "${headerText(c.slice("screen:".length), 60)}"`;
+  return AAVA_REASON_LABELS[c] ?? headerText(c, 60);
+}
+
+// The approvals API masks credential-looking values before it answers
+// (redactEventPayload). The gate still sends the original text.
+const REDACTED_MARK = "***REDACTED***";
+// Telegram's cap is 4096 chars; String#length counts UTF-16 units, which is
+// never less than the char count, so this budget leaves room for the footer.
+const AAVA_CARD_MAX = 3900;
+const AAVA_RECIPIENTS_SHOWN = 20;
+
+function aavaRecipients(to) {
+  const shown = to.slice(0, AAVA_RECIPIENTS_SHOWN).map((a) => headerText(a, 200));
+  const more = to.length - shown.length;
+  return `${shown.join(", ")}${more > 0 ? ` (+${more} muuta)` : ""}`;
+}
+
+// Shown after the decision, so a decided card still says what it was about.
+const aavaLabel = (p) => `To: ${headerText(aavaRecipients(p.to), 300)}\nAihe: ${headerText(p.subject, 200) || "(ei aihetta)"}`;
+
+function renderAavaSend(companyName, approval) {
+  const p = approval.payload;
+  const head = [
+    `📨 Aava: lähetys odottaa — ${headerText(companyName, 100)}`,
+    `From: ${headerText(p.from, 200)}`,
+    `To${p.to.length > 1 ? ` (${p.to.length})` : ""}: ${aavaRecipients(p.to)}`,
+    `Aihe: ${headerText(p.subject, 300) || "(ei aihetta)"}`,
+    `Tyyppi: ${p.op === "reply" ? "vastaus ketjuun" : "uusi viesti"}`,
+    `Syyt: ${p.reasons.length ? p.reasons.map(aavaReason).join(", ") : "(ei syytä)"}`,
+  ];
+  if (`${p.subject}\n${p.body}`.includes(REDACTED_MARK)) {
+    head.push(`⚠️ Viestissä on salaisuudelta näyttävä arvo (${REDACTED_MARK}). Viesti lähtee alkuperäisenä, ei peitettynä.`);
+  }
+  head.push(`Tunniste: ${p.gateId} · sha256 ${p.sha256.slice(0, 12)}…`, "──────────");
+
+  const bodyLines = p.body.length ? p.body.split(LINE_BREAK_RE) : ["(ei runkoa)"];
+  let text = head.join("\n");
+  const footer = (shown) =>
+    `\n──────────\n✂️ Runko katkaistu: näytetty ${shown} / ${p.body.length} merkkiä. Lue koko viesti Paperclip-UI:sta ennen lähetystä.`;
+  const budget = AAVA_CARD_MAX - footer(p.body.length).length;
+  let shownChars = 0;
+  let truncated = false;
+  for (const raw of bodyLines) {
+    const line = `\n│ ${neutralize(raw)}`;
+    if (text.length + line.length <= budget) {
+      text += line;
+      shownChars += raw.length + 1;
+      continue;
+    }
+    let part = line.slice(0, Math.max(0, budget - text.length - 1));
+    // never leave half of a surrogate pair at the cut
+    if (/[\ud800-\udbff]$/.test(part)) part = part.slice(0, -1);
+    if (part.length > 3) {
+      text += part + "…";
+      shownChars += Math.max(0, part.length - 3);
+    }
+    truncated = true;
+    break;
+  }
+  if (truncated) text += footer(Math.min(shownChars, p.body.length));
+  return text;
+}
 
 // RK9-481: one voice_action card. The issue and its assignee are read live so
 // the card shows the issue as it is now; a lookup that answers with an error
@@ -286,10 +432,31 @@ async function listCompanies() {
   if (Date.now() - companiesCache.at < 10 * 60_000) return companiesCache.list;
   const res = await pcp("GET", "/companies");
   if (res.ok && Array.isArray(res.json)) {
-    companiesCache = { at: Date.now(), list: res.json.map((c) => ({ id: c.id, name: c.name })) };
+    companiesCache = {
+      at: Date.now(),
+      list: res.json.map((c) => ({ id: c.id, name: c.name, issuePrefix: c.issuePrefix })),
+    };
   }
   return companiesCache.list;
 }
+
+// Which pending approvals get a card. An aava_send that breaks the payload
+// contract is logged once per process and skipped.
+const badAavaLogged = new Set();
+function cardKind(company, approval) {
+  if (approval.type === EMAIL_SEND || approval.type === VOICE_ACTION) return approval.type;
+  if (approval.type !== BOARD_APPROVAL || approval.payload?.kind !== AAVA_SEND) return null;
+  if (!AAVA_COMPANY_PREFIX || company.issuePrefix !== AAVA_COMPANY_PREFIX) return null;
+  if (isAavaSendPayload(approval.payload)) return AAVA_SEND;
+  if (!badAavaLogged.has(approval.id)) {
+    badAavaLogged.add(approval.id);
+    console.error(`aava_send approval ${approval.id}: payload breaks the RK9-894 contract — no card`);
+  }
+  return null;
+}
+
+const signatureFor = (kind, payload) =>
+  kind === VOICE_ACTION ? voiceSignature(payload) : kind === AAVA_SEND ? aavaSignature(payload) : null;
 
 async function scan() {
   const companies = await listCompanies();
@@ -299,7 +466,8 @@ async function scan() {
     const res = await pcp("GET", `/companies/${company.id}/approvals?status=pending`);
     if (!res.ok || !Array.isArray(res.json)) continue;
     for (const approval of res.json) {
-      if (approval.type !== "email_send" && approval.type !== VOICE_ACTION) continue;
+      const kind = cardKind(company, approval);
+      if (!kind) continue;
       pendingIds.add(approval.id);
       const posted = state.posted[approval.id];
       if (posted?.awaitingSince) {
@@ -307,14 +475,13 @@ async function scan() {
         // settled, the old card is closed and a fresh one is posted now, so a
         // queued tap on the old card meets the stale-card check.
         if ((await settleApprove(approval.id, posted)) !== "pending") continue;
-      } else if (
-        posted &&
-        approval.type === VOICE_ACTION &&
-        posted.sig &&
-        !posted.handling &&
-        posted.sig !== voiceSignature(approval.payload)
-      ) {
-        await editDone(posted.messageId, "♻️ Ehdotus muuttui — uusi kortti alla. Tämä kortti ei enää päde.");
+      } else if (posted && posted.sig && !posted.handling && posted.sig !== signatureFor(kind, approval.payload)) {
+        await editDone(
+          posted.messageId,
+          kind === AAVA_SEND
+            ? "♻️ Lähetyspyyntö muuttui — uusi kortti alla. Tämä kortti ei enää päde."
+            : "♻️ Ehdotus muuttui — uusi kortti alla. Tämä kortti ei enää päde.",
+        );
         delete state.posted[approval.id];
         saveState(state);
       } else if (posted) {
@@ -323,9 +490,11 @@ async function scan() {
       let text;
       try {
         text =
-          approval.type === VOICE_ACTION
+          kind === VOICE_ACTION
             ? await renderVoiceAction(company.name, approval)
-            : renderApproval(company.name, approval);
+            : kind === AAVA_SEND
+              ? renderAavaSend(company.name, approval)
+              : renderApproval(company.name, approval);
       } catch (e) {
         console.error(`render approval ${approval.id}:`, e.message);
         continue; // retried next scan; the other cards and the cleanup still run
@@ -334,13 +503,17 @@ async function scan() {
         chat_id: TG_CHAT,
         text,
         reply_markup: buildMarkup(approval.id, approval.type),
+        // a URL in an untrusted body must not unfurl a preview into the card
+        ...(kind === AAVA_SEND ? { link_preview_options: { is_disabled: true } } : {}),
       });
       if (msg?.ok) {
+        const sig = signatureFor(kind, approval.payload);
         state.posted[approval.id] = {
           messageId: msg.result.message_id,
           at: Date.now(),
           type: approval.type,
-          ...(approval.type === VOICE_ACTION ? { sig: voiceSignature(approval.payload) } : {}),
+          ...(sig ? { sig } : {}),
+          ...(kind === AAVA_SEND ? { kind: AAVA_SEND, label: aavaLabel(approval.payload) } : {}),
         };
         saveState(state);
         console.log(`posted approval ${approval.id} (${company.name})`);
@@ -646,6 +819,9 @@ async function doApprove(approvalId, entry) {
   }
   if (!res.ok) {
     await editDone(entry.messageId, `⚠️ Hyväksyntä epäonnistui (HTTP ${res.status}). Käsittele Paperclip-UI:ssa.`);
+  } else if (entry.kind === AAVA_SEND) {
+    // The server sends nothing for this type: the approval is the outcome.
+    await editDone(entry.messageId, aavaApprovedText(entry));
   } else {
     const outcome = (await latestOutcomeComment(approvalId, res.json).catch(() => null)) ?? "✅ Hyväksytty.";
     await editDone(entry.messageId, outcome);
@@ -653,6 +829,9 @@ async function doApprove(approvalId, entry) {
   delete state.posted[approvalId];
   saveState(state);
 }
+
+const aavaApprovedText = (entry) =>
+  `✅ Hyväksytty. Relay vie päätöksen Aavan portille, ja portti lähettää tallennetun viestin.\n${entry.label ?? ""}`.trimEnd();
 
 // RK9-502: the approve request threw (timeout, connection lost), so its result
 // is unknown. svc.approve sets `approved` before it runs the action, and the
@@ -679,6 +858,8 @@ async function settleApprove(approvalId, entry) {
   } else if (!status) {
     text = `⚠️ Palvelin ei vastannut (${why}). Hyväksynnän tila ei selvinnyt — kortti päivittyy, kun palvelin vastaa.`;
     settled = false;
+  } else if (status === "approved" && entry.kind === AAVA_SEND) {
+    text = aavaApprovedText(entry);
   } else if (status === "approved") {
     const outcome = await latestOutcomeComment(approvalId, res.json).catch(() => null);
     if (outcome) {
@@ -716,6 +897,9 @@ async function doDecline(action, approvalId, entry, note) {
   } else if (action === "r" && entry.type === VOICE_ACTION) {
     await editDone(entry.messageId, `❌ Hylätty. Tikettiin ei tehty muutosta.\n${note}`);
     delete state.posted[approvalId];
+  } else if (action === "r" && entry.kind === AAVA_SEND) {
+    await editDone(entry.messageId, `❌ Hylätty. Viestiä ei lähetetä.\n${entry.label ? `${entry.label}\n` : ""}${note}`);
+    delete state.posted[approvalId];
   } else if (action === "r") {
     await editDone(entry.messageId, `❌ Hylätty. Perustelu välitetty agentille:\n${note}`);
     delete state.posted[approvalId];
@@ -732,12 +916,12 @@ async function doDecline(action, approvalId, entry, note) {
 
 // ── update handling ───────────────────────────────────────────────────────────
 // A tap on a card whose state row has no type (posted before RK9-481) or is
-// gone: the type picks the texts and whether ✏️ is allowed. null when the
-// lookup fails.
-async function approvalType(approvalId) {
+// gone: the type picks the texts and whether ✏️ is allowed. The approval is
+// null when the lookup fails.
+async function fetchApproval(approvalId) {
   try {
     const res = await pcp("GET", `/approvals/${approvalId}`);
-    return res.ok && typeof res.json?.type === "string" ? res.json.type : null;
+    return res.ok && typeof res.json?.type === "string" ? res.json : null;
   } catch {
     return null;
   }
@@ -768,15 +952,32 @@ async function handleCallback(cq) {
   }
   const entry = state.posted[approvalId] ?? { messageId: cq.message.message_id };
   // Rows posted before RK9-481 and rows lost from state.json carry no type.
-  if (!entry.type) entry.type = await approvalType(approvalId);
+  if (!entry.type) {
+    const approval = await fetchApproval(approvalId);
+    entry.type = approval?.type ?? null;
+    if (approval?.type === BOARD_APPROVAL && approval.payload?.kind === AAVA_SEND) entry.kind = AAVA_SEND;
+  }
   const isVoice = entry.type === VOICE_ACTION;
+  const isAava = entry.kind === AAVA_SEND;
 
-  // The voice card has no ✏️ button; a forged `pa:v` must not reach
+  // RK9-894: this listener only ever posts Aava cards of the generic board
+  // type. Any other request_board_approval (e.g. a tool-gateway formal
+  // approval) is never decided from Telegram.
+  if (entry.type === BOARD_APPROVAL && !isAava) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Tätä hyväksyntää ei käsitellä Telegramissa — käytä Paperclip-UI:ta." });
+    return;
+  }
+
+  // Only the email_send card has a ✏️ button; a forged `pa:v` must not reach
   // request-revision. An unknown type (state lost, lookup failed) is refused too.
-  if (action === "v" && (isVoice || !entry.type)) {
+  if (action === "v" && entry.type !== EMAIL_SEND) {
     await tg("answerCallbackQuery", {
       callback_query_id: cq.id,
-      text: isVoice ? "Grok-ehdotukselle ei pyydetä revisiota." : "Hyväksynnän tyyppi ei selvinnyt — käsittele Paperclip-UI:ssa.",
+      text: isVoice
+        ? "Grok-ehdotukselle ei pyydetä revisiota."
+        : isAava
+          ? "Aavan lähetykselle ei pyydetä revisiota."
+          : "Hyväksynnän tyyppi ei selvinnyt — käsittele Paperclip-UI:ssa.",
     });
     return;
   }
@@ -790,13 +991,36 @@ async function handleCallback(cq) {
     return;
   }
 
+  // RK9-894: ✅ sends mail, so the card must still show what is pending now.
+  // A row lost from state.json has no signature to compare: refused, the next
+  // scan posts a fresh card.
+  if (action === "a" && isAava) {
+    const current = await fetchApproval(approvalId);
+    const fresh =
+      current?.status === "pending" &&
+      current.type === BOARD_APPROVAL &&
+      isAavaSendPayload(current.payload) &&
+      !!entry.sig &&
+      aavaSignature(current.payload) === entry.sig;
+    if (!fresh) {
+      await tg("answerCallbackQuery", {
+        callback_query_id: cq.id,
+        text: "Lähetyspyyntö on muuttunut tai jo käsitelty — käytä uusinta korttia tai Paperclip-UI:ta.",
+      });
+      return;
+    }
+  }
+
   if (action === "a") {
     entry.handling = true;
     await tg("answerCallbackQuery", {
       callback_query_id: cq.id,
-      text: isVoice ? "Hyväksytään…" : "Hyväksytään ja lähetetään…",
+      text: isVoice || isAava ? "Hyväksytään…" : "Hyväksytään ja lähetetään…",
     });
-    await editDone(entry.messageId, isVoice ? "⏳ Hyväksytään — palvelin toteuttaa…" : "⏳ Hyväksytään — palvelin lähettää…");
+    await editDone(
+      entry.messageId,
+      isVoice ? "⏳ Hyväksytään — palvelin toteuttaa…" : isAava ? "⏳ Hyväksytään…" : "⏳ Hyväksytään — palvelin lähettää…",
+    );
     await doApprove(approvalId, entry);
     return;
   }
@@ -808,9 +1032,11 @@ async function handleCallback(cq) {
     text:
       action === "r" && isVoice
         ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (tallentuu decisionNoteksi, tikettiin ei tehdä muutosta).`
-        : action === "r"
-          ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (menee agentille decisionNotena).`
-          : `✏️ Revisio — vastaa TÄHÄN viestiin ohjeella agentille.`,
+        : action === "r" && isAava
+          ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (tallentuu decisionNoteksi, viestiä ei lähetetä).`
+          : action === "r"
+            ? `❌ Hylkäys — vastaa TÄHÄN viestiin perustelulla (menee agentille decisionNotena).`
+            : `✏️ Revisio — vastaa TÄHÄN viestiin ohjeella agentille.`,
     reply_markup: { force_reply: true },
   });
   if (prompt?.ok) {
@@ -819,6 +1045,7 @@ async function handleCallback(cq) {
       approvalId,
       origMessageId: state.posted[approvalId]?.messageId ?? cq.message.message_id,
       approvalType: entry.type,
+      ...(isAava ? { approvalKind: AAVA_SEND, label: entry.label } : {}),
       at: Date.now(),
     };
     if (state.posted[approvalId]) state.posted[approvalId].handling = true;
@@ -886,7 +1113,11 @@ async function handleMessage(msg) {
     );
     return;
   }
-  const entry = state.posted[prompt.approvalId] ?? { messageId: prompt.origMessageId, type: prompt.approvalType };
+  const entry = state.posted[prompt.approvalId] ?? {
+    messageId: prompt.origMessageId,
+    type: prompt.approvalType,
+    ...(prompt.approvalKind ? { kind: prompt.approvalKind, label: prompt.label } : {}),
+  };
   await doDecline(prompt.action, prompt.approvalId, entry, note);
 }
 
