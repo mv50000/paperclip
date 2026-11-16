@@ -95,7 +95,7 @@
 //   node approval-telegram-listener.mjs            # long-poll listener (systemd)
 //   node approval-telegram-listener.mjs --once     # one scan+drain, then exit (smoke)
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, fstatSync, closeSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 
@@ -130,13 +130,17 @@ const AAVA_SIGN_KEY_FILE = process.env.AAVA_TG_SIGN_KEY_FILE || "/etc/paperclip/
 function loadAavaSignKey(path) {
   let fd;
   try {
-    fd = openSync(path, "r");
+    // O_NONBLOCK: a FIFO must not hang start-up; O_NOFOLLOW: no symlinked key.
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW);
   } catch (e) {
     return { key: null, reason: e.code === "ENOENT" ? "avaintiedostoa ei ole" : "avaintiedostoa ei voi avata", log: e.code ?? "open failed" };
   }
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) return { key: null, reason: "avaintiedosto ei ole tavallinen tiedosto", log: "not a regular file" };
+    if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+      return { key: null, reason: "avaintiedoston omistaja ei ole kuuntelijan käyttäjä", log: `owner uid ${st.uid}, want ${process.getuid()}` };
+    }
     if ((st.mode & 0o077) !== 0) {
       return {
         key: null,
@@ -160,7 +164,9 @@ function loadAavaSignKey(path) {
     closeSync(fd);
   }
 }
-const AAVA_SIGN = AAVA_COMPANY_PREFIX ? loadAavaSignKey(AAVA_SIGN_KEY_FILE) : { key: null, reason: null, log: null };
+const AAVA_SIGN = AAVA_COMPANY_PREFIX
+  ? loadAavaSignKey(AAVA_SIGN_KEY_FILE)
+  : { key: null, reason: "Aava-lähde on pois päältä", log: "Aava source off" };
 if (AAVA_COMPANY_PREFIX && !AAVA_SIGN.key) {
   console.error(`aava signing key ${AAVA_SIGN_KEY_FILE} unusable: ${AAVA_SIGN.log} — Aava ✅ disabled, cards offer ❌ only`);
 }
@@ -810,10 +816,16 @@ async function scan() {
         );
         delete state.posted[approval.id];
         saveState(state);
-      } else if (posted && posted.noKey && AAVA_SIGN.key && !posted.handling) {
-        // RK9-922: posted while the signing key was unusable (❌ only); the
-        // listener restarted with a working key, so the card can offer ✅ now.
-        await editDone(posted.messageId, "🔑 Allekirjoitusavain toimii nyt — uusi kortti alla. Tämä kortti ei enää päde.");
+      } else if (posted && kind === AAVA_SEND && !posted.handling && !!posted.noKey !== !AAVA_SIGN.key) {
+        // RK9-922: the listener restarted and the signing key's state changed
+        // since this card was posted: re-post so the card shows the right
+        // buttons (✅ only with a working key) and says why.
+        await editDone(
+          posted.messageId,
+          AAVA_SIGN.key
+            ? "🔑 Allekirjoitusavain toimii nyt — uusi kortti alla. Tämä kortti ei enää päde."
+            : "🔑 Allekirjoitusavain ei toimi — uusi kortti alla. Tämä kortti ei enää päde.",
+        );
         delete state.posted[approval.id];
         saveState(state);
       } else if (posted) {

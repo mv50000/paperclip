@@ -3,9 +3,9 @@
 // "aava_send"). One mock HTTP server plays both the Paperclip API and the
 // Telegram Bot API (TG_API_BASE override); the script runs with --once per step
 // so each assertion covers exactly one scan + one getUpdates drain.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -924,6 +924,69 @@ describe("Aava ✅ is signed with the approve key (RK9-922)", () => {
     const sig = SIGNED_NOTE_RE.exec(decisionCalls()[0].body.decisionNote)?.[1];
     const p = aavaPayload(920);
     expect(verifies(signedMessage(uuid(920), p.gateId, p.sha256), sig!)).toBe(true);
+  });
+
+  it("with a working key, email_send and voice_action approvals keep the plain note", async () => {
+    approvals.push(
+      {
+        id: uuid(940),
+        companyId: RK9.id,
+        type: "email_send",
+        status: "pending",
+        payload: { to: ["asiakas@example.com"], subject: "Tarjous", bodyMarkdown: "Hei!" },
+        requestedByAgentId: uuid(97),
+      },
+      {
+        id: uuid(941),
+        companyId: RK9.id,
+        type: "voice_action",
+        status: "pending",
+        payload: { action: "issue_status", identifier: "RK9-1", status: "done" },
+        requestedByAgentId: uuid(97),
+      },
+    );
+    await runOk();
+    updatesQueue.push([
+      callback(`pa:a:${uuid(940)}`, readState().posted[uuid(940)].messageId),
+      callback(`pa:a:${uuid(941)}`, readState().posted[uuid(941)].messageId),
+    ]);
+    await runOk();
+    expect(decisionCalls().map((c) => [c.url, c.body])).toEqual([
+      [`/api/approvals/${uuid(940)}/approve`, { decisionNote: "Hyväksytty Telegramista" }],
+      [`/api/approvals/${uuid(941)}/approve`, { decisionNote: "Hyväksytty Telegramista" }],
+    ]);
+  });
+
+  it("a key owned by another user or a FIFO is refused without hanging; a card posted with ✅ is re-posted ❌-only after the key breaks", async () => {
+    addAava(950);
+    await runOk();
+    const oldCard = readState().posted[uuid(950)].messageId as number;
+    expect(buttons(sentCards()[0].body)).toEqual(["✅ Lähetä", "❌ Hylkää"]);
+
+    const fifo = join(keyDir, "fifo.key");
+    rmSync(fifo, { force: true });
+    execFileSync("mkfifo", ["-m", "0400", fifo]);
+    const run = await runOk({ AAVA_TG_SIGN_KEY_FILE: fifo });
+    expect(run.out).toContain(`aava signing key ${fifo} unusable: not a regular file`);
+    expect(editsOf(oldCard).at(-1)?.body.text).toBe("🔑 Allekirjoitusavain ei toimi — uusi kortti alla. Tämä kortti ei enää päde.");
+    const card = sentCards().at(-1)!.body;
+    expect(buttons(card)).toEqual(["❌ Hylkää"]);
+    expect(KEY_LINE_RE.exec(card.text)?.[1]).toBe("avaintiedosto ei ole tavallinen tiedosto");
+
+    // a symlink to a good key is not followed
+    const link = join(keyDir, "link.key");
+    rmSync(link, { force: true });
+    symlinkSync(keyPath, link);
+    const linked = await runOk({ AAVA_TG_SIGN_KEY_FILE: link });
+    expect(linked.out).toContain(`aava signing key ${link} unusable: ELOOP`);
+
+    // root can hand the file to another owner; as a normal user, check the rule only
+    if (process.getuid?.() === 0) {
+      const other = keyFile("other.key", signingKey.export({ format: "pem", type: "pkcs8" }));
+      chownSync(other, 65534, 65534);
+      const owned = await runOk({ AAVA_TG_SIGN_KEY_FILE: other });
+      expect(owned.out).toContain("owner uid 65534");
+    }
   });
 
   it("a payload that changed after the card was posted gets no signature and no approval", async () => {
