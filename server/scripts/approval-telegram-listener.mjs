@@ -344,6 +344,15 @@ const AAVA_DMARC_LABELS = new Map([
 ]);
 const AAVA_REASON_TOKEN_RE = /^[a-z0-9_-]{1,40}$/;
 const AAVA_REASONS_MAX = 10;
+// A flood of lines pushes the buttons far from the headers (round 5, M1).
+const AAVA_BODY_LINES_MAX = 120;
+const AAVA_BLANK_LINES_MAX = 2;
+// The contract fields plus the relay's four web-UI fields (RK9-903). Any other
+// key (cc, bcc, attachments, …) might change what is sent: ✅ is blocked.
+const AAVA_PAYLOAD_KEYS = new Set([
+  "kind", "version", "gateId", "op", "from", "to", "subject", "body", "reasons", "sha256", "createdAt",
+  "title", "summary", "recommendedAction", "proposedComment",
+]);
 
 // The plain-language label of a gate reason code, or null for an unknown code.
 function aavaReasonLabel(code) {
@@ -364,18 +373,24 @@ function aavaReasonLabel(code) {
 
 // Each rule returns { field, rule, codePoint? } for the first thing that blocks ✅.
 function aavaTextBlocker(field, value, multiline) {
-  if (value.length === 0) return { field, rule: "empty" };
   const text = multiline ? value.replace(/\r\n/g, "\n") : value;
+  // only line breaks and spaces count as empty too (round 5, L1)
+  if (/^[\n ]*$/.test(text)) return { field, rule: "empty" };
   for (const ch of text) {
     const cp = ch.codePointAt(0);
     if (multiline && cp === 0x0a) continue;
     if (!isAavaTextCodePoint(cp)) return { field, rule: "char", codePoint: cp };
   }
   if (!multiline && (text.startsWith(" ") || text.endsWith(" "))) return { field, rule: "edge-space" };
-  for (const line of multiline ? text.split("\n") : [text]) {
+  const lines = multiline ? text.split("\n") : [text];
+  if (lines.length > AAVA_BODY_LINES_MAX) return { field, rule: "too-many-lines" };
+  let blankRun = 0;
+  for (const line of lines) {
     if (line.includes("  ")) return { field, rule: "space-run" };
     // the plain-text signature delimiter "-- " is the one line that may end in a space
     if (multiline && line !== "-- " && line.endsWith(" ")) return { field, rule: "trailing-space" };
+    blankRun = line === "" ? blankRun + 1 : 0;
+    if (blankRun > AAVA_BLANK_LINES_MAX) return { field, rule: "blank-run" };
   }
   return null;
 }
@@ -397,6 +412,8 @@ function aavaReasonsBlocker(reasons) {
 // null: the character and spacing rules allow ✅. Expects a payload that
 // passed aavaShape (strings and arrays of strings).
 function aavaApprovalBlocker(p) {
+  const unknownKey = Object.keys(p).find((k) => !AAVA_PAYLOAD_KEYS.has(k));
+  if (unknownKey !== undefined) return { field: "payload", rule: "unknown-field", key: unknownKey };
   return (
     aavaAddressBlocker("from", p.from) ??
     p.to.reduce((found, a) => found ?? aavaAddressBlocker("to", a), null) ??
@@ -407,7 +424,7 @@ function aavaApprovalBlocker(p) {
 }
 // </aava-charset>
 
-const AAVA_FIELD_LABELS = { from: "From", to: "To", subject: "Aihe", body: "Runko", reasons: "Syyt" };
+const AAVA_FIELD_LABELS = { payload: "Payload", from: "From", to: "To", subject: "Aihe", body: "Runko", reasons: "Syyt" };
 const AAVA_RULE_TEXTS = {
   empty: "tyhjä",
   "edge-space": "välilyönti alussa tai lopussa",
@@ -416,10 +433,16 @@ const AAVA_RULE_TEXTS = {
   address: "virheellinen osoite",
   "too-many": `yli ${AAVA_REASONS_MAX} syytä`,
   "unknown-reason": "tuntematon syykoodi",
+  "too-many-lines": `yli ${AAVA_BODY_LINES_MAX} riviä`,
+  "blank-run": `yli ${AAVA_BLANK_LINES_MAX} tyhjää riviä peräkkäin`,
 };
 const aavaBlockerLine = (b) =>
   `⛔ ✅ estetty — ${AAVA_FIELD_LABELS[b.field]}: ${
-    b.rule === "char" ? `kielletty merkki U+${b.codePoint.toString(16).toUpperCase().padStart(4, "0")}` : AAVA_RULE_TEXTS[b.rule]
+    b.rule === "char"
+      ? `kielletty merkki U+${b.codePoint.toString(16).toUpperCase().padStart(4, "0")}`
+      : b.rule === "unknown-field"
+        ? `tuntematon kenttä "${headerText(b.key, 40)}"`
+        : AAVA_RULE_TEXTS[b.rule]
   }. Hyväksy Paperclip-UI:ssa, jos viesti on kunnossa.`;
 
 // Display only: an unknown code (which blocks ✅) is shown neutralised.

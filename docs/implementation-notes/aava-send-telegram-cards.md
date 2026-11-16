@@ -60,12 +60,14 @@ Lisäsäännöt:
 - **Runko:** rivinvaihto on vain `\n`. `\r\n` normalisoidaan `\n`:ksi. Yksinäinen `\r` ja kaikki muut rivinvaihdot (U+000B, U+000C, U+0085, U+2028, U+2029) ovat kiellettyjä. Rivillä ei saa olla kahta välilyöntiä peräkkäin eikä välilyöntiä lopussa. Poikkeus on allekirjoituksen erotinrivi `-- `.
 - **Aihe:** ei rivinvaihtoa, ei välilyöntiä alussa tai lopussa, ei kahta välilyöntiä peräkkäin. Kortti ei trimmaa välilyöntejä hiljaa.
 - **Osoitteet (From, To):** vain ASCII U+0021–U+007E (ei välilyöntiä), muoto `<paikallinen>@<domain>` ilman merkkejä `@ < > "` osissa.
-- **Tyhjä aihe tai runko** estää ✅:n. Paikkamerkit `⟨tyhjä aihe⟩` ja `⟨tyhjä runko⟩` käyttävät merkkejä ⟨ ⟩, jotka eivät ole listalla. Kortti, joka tarjoaa ✅:n, ei siksi voi näyttää paikkamerkin näköistä tekstiä.
+- **Rungon pituus (kierros 5):** yli 120 riviä tai yli kaksi tyhjää riviä peräkkäin estää ✅:n, koska rivitulva vie napit kauas otsakkeista.
+- **Tyhjä aihe tai runko** estää ✅:n. Pelkät rivinvaihdot ja välilyönnit lasketaan tyhjäksi. Paikkamerkit `⟨tyhjä aihe⟩` ja `⟨tyhjä runko⟩` käyttävät merkkejä ⟨ ⟩, jotka eivät ole listalla. Kortti, joka tarjoaa ✅:n, ei siksi voi näyttää paikkamerkin näköistä tekstiä.
 - **Syyt:** yli 10 syytä tai tuntematon syykoodi estää ✅:n. Koodit luetaan `Map`ista, joten esim. `constructor` on tuntematon.
+- **Payloadin kentät (kierros 5):** sallitut avaimet ovat sopimuksen kentät (`kind`, `version`, `gateId`, `op`, `from`, `to`, `subject`, `body`, `reasons`, `sha256`, `createdAt`) ja relayn neljä web-UI-kenttää (`title`, `summary`, `recommendedAction`, `proposedComment`). Muu avain (esim. `cc`, `bcc`, `attachments`) voi muuttaa lähetettävää, joten se estää ✅:n syyllä `tuntematon kenttä`.
 
 Kun ✅ estyy, kortti näyttää ensimmäisen esteen kentän ja säännön, esim. `⛔ ✅ estetty — Runko: kielletty merkki U+0085. Hyväksy Paperclip-UI:ssa, jos viesti on kunnossa.` Emoji ja muut kirjoitusjärjestelmät jäävät tarkoituksella ❌-tilaan. Portti normalisoi lähtevän tekstin samaan listaan erillisessä tiketissä.
 
-Säännöt ovat skriptissä yhdessä itsenäisessä lohkossa `// <aava-charset>` … `// </aava-charset>` (`aavaApprovalBlocker`). Testi lataa lohkon erikseen ja käy läpi kaikki koodipisteet U+0000–U+10FFFF. Se varmistaa, että aihe, runko ja osoite sallivat ✅:n täsmälleen listan merkeille. Jokaisella säännöllä on oma testisyöte, ja mutaatiotarkistus 16.11.2026 rikkoi 21 sääntöä yksi kerrallaan: jokainen kaatoi testin.
+Säännöt ovat skriptissä yhdessä itsenäisessä lohkossa `// <aava-charset>` … `// </aava-charset>` (`aavaApprovalBlocker`). Testi lataa lohkon erikseen ja käy läpi kaikki koodipisteet U+0000–U+10FFFF. Se varmistaa, että aihe, runko ja osoite sallivat ✅:n täsmälleen listan merkeille. Jokaisella säännöllä on oma testisyöte. Mutaatiotarkistus 16.11.2026 rikkoi 36 sääntöä yksi kerrallaan, ja jokainen kaatoi testin. Mukana olivat näyttörajat, allekirjoituksen kentät ja painalluksen tarkistukset.
 
 ### Kortti, joka ei näytä koko viestiä: vain ❌
 

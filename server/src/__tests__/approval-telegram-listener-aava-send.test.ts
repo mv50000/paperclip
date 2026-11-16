@@ -70,6 +70,8 @@ const approvals: Approval[] = [];
 // RK9-894: GET /approvals/:id answers with this payload instead of the stored
 // one, so a tap can meet a payload that changed after the scan.
 const detailPayloadOverride = new Map<string, Record<string, unknown>>();
+// … and these top-level fields (status, requestedByAgentId) on the detail read only.
+const detailFieldOverride = new Map<string, Partial<Approval>>();
 const apiCalls: Array<{ method: string; url: string; body: any }> = [];
 const tgCalls: Array<{ method: string; body: any }> = [];
 const updatesQueue: unknown[][] = [];
@@ -119,7 +121,7 @@ beforeAll(async () => {
     if (m) {
       const a = approvals.find((x) => x.id === m![1]);
       if (!a) return send(404, { error: "Approval not found" });
-      return send(200, { ...a, payload: detailPayloadOverride.get(a.id) ?? a.payload });
+      return send(200, { ...a, payload: detailPayloadOverride.get(a.id) ?? a.payload, ...detailFieldOverride.get(a.id) });
     }
     m = /^\/api\/approvals\/([0-9a-f-]{36})\/(approve|reject|request-revision)$/.exec(p);
     if (m && req.method === "POST") {
@@ -147,6 +149,7 @@ afterAll(async () => {
 beforeEach(() => {
   approvals.length = 0;
   detailPayloadOverride.clear();
+  detailFieldOverride.clear();
   apiCalls.length = 0;
   tgCalls.length = 0;
   updatesQueue.length = 0;
@@ -309,7 +312,7 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
   });
 
   it("truncates a long body under Telegram's 4096 limit, says so and offers ❌ only", async () => {
-    addAava(8, {}, { body: `${"rivi ".repeat(29)}rivi\n`.repeat(200) });
+    addAava(8, {}, { body: `${"rivi ".repeat(299)}rivi\n`.repeat(20) });
     await runOk();
     const card = sentCards()[0].body;
     expect(card.text.length).toBeLessThanOrEqual(4096);
@@ -599,6 +602,23 @@ describe("Aava card character list (RK9-894, orchestrator decision after verifie
       [{ reasons: ["screen:"] }, { field: "reasons", rule: "unknown-reason" }],
       [{ reasons: ["dmarc:bogus"] }, { field: "reasons", rule: "unknown-reason" }],
       [{ reasons: ["outside-whitelist"] }, { field: "reasons", rule: "unknown-reason" }],
+      // round 5: the signature line is exactly "-- "
+      [{ body: "Hei\nx-- \nAava" }, { field: "body", rule: "trailing-space" }],
+      [{ body: "Hei\n -- \nAava" }, { field: "body", rule: "trailing-space" }],
+      // round 5, L1: only line breaks or spaces is empty
+      [{ body: "\n \n\r\n" }, { field: "body", rule: "empty" }],
+      [{ body: "  " }, { field: "body", rule: "empty" }],
+      [{ subject: " " }, { field: "subject", rule: "empty" }],
+      // round 5, M1: blank-line floods and long bodies
+      [{ body: "Hei,\n" + "\n".repeat(1000) + "PS. loppu" }, { field: "body", rule: "too-many-lines" }],
+      [{ body: Array.from({ length: 121 }, () => "a").join("\n") }, { field: "body", rule: "too-many-lines" }],
+      [{ body: Array.from({ length: 120 }, () => "a").join("\n") }, null],
+      [{ body: "Hei\n\n\n\nMoi" }, { field: "body", rule: "blank-run" }],
+      [{ body: "Hei\n\n\nMoi" }, null],
+      // round 5, L3: unknown payload keys block; the relay's four UI fields do not
+      [{ cc: ["x@example.com"] }, { field: "payload", rule: "unknown-field", key: "cc" }],
+      [{ attachments: [] }, { field: "payload", rule: "unknown-field", key: "attachments" }],
+      [{ title: "t", summary: "s", recommendedAction: "r", proposedComment: "p" }, null],
     ];
     for (const [over, expected] of cases) {
       expect(charset.aavaApprovalBlocker(base(over)), JSON.stringify(over)).toEqual(expected);
@@ -649,5 +669,75 @@ describe("Aava card blocks hidden line breaks and blanks (RK9-894 verifier round
     addAava(56, {}, { body: "Hei “Matti”,\r\n\r\nhinta on 120 € – sopimus • ok…\r\n\r\n-- \r\nAava" });
     await runOk();
     expect(buttons(sentCards()[0].body)).toEqual(["✅ Lähetä", "❌ Hylkää"]);
+  });
+});
+
+describe("Aava card round-5 tightenings and mutation survivors (RK9-894)", () => {
+  it("an unknown payload key and a blank-line flood give a ❌-only card with the reason", async () => {
+    addAava(60, {}, { bcc: ["piilo@example.com"] });
+    addAava(61, {}, { body: "Hei,\n" + "\n".repeat(1000) + "PS. loppu" });
+    await runOk();
+    const cards = sentCards().map((c) => c.body);
+    expect(cards.map(buttons)).toEqual([["❌ Hylkää"], ["❌ Hylkää"]]);
+    expect(cards[0].text).toContain('⛔ ✅ estetty — Payload: tuntematon kenttä "bcc".');
+    expect(cards[1].text).toContain("⛔ ✅ estetty — Runko: yli 120 riviä.");
+  });
+
+  it("each display limit alone makes the card incomplete: >20 recipients, a cut subject, a cut To line", async () => {
+    addAava(62, {}, { to: Array.from({ length: 21 }, (_, i) => `a${i}@example.com`) });
+    addAava(63, {}, { subject: "a".repeat(301) });
+    // 7 addresses of 191 chars: each fits its 200 cap, the line is over 1200
+    addAava(64, {}, { to: Array.from({ length: 7 }, (_, i) => `${"a".repeat(178)}${i}@example.com`) });
+    await runOk();
+    const cards = sentCards().map((c) => c.body);
+    expect(cards).toHaveLength(3);
+    for (const [i, card] of cards.entries()) {
+      // no character rule fires: only the display limit blocks ✅
+      expect(charset.aavaApprovalBlocker(approvals[i].payload), String(i)).toBeNull();
+      expect(card.text).not.toContain("⛔");
+      expect(card.text).toContain("✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.");
+      expect(buttons(card)).toEqual(["❌ Hylkää"]);
+    }
+  });
+
+  it("a change to only to, sha256, op, from or reasons re-posts the card", async () => {
+    const changes: Array<Record<string, unknown>> = [
+      { to: ["toinen@example.com"] },
+      { sha256: hex(3, 64) },
+      { op: "new" },
+      { from: "info@rk9.fi" },
+      { reasons: ["auto"] },
+    ];
+    const list = changes.map((_, i) => addAava(70 + i));
+    await runOk();
+    const oldCards = list.map((a) => readState().posted[a.id].messageId as number);
+    list.forEach((a, i) => {
+      a.payload = { ...a.payload, ...changes[i] };
+    });
+    await runOk();
+    for (const [i, a] of list.entries()) {
+      expect(editsOf(oldCards[i]).at(-1)?.body.text, JSON.stringify(changes[i])).toMatch(/^♻️ Lähetyspyyntö muuttui/);
+      expect(readState().posted[a.id].messageId).not.toBe(oldCards[i]);
+    }
+    expect(sentCards()).toHaveLength(10);
+  });
+
+  it("✅ is refused when the re-read approval is no longer pending or was created by an agent", async () => {
+    addAava(80);
+    addAava(81);
+    await runOk();
+    detailFieldOverride.set(uuid(80), { status: "approved" });
+    detailFieldOverride.set(uuid(81), { requestedByAgentId: uuid(98) });
+    updatesQueue.push([
+      callback(`pa:a:${uuid(80)}`, readState().posted[uuid(80)].messageId),
+      callback(`pa:a:${uuid(81)}`, readState().posted[uuid(81)].messageId),
+    ]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(0);
+    const answers = tgCalls.filter((c) => c.method === "answerCallbackQuery").map((c) => c.body.text);
+    expect(answers).toEqual([
+      "Lähetyspyyntö on muuttunut tai jo käsitelty — käytä uusinta korttia tai Paperclip-UI:ta.",
+      "Lähetyspyyntö on muuttunut tai jo käsitelty — käytä uusinta korttia tai Paperclip-UI:ta.",
+    ]);
   });
 });
