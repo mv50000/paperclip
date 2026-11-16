@@ -67,7 +67,7 @@ See the file-header comment in `index.mjs` for the change history
 {
   "targets": { "aava": ["aava@rk9.fi"] },
   "default": "aava",
-  "routes": { "hei@sunspot.fi": "aava", "noreply@saatavilla.fi": "s3-only", "dmarc*@ololla.fi": "s3-only" }
+  "routes": { "hei@sunspot.fi": "aava", "tls-rpt@ololla.fi": "s3-only", "dmarc*@ololla.fi": "s3-only" }
 }
 ```
 
@@ -83,12 +83,19 @@ See the file-header comment in `index.mjs` for the change history
   each routed message fails with `FAIL … routing:` in CloudWatch and stays in
   S3. `deploy.sh` and the tests validate the table before it ships.
   `JSON.parse` keeps the last of two identical keys without an error, so
-  check a new key with `grep` before adding it.
+  `deploy.sh` and the tests also reject a key that occurs twice
+  (`findDuplicateKeys()`).
 - `forwarder@<domain>` is `s3-only`: it is the envelope sender of every
   forwarded copy, so a bounce from the destination lands there. Forwarding
   it would loop while the destination bounces.
-- The current table follows the RK9-870 inventory, section 1. The
-  operator's personal address is not a destination for any address.
+- The apps' sender addresses (`noreply@saatavilla.fi`, `no-reply@sunspot.fi`,
+  `noreply@ololla.fi`, `no-reply@ololla.fi`) route to Aava, so a bounce of a
+  failed customer email is seen: Aava's watcher bundles bounces into the
+  morning digest (RK9-888). This cannot loop: the forwarded copy's envelope
+  sender is `forwarder@<domain>`, so a bounce from Aava's mailbox lands in S3.
+- The current table follows the RK9-870 inventory, section 1, except the
+  four app sender addresses above (RK9-888). The operator's personal
+  address is not a destination for any address.
 - Open before the ololla.fi switch: the inventory marks the prod value of
   `kaisa@ololla.fi` (migration 082) as unverified. It routes to Aava by
   default here; check it on rk9-prod before adding `ololla.fi` to

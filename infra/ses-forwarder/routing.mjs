@@ -76,6 +76,7 @@ export function parseRoutes(obj) {
     if (!SES_DOMAINS.includes(domain)) fail(`route ${key} is for a domain this forwarder does not serve`);
     if (typeof target !== "string" || !knownTarget(target)) fail(`route ${key} names unknown target ${JSON.stringify(target)}`);
     if (local.endsWith("*")) {
+      if (prefixes.some((p) => p.domain === domain && `${p.prefix}*` === local)) fail(`duplicate route ${key}`);
       prefixes.push({ prefix: local.slice(0, -1), domain, target });
     } else {
       if (!local) fail(`route ${JSON.stringify(rawKey)} has an empty local part`);
@@ -86,6 +87,61 @@ export function parseRoutes(obj) {
   prefixes.sort((a, b) => b.prefix.length - a.prefix.length);
 
   return Object.freeze({ targets, defaultTarget: obj.default, exact, prefixes });
+}
+
+/** Every key that occurs twice in the same object of a JSON text, as a dotted path
+ *  (`routes.tuki@saatavilla.fi`). JSON.parse keeps the last of two identical keys
+ *  without an error, so a repeated route would silently override the first one;
+ *  deploy.sh and the tests reject the table instead (RK9-888). Throws on invalid
+ *  JSON; the scanner below only ever walks text that JSON.parse has accepted. */
+export function findDuplicateKeys(text) {
+  JSON.parse(text);
+  const dups = [];
+  let i = 0;
+  const skipWs = () => {
+    while (i < text.length && " \t\r\n".includes(text[i])) i++;
+  };
+  const readString = () => {
+    const start = i++;
+    while (text[i] !== '"') i += text[i] === "\\" ? 2 : 1;
+    i++;
+    return JSON.parse(text.slice(start, i));
+  };
+  const join = (path, k) => (path ? `${path}.${k}` : k);
+  const value = (path) => {
+    skipWs();
+    if (text[i] === "{") {
+      i++;
+      skipWs();
+      if (text[i] === "}") return void i++;
+      const seen = new Set();
+      for (;;) {
+        skipWs();
+        const k = readString();
+        if (seen.has(k)) dups.push(join(path, k));
+        seen.add(k);
+        skipWs();
+        i++; // ':'
+        value(join(path, k));
+        skipWs();
+        if (text[i++] === "}") return;
+      }
+    }
+    if (text[i] === "[") {
+      i++;
+      skipWs();
+      if (text[i] === "]") return void i++;
+      for (let n = 0; ; n++) {
+        value(`${path}[${n}]`);
+        skipWs();
+        if (text[i++] === "]") return;
+      }
+    }
+    if (text[i] === '"') return void readString();
+    while (i < text.length && !",}] \t\r\n".includes(text[i])) i++; // number, true, false, null
+  };
+  value("");
+  return dups;
 }
 
 /** Target name for one recipient address. Lookup order: exact address, then the
