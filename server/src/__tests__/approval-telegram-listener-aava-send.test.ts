@@ -334,7 +334,7 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(text).not.toMatch(/[\u200b-\u200f\ufeff]/);
     expect(text).toContain("⚠️ Osoitteessa on muita kuin ASCII-merkkejä.");
     // the stripped U+200F is content the card cannot show: ❌ only
-    expect(text).toContain("⚠️ Viestissä on 1 näkymätöntä merkkiä, joita kortti ei voi näyttää.");
+    expect(text).toContain("⚠️ Viestissä on 1 näkymätöntä tai epätavallista merkkiä, joita kortti ei voi näyttää.");
     expect(sentCards()[0].body.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
   });
 
@@ -351,7 +351,7 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     const cards = sentCards().map((c) => c.body);
     expect(cards).toHaveLength(2);
     for (const card of cards) {
-      expect(card.text).toMatch(/⚠️ Viestissä on \d+ näkymätöntä merkkiä/);
+      expect(card.text).toMatch(/⚠️ Viestissä on \d+ näkymätöntä tai epätavallista merkkiä/);
       expect(card.text).toContain("✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.");
       expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
     }
@@ -363,6 +363,29 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     await runOk();
     expect(decisionCalls()).toHaveLength(0);
     expect(lastAnswer()).toBe("Kortti ei näytä koko viestiä — hyväksy se Paperclip-UI:ssa.");
+  });
+
+  it("C1 controls, odd whitespace, private-use and lone surrogates make the card ❌-only", async () => {
+    const bodies = [
+      "Kiitos!\u0080\u0081\u0080\u0081", // C1 controls (verifier round 3)
+      "Kiitos\u00a0viestistä!", // NBSP looks like a space
+      "Kiitos\tviestistä!",
+      "Kiitos viestistä!  ", // trailing spaces
+      "Kiitos  viestistä!", // a run of spaces
+      "Kiitos\ue000!", // private use
+      "Kiitos!\ud800", // lone surrogate
+      "Kiitos\u3164!", // Hangul filler (a letter that draws as nothing)
+    ];
+    bodies.forEach((body, i) => addAava(30 + i, {}, { body }));
+    addAava(40, {}, { subject: "Hi\u0080\u0081" });
+    await runOk();
+    const cards = sentCards().map((c) => c.body);
+    expect(cards).toHaveLength(bodies.length + 1);
+    for (const card of cards) {
+      expect(card.text).toMatch(/⚠️ Viestissä on \d+ näkymätöntä tai epätavallista merkkiä/);
+      expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+      expect(card.text).not.toMatch(/[\u0080-\u009f]/);
+    }
   });
 
   it("masked content or a missing hash yields a ❌-only card that cannot be approved", async () => {

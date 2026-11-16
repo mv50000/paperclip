@@ -290,7 +290,7 @@ const aavaSignature = (payload) => {
 // business in a card.
 // Zero-width and other invisible format characters can hide inside an address.
 const UNSAFE_CHARS_RE =
-  /[\u0000-\u0008\u000e-\u001f\u007f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+  /[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 // Telegram turns /cmd, @name, #tag and $TAG in plain text into tappable
 // entities. A WORD JOINER after the sigil keeps the look and breaks the entity.
 const AUTOLINK_SIGIL_RE = /([/@#$])(?=[\p{L}\p{N}_])/gu;
@@ -300,7 +300,23 @@ const AUTOLINK_SIGIL_RE = /([/@#$])(?=[\p{L}\p{N}_])/gu;
 // that holds any cannot be shown in full (RK9-894 verifier round 2).
 const INVISIBLE_RE =
   /[\p{Cf}\u0000-\u0008\u000e-\u001f\u007f\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2060-\u206f\u3164\ufe00-\ufe0f\uffa0\ufff0-\ufff8\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/gu;
-const countInvisible = (text) => (String(text ?? "").match(INVISIBLE_RE) ?? []).length;
+// Allowlist (verifier round 3): only letters, marks, digits, punctuation,
+// symbols and a plain space count as visible. Everything else (C0/C1
+// controls, format, private-use, unassigned, lone surrogates, any other
+// whitespace) is content the operator cannot read off the card.
+const VISIBLE_CHAR_RE = /^[\p{L}\p{M}\p{N}\p{P}\p{S} ]$/u;
+const INVISIBLE_ONE_RE = new RegExp(INVISIBLE_RE.source, "u");
+// Spaces can carry hidden bits too: a run of spaces, or spaces at the end of a
+// line. The plain-text signature delimiter "-- " is the one exception.
+function countInvisible(text) {
+  let n = 0;
+  for (const line of String(text ?? "").split(LINE_BREAK_RE)) {
+    for (const ch of line) if (!VISIBLE_CHAR_RE.test(ch) || INVISIBLE_ONE_RE.test(ch)) n += 1;
+    if (line !== "-- " && / $/.test(line)) n += 1;
+    n += (line.match(/ {2,}/g) ?? []).length;
+  }
+  return n;
+}
 const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").replace(INVISIBLE_RE, "").replace(AUTOLINK_SIGIL_RE, "$1\u2060");
 // A header value: one line, neutralised, at most `max` chars.
 const headerText = (value, max) => oneLine(neutralize(String(value ?? "").split(LINE_BREAK_RE).join(" ")), max);
@@ -399,7 +415,7 @@ function renderAavaSend(companyName, approval, masked) {
   const invisible = [p.from, ...p.to, p.subject, p.body].reduce((n, v) => n + countInvisible(v), 0);
   if (invisible > 0) {
     complete = false;
-    head.push(`⚠️ Viestissä on ${invisible} näkymätöntä merkkiä, joita kortti ei voi näyttää.`);
+    head.push(`⚠️ Viestissä on ${invisible} näkymätöntä tai epätavallista merkkiä, joita kortti ei voi näyttää.`);
   }
   const tail = [
     `Tunniste: ${p.gateId} · sha256 ${
