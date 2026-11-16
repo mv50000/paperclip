@@ -93,8 +93,9 @@ See the file-header comment in `index.mjs` for the change history
   failed customer email is seen: Aava's watcher bundles bounces into the
   morning digest (RK9-888). This cannot loop: the forwarded copy's envelope
   sender is `forwarder@<domain>`, so a bounce from Aava's mailbox lands in S3.
-- The current table follows the RK9-870 inventory, section 1. The
-  operator's personal address is not a destination for any address.
+- The current table follows the RK9-870 inventory, section 1, except the
+  four app sender addresses above (RK9-888). The operator's personal
+  address is not a destination for any address.
 - Open before the ololla.fi switch: the inventory marks the prod value of
   `kaisa@ololla.fi` (migration 082) as unverified. It routes to Aava by
   default here; check it on rk9-prod before adding `ololla.fi` to

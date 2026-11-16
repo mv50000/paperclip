@@ -227,11 +227,46 @@ test("rewrite() finds the end of the headers in a message with \\r\\r\\n on ever
   const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
   const sep = out.indexOf("\r\n\r\n");
   const h = out.slice(0, sep);
-  assert.equal(out.slice(sep + 4), "line 1\r\r\nline 2\r\r\n", "the body is forwarded whole");
+  assert.equal(out.slice(sep + 4), "line 1\r\nline 2\r\n", "the body is forwarded whole, with plain CRLF line ends");
   assert.match(h, /^Content-Type: text\/plain *$/m, "Content-Type stays in the headers");
   assert.match(h, /^Subject: x *$/m);
   assert.equal(header(out, "Reply-To"), "a@example.com");
   assert.ok(!/\r(?!\n)/.test(h), "no lone CR left in the headers");
+});
+
+test("rewrite() repairs the multipart delimiters of a doubly converted message", () => {
+  const lines = [
+    "From: a@example.com",
+    'Content-Type: multipart/alternative; boundary="B1"',
+    "",
+    "--B1",
+    "Content-Type: text/plain",
+    "",
+    "plain",
+    "--B1",
+    "Content-Type: text/html",
+    "",
+    "<b>html</b>",
+    "--B1--",
+    "",
+  ];
+  const raw = Buffer.from(lines.join("\r\r\n"), "utf8");
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
+  const sep = out.indexOf("\r\n\r\n");
+  assert.match(out.slice(0, sep), /^Content-Type: multipart\/alternative; boundary="B1" *$/m);
+  assert.equal(out.slice(sep + 4), lines.slice(3).join("\r\n"), "every delimiter line ends in a plain CRLF");
+  // a body without a double CR is passed through byte for byte
+  const clean = "a\rb\r\nc\n";
+  const out2 = rewrite(Buffer.from(`From: a@example.com\r\n\r\n${clean}`), "forwarder@sunspot.fi", {}, "hei@sunspot.fi").toString("utf8");
+  assert.ok(out2.endsWith(`\r\n\r\n${clean}`));
+});
+
+test("rewrite() drops an empty first line instead of ending its headers early", () => {
+  const raw = Buffer.from("\nFrom: a@example.com\r\nContent-Type: text/html\r\n\r\n<b>hi</b>", "utf8");
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
+  const [h, body] = out.split("\r\n\r\n");
+  assert.match(h, /^Content-Type: text\/html$/m);
+  assert.equal(body, "<b>hi</b>");
 });
 
 test("rewrite() splits CRLF, LF and mixed line endings exactly as before", () => {
@@ -251,11 +286,11 @@ test("rewrite() splits CRLF, LF and mixed line endings exactly as before", () =>
 });
 
 test("rewrite() splits a long run of CRs in linear time", () => {
-  const raw = Buffer.from("From: a@example.com\r\nSubject: " + "\r".repeat(2_000_000) + "\r\n\r\nbody", "utf8");
+  const raw = Buffer.from("From: a@example.com\r\nSubject: " + "\r".repeat(2_000_000) + "\r\n\r\nbody" + "\r".repeat(2_000_000) + "x\r\r\n", "utf8");
   const t0 = Date.now();
   const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
   assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
-  assert.ok(out.endsWith("\r\n\r\nbody"));
+  assert.ok(out.endsWith("x\r\n"));
 });
 
 // RK9-888 (verifier Low): a line with a tab but no colon is not a header.
