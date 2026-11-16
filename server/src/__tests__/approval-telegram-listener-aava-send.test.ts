@@ -95,6 +95,9 @@ const detailPayloadOverride = new Map<string, Record<string, unknown>>();
 // … and these top-level fields (status, requestedByAgentId) on the detail read only.
 const detailFieldOverride = new Map<string, Partial<Approval>>();
 const apiCalls: Array<{ method: string; url: string; body: any }> = [];
+// RK9-922: the pending list answers 500, so a run's scan posts and re-posts
+// nothing and a tap meets the state row exactly as written.
+let failApprovalList = false;
 const tgCalls: Array<{ method: string; body: any }> = [];
 const updatesQueue: unknown[][] = [];
 let nextTgMessageId = 500;
@@ -148,6 +151,7 @@ beforeAll(async () => {
     if (p === "/api/companies") return send(200, [RK9, SAA]);
     let m = /^\/api\/companies\/([\w-]+)\/approvals$/.exec(p);
     if (m) {
+      if (failApprovalList) return send(500, { error: "down" });
       const status = url.searchParams.get("status");
       return send(200, approvals.filter((a) => a.companyId === m![1] && (!status || a.status === status)));
     }
@@ -185,6 +189,7 @@ beforeEach(() => {
   approvals.length = 0;
   detailPayloadOverride.clear();
   detailFieldOverride.clear();
+  failApprovalList = false;
   apiCalls.length = 0;
   tgCalls.length = 0;
   updatesQueue.length = 0;
@@ -987,6 +992,63 @@ describe("Aava ✅ is signed with the approve key (RK9-922)", () => {
       const owned = await runOk({ AAVA_TG_SIGN_KEY_FILE: other });
       expect(owned.out).toContain("owner uid 65534");
     }
+  });
+
+  it("a tampered state row cannot make ✅ sign content the card did not show", async () => {
+    const a = addAava(960);
+    await runOk();
+    const card = readState().posted[uuid(960)].messageId as number;
+    expect(readState().posted[uuid(960)].mac).toMatch(/^[A-Za-z0-9+/]{43}=$/);
+
+    // whoever can write state.json swaps the payload and rewrites the row's
+    // fingerprint to match it, keeping the old MAC
+    const b = aavaPayload(960, { to: ["hyokkaaja@example.com"], sha256: hex(9, 64) });
+    a.payload = b;
+    const st = readState();
+    st.posted[uuid(960)].sig = JSON.stringify([b.gateId, b.op, b.from, b.to, b.subject, b.body, b.reasons, b.sha256]);
+    writeFileSync(join(stateDir, "state.json"), JSON.stringify(st));
+    // the tap comes in before any scan sees the change
+    updatesQueue.push([callback(`pa:a:${uuid(960)}`, card)]);
+    failApprovalList = true;
+    const tap = await runOk();
+    failApprovalList = false;
+    expect(decisionCalls()).toHaveLength(0);
+    expect(tap.out).toContain(`aava approval ${uuid(960)}: ✅ refused, state row fails its integrity check`);
+    expect(lastAnswer()).toBe("Kortin tila ei täsmää — tätä ei hyväksytty. Uusi kortti tulee seuraavassa skannauksessa.");
+
+    // the next scan replaces the card; the fresh card shows B and signs B
+    await runOk();
+    expect(editsOf(card).at(-1)?.body.text).toBe("♻️ Kortti päivitettiin — uusi kortti alla. Tämä kortti ei enää päde.");
+    const fresh = readState().posted[uuid(960)];
+    expect(sentCards().at(-1)!.body.text).toContain(`hyokkaaja@${WJ}example.com`);
+    updatesQueue.push([callback(`pa:a:${uuid(960)}`, fresh.messageId)]);
+    await runOk();
+    const sig = SIGNED_NOTE_RE.exec(decisionCalls()[0].body.decisionNote)?.[1];
+    expect(verifies(signedMessage(uuid(960), b.gateId, b.sha256), sig!)).toBe(true);
+  });
+
+  it("a row without a MAC (posted before RK9-922) or with a moved message id never signs", async () => {
+    addAava(970);
+    addAava(971);
+    await runOk();
+    const st = readState();
+    delete st.posted[uuid(970)].mac;
+    // point 971's row at another message: its MAC no longer matches
+    st.posted[uuid(971)].messageId = 4242;
+    writeFileSync(join(stateDir, "state.json"), JSON.stringify(st));
+    updatesQueue.push([callback(`pa:a:${uuid(970)}`, st.posted[uuid(970)].messageId), callback(`pa:a:${uuid(971)}`, 4242)]);
+    failApprovalList = true;
+    await runOk();
+    failApprovalList = false;
+    expect(decisionCalls()).toHaveLength(0);
+    expect(tgCalls.filter((c) => c.method === "answerCallbackQuery").map((c) => c.body.text)).toEqual([
+      "Kortin tila ei täsmää — tätä ei hyväksytty. Uusi kortti tulee seuraavassa skannauksessa.",
+      "Kortin tila ei täsmää — tätä ei hyväksytty. Uusi kortti tulee seuraavassa skannauksessa.",
+    ]);
+    // both rows are re-posted with a valid MAC
+    await runOk();
+    expect(readState().posted[uuid(970)].mac).toEqual(expect.any(String));
+    expect(readState().posted[uuid(971)].messageId).not.toBe(4242);
   });
 
   it("a payload that changed after the card was posted gets no signature and no approval", async () => {

@@ -88,16 +88,18 @@
 //   AAVA_TG_COMPANY_PREFIX default RK9; the company whose aava_send approvals get
 //                       a card ("" turns the Aava source off)
 //   AAVA_TG_SIGN_KEY_FILE default /etc/paperclip/aava-approve-ed25519.key; the
-//                       Ed25519 private key (PKCS8 PEM, owner paperclip, mode
-//                       0400) that signs Aava ✅ decisions (RK9-922). Read once
-//                       at start-up; a fixed key needs a listener restart.
+//                       Ed25519 private key (PKCS8 PEM, owned by the listener's
+//                       own user, mode 0400) that signs Aava ✅ decisions
+//                       (RK9-922). Read once at start-up; a fixed key needs a
+//                       listener restart. The listener runs as its own system
+//                       user, not as the agents' user, and STATE_DIR is 0700.
 //
 //   node approval-telegram-listener.mjs            # long-poll listener (systemd)
 //   node approval-telegram-listener.mjs --once     # one scan+drain, then exit (smoke)
 
 import { readFileSync, writeFileSync, mkdirSync, renameSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { join } from "node:path";
-import { createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { createHash, createHmac, createPrivateKey, sign as cryptoSign, timingSafeEqual } from "node:crypto";
 
 const API_URL = (process.env.PAPERCLIP_API_URL ?? "http://localhost:3100").replace(/\/$/, "");
 const PCP_TOKEN = process.env.PAPERCLIP_TOKEN ?? "";
@@ -169,6 +171,29 @@ const AAVA_SIGN = AAVA_COMPANY_PREFIX
   : { key: null, reason: "Aava-lähde on pois päältä", log: "Aava source off" };
 if (AAVA_COMPANY_PREFIX && !AAVA_SIGN.key) {
   console.error(`aava signing key ${AAVA_SIGN_KEY_FILE} unusable: ${AAVA_SIGN.log} — Aava ✅ disabled, cards offer ❌ only`);
+}
+
+// RK9-922: state.json may be tampered with. An Aava row's posting-time
+// fingerprint (`sig`) decides what ✅ signs, so the row carries an HMAC over
+// approval id, Telegram message id and fingerprint. The HMAC key is derived
+// from the signing key (domain-separated, never stored), so whoever can write
+// the state file but not read the key cannot make the listener sign content
+// that no card showed. A row without a valid MAC never signs; the next scan
+// re-posts its card.
+const AAVA_CARD_MAC_KEY = AAVA_SIGN.key
+  ? createHash("sha256")
+      .update("aava-card-mac-v1\n")
+      .update(AAVA_SIGN.key.export({ format: "der", type: "pkcs8" }))
+      .digest()
+  : null;
+const aavaCardMac = (approvalId, messageId, sig) =>
+  createHmac("sha256", AAVA_CARD_MAC_KEY).update(JSON.stringify(["aava-card-v1", approvalId, messageId, sig])).digest();
+function aavaCardMacOk(approvalId, entry) {
+  if (!AAVA_CARD_MAC_KEY || typeof entry?.mac !== "string" || typeof entry.sig !== "string") return false;
+  if (!Number.isSafeInteger(entry.messageId)) return false;
+  const given = Buffer.from(entry.mac, "base64");
+  const want = aavaCardMac(approvalId, entry.messageId, entry.sig);
+  return given.length === want.length && timingSafeEqual(given, want);
 }
 
 // TG_API_BASE is only overridden by the test harness (points both APIs at a mock server).
@@ -828,6 +853,12 @@ async function scan() {
         );
         delete state.posted[approval.id];
         saveState(state);
+      } else if (posted && kind === AAVA_SEND && AAVA_SIGN.key && !posted.handling && !aavaCardMacOk(approval.id, posted)) {
+        // RK9-922: the row fails its integrity check (posted before RK9-922,
+        // or state.json was edited). Its ✅ never signs; post a fresh card.
+        await editDone(posted.messageId, "♻️ Kortti päivitettiin — uusi kortti alla. Tämä kortti ei enää päde.");
+        delete state.posted[approval.id];
+        saveState(state);
       } else if (posted) {
         continue;
       }
@@ -862,6 +893,9 @@ async function scan() {
           ...(sig ? { sig } : {}),
           ...(kind === AAVA_SEND ? { kind: AAVA_SEND, label: aavaLabel(approval.payload) } : {}),
           ...(kind === AAVA_SEND && !AAVA_SIGN.key ? { noKey: true } : {}),
+          ...(kind === AAVA_SEND && sig && AAVA_SIGN.key
+            ? { mac: aavaCardMac(approval.id, msg.result.message_id, sig).toString("base64") }
+            : {}),
         };
         saveState(state);
         console.log(`posted approval ${approval.id} (${company.name})`);
@@ -1368,6 +1402,23 @@ async function handleCallback(cq) {
     return;
   }
 
+  // RK9-922: the state row decides what ✅ signs, so it must pass its
+  // integrity check and belong to the tapped message. A lost row has no
+  // fingerprint and is refused by the freshness check below.
+  if (
+    action === "a" &&
+    isAava &&
+    state.posted[approvalId] &&
+    (!aavaCardMacOk(approvalId, entry) || cq.message?.message_id !== entry.messageId)
+  ) {
+    console.error(`aava approval ${approvalId}: ✅ refused, state row fails its integrity check`);
+    await tg("answerCallbackQuery", {
+      callback_query_id: cq.id,
+      text: "Kortin tila ei täsmää — tätä ei hyväksytty. Uusi kortti tulee seuraavassa skannauksessa.",
+    });
+    return;
+  }
+
   let aavaNote = null;
   if (action === "a" && isAava) {
     const current = await fetchApproval(approvalId);
@@ -1385,8 +1436,11 @@ async function handleCallback(cq) {
       });
       return;
     }
-    // The payload now matches the card's posting-time fingerprint; sign that.
-    const signed = aavaSignedNote(approvalId, entry.sig);
+    // The payload now matches the card's posting-time fingerprint; sign that,
+    // and only from a row that passes its integrity check (RK9-922).
+    const signed = aavaCardMacOk(approvalId, entry)
+      ? aavaSignedNote(approvalId, entry.sig)
+      : { refusal: "Kortin tila ei täsmää — tätä ei hyväksytty. Uusi kortti tulee seuraavassa skannauksessa." };
     if (!signed.note) {
       console.error(`aava approval ${approvalId}: ✅ refused, not signed`);
       await tg("answerCallbackQuery", { callback_query_id: cq.id, text: signed.refusal });

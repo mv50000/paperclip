@@ -107,11 +107,21 @@ Pelkkä approvalin tila `approved` ei enää riitä lähetykseen. Kuuntelija all
 
 Avain:
 
-- Yksityinen avain on PEM-tiedosto (PKCS8). Polku tulee muuttujasta `AAVA_TG_SIGN_KEY_FILE`, oletus `/etc/paperclip/aava-approve-ed25519.key`. Tiedoston omistaa käyttäjä `paperclip`, oikeudet `0400`. Orkestroija luo ja asentaa avaimen.
+- Yksityinen avain on PEM-tiedosto (PKCS8). Polku tulee muuttujasta `AAVA_TG_SIGN_KEY_FILE`, oletus `/etc/paperclip/aava-approve-ed25519.key`. Tiedoston omistaa kuuntelijan oma käyttäjä, oikeudet `0400`. Orkestroija luo ja asentaa avaimen.
 - Kuuntelija lukee avaimen käynnistyksessä. Se hylkää avaimen, jos tiedostoa ei ole, sitä ei voi avata, polku on symbolinen linkki, tiedosto ei ole tavallinen tiedosto (esim. FIFO), tiedoston omistaja ei ole kuuntelijan käyttäjä, oikeudet sallivat ryhmän tai muiden käytön, tiedosto ei ole PEM-avain tai avain ei ole Ed25519. Kuuntelija kirjaa syyn lokiin (polku ja syy, ei sisältöä) eikä kaadu.
 - Ilman toimivaa avainta Aava-kortti tarjoaa vain ❌:n ja näyttää rivin `🔑 ✅ ei käytössä: hyväksynnän allekirjoitusavain ei toimi (<syy>)…`. Väärennetty ✅ torjutaan samalla syyllä. Muut kortit toimivat.
 - Avaimen korjaus vaatii kuuntelijan uudelleenkäynnistyksen. Kun avaimen tila on muuttunut kortin postauksen jälkeen, seuraava skannaus sulkee vanhan kortin ja postaa uuden. Ilman avainta postattu kortti vaihtuu ✅-korttiin (`🔑 Allekirjoitusavain toimii nyt — uusi kortti alla.`), ja ✅-kortti vaihtuu ❌-korttiin, jos avain lakkaa toimimasta (`🔑 Allekirjoitusavain ei toimi — uusi kortti alla.`).
 - Avainta, allekirjoitettavaa viestiä tai allekirjoitusta ei kirjoiteta lokiin, Telegramiin eikä `state.json`iin. Allekirjoitus päätyy vain approvalin `decisionNote`en.
+
+Tilatiedoston eheys:
+
+- Postaushetken sormenjälki elää `state.json`issa. Tiedoston muokkaaja voisi muuten vaihtaa sormenjäljen ja saada ✅:n allekirjoittamaan sisällön, jota kortti ei näyttänyt.
+- Siksi Aava-kortin tilarivillä on HMAC-SHA256 (`mac`) approvalin id:n, Telegram-viestin id:n ja sormenjäljen yli. HMAC-avain johdetaan allekirjoitusavaimesta omalla etuliitteellä (`aava-card-mac-v1`), eikä sitä tallenneta.
+- ✅ allekirjoittaa vain rivin, jonka MAC täsmää ja jonka viesti on painettu kortti. Muuten painallus torjutaan (`Kortin tila ei täsmää`), ja lokiin kirjataan `state row fails its integrity check`.
+- Seuraava skannaus korvaa rivin, jonka MAC ei täsmää (`♻️ Kortti päivitettiin — uusi kortti alla.`). Sama koskee ennen RK9-922:ta postattuja kortteja, joilta MAC puuttuu.
+- Raja: tilatiedoston muokkaaja voi yhä poistaa rivejä tai estää ✅:n. Allekirjoitusta se ei saa ilman avainta.
+
+Asennusvaatimus (orkestroijan päätös 16.11.2026): kuuntelija ajetaan omalla järjestelmäkäyttäjällään, ei käyttäjänä `paperclip`, koska Paperclipin agentit ajetaan käyttäjänä `paperclip`. Avaimen omistaa kuuntelijan käyttäjä (`0400`), ja tilahakemisto `STATE_DIR` on vain sen kirjoitettavissa (`0700`).
 
 Testivektori, jota myös portin toteutus käyttää: RFC 8032:n kohdan 7.1 TEST 1 -avain (siemen `9d61b19d…7f60`, julkinen avain `d75a9801…511a`), `approvalId` `4f8c2a1e-9b3d-4e7a-8c5f-0d1e2f3a4b5c`, `gateId` `g-0123456789abcdef`, `sha256` `e3b0c442…b855` (tyhjän merkkijonon tiiviste). Odotettu allekirjoitus on `1kAq6ROEOQqg3F7TtMggtEaiikZC3BUFI0lwxQgIp6/USriNp7jGhDgNKW5jqmr+IWAyvCNq/YTdlALiM8lIAA==`. Täydet arvot ovat testissä.
 
@@ -137,6 +147,6 @@ Kortin rivi tallentaa allekirjoituksen kentistä `gateId`, `op`, `from`, `to`, `
 
 ## Käyttöönotto
 
-Palvelu ajaa skriptin polusta `/opt/paperclip/server/scripts/approval-telegram-listener.mjs` (`paperclip-approval-telegram.service`). Päivitä `/opt/paperclip` mergetyn masterin tasolle ja aja `sudo systemctl restart paperclip-approval-telegram`. Paperclip-palvelin ei tarvitse restarttia. Ympäristömuuttujaa ei tarvitse lisätä, koska `AAVA_TG_COMPANY_PREFIX` on oletuksena `RK9` ja `AAVA_TG_SIGN_KEY_FILE` oletuksena `/etc/paperclip/aava-approve-ed25519.key`. RK9-922: asenna avain ennen restarttia (`paperclip:paperclip`, `0400`), muuten Aava-kortit ovat ❌-kortteja. Käynnistyslokin rivi `aava signing key … unusable` kertoo, ettei avain kelpaa.
+Palvelu ajaa skriptin polusta `/opt/paperclip/server/scripts/approval-telegram-listener.mjs` (`paperclip-approval-telegram.service`). Päivitä `/opt/paperclip` mergetyn masterin tasolle ja aja `sudo systemctl restart paperclip-approval-telegram`. Paperclip-palvelin ei tarvitse restarttia. Ympäristömuuttujaa ei tarvitse lisätä, koska `AAVA_TG_COMPANY_PREFIX` on oletuksena `RK9` ja `AAVA_TG_SIGN_KEY_FILE` oletuksena `/etc/paperclip/aava-approve-ed25519.key`. RK9-922: asenna avain ennen restarttia (kuuntelijan oma käyttäjä, `0400`, tilahakemisto `0700`), muuten Aava-kortit ovat ❌-kortteja. Palvelutiedoston `User=`/`Group=` (nyt `paperclip`) vaihtaa orkestroija asennuksessa. Käynnistyslokin rivi `aava signing key … unusable` kertoo, ettei avain kelpaa.
 
 Testi: `server/src/__tests__/approval-telegram-listener-aava-send.test.ts`.
