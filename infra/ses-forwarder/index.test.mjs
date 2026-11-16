@@ -269,6 +269,20 @@ test("rewrite() drops an empty first line instead of ending its headers early", 
   assert.equal(body, "<b>hi</b>");
 });
 
+test("rewrite() drops a leading continuation line that would fold into X-Original-To", () => {
+  for (const raw of [
+    " , tietosuoja@sunspot.fi\r\nFrom: a@example.com\r\nSubject: s\r\n\r\nb",
+    "\r\r\n X-Original-To: tietosuoja@sunspot.fi\r\nFrom: a@example.com\r\n\r\nb",
+    "\tSubject: x\r\n\tmore\r\nFrom: a@example.com\r\n\r\nb",
+  ]) {
+    const out = rewrite(Buffer.from(raw, "utf8"), "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
+    const h = out.split("\r\n\r\n")[0];
+    assert.ok(!h.includes("tietosuoja"), JSON.stringify(raw));
+    assert.match(h, /\r\nX-Original-To: hei@sunspot\.fi(\r\n[^ \t]|$)/, JSON.stringify(raw));
+    assert.ok(!/\r\n[ \t]/.test(h.slice(h.indexOf("X-Original-To"))), "nothing folds after X-Original-To");
+  }
+});
+
 test("rewrite() splits CRLF, LF and mixed line endings exactly as before", () => {
   const m = { commonHeaders: { from: ["a@example.com"] } };
   for (const [raw, body] of [

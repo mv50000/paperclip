@@ -265,11 +265,13 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // Tab is allowed before a colon: obsolete syntax permits whitespace there (nameOf
   // trims it). A line with no colon is no header at all, so any control character,
   // tab included, drops it (RK9-888). An empty line (a message that starts with an
-  // LF) is dropped too: replayed, it would end our header block early.
+  // LF) is dropped too: replayed, it would end our header block early. So is a first
+  // line that starts with whitespace: it continues no header, and replayed after our
+  // X-Original-To it would fold into that header as an extra arrival address.
   const hasBadName = (line) =>
     line.includes(":") ? /[\x00-\x08\x0a-\x1f\x7f]/.test(line.split(":")[0]) : /[\x00-\x1f\x7f]/.test(line);
   const kept = blocks
-    .filter((b) => b[0] !== "" && !DROP_HEADERS.has(nameOf(b)) && !hasBadName(b[0]))
+    .filter((b) => b[0] !== "" && !/^[ \t]/.test(b[0]) && !DROP_HEADERS.has(nameOf(b)) && !hasBadName(b[0]))
     .map((b) => b.join("\r\n"));
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
