@@ -221,10 +221,16 @@ export function encodePhrase(phrase) {
  *  - the original identity and the inbound hop's verdict headers are dropped */
 export function rewrite(raw, fromAddr, mail, originalTo) {
   const text = sanitizeDanglingBoundaries(raw.toString("utf8"));
-  const m = text.match(/\r?\n\r?\n/);
-  const sepIdx = m ? m.index : -1;
-  const headerPart = sepIdx >= 0 ? text.slice(0, sepIdx) : text;
-  const body = sepIdx >= 0 ? text.slice(sepIdx + m[0].length) : "";
+  // The header block ends at the first empty line. Stray CRs before either LF still
+  // count as an empty line (RK9-888): a message converted to CRLF twice has `\r\r\n`
+  // on every line, and `\r?\n\r?\n` found no end, so the whole body was parsed as
+  // headers and the forwarded body was empty. The pattern can only start at an LF,
+  // so a long run of CRs costs one pass, not a backtrack per position.
+  const m = /\n\r*\n/.exec(text);
+  let headerEnd = m ? m.index : text.length;
+  while (headerEnd > 0 && text.charCodeAt(headerEnd - 1) === 13) headerEnd--; // CRs before the LF
+  const headerPart = text.slice(0, headerEnd);
+  const body = m ? text.slice(m.index + m[0].length) : "";
 
   // Group header lines into logical blocks (header + its folded continuation lines)
   const blocks = [];
@@ -238,9 +244,13 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   }
   const nameOf = (b) => (b[0].split(":")[0] || "").toLowerCase().trim();
   // A header whose name holds control characters (`X-Original-To\0:`) is dropped too.
-  // Tab is allowed: obsolete syntax permits whitespace before the colon (nameOf trims it).
+  // Tab is allowed before a colon: obsolete syntax permits whitespace there (nameOf
+  // trims it). A line with no colon is no header at all, so any control character,
+  // tab included, drops it (RK9-888: as before RK9-874).
+  const hasBadName = (line) =>
+    line.includes(":") ? /[\x00-\x08\x0a-\x1f\x7f]/.test(line.split(":")[0]) : /[\x00-\x1f\x7f]/.test(line);
   const kept = blocks
-    .filter((b) => !DROP_HEADERS.has(nameOf(b)) && !/[\x00-\x08\x0a-\x1f\x7f]/.test(b[0].split(":")[0]))
+    .filter((b) => !DROP_HEADERS.has(nameOf(b)) && !hasBadName(b[0]))
     .map((b) => b.join("\r\n"));
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);

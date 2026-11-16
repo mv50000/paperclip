@@ -6,7 +6,8 @@
 # session (aws sts get-caller-identity), e.g. AWS_PROFILE=rk9-admin.
 #
 # Before uploading, the script
-#   1. validates routes.json (an invalid table would make every routed message fail),
+#   1. validates routes.json (an invalid table would make every routed message fail;
+#      a repeated key is rejected too, because JSON.parse silently keeps the last),
 #   2. saves the currently deployed code and configuration to $BACKUP_DIR
 #      (default ~/rk9-mail-backup/<UTC timestamp>/) for rollback.
 # It never changes the function's environment variables: see README.md for the
@@ -20,8 +21,14 @@ BACKUP_DIR="${BACKUP_DIR:-$HOME/rk9-mail-backup/$(date -u +%Y-%m-%dT%H%M%SZ)}"
 
 node --input-type=module -e '
   import fs from "node:fs";
-  import { parseRoutes } from "./routing.mjs";
-  const c = parseRoutes(JSON.parse(fs.readFileSync("routes.json", "utf8")));
+  import { parseRoutes, findDuplicateKeys } from "./routing.mjs";
+  const text = fs.readFileSync("routes.json", "utf8");
+  const dups = findDuplicateKeys(text);
+  if (dups.length) {
+    console.error(`routes.json invalid: duplicate key(s) ${dups.join(", ")} (JSON.parse would keep only the last)`);
+    process.exit(1);
+  }
+  const c = parseRoutes(JSON.parse(text));
   const dests = [...new Set([...c.targets.values()].flat())];
   console.log(`routes.json OK: ${c.exact.size} exact + ${c.prefixes.length} prefix routes, default=${c.defaultTarget}, destinations=${dests.join(",")}`);
 '

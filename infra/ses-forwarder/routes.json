@@ -1,5 +1,5 @@
 {
-  "$comment": "rk9-ses-forwarder routing table (RK9-874). Source: RK9-870 inventory, section 1. Targets: a name maps to destination addresses; \"s3-only\" is reserved and means keep the raw .eml in S3 without forwarding. Unlisted addresses go to `default`. The operator's personal address is not a destination for any address. forwarder@<domain> is the envelope sender of every forwarded copy, so its bounces must stay in S3 (a bouncing destination would otherwise loop). Validated by routing.mjs parseRoutes() in tests and in deploy.sh.",
+  "$comment": "rk9-ses-forwarder routing table (RK9-874). Source: RK9-870 inventory, section 1. Targets: a name maps to destination addresses; \"s3-only\" is reserved and means keep the raw .eml in S3 without forwarding. Unlisted addresses go to `default`. The operator's personal address is not a destination for any address. forwarder@<domain> is the envelope sender of every forwarded copy, so its bounces must stay in S3 (a bouncing destination would otherwise loop). The apps' noreply/no-reply senders route to Aava (RK9-888) so a bounce of a failed customer email is seen: Aava's watcher bundles them into the morning digest. Validated by routing.mjs parseRoutes() in tests and in deploy.sh.",
   "targets": {
     "aava": ["aava@rk9.fi"]
   },
@@ -11,7 +11,7 @@
     "tietosuoja@saatavilla.fi": "aava",
     "admin@saatavilla.fi": "aava",
     "operator@saatavilla.fi": "aava",
-    "noreply@saatavilla.fi": "s3-only",
+    "noreply@saatavilla.fi": "aava",
 
     "$sunspot": "sunspot.fi",
     "forwarder@sunspot.fi": "s3-only",
@@ -22,7 +22,7 @@
     "hello@sunspot.fi": "aava",
     "admin@sunspot.fi": "aava",
     "ops@sunspot.fi": "aava",
-    "no-reply@sunspot.fi": "s3-only",
+    "no-reply@sunspot.fi": "aava",
     "uptime-probe@sunspot.fi": "s3-only",
 
     "$ololla": "ololla.fi",
@@ -35,8 +35,8 @@
     "support@ololla.fi": "aava",
     "tietosuoja@ololla.fi": "aava",
     "kaisa@ololla.fi": "aava",
-    "noreply@ololla.fi": "s3-only",
-    "no-reply@ololla.fi": "s3-only",
+    "noreply@ololla.fi": "aava",
+    "no-reply@ololla.fi": "aava",
     "dmarc*@ololla.fi": "s3-only",
     "tls-rpt@ololla.fi": "s3-only"
   }

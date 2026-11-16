@@ -217,6 +217,55 @@ test("rewrite() keeps the header block intact around a stray CR (\\r\\r\\n) and 
   assert.equal(body, "<b>hi</b>\r\n");
 });
 
+// RK9-888: a message converted to CRLF twice has `\r\r\n` on every line, the empty
+// line included. The header/body split used to miss it and forward an empty body.
+test("rewrite() finds the end of the headers in a message with \\r\\r\\n on every line", () => {
+  const raw = Buffer.from(
+    "From: a@example.com\r\r\nSubject: x\r\r\nContent-Type: text/plain\r\r\n\r\r\nline 1\r\r\nline 2\r\r\n",
+    "utf8",
+  );
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
+  const sep = out.indexOf("\r\n\r\n");
+  const h = out.slice(0, sep);
+  assert.equal(out.slice(sep + 4), "line 1\r\r\nline 2\r\r\n", "the body is forwarded whole");
+  assert.match(h, /^Content-Type: text\/plain *$/m, "Content-Type stays in the headers");
+  assert.match(h, /^Subject: x *$/m);
+  assert.equal(header(out, "Reply-To"), "a@example.com");
+  assert.ok(!/\r(?!\n)/.test(h), "no lone CR left in the headers");
+});
+
+test("rewrite() splits CRLF, LF and mixed line endings exactly as before", () => {
+  const m = { commonHeaders: { from: ["a@example.com"] } };
+  for (const [raw, body] of [
+    ["From: a@example.com\r\nSubject: x\r\n\r\nbody\r\n", "body\r\n"],
+    ["From: a@example.com\nSubject: x\n\nbody\n", "body\n"],
+    ["From: a@example.com\nSubject: x\r\n\nbody", "body"],
+    ["From: a@example.com\nSubject: x\n\r\nbody", "body"],
+    ["From: a@example.com\r\nSubject: x", ""],
+  ]) {
+    const out = rewrite(Buffer.from(raw, "utf8"), "forwarder@sunspot.fi", m, "hei@sunspot.fi").toString("utf8");
+    const sep = out.indexOf("\r\n\r\n");
+    assert.equal(out.slice(sep + 4), body, JSON.stringify(raw));
+    assert.match(out.slice(0, sep), /^Subject: x$/m, JSON.stringify(raw));
+  }
+});
+
+test("rewrite() splits a long run of CRs in linear time", () => {
+  const raw = Buffer.from("From: a@example.com\r\nSubject: " + "\r".repeat(2_000_000) + "\r\n\r\nbody", "utf8");
+  const t0 = Date.now();
+  const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi").toString("utf8");
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+  assert.ok(out.endsWith("\r\n\r\nbody"));
+});
+
+// RK9-888 (verifier Low): a line with a tab but no colon is not a header.
+test("rewrite() drops a header line that has a tab but no colon", () => {
+  const raw = plain(["From: a@example.com", "Subject: x", "junk\tline", "plain junk"]);
+  const h = headersOf(rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi"));
+  assert.ok(!h.includes("junk\tline"));
+  assert.match(h, /^plain junk$/m, "a colon-less line without control characters is kept as before");
+});
+
 test("rewrite() never copies a From that would be cut by its many folds", () => {
   const raw = plain(["From:" + "\r\n ".repeat(2665) + "victim@example.com", "Subject: x"]);
   const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: [] } }, "hei@sunspot.fi");
@@ -295,7 +344,7 @@ test("handler keeps a bounce to forwarder@<domain> in S3 (no loop)", async () =>
 });
 
 test("handler keeps an s3-only address in S3 without fetching or sending", async () => {
-  const { calls } = await runHandler(sesEvent(["noreply@saatavilla.fi"]));
+  const { calls } = await runHandler(sesEvent(["uptime-probe@sunspot.fi"]));
   assert.equal(calls.s3.length, 0);
   assert.equal(calls.ses.length, 0);
 });
