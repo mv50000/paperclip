@@ -333,6 +333,36 @@ describe("approval-telegram-listener — Aava send requests (RK9-894)", () => {
     expect(text).toContain(`To (2): ceo@${WJ}rk9.fi, \u0430ava@${WJ}rk9.fi`);
     expect(text).not.toMatch(/[\u200b-\u200f\ufeff]/);
     expect(text).toContain("⚠️ Osoitteessa on muita kuin ASCII-merkkejä.");
+    // the stripped U+200F is content the card cannot show: ❌ only
+    expect(text).toContain("⚠️ Viestissä on 1 näkymätöntä merkkiä, joita kortti ei voi näyttää.");
+    expect(sentCards()[0].body.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+  });
+
+  it("a body that hides text in invisible characters cannot be approved", async () => {
+    const hidden = "IBAN FI12 3456"
+      .split("")
+      .map((c) => c.charCodeAt(0).toString(2).replace(/0/g, "\u200b").replace(/1/g, "\u200c"))
+      .join("\u200d");
+    addAava(24, {}, { body: `Kiitos viestistä!${hidden}` });
+    // tag characters ("ASCII smuggling") and a variation selector in the subject
+    addAava(25, {}, { subject: "Re: kysymys\u{e0041}\u{e0042}\ufe0f" });
+    await runOk();
+
+    const cards = sentCards().map((c) => c.body);
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      expect(card.text).toMatch(/⚠️ Viestissä on \d+ näkymätöntä merkkiä/);
+      expect(card.text).toContain("✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.");
+      expect(card.reply_markup.inline_keyboard[0].map((b: any) => b.text)).toEqual(["❌ Hylkää"]);
+    }
+    expect(cards[0].text).toContain("│ Kiitos viestistä!");
+    expect(cards[0].text).not.toMatch(/[\u200b-\u200d]/);
+    expect(cards[1].text).toContain("Aihe: Re: kysymys\n");
+
+    updatesQueue.push([callback(`pa:a:${uuid(24)}`, readState().posted[uuid(24)].messageId)]);
+    await runOk();
+    expect(decisionCalls()).toHaveLength(0);
+    expect(lastAnswer()).toBe("Kortti ei näytä koko viestiä — hyväksy se Paperclip-UI:ssa.");
   });
 
   it("masked content or a missing hash yields a ❌-only card that cannot be approved", async () => {

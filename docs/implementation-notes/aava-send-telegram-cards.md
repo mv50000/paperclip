@@ -37,7 +37,8 @@ From, To, aihe ja runko voivat tulla ulkopuoliselta lähettäjältä. Kuuntelija
 
 - Viesti lähtee ilman `parse_mode`a, joten teksti ei voi muotoilla korttia. Linkkien esikatselu on pois päältä (`link_preview_options.is_disabled`).
 - Merkkien `/`, `@`, `#` ja `$` jälkeen lisätään WORD JOINER (U+2060), kun niitä seuraa kirjain, numero tai alaviiva. Telegram ei silloin tee tekstistä napautettavaa komentoa (`/start`), mainintaa (`@botti`), hashtagia tai cashtagia. Teksti näyttää samalta. Kopioitu osoite sisältää näkymättömän merkin.
-- Bidi-ohjausmerkit (U+202A–U+202E, U+2066–U+2069, U+061C), nollalevyiset ja muut näkymättömät merkit (U+00AD, U+180E, U+200B–U+200F, U+2060–U+2064, U+FEFF) ja C0-ohjausmerkit poistetaan. Osoite ei siksi näy väärässä järjestyksessä, eikä siihen voi piilottaa merkkejä.
+- Bidi-ohjausmerkit (U+202A–U+202E, U+2066–U+2069, U+061C), nollalevyiset ja muut näkymättömät merkit (U+00AD, U+180E, U+200B–U+200F, U+2060–U+2064, U+FEFF) ja C0-ohjausmerkit poistetaan. Osoite ei siksi näy väärässä järjestyksessä.
+- Kortti poistaa myös muut merkit, joita Telegram ei piirrä: Unicode-luokka Cf, default-ignorable-merkit, tag-merkit (U+E0000–U+E0FFF), variaatiovalitsimet ja Hangul-täytemerkit. Poistettu merkki on sisältöä, jota operaattori ei näe. Jos From, To, aihe tai runko sisältää yhdenkin, kortti näyttää rivin `⚠️ Viestissä on N näkymätöntä merkkiä, joita kortti ei voi näyttää.`, eikä sitä voi hyväksyä Telegramista. Myös emoji, jossa on ZWJ tai variaatiovalitsin (esim. ❤️), estää hyväksynnän Telegramista.
 - Jos From- tai To-osoitteessa on muita kuin ASCII-merkkejä (esim. kyrillinen `а`), kortti varoittaa, että osoite voi jäljitellä tuttua osoitetta.
 - Otsakkeet kirjoitetaan yhdelle riville. Rivinvaihdoksi lasketaan sama joukko kuin `voice_action`-kortissa (`\n`, `\r`, `\v`, `\f`, U+0085, U+2028, U+2029).
 - Rungon jokainen rivi alkaa merkeillä `│ `. Runko ei siksi voi näyttää kortin omalta riviltä, kuten väärennetyltä `To:`- tai `✅ Hyväksytty`-riviltä.
@@ -52,7 +53,7 @@ Operaattori ei saa hyväksyä viestiä, jota hän ei nähnyt kokonaan (orkestroi
 
 - `from`, jokin `to`-osoite, `subject` tai `body` sisältää merkkijonon `***REDACTED***`. Kortti näyttää rivin `⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.`
 - `sha256` puuttuu tai ei ole 64 pientä heksaa. Kortti näyttää saman rivin.
-- Runko katkaistiin, osoite tai aihe lyhennettiin, tai vastaanottajia on yli 20. Kortti näyttää rivin `✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.` Paperclip-UI näyttää koko viestin.
+- Runko katkaistiin, osoite tai aihe lyhennettiin, vastaanottajia on yli 20, tai viestissä on näkymättömiä merkkejä. Kortti näyttää rivin `✂️ Kortti ei näytä koko viestiä. Hyväksy se Paperclip-UI:ssa.` Paperclip-UI näyttää koko viestin.
 
 Tiketin kuvaus sanoo, että runko näytetään "katkaistuna Telegramin rajaan". Runko katkaistaan edelleen, mutta katkaistua korttia ei voi hyväksyä Telegramista. Tämä seuraa orkestroijan periaatteesta. Syyt eivät ole viestin sisältöä, joten syiden rajaus ei estä hyväksyntää.
 

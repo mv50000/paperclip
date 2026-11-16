@@ -294,7 +294,14 @@ const UNSAFE_CHARS_RE =
 // Telegram turns /cmd, @name, #tag and $TAG in plain text into tappable
 // entities. A WORD JOINER after the sigil keeps the look and breaks the entity.
 const AUTOLINK_SIGIL_RE = /([/@#$])(?=[\p{L}\p{N}_])/gu;
-const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").replace(AUTOLINK_SIGIL_RE, "$1\u2060");
+// Characters a Telegram client draws as nothing (format characters, Unicode
+// default-ignorables, tag characters, variation selectors, Hangul fillers, C0
+// controls other than the line breaks). The card strips them, so a message
+// that holds any cannot be shown in full (RK9-894 verifier round 2).
+const INVISIBLE_RE =
+  /[\p{Cf}\u0000-\u0008\u000e-\u001f\u007f\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2060-\u206f\u3164\ufe00-\ufe0f\uffa0\ufff0-\ufff8\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/gu;
+const countInvisible = (text) => (String(text ?? "").match(INVISIBLE_RE) ?? []).length;
+const neutralize = (text) => String(text ?? "").replace(UNSAFE_CHARS_RE, "").replace(INVISIBLE_RE, "").replace(AUTOLINK_SIGIL_RE, "$1\u2060");
 // A header value: one line, neutralised, at most `max` chars.
 const headerText = (value, max) => oneLine(neutralize(String(value ?? "").split(LINE_BREAK_RE).join(" ")), max);
 
@@ -389,6 +396,11 @@ function renderAavaSend(companyName, approval, masked) {
     head.push("⚠️ Osoitteessa on muita kuin ASCII-merkkejä. Tarkista, ettei se jäljittele tuttua osoitetta.");
   }
   if (masked) head.push("⚠️ Sisältöä on peitetty, viesti ei vastaa lähtevää. Tätä ei voi hyväksyä.");
+  const invisible = [p.from, ...p.to, p.subject, p.body].reduce((n, v) => n + countInvisible(v), 0);
+  if (invisible > 0) {
+    complete = false;
+    head.push(`⚠️ Viestissä on ${invisible} näkymätöntä merkkiä, joita kortti ei voi näyttää.`);
+  }
   const tail = [
     `Tunniste: ${p.gateId} · sha256 ${
       typeof p.sha256 === "string" && SHA256_RE.test(p.sha256) ? `${p.sha256.slice(0, 12)}…` : "puuttuu tai virheellinen"
@@ -396,8 +408,11 @@ function renderAavaSend(companyName, approval, masked) {
     "──────────",
   ];
 
-  // the incomplete line is decided after the body, so its room is reserved now
-  const headLength = [...head, AAVA_INCOMPLETE_LINE, ...tail].join("\n").length;
+  // The incomplete line is decided after the body, so its room is reserved
+  // now. The title is counted at its longest (company name cut at 100), so
+  // `complete` does not depend on the company name: the tap-time check in
+  // aavaApprovable renders without it and must reach the same answer.
+  const headLength = [`${head[0].split(" — ")[0]} — ${"x".repeat(100)}`, ...head.slice(1), AAVA_INCOMPLETE_LINE, ...tail].join("\n").length;
   const footer = (shown) => `\n──────────\n✂️ Runko katkaistu: näytetty ${shown} / ${p.body.length} merkkiä.`;
   const budget = AAVA_CARD_MAX - headLength - footer(p.body.length).length;
   const bodyLines = p.body.length ? p.body.split(LINE_BREAK_RE) : ["(ei runkoa)"];
