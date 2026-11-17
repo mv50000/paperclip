@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SESClient } from "@aws-sdk/client-ses";
 import { Readable } from "node:stream";
-import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, handler } from "./index.mjs";
+import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, handler } from "./index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, "fixtures");
@@ -191,6 +191,85 @@ test("rewrite() keeps the sender's own Reply-To as X-Original-Reply-To", () => {
   assert.equal(header(out, "Reply-To"), "noreply@vendor.example");
   assert.equal(header(out, "X-Original-Reply-To"), "Customer <customer@example.com>");
   assert.equal((headersOf(out).match(/^X-Original-Reply-To:/gim) || []).length, 1);
+});
+
+// ---- RK9-930: X-Original-Message-ID ------------------------------------------
+
+const countOf = (buf, name) => (headersOf(buf).match(new RegExp(`^${name}:`, "gim")) || []).length;
+const fwd = (headers) =>
+  rewrite(plain(headers), "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi");
+
+test("rewrite() keeps the original Message-ID as X-Original-Message-ID and threading headers as is", () => {
+  const out = fwd([
+    "From: a@example.com",
+    "Message-ID: <CAF1abc.def+x=y@mail.example.com>",
+    "In-Reply-To: <prev@saatavilla.fi>",
+    "References: <first@example.com>\r\n <prev@saatavilla.fi>",
+    "Subject: Re: tilaus",
+  ]);
+  assert.equal(header(out, "X-Original-Message-ID"), "<CAF1abc.def+x=y@mail.example.com>");
+  assert.equal(countOf(out, "X-Original-Message-ID"), 1);
+  assert.equal(countOf(out, "Message-ID"), 0, "SES writes the forwarded copy's own Message-ID");
+  assert.equal(header(out, "In-Reply-To"), "<prev@saatavilla.fi>");
+  assert.equal(header(out, "References"), "<first@example.com> <prev@saatavilla.fi>");
+  assert.equal(countOf(out, "X-Original-References"), 0);
+  assert.equal(countOf(out, "X-Original-In-Reply-To"), 0);
+  assert.equal(out.toString("utf8").split("\r\n\r\n")[1], "hello\r\n", "body intact");
+});
+
+test("rewrite() forwards a message without a Message-ID and adds no X-Original-Message-ID", () => {
+  const out = fwd(["From: a@example.com", "Subject: x"]);
+  assert.equal(countOf(out, "X-Original-Message-ID"), 0);
+  assert.equal(header(out, "Subject"), "x");
+  assert.equal(out.toString("utf8").split("\r\n\r\n")[1], "hello\r\n");
+});
+
+test("rewrite() drops a forged inbound X-Original-Message-ID and every other X-Original-* header", () => {
+  const forged = [
+    "X-Original-Message-ID: <forged@attacker.example>",
+    "x-original-message-id: <forged2@attacker.example>",
+    "X-Original-References: <forged@attacker.example>",
+    "X-Original-In-Reply-To: <forged@attacker.example>",
+    "X-Original-Sender: forged@attacker.example",
+  ];
+  const withId = fwd(["From: a@example.com", "Message-ID: <real@example.com>", ...forged, "Subject: x"]);
+  assert.equal(countOf(withId, "X-Original-Message-ID"), 1);
+  assert.equal(header(withId, "X-Original-Message-ID"), "<real@example.com>");
+  assert.ok(!/attacker/.test(headersOf(withId)), "no forged value survives");
+
+  const withoutId = fwd(["From: a@example.com", ...forged, "Subject: x"]);
+  assert.equal(countOf(withoutId, "X-Original-Message-ID"), 0);
+  assert.ok(!/attacker/.test(headersOf(withoutId)), "no forged value survives");
+});
+
+test("rewrite() omits X-Original-Message-ID when the value has a line break", () => {
+  // folded inside the id
+  assert.equal(countOf(fwd(["From: a@example.com", "Message-ID: <abc\r\n def@example.com>"]), "X-Original-Message-ID"), 0);
+  // a lone CR is no line end, and the id it leaves behind is not valid
+  assert.equal(countOf(fwd(["From: a@example.com", "Message-ID: <abc\rdef@example.com>"]), "X-Original-Message-ID"), 0);
+  // a bare LF starts a new (forged) header line, which is dropped
+  const lf = fwd(["From: a@example.com", "Message-ID: <ok@example.com>\nX-Original-Message-ID: <forged@attacker.example>"]);
+  assert.equal(countOf(lf, "X-Original-Message-ID"), 1);
+  assert.equal(header(lf, "X-Original-Message-ID"), "<ok@example.com>");
+  // folding before the id is whitespace, not part of the value
+  assert.equal(header(fwd(["From: a@example.com", "Message-ID:\r\n <ok@example.com>"]), "X-Original-Message-ID"), "<ok@example.com>");
+});
+
+test("originalMessageId() accepts only one single-line <left@right> id that fits a header line", () => {
+  const blk = (v) => [[`Message-ID:${v}`]];
+  assert.equal(originalMessageId(blk(" <a@b>")), "<a@b>");
+  assert.equal(originalMessageId([]), "");
+  assert.equal(originalMessageId([...blk(" <a@b>"), ...blk(" <c@d>")]), "", "two Message-IDs are ambiguous");
+  for (const bad of [" a@b", " <ab>", " <a@b", " <a b@c>", " <a<b@c>", " <@b>", " <a@>", " <a@b> x", " <ä@b>", " <a\x00@b>", ""]) {
+    assert.equal(originalMessageId(blk(bad)), "", JSON.stringify(bad));
+  }
+  const fits = `<${"x".repeat(975 - 4)}@b>`; // 975 characters
+  assert.equal(originalMessageId(blk(` ${fits}`)), fits);
+  assert.equal(originalMessageId(blk(` <x${fits.slice(1)}`)), "", "976 characters would make a line over 998 octets");
+  const out = fwd(["From: a@example.com", `Message-ID: ${fits}`]);
+  for (const line of headersOf(out).split("\r\n")) assert.ok(Buffer.byteLength(line) <= 998, "header line within 998 octets");
+  assert.equal(countOf(out, "X-Original-Message-ID"), 1);
+  assert.equal(countOf(fwd(["From: a@example.com", `Message-ID: <${"x".repeat(1200)}@b>`]), "X-Original-Message-ID"), 0);
 });
 
 test("rewrite() does not let a bare CR or a control-character header name smuggle X-Original-To", () => {

@@ -40,6 +40,12 @@
 // to a target (Aava by default) or to "s3-only". See routing.mjs. The forwarded From is
 // now `"<original name or address> via <domain>" <forwarder@domain>`, Reply-To is the
 // original sender, and X-Original-To lists the address(es) the message arrived at.
+//
+// 2026-11-17 (RK9-930): SES gives the forwarded copy a new Message-ID, so a reply to it
+// could not thread to the customer's original message. The original Message-ID now
+// travels as X-Original-Message-ID (validated, see originalMessageId()). In-Reply-To and
+// References pass through unchanged, so they need no X-Original-* copy. Every inbound
+// X-Original-* header is dropped: only the forwarder writes that family.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
@@ -80,7 +86,8 @@ const DROP_HEADERS = new Set([
   "from", "return-path", "sender", "message-id", "dkim-signature", "reply-to", "x-original-from",
   "x-original-reply-to",
   // ours to write: an inbound X-Original-To would let any sender fake which address
-  // the message arrived at (e.g. tietosuoja@), and Aava acts on that header
+  // the message arrived at (e.g. tietosuoja@), and Aava acts on that header. Every
+  // other X-Original-* header is dropped too (isForgeableOriginal() below).
   "x-original-to",
   // inbound-hop artifacts — never forward someone else's verdict
   "authentication-results", "received-spf",
@@ -125,6 +132,32 @@ export function sanitizeDanglingBoundaries(text) {
     if (!boundary) return block;
     return delimiters.has(boundary) ? block : "Content-Type: text/plain";
   });
+}
+
+/** The X-Original-* family is ours to write, and the Aava gate trusts it only in a
+ *  forwarded message (RK9-930). An inbound copy (X-Original-Message-ID, …) is the
+ *  sender's forgery, so it is dropped whatever its exact name. */
+const isForgeableOriginal = (name) => name.startsWith("x-original-");
+
+const X_ORIGINAL_MESSAGE_ID = "X-Original-Message-ID";
+/** A msg-id (RFC 5322 3.6.4) in its common form: `<left@right>`, printable ASCII,
+ *  no whitespace and no angle brackets inside. */
+const MSG_ID = /^<[!-;=?-~]+@[!-;=?-~]+>$/;
+
+/** The original Message-ID value exactly as the sender wrote it (angle brackets
+ *  included), or "" when it cannot be copied safely. The value must fit one line
+ *  (no folding inside it) and have the `<…@…>` form. It is at most 998 characters,
+ *  and short enough that our whole header line stays within the RFC 5322 limit of
+ *  998 octets (975 characters for the value). A message
+ *  with no Message-ID, or with more than one, gets none: an ambiguous id is worse
+ *  than a missing one. The message is forwarded either way. */
+export function originalMessageId(messageIdBlocks) {
+  if (messageIdBlocks.length !== 1) return "";
+  const b = messageIdBlocks[0];
+  const value = b.join("\r\n").slice(b[0].indexOf(":") + 1).trim();
+  if (/[\r\n]/.test(value)) return "";
+  if (value.length > 998 - `${X_ORIGINAL_MESSAGE_ID}: `.length) return "";
+  return MSG_ID.test(value) ? value : "";
 }
 
 async function streamToBuffer(stream) {
@@ -236,6 +269,7 @@ function collapseStrayCRs(body) {
  *  - From: `"<original name or address> via <domain>" <fromAddr>` (DKIM-aligned)
  *  - Reply-To and X-Original-From: the original From header
  *  - X-Original-To: the address(es) the message arrived at (string or array)
+ *  - X-Original-Message-ID: the original Message-ID, when it is a valid one-line id
  *  - the original identity and the inbound hop's verdict headers are dropped */
 export function rewrite(raw, fromAddr, mail, originalTo) {
   const text = sanitizeDanglingBoundaries(raw.toString("utf8"));
@@ -270,8 +304,9 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // X-Original-To it would fold into that header as an extra arrival address.
   const hasBadName = (line) =>
     line.includes(":") ? /[\x00-\x08\x0a-\x1f\x7f]/.test(line.split(":")[0]) : /[\x00-\x1f\x7f]/.test(line);
+  const isHeader = (b) => b[0] !== "" && !/^[ \t]/.test(b[0]) && !hasBadName(b[0]);
   const kept = blocks
-    .filter((b) => b[0] !== "" && !/^[ \t]/.test(b[0]) && !DROP_HEADERS.has(nameOf(b)) && !hasBadName(b[0]))
+    .filter((b) => isHeader(b) && !DROP_HEADERS.has(nameOf(b)) && !isForgeableOriginal(nameOf(b)))
     .map((b) => b.join("\r\n"));
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
@@ -293,6 +328,9 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // The sender's own Reply-To (e.g. a contact form's customer address) would be lost
   // with Reply-To rewritten to the sender, so it travels as X-Original-Reply-To.
   const origReplyTo = copyable(rawValueOf("reply-to"));
+  // SES gives the forwarded copy a new Message-ID; the original one lets a reply
+  // thread to the customer's message (RK9-930).
+  const origMessageId = originalMessageId(blocks.filter((b) => isHeader(b) && nameOf(b) === "message-id"));
 
   const domain = String(fromAddr).split("@")[1] || "";
   const label = senderLabel(commonFrom || rawFrom);
@@ -309,6 +347,7 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
     // (bcc, alias, list), and on a domain catch-all that is the useful fact.
     ...(origReplyTo ? [`X-Original-Reply-To: ${origReplyTo}`] : []),
     ...(toList.length ? [`X-Original-To: ${toList.join(",\r\n ")}`] : []),
+    ...(origMessageId ? [`${X_ORIGINAL_MESSAGE_ID}: ${origMessageId}`] : []),
     ...kept,
   ].join("\r\n");
   return Buffer.from(newHeaders + "\r\n\r\n" + body, "utf8");
