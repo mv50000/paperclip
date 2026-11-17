@@ -51,7 +51,11 @@
 // forwarder's header of that name disappears, so the Aava gate could not learn the
 // arrival address. The arrival address now also travels in X-Rk9-Forwarded-To, a
 // header no mail system writes: the routed envelope recipients as bare addresses
-// separated by ", " on one line. Every inbound X-Rk9-* header is dropped.
+// separated by ", " on one line. Every inbound X-Rk9-* header is dropped. The header
+// is always written: a list that cannot be written safely gets the value `invalid`,
+// so a sender's hidden copy can never be the only one (the gate rejects two). A kept
+// header's name must be printable ASCII (RFC 5322 ftext), and control characters are
+// removed from kept header values.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
@@ -147,19 +151,34 @@ export function sanitizeDanglingBoundaries(text) {
 const isForgeableOriginal = (name) => name.startsWith("x-original-") || name.startsWith("x-rk9-");
 
 const X_RK9_FORWARDED_TO = "X-Rk9-Forwarded-To";
+/** The X-Rk9-Forwarded-To value when the recipient list cannot be written safely.
+ *  It is not an address, so the Aava gate rejects a brand reply to the message. */
+export const FORWARDED_TO_INVALID = "invalid";
 
 /** The X-Rk9-Forwarded-To value: the envelope recipients routed to this delivery as
- *  bare lowercase addresses joined by ", " on one line (no folding), or "" when the
- *  header must be left out. One malformed address leaves out the whole header: a
- *  partial list could make a message for two addresses look like a message for one.
- *  So does a line longer than 998 octets. The Aava gate rejects a message without
- *  the header, so every doubt fails closed (RK9-936). */
+ *  bare lowercase addresses joined by ", " on one line (no folding). The header is
+ *  always written. It gets FORWARDED_TO_INVALID when the list is empty, when one
+ *  address is malformed (a partial list could make a message for two addresses look
+ *  like a message for one) or when the line would be longer than 998 octets. A
+ *  sender's hidden copy of the header can then never be the only one, and the Aava
+ *  gate rejects two headers or a non-address value, so every doubt fails closed
+ *  (RK9-936). */
 export function forwardedToValue(recipients) {
   const list = (Array.isArray(recipients) ? recipients : [recipients]).map((r) => String(r ?? "").trim().toLowerCase());
-  if (list.length === 0 || !list.every((a) => ADDRESS_RE.test(a))) return "";
+  if (list.length === 0 || !list.every((a) => ADDRESS_RE.test(a))) return FORWARDED_TO_INVALID;
   const value = [...new Set(list)].join(", ");
-  return Buffer.byteLength(`${X_RK9_FORWARDED_TO}: ${value}`, "utf8") <= 998 ? value : "";
+  return Buffer.byteLength(`${X_RK9_FORWARDED_TO}: ${value}`, "utf8") <= 998 ? value : FORWARDED_TO_INVALID;
 }
+
+/** A header name we replay: RFC 5322 ftext (printable ASCII except the colon),
+ *  optionally followed by obsolete whitespace before the colon. A name with a
+ *  non-ASCII character (a zero-width space, a fullwidth letter) or a line with no
+ *  colon is dropped, so no later hop can turn it into one of our headers (RK9-936). */
+const REPLAYABLE_NAME = /^[\x21-\x39\x3b-\x7e]+[ \t]*$/;
+
+/** Control characters other than HTAB, removed from every kept header line. CR and
+ *  LF cannot occur inside a line here (a lone CR is already a space, LF splits). */
+const VALUE_CONTROL = /[\x00-\x08\x0a-\x1f\x7f]/g;
 
 const X_ORIGINAL_MESSAGE_ID = "X-Original-Message-ID";
 /** A msg-id (RFC 5322 3.6.4) in its common form: `<left@right>`, printable ASCII,
@@ -291,8 +310,8 @@ function collapseStrayCRs(body) {
  *  - From: `"<original name or address> via <domain>" <fromAddr>` (DKIM-aligned)
  *  - Reply-To and X-Original-From: the original From header
  *  - X-Original-To: the address(es) the message arrived at (string or array)
- *  - X-Rk9-Forwarded-To: the same arrival address(es) as bare addresses, see
- *    forwardedToValue(); the Aava gate reads only this header (RK9-936)
+ *  - X-Rk9-Forwarded-To: the same arrival address(es) as bare addresses, always
+ *    written, see forwardedToValue(); the Aava gate reads only this header (RK9-936)
  *  - X-Original-Message-ID: the original Message-ID, when it is a valid one-line id
  *  - the original identity and the inbound hop's verdict headers are dropped */
 export function rewrite(raw, fromAddr, mail, originalTo) {
@@ -326,12 +345,15 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // LF) is dropped too: replayed, it would end our header block early. So is a first
   // line that starts with whitespace: it continues no header, and replayed after our
   // X-Original-To it would fold into that header as an extra arrival address.
-  const hasBadName = (line) =>
-    line.includes(":") ? /[\x00-\x08\x0a-\x1f\x7f]/.test(line.split(":")[0]) : /[\x00-\x1f\x7f]/.test(line);
+  // Since RK9-936 the name must be printable ASCII (REPLAYABLE_NAME), and a line
+  // with no colon is dropped whatever it holds.
+  const hasBadName = (line) => !line.includes(":") || !REPLAYABLE_NAME.test(line.split(":")[0]);
   const isHeader = (b) => b[0] !== "" && !/^[ \t]/.test(b[0]) && !hasBadName(b[0]);
+  // A form feed or other control character in a kept value is removed: a lenient
+  // parser could read `X-A: a\fX-Rk9-Forwarded-To: …` as two headers (RK9-936).
   const kept = blocks
     .filter((b) => isHeader(b) && !DROP_HEADERS.has(nameOf(b)) && !isForgeableOriginal(nameOf(b)))
-    .map((b) => b.join("\r\n"));
+    .map((b) => b.map((line) => line.replace(VALUE_CONTROL, "")).join("\r\n"));
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
     return b ? b.join("\r\n").slice(b[0].indexOf(":") + 1) : "";
@@ -364,6 +386,7 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
     .map((a) => sanitizeHeaderValue(a, 320))
     .filter(Boolean);
   // Proton overwrites X-Original-To on delivery; this header survives (RK9-936).
+  // Always written, `invalid` when the list cannot be written safely.
   const forwardedTo = forwardedToValue(originalTo);
 
   const newHeaders = [
@@ -373,7 +396,7 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
     // (bcc, alias, list), and on a domain catch-all that is the useful fact.
     ...(origReplyTo ? [`X-Original-Reply-To: ${origReplyTo}`] : []),
     ...(toList.length ? [`X-Original-To: ${toList.join(",\r\n ")}`] : []),
-    ...(forwardedTo ? [`${X_RK9_FORWARDED_TO}: ${forwardedTo}`] : []),
+    `${X_RK9_FORWARDED_TO}: ${forwardedTo}`,
     ...(origMessageId ? [`${X_ORIGINAL_MESSAGE_ID}: ${origMessageId}`] : []),
     ...kept,
   ].join("\r\n");

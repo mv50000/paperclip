@@ -53,11 +53,16 @@ directory must be kept in sync (see **Deploying** below).
    ([RK9-936](/RK9/issues/RK9-936)). Its value is the envelope recipients
    routed to this target as bare lowercase addresses (no display name, no
    angle brackets), separated by `, ` on one line, for example
-   `X-Rk9-Forwarded-To: hei@sunspot.fi`. If any address is malformed or the
-   line would exceed 998 octets, the header is left out, and the Aava gate
-   then rejects a brand reply (fail closed). Every inbound `X-Rk9-*` header
-   is dropped. The Aava gate reads the arrival address only from this
-   header. The sender's own `Reply-To` (for
+   `X-Rk9-Forwarded-To: hei@sunspot.fi`. The header is always written. If the
+   list is empty, any address is malformed or the line would exceed 998
+   octets, the value is `invalid`, and the Aava gate then rejects a brand
+   reply (fail closed). A sender's hidden copy can so never be the only one.
+   Every inbound `X-Rk9-*` header is dropped. The Aava gate reads the arrival
+   address only from this header. A kept header must have a name of
+   printable ASCII (RFC 5322 ftext, obsolete whitespace before the colon is
+   allowed); any other line, including a line with no colon, is dropped.
+   Control characters other than HTAB are removed from kept header values.
+   The body is not changed. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
    so the original one is kept as `X-Original-Message-ID` (angle brackets
@@ -71,9 +76,7 @@ directory must be kept in sync (see **Deploying** below).
    dropped, because only the forwarder writes that family. This also drops a
    list server's own headers, such as Google Groups' `X-Original-Sender`.
    A reader of these headers must use an RFC 5322 parser that reads only the
-   top-level header block and splits lines only on CR/LF: kept header values
-   can still hold other control characters. Every value the forwarder copies
-   is stripped of CR/LF.
+   top-level header block and splits lines only on CR/LF.
 4. Looks up each recipient in `routes.json` (see **Routing** below) and sends
    one rewritten copy per target via SES `SendRawEmail`. Recipients routed to
    `s3-only` are logged (`S3-ONLY …`) and not forwarded.
