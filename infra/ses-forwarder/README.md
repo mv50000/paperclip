@@ -61,7 +61,8 @@ directory must be kept in sync (see **Deploying** below).
    address only from this header. A kept header must have a name of
    printable ASCII (RFC 5322 ftext, obsolete whitespace before the colon is
    allowed); any other line, including a line with no colon, is dropped.
-   Control characters other than HTAB are removed from kept header values.
+   C0 control characters other than HTAB, and DEL, are removed from kept
+   header values (C1 controls and U+2028/U+2029 are not).
    The body is not changed. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
