@@ -58,8 +58,12 @@ directory must be kept in sync (see **Deploying** below).
    otherwise it is left out and the message is still forwarded.
    `In-Reply-To` and `References` pass through unchanged. Every inbound
    `X-Original-*` header (`X-Original-To`, `X-Original-Message-ID`, …) is
-   dropped, so a sender cannot fake one: only the forwarder writes that family.
-   Every copied value is stripped of CR/LF.
+   dropped, because only the forwarder writes that family. This also drops a
+   list server's own headers, such as Google Groups' `X-Original-Sender`.
+   A reader of these headers must use an RFC 5322 parser that reads only the
+   top-level header block and splits lines only on CR/LF: kept header values
+   can still hold other control characters. Every value the forwarder copies
+   is stripped of CR/LF.
 4. Looks up each recipient in `routes.json` (see **Routing** below) and sends
    one rewritten copy per target via SES `SendRawEmail`. Recipients routed to
    `s3-only` are logged (`S3-ONLY …`) and not forwarded.
