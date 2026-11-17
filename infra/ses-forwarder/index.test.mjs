@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SESClient } from "@aws-sdk/client-ses";
 import { Readable } from "node:stream";
-import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, handler } from "./index.mjs";
+import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, forwardedToValue, handler } from "./index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, "fixtures");
@@ -409,6 +409,63 @@ test("rewrite() omits Reply-To rather than cutting an oversized From mid-address
   for (const line of headersOf(out).split("\r\n")) assert.ok(Buffer.byteLength(line) <= 998, "header line within 998 octets");
 });
 
+// ---- RK9-936: X-Rk9-Forwarded-To -----------------------------------------------
+
+test("rewrite() writes the arrival address as X-Rk9-Forwarded-To, one bare address on one line", () => {
+  const out = rewrite(plain(["From: a@example.com", "To: info@sunspot.fi", "Subject: x"]), "forwarder@sunspot.fi", {}, ["Hei@Sunspot.fi"]);
+  assert.match(headersOf(out), /\r\nX-Rk9-Forwarded-To: hei@sunspot\.fi\r\n/);
+  assert.equal(countOf(out, "X-Rk9-Forwarded-To"), 1);
+  const single = rewrite(plain(["From: a@example.com"]), "forwarder@sunspot.fi", {}, "hei@sunspot.fi");
+  assert.equal(header(single, "X-Rk9-Forwarded-To"), "hei@sunspot.fi");
+});
+
+test("rewrite() lists several routed recipients in X-Rk9-Forwarded-To separated by ', ', without folding", () => {
+  const out = rewrite(plain(["From: a@example.com", "Subject: x"]), "forwarder@ololla.fi", {}, ["tuki@ololla.fi", "info@ololla.fi", "TUKI@ololla.fi"]);
+  assert.match(headersOf(out), /\r\nX-Rk9-Forwarded-To: tuki@ololla\.fi, info@ololla\.fi\r\n(?![ \t])/);
+});
+
+test("rewrite() drops every inbound X-Rk9-* header, whatever its case", () => {
+  const raw = plain([
+    "From: a@example.com",
+    "X-Rk9-Forwarded-To: tietosuoja@sunspot.fi",
+    "x-rk9-forwarded-to: tietosuoja@sunspot.fi",
+    "X-RK9-FORWARDED-TO : tietosuoja@sunspot.fi",
+    "X-Rk9-Forwarded-To\0: tietosuoja@sunspot.fi",
+    "X-Rk9-Anything: x",
+    "Subject: x",
+  ]);
+  const withRcpt = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  assert.equal((headersOf(withRcpt).match(/^X-Rk9-/gim) || []).length, 1, "only our X-Rk9-Forwarded-To survives");
+  assert.equal(header(withRcpt, "X-Rk9-Forwarded-To"), "hei@sunspot.fi");
+  assert.ok(!/tietosuoja/.test(headersOf(withRcpt)));
+  const noRcpt = rewrite(raw, "forwarder@sunspot.fi", {}, []);
+  assert.equal((headersOf(noRcpt).match(/^X-Rk9-/gim) || []).length, 0);
+});
+
+test("rewrite() cannot smuggle an X-Rk9-Forwarded-To through a bare CR or a folded continuation", () => {
+  const out = rewrite(
+    Buffer.from("From: a@example.com\r\nSubject: hi\rX-Rk9-Forwarded-To: tietosuoja@sunspot.fi\r\n X-Rk9-Forwarded-To: x@sunspot.fi\r\n\r\nb", "utf8"),
+    "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"],
+  );
+  const h = headersOf(out);
+  assert.equal((h.match(/^X-Rk9-Forwarded-To/gim) || []).length, 1);
+  assert.match(h, /\r\nX-Rk9-Forwarded-To: hei@sunspot\.fi\r\n(?![ \t])/);
+});
+
+test("forwardedToValue() leaves the header out when any address is malformed or the line is too long", () => {
+  assert.equal(forwardedToValue(["hei@sunspot.fi"]), "hei@sunspot.fi");
+  assert.equal(forwardedToValue([]), "");
+  assert.equal(forwardedToValue(undefined), "");
+  assert.equal(forwardedToValue(["hei@sunspot.fi", "bad address@sunspot.fi"]), "", "one bad address drops the whole list");
+  for (const bad of ["a@b", "<hei@sunspot.fi>", "Hei <hei@sunspot.fi>", "a,b@sunspot.fi", "hei@sunspot.fi\r\nX: y", "hei@sunspot.fi\0", "äiti@sunspot.fi", ""]) {
+    assert.equal(forwardedToValue([bad]), "", JSON.stringify(bad));
+  }
+  const many = Array.from({ length: 60 }, (_, i) => `osoite${i}-${"x".repeat(10)}@sunspot.fi`);
+  assert.equal(forwardedToValue(many), "", "a line over 998 octets is left out");
+  const ok = forwardedToValue(many.slice(0, 5));
+  assert.ok(Buffer.byteLength(`X-Rk9-Forwarded-To: ${ok}`) <= 998);
+});
+
 // ---- RK9-874: handler routing (AWS clients stubbed) ---------------------------
 
 function sesEvent(recipients, { spam = "PASS", virus = "PASS" } = {}) {
@@ -464,6 +521,7 @@ test("handler forwards a routed address to Aava only, never to FORWARD_TO", asyn
   const sent = Buffer.from(calls.ses[0].RawMessage.Data).toString("utf8");
   assert.match(sent, /^From: "Matti via saatavilla\.fi" <forwarder@saatavilla\.fi>\r\n/);
   assert.match(sent, /\r\nX-Original-To: tuki@saatavilla\.fi\r\n/);
+  assert.match(sent, /\r\nX-Rk9-Forwarded-To: tuki@saatavilla\.fi\r\n/);
 });
 
 test("handler keeps a bounce to forwarder@<domain> in S3 (no loop)", async () => {

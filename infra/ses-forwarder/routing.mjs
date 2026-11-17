@@ -22,7 +22,9 @@ export const S3_ONLY = "s3-only";
  *  straight back into the forwarder, so parseRoutes() rejects it. */
 export const SES_DOMAINS = ["sunspot.fi", "ololla.fi", "saatavilla.fi"];
 
-const ADDRESS_RE = /^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+/** A bare address as the routing table and X-Rk9-Forwarded-To accept it: lowercase
+ *  ASCII, no display name, no whitespace, no comma. */
+export const ADDRESS_RE = /^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 // Route key: a full address, or a local-part prefix ending in `*` (`dmarc*@ololla.fi`).
 const ROUTE_KEY_RE = /^[a-z0-9!#$%&'+/=?^_`{|}~.-]*\*?@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 const TARGET_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;

@@ -46,10 +46,16 @@
 // travels as X-Original-Message-ID (validated, see originalMessageId()). In-Reply-To and
 // References pass through unchanged, so they need no X-Original-* copy. Every inbound
 // X-Original-* header is dropped: only the forwarder writes that family.
+//
+// 2026-11-17 (RK9-936): Proton writes its own X-Original-To on delivery, and the
+// forwarder's header of that name disappears, so the Aava gate could not learn the
+// arrival address. The arrival address now also travels in X-Rk9-Forwarded-To, a
+// header no mail system writes: the routed envelope recipients as bare addresses
+// separated by ", " on one line. Every inbound X-Rk9-* header is dropped.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
-import { parseRoutes, planDeliveries, domainIsRouted } from "./routing.mjs";
+import { parseRoutes, planDeliveries, domainIsRouted, ADDRESS_RE } from "./routing.mjs";
 
 const REGION = process.env.AWS_REGION || "eu-north-1";
 const s3 = new S3Client({ region: REGION });
@@ -134,10 +140,26 @@ export function sanitizeDanglingBoundaries(text) {
   });
 }
 
-/** The X-Original-* family is ours to write, and the Aava gate trusts it only in a
- *  forwarded message (RK9-930). An inbound copy (X-Original-Message-ID, …) is the
- *  sender's forgery, so it is dropped whatever its exact name. */
-const isForgeableOriginal = (name) => name.startsWith("x-original-");
+/** The X-Original-* and X-Rk9-* families are ours to write, and the Aava gate trusts
+ *  them only in a forwarded message (RK9-930, RK9-936). An inbound copy
+ *  (X-Original-Message-ID, X-Rk9-Forwarded-To, …) is the sender's forgery, so it is
+ *  dropped whatever its exact name. */
+const isForgeableOriginal = (name) => name.startsWith("x-original-") || name.startsWith("x-rk9-");
+
+const X_RK9_FORWARDED_TO = "X-Rk9-Forwarded-To";
+
+/** The X-Rk9-Forwarded-To value: the envelope recipients routed to this delivery as
+ *  bare lowercase addresses joined by ", " on one line (no folding), or "" when the
+ *  header must be left out. One malformed address leaves out the whole header: a
+ *  partial list could make a message for two addresses look like a message for one.
+ *  So does a line longer than 998 octets. The Aava gate rejects a message without
+ *  the header, so every doubt fails closed (RK9-936). */
+export function forwardedToValue(recipients) {
+  const list = (Array.isArray(recipients) ? recipients : [recipients]).map((r) => String(r ?? "").trim().toLowerCase());
+  if (list.length === 0 || !list.every((a) => ADDRESS_RE.test(a))) return "";
+  const value = [...new Set(list)].join(", ");
+  return Buffer.byteLength(`${X_RK9_FORWARDED_TO}: ${value}`, "utf8") <= 998 ? value : "";
+}
 
 const X_ORIGINAL_MESSAGE_ID = "X-Original-Message-ID";
 /** A msg-id (RFC 5322 3.6.4) in its common form: `<left@right>`, printable ASCII,
@@ -269,6 +291,8 @@ function collapseStrayCRs(body) {
  *  - From: `"<original name or address> via <domain>" <fromAddr>` (DKIM-aligned)
  *  - Reply-To and X-Original-From: the original From header
  *  - X-Original-To: the address(es) the message arrived at (string or array)
+ *  - X-Rk9-Forwarded-To: the same arrival address(es) as bare addresses, see
+ *    forwardedToValue(); the Aava gate reads only this header (RK9-936)
  *  - X-Original-Message-ID: the original Message-ID, when it is a valid one-line id
  *  - the original identity and the inbound hop's verdict headers are dropped */
 export function rewrite(raw, fromAddr, mail, originalTo) {
@@ -339,6 +363,8 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const toList = (Array.isArray(originalTo) ? originalTo : [originalTo])
     .map((a) => sanitizeHeaderValue(a, 320))
     .filter(Boolean);
+  // Proton overwrites X-Original-To on delivery; this header survives (RK9-936).
+  const forwardedTo = forwardedToValue(originalTo);
 
   const newHeaders = [
     `From: ${phrase} <${fromAddr}>`,
@@ -347,6 +373,7 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
     // (bcc, alias, list), and on a domain catch-all that is the useful fact.
     ...(origReplyTo ? [`X-Original-Reply-To: ${origReplyTo}`] : []),
     ...(toList.length ? [`X-Original-To: ${toList.join(",\r\n ")}`] : []),
+    ...(forwardedTo ? [`${X_RK9_FORWARDED_TO}: ${forwardedTo}`] : []),
     ...(origMessageId ? [`${X_ORIGINAL_MESSAGE_ID}: ${origMessageId}`] : []),
     ...kept,
   ].join("\r\n");

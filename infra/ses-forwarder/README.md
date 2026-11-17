@@ -47,7 +47,17 @@ directory must be kept in sync (see **Deploying** below).
    `"<original name or address> via <domain>" <forwarder@<domain>>`
    (RFC 2047-encoded when the name is not ASCII), sets `Reply-To` and
    `X-Original-From` to the original `From`, and sets `X-Original-To` to the
-   address(es) the message arrived at. The sender's own `Reply-To` (for
+   address(es) the message arrived at. Proton writes its own `X-Original-To`
+   on delivery, and the forwarder's header of that name disappears, so the
+   arrival address also travels in `X-Rk9-Forwarded-To`
+   ([RK9-936](/RK9/issues/RK9-936)). Its value is the envelope recipients
+   routed to this target as bare lowercase addresses (no display name, no
+   angle brackets), separated by `, ` on one line, for example
+   `X-Rk9-Forwarded-To: hei@sunspot.fi`. If any address is malformed or the
+   line would exceed 998 octets, the header is left out, and the Aava gate
+   then rejects a brand reply (fail closed). Every inbound `X-Rk9-*` header
+   is dropped. The Aava gate reads the arrival address only from this
+   header. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
    so the original one is kept as `X-Original-Message-ID` (angle brackets
@@ -70,7 +80,8 @@ directory must be kept in sync (see **Deploying** below).
 
 See the file-header comment in `index.mjs` for the change history
 (2026-08-08 spam-poisoning fix, 2026-09-17 dangling-boundary fix,
-2026-11-15 per-address routing).
+2026-11-15 per-address routing, 2026-11-17 X-Original-Message-ID and
+X-Rk9-Forwarded-To).
 
 ## Routing
 
