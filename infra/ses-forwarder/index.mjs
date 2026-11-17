@@ -55,7 +55,8 @@
 // is always written: a list that cannot be written safely gets the value `invalid`,
 // so a sender's hidden copy can never be the only one (the gate rejects two). A kept
 // header's name must be printable ASCII (RFC 5322 ftext), and control characters are
-// removed from kept header values.
+// removed from kept header values. Every inbound X-Pm-* header (Proton's family) is
+// dropped as well, because the gate reads Proton's receive time from X-Pm-Date.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
@@ -147,8 +148,11 @@ export function sanitizeDanglingBoundaries(text) {
 /** The X-Original-* and X-Rk9-* families are ours to write, and the Aava gate trusts
  *  them only in a forwarded message (RK9-930, RK9-936). An inbound copy
  *  (X-Original-Message-ID, X-Rk9-Forwarded-To, …) is the sender's forgery, so it is
- *  dropped whatever its exact name. */
-const isForgeableOriginal = (name) => name.startsWith("x-original-") || name.startsWith("x-rk9-");
+ *  dropped whatever its exact name. X-Pm-* is Proton's to write on delivery, after
+ *  this forwarder; the gate reads Proton's receive time from X-Pm-Date, so a
+ *  sender's own X-Pm-* header is dropped too (RK9-936). */
+const isForgeableOriginal = (name) =>
+  name.startsWith("x-original-") || name.startsWith("x-rk9-") || name.startsWith("x-pm-");
 
 const X_RK9_FORWARDED_TO = "X-Rk9-Forwarded-To";
 /** The X-Rk9-Forwarded-To value when the recipient list cannot be written safely.

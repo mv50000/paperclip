@@ -510,6 +510,24 @@ test("rewrite() removes a form feed and other control characters from kept heade
   assert.equal(out.toString("utf8").split("\r\n\r\n")[1], "hello\r\n", "body untouched");
 });
 
+test("rewrite() drops every inbound X-Pm-* header (Proton writes that family on delivery)", () => {
+  const raw = plain([
+    "From: a@example.com",
+    "X-Pm-Date: Mon, 01 Jan 2035 00:00:00 +0000",
+    "X-PM-Date: Mon, 01 Jan 2035 00:00:00 +0000",
+    "x-pm-date : Mon, 01 Jan 2035 00:00:00 +0000",
+    "X-Pm-Internal-Id: forged",
+    "X-Pmx: kept",
+    "Subject: x",
+  ]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  assert.ok(!/^x-pm-/im.test(h), "no X-Pm-* header is forwarded");
+  assert.ok(!/2035|forged/.test(h));
+  assert.equal(header(out, "X-Pmx"), "kept", "only the X-Pm- prefix is dropped");
+  assert.equal(header(out, "Subject"), "x");
+});
+
 // ---- RK9-874: handler routing (AWS clients stubbed) ---------------------------
 
 function sesEvent(recipients, { spam = "PASS", virus = "PASS" } = {}) {

@@ -57,7 +57,10 @@ directory must be kept in sync (see **Deploying** below).
    list is empty, any address is malformed or the line would exceed 998
    octets, the value is `invalid`, and the Aava gate then rejects a brand
    reply (fail closed). A sender's hidden copy can so never be the only one.
-   Every inbound `X-Rk9-*` header is dropped. The Aava gate reads the arrival
+   Every inbound `X-Rk9-*` header is dropped, and so is every inbound
+   `X-Pm-*` header: Proton writes that family on delivery, after the
+   forwarder, and the Aava gate reads Proton's receive time from
+   `X-Pm-Date`. The Aava gate reads the arrival
    address only from this header. A kept header must have a name of
    printable ASCII (RFC 5322 ftext, obsolete whitespace before the colon is
    allowed); any other line, including a line with no colon, is dropped.
