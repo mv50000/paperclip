@@ -49,8 +49,17 @@ directory must be kept in sync (see **Deploying** below).
    `X-Original-From` to the original `From`, and sets `X-Original-To` to the
    address(es) the message arrived at. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
-   `X-Original-Reply-To`. An inbound `X-Original-To` is dropped,
-   so a sender cannot fake it. Every copied value is stripped of CR/LF.
+   `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
+   so the original one is kept as `X-Original-Message-ID` (angle brackets
+   included) for reply threading ([RK9-930](/RK9/issues/RK9-930)). It is
+   copied only when the message has exactly one `Message-ID` whose value fits
+   one line, has the form `<left@right>` (printable ASCII, no whitespace) and
+   is at most 975 characters (the header line stays within 998 octets);
+   otherwise it is left out and the message is still forwarded.
+   `In-Reply-To` and `References` pass through unchanged. Every inbound
+   `X-Original-*` header (`X-Original-To`, `X-Original-Message-ID`, …) is
+   dropped, so a sender cannot fake one: only the forwarder writes that family.
+   Every copied value is stripped of CR/LF.
 4. Looks up each recipient in `routes.json` (see **Routing** below) and sends
    one rewritten copy per target via SES `SendRawEmail`. Recipients routed to
    `s3-only` are logged (`S3-ONLY …`) and not forwarded.
