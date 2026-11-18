@@ -70,15 +70,22 @@ directory must be kept in sync (see **Deploying** below).
    C0 control characters other than HTAB, DEL, C1 control characters
    (U+0080 to U+009F, NEL included) and U+2028/U+2029. A lenient reader
    (a JS regex with the `m` flag, Python's `str.splitlines()`) treats some of
-   them as line ends ([RK9-940](/RK9/issues/RK9-940)). A continuation line
-   that holds only whitespace is dropped, because a parser can end the
+   them as line ends ([RK9-940](/RK9/issues/RK9-940)). This protects a reader
+   that decodes the message as UTF-8. A reader that decodes it as Latin-1
+   still sees the byte 0x85 inside a UTF-8 character (for example `Å` is
+   C3 85) and can split a line there; that reader must decode as UTF-8 or
+   split only on CR/LF. A continuation line that holds only whitespace
+   (Unicode whitespace included) is dropped, because a parser can end the
    header block there. Nothing else in a kept header changes.
-   `Content-Type` is the exception: it is replayed byte for byte or not at
-   all, because its `boundary` must match the delimiter lines in the body.
-   A message whose top-level `Content-Type` holds a removable character, a
-   lone CR or a blank continuation line is not forwarded. It stays in S3 and
-   the log shows `SKIP … unforwardable: …`. Such a header is malformed, so
-   ordinary mail never takes this path.
+   A top-level `Content-Type` of type `multipart/*` or `message/*` is the
+   exception: it is replayed byte for byte or not at all, because its
+   `boundary` must match the delimiter lines in the body. If the cleaning
+   would change such a header (a removed character, a lone CR or a blank
+   continuation line), the message is not forwarded. It stays in S3, the
+   log shows `SKIP … unforwardable: …` and the Lambda returns normally, so
+   SES does not retry it. Replay it from S3 by hand if it matters. Any other
+   `Content-Type` (for example `text/plain` with a dirty `name=` or
+   `charset`) is cleaned and forwarded like every other header.
    The body is not changed. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,

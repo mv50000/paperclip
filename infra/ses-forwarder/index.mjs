@@ -202,6 +202,13 @@ const VALUE_CONTROL = /[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]/g;
  *  LF are already gone. */
 const COPY_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]/g;
 
+/** True when a cleaned Content-Type header block declares multipart/* or message/*:
+ *  the types whose body structure depends on the header (RFC 2046). */
+function hasBoundaryType(contentTypeBlock) {
+  const value = contentTypeBlock.slice(contentTypeBlock.indexOf(":") + 1).replace(/\r\n/g, "");
+  return /^\s*(?:multipart|message)\s*\//i.test(value);
+}
+
 /** Thrown by rewrite() when the message cannot be forwarded without changing what it
  *  means. The handler logs it and leaves the message in S3; it is not retried. */
 export class UnforwardableMessageError extends Error {
@@ -413,15 +420,18 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const keptIdx = blocks
     .map((b, i) => i)
     .filter((i) => isHeader(blocks[i]) && !DROP_HEADERS.has(nameOf(blocks[i])) && !isForgeableOriginal(nameOf(blocks[i])));
-  // Content-Type is replayed byte for byte or not at all: its boundary must match
-  // the delimiter lines in the body, and a cleaned `boundary="ab\x01cd"` would not.
-  // Such a header is malformed anyway, so the message stays in S3 (RK9-940).
-  for (const i of keptIdx) {
-    if (nameOf(blocks[i]) === "content-type" && cleanBlock(blocks[i]) !== rawBlocks[i].join("\r\n")) {
-      throw new UnforwardableMessageError("Content-Type header holds control characters or a blank continuation line");
+  // A multipart/* or message/* Content-Type is replayed byte for byte or not at all:
+  // its boundary must match the delimiter lines in the body, and a cleaned
+  // `boundary="ab\x01cd"` would not. Such a message stays in S3 (RK9-940). Any other
+  // Content-Type (text/plain with a dirty name= or charset) has no boundary, so it is
+  // cleaned and forwarded like every other header. Every Content-Type is checked.
+  const kept = keptIdx.map((i) => {
+    const cleaned = cleanBlock(blocks[i]);
+    if (nameOf(blocks[i]) === "content-type" && cleaned !== rawBlocks[i].join("\r\n") && hasBoundaryType(cleaned)) {
+      throw new UnforwardableMessageError("multipart or message Content-Type would change in cleaning");
     }
-  }
-  const kept = keptIdx.map((i) => cleanBlock(blocks[i]));
+    return cleaned;
+  });
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
     return b ? b.join("\r\n").slice(b[0].indexOf(":") + 1) : "";
