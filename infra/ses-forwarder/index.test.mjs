@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SESClient } from "@aws-sdk/client-ses";
 import { Readable } from "node:stream";
-import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, handler } from "./index.mjs";
+import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, forwardedToValue, FORWARDED_TO_INVALID, handler } from "./index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, "fixtures");
@@ -391,7 +391,7 @@ test("rewrite() drops a header line that has a tab but no colon", () => {
   const raw = plain(["From: a@example.com", "Subject: x", "junk\tline", "plain junk"]);
   const h = headersOf(rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: ["a@example.com"] } }, "hei@sunspot.fi"));
   assert.ok(!h.includes("junk\tline"));
-  assert.match(h, /^plain junk$/m, "a colon-less line without control characters is kept as before");
+  assert.ok(!h.includes("plain junk"), "a colon-less line is dropped too (RK9-936)");
 });
 
 test("rewrite() never copies a From that would be cut by its many folds", () => {
@@ -407,6 +407,125 @@ test("rewrite() omits Reply-To rather than cutting an oversized From mid-address
   const out = rewrite(raw, "forwarder@sunspot.fi", { commonHeaders: { from: [huge] } }, "hei@sunspot.fi");
   assert.equal(header(out, "Reply-To"), null);
   for (const line of headersOf(out).split("\r\n")) assert.ok(Buffer.byteLength(line) <= 998, "header line within 998 octets");
+});
+
+// ---- RK9-936: X-Rk9-Forwarded-To -----------------------------------------------
+
+test("rewrite() writes the arrival address as X-Rk9-Forwarded-To, one bare address on one line", () => {
+  const out = rewrite(plain(["From: a@example.com", "To: info@sunspot.fi", "Subject: x"]), "forwarder@sunspot.fi", {}, ["Hei@Sunspot.fi"]);
+  assert.match(headersOf(out), /\r\nX-Rk9-Forwarded-To: hei@sunspot\.fi\r\n/);
+  assert.equal(countOf(out, "X-Rk9-Forwarded-To"), 1);
+  const single = rewrite(plain(["From: a@example.com"]), "forwarder@sunspot.fi", {}, "hei@sunspot.fi");
+  assert.equal(header(single, "X-Rk9-Forwarded-To"), "hei@sunspot.fi");
+});
+
+test("rewrite() lists several routed recipients in X-Rk9-Forwarded-To separated by ', ', without folding", () => {
+  const out = rewrite(plain(["From: a@example.com", "Subject: x"]), "forwarder@ololla.fi", {}, ["tuki@ololla.fi", "info@ololla.fi", "TUKI@ololla.fi"]);
+  assert.match(headersOf(out), /\r\nX-Rk9-Forwarded-To: tuki@ololla\.fi, info@ololla\.fi\r\n(?![ \t])/);
+});
+
+test("rewrite() drops every inbound X-Rk9-* header, whatever its case", () => {
+  const raw = plain([
+    "From: a@example.com",
+    "X-Rk9-Forwarded-To: tietosuoja@sunspot.fi",
+    "x-rk9-forwarded-to: tietosuoja@sunspot.fi",
+    "X-RK9-FORWARDED-TO : tietosuoja@sunspot.fi",
+    "X-Rk9-Forwarded-To\0: tietosuoja@sunspot.fi",
+    "X-Rk9-Anything: x",
+    "Subject: x",
+  ]);
+  const withRcpt = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  assert.equal((headersOf(withRcpt).match(/^X-Rk9-/gim) || []).length, 1, "only our X-Rk9-Forwarded-To survives");
+  assert.equal(header(withRcpt, "X-Rk9-Forwarded-To"), "hei@sunspot.fi");
+  assert.ok(!/tietosuoja/.test(headersOf(withRcpt)));
+  const noRcpt = rewrite(raw, "forwarder@sunspot.fi", {}, []);
+  assert.equal((headersOf(noRcpt).match(/^X-Rk9-/gim) || []).length, 1, "our header is written even with no recipient");
+  assert.equal(header(noRcpt, "X-Rk9-Forwarded-To"), "invalid");
+});
+
+test("rewrite() cannot smuggle an X-Rk9-Forwarded-To through a bare CR or a folded continuation", () => {
+  const out = rewrite(
+    Buffer.from("From: a@example.com\r\nSubject: hi\rX-Rk9-Forwarded-To: tietosuoja@sunspot.fi\r\n X-Rk9-Forwarded-To: x@sunspot.fi\r\n\r\nb", "utf8"),
+    "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"],
+  );
+  const h = headersOf(out);
+  assert.equal((h.match(/^X-Rk9-Forwarded-To/gim) || []).length, 1);
+  assert.match(h, /\r\nX-Rk9-Forwarded-To: hei@sunspot\.fi\r\n(?![ \t])/);
+});
+
+test("forwardedToValue() gives 'invalid' when any address is malformed or the line is too long", () => {
+  assert.equal(FORWARDED_TO_INVALID, "invalid");
+  assert.equal(forwardedToValue(["hei@sunspot.fi"]), "hei@sunspot.fi");
+  assert.equal(forwardedToValue([]), "invalid");
+  assert.equal(forwardedToValue(undefined), "invalid");
+  assert.equal(forwardedToValue(["hei@sunspot.fi", "bad address@sunspot.fi"]), "invalid", "one bad address voids the whole list");
+  for (const bad of ["a@b", "<hei@sunspot.fi>", "Hei <hei@sunspot.fi>", "a,b@sunspot.fi", "hei@sunspot.fi\r\nX: y", "hei@sunspot.fi\0", "äiti@sunspot.fi", ""]) {
+    assert.equal(forwardedToValue([bad]), "invalid", JSON.stringify(bad));
+  }
+  const many = Array.from({ length: 60 }, (_, i) => `osoite${i}-${"x".repeat(10)}@sunspot.fi`);
+  assert.equal(forwardedToValue(many), "invalid", "a line over 998 octets is not written");
+  const ok = forwardedToValue(many.slice(0, 5));
+  assert.ok(Buffer.byteLength(`X-Rk9-Forwarded-To: ${ok}`) <= 998);
+});
+
+// Orchestrator review of RK9-936: the forwarder must never leave a sender's hidden
+// copy as the only X-Rk9-Forwarded-To, and must not replay a header that a lenient
+// parser could turn into one.
+const hidden = [
+  "\u200BX-Rk9-Forwarded-To: tietosuoja@sunspot.fi", // zero-width space before the name
+  "\uFF38-Rk9-Forwarded-To: tietosuoja@sunspot.fi", // fullwidth X
+  "X-Rk9\r\n\t-Forwarded-To: tietosuoja@sunspot.fi", // folded name, no colon on the first line
+];
+
+test("rewrite() writes X-Rk9-Forwarded-To: invalid for a long list or a non-ASCII recipient, and drops hidden copies", () => {
+  const long = Array.from({ length: 15 }, (_, i) => `${String(i).padStart(2, "0")}${"x".repeat(60)}@sunspot.fi`);
+  for (const rcpts of [long, ["äiti@sunspot.fi"]]) {
+    const out = rewrite(plain(["From: a@example.com", ...hidden, "Subject: x"]), "forwarder@sunspot.fi", {}, rcpts);
+    const h = headersOf(out);
+    assert.equal((h.match(/X-Rk9/gi) || []).length, 1, "only our header mentions X-Rk9");
+    assert.match(h, /\r\nX-Rk9-Forwarded-To: invalid\r\n/);
+    assert.ok(!/tietosuoja/.test(h), "no hidden copy is replayed");
+    for (const line of h.split("\r\n")) assert.ok(Buffer.byteLength(line) <= 998);
+  }
+});
+
+test("rewrite() drops a header whose name is not printable ASCII or that has no colon", () => {
+  const out = rewrite(plain(["From: a@example.com", ...hidden, "Sübject: x", "plain junk", "Subject: ok"]), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  assert.equal(countOf(out, "X-Rk9-Forwarded-To"), 1);
+  assert.equal(header(out, "X-Rk9-Forwarded-To"), "hei@sunspot.fi");
+  assert.ok(!/tietosuoja|Sübject|plain junk|Forwarded-To: t/.test(h));
+  assert.equal(header(out, "Subject"), "ok");
+});
+
+test("rewrite() removes a form feed and other control characters from kept header values", () => {
+  const raw = plain(["From: a@example.com", "X-A: a\x0cX-Rk9-Forwarded-To: tietosuoja@sunspot.fi", "Subject: hi\x0b\x00\x7f there", "X-B: one\r\n\ttwo\x1b"]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(h), "no control character other than HTAB and the CRLF line ends");
+  assert.match(h, /^X-A: aX-Rk9-Forwarded-To: tietosuoja@sunspot\.fi$/m, "the smuggled text stays inside X-A's value");
+  assert.equal((h.match(/^X-Rk9-Forwarded-To:/gim) || []).length, 1);
+  assert.equal(header(out, "Subject"), "hi there");
+  assert.match(h, /^X-B: one\r\n\ttwo$/m, "folding is kept");
+  assert.equal(out.toString("utf8").split("\r\n\r\n")[1], "hello\r\n", "body untouched");
+});
+
+test("rewrite() drops every inbound X-Pm-* header (Proton writes that family on delivery)", () => {
+  const raw = plain([
+    "From: a@example.com",
+    "X-Pm-Date: Mon, 01 Jan 2035 00:00:00 +0000",
+    "X-PM-Date: Mon, 01 Jan 2035 00:00:00 +0000",
+    "x-pm-date : Mon, 01 Jan 2035 00:00:00 +0000",
+    "X-Pm-Internal-Id: forged",
+    "X-Pmx: kept",
+    "Subject: x",
+  ]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  assert.ok(!/^x-pm-/im.test(h), "no X-Pm-* header is forwarded");
+  assert.ok(!/2035|forged/.test(h));
+  assert.equal(header(out, "X-Pmx"), "kept", "only the X-Pm- prefix is dropped");
+  assert.equal(header(out, "Subject"), "x");
 });
 
 // ---- RK9-874: handler routing (AWS clients stubbed) ---------------------------
@@ -464,6 +583,7 @@ test("handler forwards a routed address to Aava only, never to FORWARD_TO", asyn
   const sent = Buffer.from(calls.ses[0].RawMessage.Data).toString("utf8");
   assert.match(sent, /^From: "Matti via saatavilla\.fi" <forwarder@saatavilla\.fi>\r\n/);
   assert.match(sent, /\r\nX-Original-To: tuki@saatavilla\.fi\r\n/);
+  assert.match(sent, /\r\nX-Rk9-Forwarded-To: tuki@saatavilla\.fi\r\n/);
 });
 
 test("handler keeps a bounce to forwarder@<domain> in S3 (no loop)", async () => {

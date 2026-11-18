@@ -47,7 +47,26 @@ directory must be kept in sync (see **Deploying** below).
    `"<original name or address> via <domain>" <forwarder@<domain>>`
    (RFC 2047-encoded when the name is not ASCII), sets `Reply-To` and
    `X-Original-From` to the original `From`, and sets `X-Original-To` to the
-   address(es) the message arrived at. The sender's own `Reply-To` (for
+   address(es) the message arrived at. Proton writes its own `X-Original-To`
+   on delivery, and the forwarder's header of that name disappears, so the
+   arrival address also travels in `X-Rk9-Forwarded-To`
+   ([RK9-936](/RK9/issues/RK9-936)). Its value is the envelope recipients
+   routed to this target as bare lowercase addresses (no display name, no
+   angle brackets), separated by `, ` on one line, for example
+   `X-Rk9-Forwarded-To: hei@sunspot.fi`. The header is always written. If the
+   list is empty, any address is malformed or the line would exceed 998
+   octets, the value is `invalid`, and the Aava gate then rejects a brand
+   reply (fail closed). A sender's hidden copy can so never be the only one.
+   Every inbound `X-Rk9-*` header is dropped, and so is every inbound
+   `X-Pm-*` header: Proton writes that family on delivery, after the
+   forwarder, and the Aava gate reads Proton's receive time from
+   `X-Pm-Date`. The Aava gate reads the arrival
+   address only from this header. A kept header must have a name of
+   printable ASCII (RFC 5322 ftext, obsolete whitespace before the colon is
+   allowed); any other line, including a line with no colon, is dropped.
+   C0 control characters other than HTAB, and DEL, are removed from kept
+   header values (C1 controls and U+2028/U+2029 are not).
+   The body is not changed. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
    so the original one is kept as `X-Original-Message-ID` (angle brackets
@@ -61,16 +80,15 @@ directory must be kept in sync (see **Deploying** below).
    dropped, because only the forwarder writes that family. This also drops a
    list server's own headers, such as Google Groups' `X-Original-Sender`.
    A reader of these headers must use an RFC 5322 parser that reads only the
-   top-level header block and splits lines only on CR/LF: kept header values
-   can still hold other control characters. Every value the forwarder copies
-   is stripped of CR/LF.
+   top-level header block and splits lines only on CR/LF.
 4. Looks up each recipient in `routes.json` (see **Routing** below) and sends
    one rewritten copy per target via SES `SendRawEmail`. Recipients routed to
    `s3-only` are logged (`S3-ONLY …`) and not forwarded.
 
 See the file-header comment in `index.mjs` for the change history
 (2026-08-08 spam-poisoning fix, 2026-09-17 dangling-boundary fix,
-2026-11-15 per-address routing).
+2026-11-15 per-address routing, 2026-11-17 X-Original-Message-ID and
+X-Rk9-Forwarded-To).
 
 ## Routing
 
