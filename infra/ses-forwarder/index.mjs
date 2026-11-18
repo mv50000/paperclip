@@ -371,7 +371,12 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // here either, so `\r\r\n` from a double line-ending conversion cannot end the
   // header block early and push Content-Type into the body. Every CR left inside a
   // line after the split is a lone CR, so replacing them all is the same thing.
-  const asReceived = (rawLine) => rawLine.replace(/\r+$/, (crs) => " ".repeat(crs.length));
+  // A loop, not /\r+$/: that regex backtracks on a long CR run inside a line.
+  const asReceived = (rawLine) => {
+    let end = rawLine.length;
+    while (end > 0 && rawLine.charCodeAt(end - 1) === 13) end--;
+    return end === rawLine.length ? rawLine : rawLine.slice(0, end) + " ".repeat(rawLine.length - end);
+  };
   for (const rawLine of headerPart.split(/\r?\n/)) {
     const line = rawLine.replace(/\r/g, " ");
     if (/^[ \t]/.test(line) && blocks.length) {
@@ -396,13 +401,14 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const isHeader = (b) => b[0] !== "" && !/^[ \t]/.test(b[0]) && !hasBadName(b[0]);
   // A form feed or other control character in a kept value is removed: a lenient
   // parser could read `X-A: a\fX-Rk9-Forwarded-To: …` as two headers (RK9-936).
-  // A continuation line left with only whitespace is dropped: a parser can take it
-  // for the empty line that ends the header block and move the rest into the body.
+  // A continuation line left with only whitespace (Unicode whitespace such as NBSP
+  // included) is dropped: a parser can take it for the empty line that ends the
+  // header block and move the rest into the body.
   // The first line keeps its name and colon, which no removal touches (RK9-940).
   const cleanBlock = (b) =>
     b
       .map((line) => line.replace(VALUE_CONTROL, ""))
-      .filter((line, i) => i === 0 || /[^ \t]/.test(line))
+      .filter((line, i) => i === 0 || /\S/.test(line))
       .join("\r\n");
   const keptIdx = blocks
     .map((b, i) => i)

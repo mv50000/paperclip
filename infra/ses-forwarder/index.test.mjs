@@ -553,7 +553,7 @@ test("rewrite() removes C1 controls, NEL and U+2028/U+2029 from kept values and 
 });
 
 test("rewrite() drops a continuation line that holds only whitespace, before or after the cleaning", () => {
-  const raw = plain(["From: a@example.com", "X-A: a\r\n\t\x0c", "X-B: b\r\n \r\n\t\r\n c", "X-C: c\r\n \u0085\u2028", "Subject: s"]);
+  const raw = plain(["From: a@example.com", "X-A: a\r\n\t\x0c", "X-B: b\r\n \r\n\t\r\n c\r\n \u00a0\u3000", "X-C: c\r\n \u0085\u2028", "Subject: s"]);
   const out = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
   const h = headersOf(out);
   for (const line of h.split("\r\n")) assert.match(line, /[^ \t]/, `no blank header line: ${JSON.stringify(line)}`);
@@ -571,6 +571,16 @@ test("rewrite() replays ordinary headers byte for byte", () => {
   const raw = plain(["From: a@example.com", ...lines], "--=_abc-123\r\nContent-Type: text/plain\r\n\r\nhei\r\n--=_abc-123--\r\n");
   const h = headersOf(rewrite(raw, "forwarder@sunspot.fi", {}, ["info@sunspot.fi"]));
   assert.ok(h.endsWith(`\r\n${lines.join("\r\n")}`), h);
+});
+
+test("rewrite() handles a long CR run inside a header line in linear time", { timeout: 10_000 }, () => {
+  const raw = Buffer.from(`From: a@example.com\r\nSubject: ${"\r".repeat(2_000_000)}x\r\nContent-Type: text/plain;${"\r".repeat(200_000)} charset=utf-8\r\n\r\nbody`, "utf8");
+  const t = Date.now();
+  assert.throws(() => rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]), UnforwardableMessageError);
+  const noCt = Buffer.from(`From: a@example.com\r\nSubject: ${"\r".repeat(2_000_000)}x\r\n\r\nbody`, "utf8");
+  const out = rewrite(noCt, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  assert.ok(Date.now() - t < 3000, `took ${Date.now() - t} ms`);
+  assert.equal(out.toString("utf8").split("\r\n\r\n")[1], "body");
 });
 
 test("forwardedToValue() rejects a recipient that holds an encoded-word (=?)", () => {
