@@ -57,6 +57,14 @@
 // header's name must be printable ASCII (RFC 5322 ftext), and control characters are
 // removed from kept header values. Every inbound X-Pm-* header (Proton's family) is
 // dropped as well, because the gate reads Proton's receive time from X-Pm-Date.
+//
+// 2026-11-18 (RK9-940): kept header values also lose C1 control characters (U+0080 to
+// U+009F, NEL included) and U+2028/U+2029, which a lenient reader (a JS regex with the
+// `m` flag, Python's str.splitlines()) treats as line ends. A continuation line that
+// holds only whitespace is dropped, because a parser can end the header block there.
+// The Content-Type header is never changed: its boundary must match the body, so a
+// message whose Content-Type would need cleaning is not forwarded (it stays in S3).
+// An X-Rk9-Forwarded-To recipient that holds `=?` (an RFC 2047 encoded-word) is invalid.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
@@ -169,7 +177,10 @@ export const FORWARDED_TO_INVALID = "invalid";
  *  (RK9-936). */
 export function forwardedToValue(recipients) {
   const list = (Array.isArray(recipients) ? recipients : [recipients]).map((r) => String(r ?? "").trim().toLowerCase());
-  if (list.length === 0 || !list.every((a) => ADDRESS_RE.test(a))) return FORWARDED_TO_INVALID;
+  // `=?` starts an RFC 2047 encoded-word: a reader that decodes it would see another
+  // address than the one we checked (RK9-940).
+  const isPlainAddress = (a) => ADDRESS_RE.test(a) && !a.includes("=?");
+  if (list.length === 0 || !list.every(isPlainAddress)) return FORWARDED_TO_INVALID;
   const value = [...new Set(list)].join(", ");
   return Buffer.byteLength(`${X_RK9_FORWARDED_TO}: ${value}`, "utf8") <= 998 ? value : FORWARDED_TO_INVALID;
 }
@@ -180,9 +191,26 @@ export function forwardedToValue(recipients) {
  *  colon is dropped, so no later hop can turn it into one of our headers (RK9-936). */
 const REPLAYABLE_NAME = /^[\x21-\x39\x3b-\x7e]+[ \t]*$/;
 
-/** Control characters other than HTAB, removed from every kept header line. CR and
- *  LF cannot occur inside a line here (a lone CR is already a space, LF splits). */
-const VALUE_CONTROL = /[\x00-\x08\x0a-\x1f\x7f]/g;
+/** Characters removed from every kept header line: C0 controls other than HTAB, DEL,
+ *  C1 controls (U+0080 to U+009F, NEL included) and the Unicode line and paragraph
+ *  separators U+2028/U+2029. A lenient reader (a JS regex with the `m` flag, Python's
+ *  str.splitlines()) treats some of these as line ends (RK9-940). CR and LF cannot
+ *  occur inside a line here (a lone CR is already a space, LF splits). */
+const VALUE_CONTROL = /[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]/g;
+
+/** The same set for a value copied onto one of our own header lines, where CR and
+ *  LF are already gone. */
+const COPY_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]/g;
+
+/** Thrown by rewrite() when the message cannot be forwarded without changing what it
+ *  means. The handler logs it and leaves the message in S3; it is not retried. */
+export class UnforwardableMessageError extends Error {
+  constructor(reason) {
+    super(`unforwardable: ${reason}`);
+    this.name = "UnforwardableMessageError";
+    this.reason = reason;
+  }
+}
 
 const X_ORIGINAL_MESSAGE_ID = "X-Original-Message-ID";
 /** A msg-id (RFC 5322 3.6.4) in its common form: `<left@right>`, printable ASCII,
@@ -231,7 +259,7 @@ export function sanitizeHeaderValue(v, max = 900) {
     .slice(0, max * 4) // bound the work on a huge header before the code-point split
     .replace(/\r?\n[ \t]*/g, " ")
     .replace(/[\r\n]/g, " ")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .replace(COPY_CONTROL, "")
     .trim();
   return [...clean].slice(0, max).join("");
 }
@@ -331,15 +359,28 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const headerPart = text.slice(0, headerEnd);
   const body = m ? collapseStrayCRs(text.slice(m.index + m[0].length)) : "";
 
-  // Group header lines into logical blocks (header + its folded continuation lines)
+  // Group header lines into logical blocks (header + its folded continuation lines).
+  // rawBlocks holds the same lines as received, so a change to Content-Type can be
+  // detected below. CRs at the end of a line come from a double line-ending conversion
+  // (`\r\r\n`, RK9-888) and are not content, so there they count as the space the
+  // line gets.
   const blocks = [];
+  const rawBlocks = [];
   // A lone CR becomes a space: a receiver that treats it as a line end would
   // otherwise see `Subject: x\rX-Original-To: …` as a second header. Not a line end
   // here either, so `\r\r\n` from a double line-ending conversion cannot end the
-  // header block early and push Content-Type into the body.
-  for (const line of headerPart.replace(/\r(?!\n)/g, " ").split(/\r?\n/)) {
-    if (/^[ \t]/.test(line) && blocks.length) blocks[blocks.length - 1].push(line);
-    else blocks.push([line]);
+  // header block early and push Content-Type into the body. Every CR left inside a
+  // line after the split is a lone CR, so replacing them all is the same thing.
+  const asReceived = (rawLine) => rawLine.replace(/\r+$/, (crs) => " ".repeat(crs.length));
+  for (const rawLine of headerPart.split(/\r?\n/)) {
+    const line = rawLine.replace(/\r/g, " ");
+    if (/^[ \t]/.test(line) && blocks.length) {
+      blocks[blocks.length - 1].push(line);
+      rawBlocks[rawBlocks.length - 1].push(asReceived(rawLine));
+    } else {
+      blocks.push([line]);
+      rawBlocks.push([asReceived(rawLine)]);
+    }
   }
   const nameOf = (b) => (b[0].split(":")[0] || "").toLowerCase().trim();
   // A header whose name holds control characters (`X-Original-To\0:`) is dropped too.
@@ -355,9 +396,26 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const isHeader = (b) => b[0] !== "" && !/^[ \t]/.test(b[0]) && !hasBadName(b[0]);
   // A form feed or other control character in a kept value is removed: a lenient
   // parser could read `X-A: a\fX-Rk9-Forwarded-To: …` as two headers (RK9-936).
-  const kept = blocks
-    .filter((b) => isHeader(b) && !DROP_HEADERS.has(nameOf(b)) && !isForgeableOriginal(nameOf(b)))
-    .map((b) => b.map((line) => line.replace(VALUE_CONTROL, "")).join("\r\n"));
+  // A continuation line left with only whitespace is dropped: a parser can take it
+  // for the empty line that ends the header block and move the rest into the body.
+  // The first line keeps its name and colon, which no removal touches (RK9-940).
+  const cleanBlock = (b) =>
+    b
+      .map((line) => line.replace(VALUE_CONTROL, ""))
+      .filter((line, i) => i === 0 || /[^ \t]/.test(line))
+      .join("\r\n");
+  const keptIdx = blocks
+    .map((b, i) => i)
+    .filter((i) => isHeader(blocks[i]) && !DROP_HEADERS.has(nameOf(blocks[i])) && !isForgeableOriginal(nameOf(blocks[i])));
+  // Content-Type is replayed byte for byte or not at all: its boundary must match
+  // the delimiter lines in the body, and a cleaned `boundary="ab\x01cd"` would not.
+  // Such a header is malformed anyway, so the message stays in S3 (RK9-940).
+  for (const i of keptIdx) {
+    if (nameOf(blocks[i]) === "content-type" && cleanBlock(blocks[i]) !== rawBlocks[i].join("\r\n")) {
+      throw new UnforwardableMessageError("Content-Type header holds control characters or a blank continuation line");
+    }
+  }
+  const kept = keptIdx.map((i) => cleanBlock(blocks[i]));
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
     return b ? b.join("\r\n").slice(b[0].indexOf(":") + 1) : "";
@@ -446,8 +504,18 @@ export const handler = async (event) => {
     try {
       const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
       const raw = await streamToBuffer(obj.Body);
-      for (const d of plan.deliveries) {
-        const forwarded = rewrite(raw, fromAddr, mail, d.recipients);
+      // rewrite() depends on the recipients only for the arrival-address headers, so a
+      // message it refuses is refused before the first send, never halfway.
+      let forwardedCopies;
+      try {
+        forwardedCopies = plan.deliveries.map((d) => ({ d, forwarded: rewrite(raw, fromAddr, mail, d.recipients) }));
+      } catch (err) {
+        if (!(err instanceof UnforwardableMessageError)) throw err;
+        // Not retried: the same bytes fail the same way. The raw message is in S3.
+        console.error(`SKIP ${messageId} (${domain}) ${err.message} ${verdicts} key=${key}`);
+        continue;
+      }
+      for (const { d, forwarded } of forwardedCopies) {
         await ses.send(new SendRawEmailCommand({
           Destinations: d.destinations,
           Source: fromAddr,

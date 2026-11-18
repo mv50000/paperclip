@@ -54,8 +54,9 @@ directory must be kept in sync (see **Deploying** below).
    routed to this target as bare lowercase addresses (no display name, no
    angle brackets), separated by `, ` on one line, for example
    `X-Rk9-Forwarded-To: hei@sunspot.fi`. The header is always written. If the
-   list is empty, any address is malformed or the line would exceed 998
-   octets, the value is `invalid`, and the Aava gate then rejects a brand
+   list is empty, any address is malformed or holds `=?` (an RFC 2047
+   encoded-word, [RK9-940](/RK9/issues/RK9-940)), or the line would exceed
+   998 octets, the value is `invalid`, and the Aava gate then rejects a brand
    reply (fail closed). A sender's hidden copy can so never be the only one.
    Every inbound `X-Rk9-*` header is dropped, and so is every inbound
    `X-Pm-*` header: Proton writes that family on delivery, after the
@@ -63,9 +64,21 @@ directory must be kept in sync (see **Deploying** below).
    `X-Pm-Date`. The Aava gate reads the arrival
    address only from this header. A kept header must have a name of
    printable ASCII (RFC 5322 ftext, obsolete whitespace before the colon is
-   allowed); any other line, including a line with no colon, is dropped.
-   C0 control characters other than HTAB, and DEL, are removed from kept
-   header values (C1 controls and U+2028/U+2029 are not).
+   allowed); any other line, including a line with no colon or with a
+   zero-width character in the name, is dropped. These characters are
+   removed from kept header values and from the copied `From`/`Reply-To`:
+   C0 control characters other than HTAB, DEL, C1 control characters
+   (U+0080 to U+009F, NEL included) and U+2028/U+2029. A lenient reader
+   (a JS regex with the `m` flag, Python's `str.splitlines()`) treats some of
+   them as line ends ([RK9-940](/RK9/issues/RK9-940)). A continuation line
+   that holds only whitespace is dropped, because a parser can end the
+   header block there. Nothing else in a kept header changes.
+   `Content-Type` is the exception: it is replayed byte for byte or not at
+   all, because its `boundary` must match the delimiter lines in the body.
+   A message whose top-level `Content-Type` holds a removable character, a
+   lone CR or a blank continuation line is not forwarded. It stays in S3 and
+   the log shows `SKIP … unforwardable: …`. Such a header is malformed, so
+   ordinary mail never takes this path.
    The body is not changed. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
@@ -88,7 +101,8 @@ directory must be kept in sync (see **Deploying** below).
 See the file-header comment in `index.mjs` for the change history
 (2026-08-08 spam-poisoning fix, 2026-09-17 dangling-boundary fix,
 2026-11-15 per-address routing, 2026-11-17 X-Original-Message-ID and
-X-Rk9-Forwarded-To).
+X-Rk9-Forwarded-To, 2026-11-18 C1 controls, blank continuation lines and
+the Content-Type rule).
 
 ## Routing
 

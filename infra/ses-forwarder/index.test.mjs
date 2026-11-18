@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SESClient } from "@aws-sdk/client-ses";
 import { Readable } from "node:stream";
-import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, forwardedToValue, FORWARDED_TO_INVALID, handler } from "./index.mjs";
+import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, forwardedToValue, FORWARDED_TO_INVALID, UnforwardableMessageError, handler } from "./index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, "fixtures");
@@ -528,6 +528,91 @@ test("rewrite() drops every inbound X-Pm-* header (Proton writes that family on 
   assert.equal(header(out, "Subject"), "x");
 });
 
+// ---- RK9-940: forwarder leftovers from the RK9-936 review --------------------
+
+test("rewrite() removes C1 controls, NEL and U+2028/U+2029 from kept values and copied From", () => {
+  const raw = plain([
+    "From: Matti\u2028X-Rk9-Forwarded-To: tietosuoja@sunspot.fi <matti@example.com>",
+    "Subject: a\u0085X-Rk9-Forwarded-To: hei@sunspot.fi",
+    "X-A: one\u2029X-Rk9-Forwarded-To: tietosuoja@sunspot.fi",
+    "X-B: c1\u0080\u009b\u009fend",
+    "X-C: keep äiti 😀 \u00a0 \u00ff",
+  ]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  assert.ok(!/[\u0080-\u009f\u2028\u2029]/.test(h), "no C1 control or Unicode line separator is replayed");
+  assert.equal(h.split(/\r\n/).length, h.split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/).length, "Python splitlines() sees the same lines");
+  assert.equal((h.match(/^X-Rk9-Forwarded-To:/gim) || []).length, 1, "a JS m-flag reader sees one X-Rk9-Forwarded-To");
+  assert.equal(header(out, "X-Rk9-Forwarded-To"), "hei@sunspot.fi");
+  assert.equal(header(out, "Subject"), "aX-Rk9-Forwarded-To: hei@sunspot.fi", "the text stays inside Subject");
+  assert.equal(header(out, "X-A"), "oneX-Rk9-Forwarded-To: tietosuoja@sunspot.fi");
+  assert.equal(header(out, "X-B"), "c1end");
+  assert.equal(header(out, "X-C"), "keep äiti 😀 \u00a0 \u00ff", "ordinary non-ASCII text is kept");
+  assert.equal(header(out, "Reply-To"), "MattiX-Rk9-Forwarded-To: tietosuoja@sunspot.fi <matti@example.com>");
+  assert.equal(out.toString("utf8").split("\r\n\r\n")[1], "hello\r\n", "body untouched");
+});
+
+test("rewrite() drops a continuation line that holds only whitespace, before or after the cleaning", () => {
+  const raw = plain(["From: a@example.com", "X-A: a\r\n\t\x0c", "X-B: b\r\n \r\n\t\r\n c", "X-C: c\r\n \u0085\u2028", "Subject: s"]);
+  const out = rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  for (const line of h.split("\r\n")) assert.match(line, /[^ \t]/, `no blank header line: ${JSON.stringify(line)}`);
+  assert.match(h, /^X-A: a\r\nX-B: b\r\n c\r\nX-C: c\r\nSubject: s$/m);
+  assert.equal(header(out, "Subject"), "s", "later headers stay in the header block");
+});
+
+test("rewrite() replays ordinary headers byte for byte", () => {
+  const lines = [
+    "Subject: =?UTF-8?Q?Tilaus_=C3=A4iti?=\r\n =?UTF-8?Q?_nro_12?=",
+    "To: Info <info@sunspot.fi>, \r\n\tToinen <toinen@example.com>",
+    "Content-Type: multipart/alternative;\r\n\tboundary=\"=_abc-123\"",
+    "X-Mailer: Äpp 1.0 \u00e4",
+  ];
+  const raw = plain(["From: a@example.com", ...lines], "--=_abc-123\r\nContent-Type: text/plain\r\n\r\nhei\r\n--=_abc-123--\r\n");
+  const h = headersOf(rewrite(raw, "forwarder@sunspot.fi", {}, ["info@sunspot.fi"]));
+  assert.ok(h.endsWith(`\r\n${lines.join("\r\n")}`), h);
+});
+
+test("forwardedToValue() rejects a recipient that holds an encoded-word (=?)", () => {
+  assert.equal(forwardedToValue(["=?utf-8?q?info?=@sunspot.fi"]), "invalid");
+  assert.equal(forwardedToValue(["hei@sunspot.fi", "a=?b@sunspot.fi"]), "invalid");
+  assert.equal(forwardedToValue(["a=b@sunspot.fi", "c?d@sunspot.fi", "e?=f@sunspot.fi"]), "a=b@sunspot.fi, c?d@sunspot.fi, e?=f@sunspot.fi");
+  const out = rewrite(plain(["From: a@example.com"]), "forwarder@sunspot.fi", {}, ["=?utf-8?q?info?=@sunspot.fi"]);
+  assert.equal(header(out, "X-Rk9-Forwarded-To"), "invalid");
+});
+
+test("rewrite() drops a header whose name holds a zero-width character anywhere (RK9-931)", () => {
+  const names = ["X-Rk9\u200B-Forwarded-To", "X-Rk9-Forwarded-To\u200B", "X-Rk9-Forwarded\u200D-To", "\uFEFFX-Rk9-Forwarded-To", "X-Rk9-Forwarded-To\u2060 "];
+  const out = rewrite(plain(["From: a@example.com", ...names.map((n) => `${n}: tietosuoja@sunspot.fi`), "Subject\u200B: forged", "Subject: ok"]), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  const h = headersOf(out);
+  assert.ok(!/tietosuoja|forged|[\u200b\u200d\u2060\ufeff]/.test(h), h);
+  assert.equal((h.match(/X-Rk9/gi) || []).length, 1);
+  assert.equal(header(out, "Subject"), "ok");
+});
+
+test("rewrite() refuses a message whose Content-Type would change, so the boundary never splits from the body", () => {
+  const body = (b) => `--${b}\r\nContent-Type: text/plain\r\n\r\nhei\r\n--${b}--\r\n`;
+  const cases = [
+    ["ab\x01cd", 'Content-Type: multipart/mixed; boundary="ab\x01cd"'],
+    ["ab\u0085cd", 'Content-Type: multipart/mixed; boundary="ab\u0085cd"'],
+    ["abcd", 'Content-Type: multipart/mixed;\x0c boundary="abcd"'],
+    ["abcd", 'Content-Type: multipart/mixed;\r\n \r\n boundary="abcd"'],
+    ["abcd", 'Content-Type: multipart/mixed;\r boundary="abcd"'], // a lone CR becomes a space
+  ];
+  for (const [b, ct] of cases) {
+    assert.throws(
+      () => rewrite(plain(["From: a@example.com", ct], body(b)), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]),
+      (err) => err instanceof UnforwardableMessageError && /Content-Type/.test(err.message),
+      JSON.stringify(ct),
+    );
+  }
+  // A clean Content-Type, a doubly converted one (\r\r\n) and junk in another header still forward.
+  const ok = rewrite(plain(["From: a@example.com", 'Content-Type: multipart/mixed; boundary="abcd"', "X-A: a\x01"], body("abcd")), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  assert.equal(header(ok, "Content-Type"), 'multipart/mixed; boundary="abcd"');
+  const doubled = Buffer.from(`From: a@example.com\r\r\nContent-Type: multipart/mixed; boundary="abcd"\r\r\n\r\r\n${body("abcd").replace(/\r\n/g, "\r\r\n")}`, "utf8");
+  assert.match(headersOf(rewrite(doubled, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"])), /boundary="abcd"/);
+});
+
 // ---- RK9-874: handler routing (AWS clients stubbed) ---------------------------
 
 function sesEvent(recipients, { spam = "PASS", virus = "PASS" } = {}) {
@@ -541,7 +626,9 @@ function sesEvent(recipients, { spam = "PASS", virus = "PASS" } = {}) {
   };
 }
 
-async function runHandler(event, env = {}) {
+const DEFAULT_RAW = "From: Matti <matti@example.com>\r\nSubject: hi\r\n\r\nbody\r\n";
+
+async function runHandler(event, env = {}, raw = DEFAULT_RAW) {
   const calls = { s3: [], ses: [] };
   const origS3 = S3Client.prototype.send;
   const origSes = SESClient.prototype.send;
@@ -553,7 +640,7 @@ async function runHandler(event, env = {}) {
   }
   S3Client.prototype.send = async (cmd) => {
     calls.s3.push(cmd.input);
-    return { Body: Readable.from([Buffer.from("From: Matti <matti@example.com>\r\nSubject: hi\r\n\r\nbody\r\n")]) };
+    return { Body: Readable.from([Buffer.from(raw, "utf8")]) };
   };
   SESClient.prototype.send = async (cmd) => {
     calls.ses.push(cmd.input);
@@ -584,6 +671,24 @@ test("handler forwards a routed address to Aava only, never to FORWARD_TO", asyn
   assert.match(sent, /^From: "Matti via saatavilla\.fi" <forwarder@saatavilla\.fi>\r\n/);
   assert.match(sent, /\r\nX-Original-To: tuki@saatavilla\.fi\r\n/);
   assert.match(sent, /\r\nX-Rk9-Forwarded-To: tuki@saatavilla\.fi\r\n/);
+});
+
+test("handler writes only the forwarded recipients in the arrival headers, never an s3-only one", async () => {
+  const { calls } = await runHandler(sesEvent(["uptime-probe@sunspot.fi", "hei@sunspot.fi"]));
+  assert.equal(calls.ses.length, 1);
+  assert.deepEqual(calls.ses[0].Destinations, ["aava@rk9.fi"]);
+  const sent = Buffer.from(calls.ses[0].RawMessage.Data).toString("utf8");
+  assert.match(sent, /\r\nX-Rk9-Forwarded-To: hei@sunspot\.fi\r\n/);
+  assert.match(sent, /\r\nX-Original-To: hei@sunspot\.fi\r\n/);
+  assert.ok(!/uptime-probe/.test(sent), "the s3-only recipient is not named");
+});
+
+test("handler keeps a message with a control character in Content-Type in S3 without sending", async () => {
+  const raw = 'From: a@example.com\r\nContent-Type: multipart/mixed; boundary="ab\x01cd"\r\n\r\n--ab\x01cd\r\n\r\nhei\r\n--ab\x01cd--\r\n';
+  const { res, calls } = await runHandler(sesEvent(["hei@sunspot.fi", "info@sunspot.fi"]), {}, raw);
+  assert.deepEqual(res, { disposition: "CONTINUE" });
+  assert.equal(calls.s3.length, 1);
+  assert.equal(calls.ses.length, 0);
 });
 
 test("handler keeps a bounce to forwarder@<domain> in S3 (no loop)", async () => {
