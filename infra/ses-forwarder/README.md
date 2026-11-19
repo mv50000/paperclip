@@ -81,8 +81,13 @@ directory must be kept in sync (see **Deploying** below).
    exception, whatever the type: its value must match the delimiter lines
    in the body. The forwarder reads every `boundary` value (name in any
    case, quoted or bare, over folded lines) before and after the cleaning.
-   If the cleaning would change a value, or add or remove one, the message
-   is not forwarded. It stays in S3, the log shows `SKIP … unforwardable: …`
+   It reads the values twice: once with RFC 822 comments `(…)` outside
+   quotes skipped, as a comment-aware parser reads them, and once as plain
+   text, as a naive parser reads them. A `"` or `;` inside a comment cannot
+   so hide a boundary from the check ([RK9-945](/RK9/issues/RK9-945)).
+   If the cleaning would change a value in either reading, or add or remove
+   one, the message is not forwarded. When the message is routed to several
+   targets, no copy goes out: every copy is rewritten before the first send. It stays in S3, the log shows `SKIP … unforwardable: …`
    and the Lambda returns normally, so SES does not retry it. Replay it
    from S3 by hand if it matters. The rest of `Content-Type` (a dirty
    `name=`, `charset` or `micalg`, a blank continuation line, a removed
@@ -103,6 +108,14 @@ directory must be kept in sync (see **Deploying** below).
    list server's own headers, such as Google Groups' `X-Original-Sender`.
    A reader of these headers must use an RFC 5322 parser that reads only the
    top-level header block and splits lines only on CR/LF.
+   The reader must also split the header lines before it decodes RFC 2047
+   encoded-words. The forwarder copies an encoded-word in a kept header as
+   it is, and its decoded text can hold CRLF and a line that looks like a
+   header, for example
+   `X-A: =?UTF-8?B?<base64 of "x\r\nX-Rk9-Forwarded-To: …">?=`. Python's
+   `email` package (compat32 and the default policy) splits first and still
+   sees one `X-Rk9-Forwarded-To` ([RK9-945](/RK9/issues/RK9-945)). The Aava
+   gate must keep that order and read only the top-level header block.
 4. Looks up each recipient in `routes.json` (see **Routing** below) and sends
    one rewritten copy per target via SES `SendRawEmail`. Recipients routed to
    `s3-only` are logged (`S3-ONLY …`) and not forwarded.
@@ -111,7 +124,7 @@ See the file-header comment in `index.mjs` for the change history
 (2026-08-08 spam-poisoning fix, 2026-09-17 dangling-boundary fix,
 2026-11-15 per-address routing, 2026-11-17 X-Original-Message-ID and
 X-Rk9-Forwarded-To, 2026-11-18 C1 controls, blank continuation lines and
-the Content-Type boundary rule).
+the Content-Type boundary rule, 2026-11-19 comments in Content-Type).
 
 ## Routing
 
@@ -269,6 +282,10 @@ unzip -p /tmp/deployed.zip index.mjs | diff - index.mjs
 npm install
 npm test
 ```
+
+The workflow `.github/workflows/ses-forwarder.yml` runs the same tests on
+every pull request that changes `infra/ses-forwarder/`
+([RK9-945](/RK9/issues/RK9-945)).
 
 `fixtures/virus-quarantine-dsn.eml` is a redacted real bounce (AWS internal
 receipt/signature tokens replaced with placeholders) that reproduced

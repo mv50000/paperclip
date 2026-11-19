@@ -66,6 +66,10 @@
 // lines in the body, so a message whose boundary would change in cleaning is not
 // forwarded (it stays in S3). The rest of Content-Type is cleaned like any header.
 // An X-Rk9-Forwarded-To recipient that holds `=?` (an RFC 2047 encoded-word) is invalid.
+//
+// 2026-11-19 (RK9-945): the boundary check reads Content-Type twice, once with RFC 822
+// comments skipped and once without. `(")multipart/mixed; boundary="ab\x01cd"` hid
+// the boundary from the old scan, so the boundary was cleaned and split from the body.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
@@ -219,8 +223,14 @@ function trimmed(s, from, to) {
  *  removes does not count in a parameter name, so only a change of the value counts.
  *  One linear pass, no backtracking regex (RK9-940). The values before and after
  *  cleaning are compared; the type does not matter, because only the boundary must
- *  match the body (RFC 2046 5.1.1). */
-export function boundaryValues(line) {
+ *  match the body (RFC 2046 5.1.1).
+ *  By default an RFC 822 comment outside quotes, before the type or anywhere else, is
+ *  read as a space, as a comment-aware parser (Python's default email policy) reads
+ *  it. Otherwise a `"` or `;` inside `(…)` would hide a real boundary from the scan
+ *  (RK9-945). `{ comments: false }` reads the line the way a naive parser does, which
+ *  sees no comments; rewrite() compares both readings. */
+export function boundaryValues(line, { comments = true } = {}) {
+  if (comments) line = withoutComments(line);
   const out = [];
   const param = (from, to) => {
     let eq = from;
@@ -252,6 +262,37 @@ export function boundaryValues(line) {
   }
   if (start >= 0) param(start, line.length);
   return out;
+}
+
+/** The line with each RFC 822 comment outside a quoted string replaced by one space.
+ *  A comment nests, and `\` escapes the next character in a comment and in a quoted
+ *  string. A comment that is never closed runs to the end of the line. One linear
+ *  pass (RK9-945). */
+function withoutComments(line) {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (depth > 0) {
+      if (c === "\\") i++;
+      else if (c === "(") depth++;
+      else if (c === ")" && --depth === 0) out += " ";
+      continue;
+    }
+    if (quoted && c === "\\") {
+      out += c + (line[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (c === '"') quoted = !quoted;
+    else if (c === "(" && !quoted) {
+      depth = 1;
+      continue;
+    }
+    out += c;
+  }
+  return depth > 0 ? out + " " : out;
 }
 
 /** Thrown by rewrite() when the message cannot be forwarded without changing what it
@@ -465,10 +506,13 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const kept = keptIdx.map((i) => {
     const cleaned = cleanLines(blocks[i]);
     if (nameOf(blocks[i]) === "content-type") {
-      const before = boundaryValues(rawBlocks[i].join(""));
-      const after = boundaryValues(cleaned.join(""));
-      if (before.length !== after.length || before.some((v, j) => v !== after[j])) {
-        throw new UnforwardableMessageError("Content-Type boundary would change in cleaning");
+      // Read with and without RFC 822 comments (RK9-945): a receiver may parse either way.
+      for (const comments of [true, false]) {
+        const before = boundaryValues(rawBlocks[i].join(""), { comments });
+        const after = boundaryValues(cleaned.join(""), { comments });
+        if (before.length !== after.length || before.some((v, j) => v !== after[j])) {
+          throw new UnforwardableMessageError("Content-Type boundary would change in cleaning");
+        }
       }
     }
     return cleaned.join("\r\n");

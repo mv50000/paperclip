@@ -645,6 +645,45 @@ test("boundaryValues() reads every boundary parameter, quoted or bare, in any ca
   assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundary="ab"junk'), ["ab"]);
 });
 
+test("boundaryValues() skips RFC 822 comments outside quotes, and reads them as text with { comments: false } (RK9-945)", () => {
+  const cases = [
+    ['Content-Type: (c)multipart/mixed; boundary="ab"', ["ab"], ["ab"]],
+    ['Content-Type: (")multipart/mixed; boundary="ab"', ["ab"], []], // a quote in the comment
+    ["Content-Type: (a;b)multipart/mixed; boundary=ab", ["ab"], ["ab"]], // a semicolon in the comment
+    ['Content-Type: (a(b")c)multipart/mixed; boundary="x"', ["x"], []], // a nested comment
+    ['Content-Type: (a\\)")multipart/mixed; boundary="x"', ["x"], []], // an escaped ")" does not close the comment
+    ['Content-Type: multipart/mixed; boundary="a(b"', ["a(b"], ["a(b"]], // "(" inside quotes is not a comment
+    ['Content-Type: multipart/mixed; boundary="x" (c)', ["x"], ["x"]],
+    ["Content-Type: multipart/mixed; boundary=ab(c)", ["ab"], ["ab(c)"]],
+    ['Content-Type: multipart/mixed (; boundary="x")', [], ["x"]], // the boundary is inside the comment
+    ['Content-Type: (multipart/mixed; boundary="x"', [], ["x"]], // an unclosed comment runs to the end
+  ];
+  for (const [line, aware, naive] of cases) {
+    assert.deepEqual(boundaryValues(line), aware, JSON.stringify(line));
+    assert.deepEqual(boundaryValues(line, { comments: false }), naive, JSON.stringify(line));
+  }
+});
+
+test("rewrite() refuses a message whose boundary a comment hides from one reading of Content-Type (RK9-945)", () => {
+  const body = "--ab\x01cd\r\n\r\nhei\r\n--ab\x01cd--\r\n";
+  for (const ct of [
+    'Content-Type: (c)multipart/mixed; boundary="ab\x01cd"',
+    'Content-Type: (")multipart/mixed; boundary="ab\x01cd"',
+    'Content-Type: (a;")multipart/mixed; boundary=ab\x01cd',
+    'Content-Type: multipart/mixed (; boundary="ab\x01cd")',
+    'Content-Type: multipart/mixed; x=y (\\"); boundary="ab\x01cd"',
+  ]) {
+    assert.throws(
+      () => rewrite(plain(["From: a@example.com", ct], body), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]),
+      (err) => err instanceof UnforwardableMessageError,
+      JSON.stringify(ct),
+    );
+  }
+  // A comment whose own text is cleaned still forwards: the boundary stays the same.
+  const ok = rewrite(plain(["From: a@example.com", 'Content-Type: (c\x01) multipart/mixed; boundary="abcd"'], "--abcd\r\n\r\nhei\r\n--abcd--\r\n"), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  assert.equal(header(ok, "Content-Type"), '(c) multipart/mixed; boundary="abcd"');
+});
+
 test("rewrite() cleans and forwards a dirty Content-Type whose boundary stays the same, as before", () => {
   const variants = [
     ['Content-Type: application/pdf; name="Lasku 100\u0080.pdf"', 'application/pdf; name="Lasku 100.pdf"'],
@@ -711,7 +750,7 @@ function sesEvent(recipients, { spam = "PASS", virus = "PASS" } = {}) {
 
 const DEFAULT_RAW = "From: Matti <matti@example.com>\r\nSubject: hi\r\n\r\nbody\r\n";
 
-async function runHandler(event, env = {}, raw = DEFAULT_RAW) {
+async function runHandler(event, env = {}, raw = DEFAULT_RAW, run = handler) {
   const calls = { s3: [], ses: [], errors: [] };
   const origError = console.error;
   console.error = (...a) => calls.errors.push(a.join(" "));
@@ -732,7 +771,7 @@ async function runHandler(event, env = {}, raw = DEFAULT_RAW) {
     return {};
   };
   try {
-    const res = await handler(event);
+    const res = await run(event);
     return { res, calls };
   } finally {
     console.error = origError;
@@ -772,6 +811,42 @@ test("handler writes only the forwarded recipients in the arrival headers, never
 test("handler keeps a message with a control character in Content-Type in S3 without sending", async () => {
   const raw = 'From: a@example.com\r\nContent-Type: multipart/mixed; boundary="ab\x01cd"\r\n\r\n--ab\x01cd\r\n\r\nhei\r\n--ab\x01cd--\r\n';
   const { res, calls } = await runHandler(sesEvent(["hei@sunspot.fi", "info@sunspot.fi"]), {}, raw);
+  assert.deepEqual(res, { disposition: "CONTINUE" });
+  assert.equal(calls.s3.length, 1);
+  assert.equal(calls.ses.length, 0);
+  assert.equal(calls.errors.length, 1);
+  assert.match(calls.errors[0], /^SKIP msg-1 \(sunspot\.fi\) unforwardable: .* key=msg-1$/);
+});
+
+// A second copy of index.mjs, with routes.json replaced by a table of two targets.
+// Its own routing cache, so the shared copy above keeps the real routes.json.
+async function twoTargetHandler() {
+  const table = JSON.stringify({
+    targets: { aava: ["aava@rk9.fi"], ops: ["ops@example.com"] },
+    default: "s3-only",
+    routes: { "hei@sunspot.fi": "aava", "info@sunspot.fi": "ops" },
+  });
+  const mod = await import("./index.mjs?two-targets");
+  const origRead = fs.readFileSync;
+  fs.readFileSync = (p, ...rest) => (String(p).endsWith("/routes.json") ? table : origRead(p, ...rest));
+  try {
+    // The table is read on the first call and cached; a message to no one loads it.
+    await runHandler(sesEvent(["nobody@sunspot.fi"]), {}, DEFAULT_RAW, mod.handler);
+  } finally {
+    fs.readFileSync = origRead;
+  }
+  return mod.handler;
+}
+
+test("handler sends no copy at all when the message is unforwardable for two targets (RK9-945)", async () => {
+  const two = await twoTargetHandler();
+  const rcpts = ["hei@sunspot.fi", "info@sunspot.fi"];
+  // Control: a clean message goes out as two copies, one per target.
+  const clean = await runHandler(sesEvent(rcpts), {}, DEFAULT_RAW, two);
+  assert.deepEqual(clean.calls.ses.map((c) => c.Destinations), [["aava@rk9.fi"], ["ops@example.com"]]);
+  // A boundary that cleaning would change: no copy is sent, to either target.
+  const raw = 'From: a@example.com\r\nContent-Type: multipart/mixed; boundary="ab\x01cd"\r\n\r\n--ab\x01cd\r\n\r\nhei\r\n--ab\x01cd--\r\n';
+  const { res, calls } = await runHandler(sesEvent(rcpts), {}, raw, two);
   assert.deepEqual(res, { disposition: "CONTINUE" });
   assert.equal(calls.s3.length, 1);
   assert.equal(calls.ses.length, 0);
