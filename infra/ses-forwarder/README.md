@@ -80,15 +80,19 @@ directory must be kept in sync (see **Deploying** below).
    The `boundary` parameter of a top-level `Content-Type` is the one
    exception, whatever the type: its value must match the delimiter lines
    in the body. The forwarder reads every `boundary` value (name in any
-   case, quoted or bare, over folded lines) before and after the cleaning.
+   case, quoted or bare, over folded lines, and the RFC 2231 forms
+   `boundary*0`, `boundary*1`, … and `boundary*`) before and after the
+   cleaning.
    It reads the values twice: once with RFC 822 comments `(…)` outside
    quotes skipped, as a comment-aware parser reads them, and once as plain
    text, as a naive parser reads them. A `"` or `;` inside a comment cannot
    so hide a boundary from the check ([RK9-945](/RK9/issues/RK9-945)).
    If the cleaning would change a value in either reading, or add or remove
-   one, the message is not forwarded. When the message is routed to several
-   targets, no copy goes out: every copy is rewritten before the first send. It stays in S3, the log shows `SKIP … unforwardable: …`
-   and the Lambda returns normally, so SES does not retry it. Replay it
+   one, the message is not forwarded. It stays in S3, the log shows
+   `SKIP … unforwardable: …`
+   and the Lambda returns normally, so SES does not retry it. When the
+   message is routed to several targets, no copy goes out, because every
+   copy is rewritten before the first send. Replay it
    from S3 by hand if it matters. The rest of `Content-Type` (a dirty
    `name=`, `charset` or `micalg`, a blank continuation line, a removed
    character in a parameter name) is cleaned and forwarded like every

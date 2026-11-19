@@ -664,6 +664,29 @@ test("boundaryValues() skips RFC 822 comments outside quotes, and reads them as 
   }
 });
 
+test("boundaryValues() reads the RFC 2231 forms boundary*0, boundary*1 and boundary* (RK9-945)", () => {
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundary*0="ab"; Boundary*1="cd"'), ["ab", "cd"]);
+  assert.deepEqual(boundaryValues("Content-Type: multipart/mixed; boundary*=''abcd"), ["''abcd"]);
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundaryx="no"; xboundary*0="no"'), []);
+});
+
+test("rewrite() refuses a message whose RFC 2231 boundary would change in cleaning (RK9-945)", () => {
+  const body = "--ab\x01cd\r\n\r\nhei\r\n--ab\x01cd--\r\n";
+  for (const ct of [
+    'Content-Type: multipart/mixed; boundary*0="ab"; boundary*1="\x01cd"',
+    "Content-Type: multipart/mixed; boundary*=''ab\x01cd",
+    "Content-Type: multipart/mixed; BOUNDARY*0*=''ab\x01; boundary*1=cd",
+  ]) {
+    assert.throws(
+      () => rewrite(plain(["From: a@example.com", ct], body), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]),
+      (err) => err instanceof UnforwardableMessageError,
+      JSON.stringify(ct),
+    );
+  }
+  const ok = rewrite(plain(["From: a@example.com", 'Content-Type: multipart/mixed; boundary*0="ab"; boundary*1="cd"; x="y\x01"'], "--abcd\r\n\r\nhei\r\n--abcd--\r\n"), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
+  assert.equal(header(ok, "Content-Type"), 'multipart/mixed; boundary*0="ab"; boundary*1="cd"; x="y"');
+});
+
 test("rewrite() refuses a message whose boundary a comment hides from one reading of Content-Type (RK9-945)", () => {
   const body = "--ab\x01cd\r\n\r\nhei\r\n--ab\x01cd--\r\n";
   for (const ct of [
@@ -820,6 +843,9 @@ test("handler keeps a message with a control character in Content-Type in S3 wit
 
 // A second copy of index.mjs, with routes.json replaced by a table of two targets.
 // Its own routing cache, so the shared copy above keeps the real routes.json.
+// The refusal does not depend on the recipients, so this test guards the
+// all-or-nothing result; it cannot tell a rewrite-all-then-send loop from an
+// interleaved one.
 async function twoTargetHandler() {
   const table = JSON.stringify({
     targets: { aava: ["aava@rk9.fi"], ops: ["ops@example.com"] },

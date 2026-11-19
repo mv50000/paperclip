@@ -224,13 +224,15 @@ function trimmed(s, from, to) {
  *  One linear pass, no backtracking regex (RK9-940). The values before and after
  *  cleaning are compared; the type does not matter, because only the boundary must
  *  match the body (RFC 2046 5.1.1).
+ *  The RFC 2231 names `boundary*0`, `boundary*1`, … and `boundary*` count too, each
+ *  value as it is written (RK9-945).
  *  By default an RFC 822 comment outside quotes, before the type or anywhere else, is
- *  read as a space, as a comment-aware parser (Python's default email policy) reads
- *  it. Otherwise a `"` or `;` inside `(…)` would hide a real boundary from the scan
- *  (RK9-945). `{ comments: false }` reads the line the way a naive parser does, which
- *  sees no comments; rewrite() compares both readings. */
+ *  read as a space, as an RFC 2045 parser that knows comments reads it. Otherwise a
+ *  `"` or `;` inside `(…)` would hide a real boundary from the scan (RK9-945).
+ *  `{ comments: false }` reads the line as text, the way a parser that knows no
+ *  comments does; rewrite() compares both readings. */
 export function boundaryValues(line, { comments = true } = {}) {
-  if (comments) line = withoutComments(line);
+  if (comments && line.includes("(")) line = withoutComments(line);
   const out = [];
   const param = (from, to) => {
     let eq = from;
@@ -238,7 +240,9 @@ export function boundaryValues(line, { comments = true } = {}) {
     if (eq === to) return;
     const name = line.slice(from, eq).replace(VALUE_CONTROL, "");
     const [ns, ne] = trimmed(name, 0, name.length);
-    if (name.slice(ns, ne).toLowerCase() !== "boundary") return;
+    // `boundary*0`, `boundary*1` and `boundary*` are RFC 2231 forms of the same
+    // parameter; Python's email package joins them into the boundary (RK9-945).
+    if (!/^boundary(?:\*|$)/.test(name.slice(ns, ne).toLowerCase())) return;
     const [vs, ve] = trimmed(line, eq + 1, to);
     if (line.charCodeAt(vs) !== 34) return void out.push(line.slice(vs, ve));
     let v = "";
