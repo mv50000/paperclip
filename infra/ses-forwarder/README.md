@@ -77,15 +77,17 @@ directory must be kept in sync (see **Deploying** below).
    split only on CR/LF. A continuation line that holds only whitespace
    (Unicode whitespace included) is dropped, because a parser can end the
    header block there. Nothing else in a kept header changes.
-   A top-level `Content-Type` of type `multipart/*` or `message/*` is the
-   exception: it is replayed byte for byte or not at all, because its
-   `boundary` must match the delimiter lines in the body. If the cleaning
-   would change such a header (a removed character, a lone CR or a blank
-   continuation line), the message is not forwarded. It stays in S3, the
-   log shows `SKIP … unforwardable: …` and the Lambda returns normally, so
-   SES does not retry it. Replay it from S3 by hand if it matters. Any other
-   `Content-Type` (for example `text/plain` with a dirty `name=` or
-   `charset`) is cleaned and forwarded like every other header.
+   The `boundary` parameter of a top-level `Content-Type` is the one
+   exception, whatever the type: its value must match the delimiter lines
+   in the body. The forwarder reads every `boundary` value (name in any
+   case, quoted or bare, over folded lines) before and after the cleaning.
+   If the cleaning would change a value, or add or remove one, the message
+   is not forwarded. It stays in S3, the log shows `SKIP … unforwardable: …`
+   and the Lambda returns normally, so SES does not retry it. Replay it
+   from S3 by hand if it matters. The rest of `Content-Type` (a dirty
+   `name=`, `charset` or `micalg`, a blank continuation line, a removed
+   character in a parameter name) is cleaned and forwarded like every
+   other header.
    The body is not changed. The sender's own `Reply-To` (for
    example a contact form's customer address) is kept as
    `X-Original-Reply-To`. SES gives the forwarded copy a new `Message-ID`,
@@ -109,7 +111,7 @@ See the file-header comment in `index.mjs` for the change history
 (2026-08-08 spam-poisoning fix, 2026-09-17 dangling-boundary fix,
 2026-11-15 per-address routing, 2026-11-17 X-Original-Message-ID and
 X-Rk9-Forwarded-To, 2026-11-18 C1 controls, blank continuation lines and
-the Content-Type rule).
+the Content-Type boundary rule).
 
 ## Routing
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SESClient } from "@aws-sdk/client-ses";
 import { Readable } from "node:stream";
-import { rewrite, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, forwardedToValue, FORWARDED_TO_INVALID, UnforwardableMessageError, handler } from "./index.mjs";
+import { rewrite, boundaryValues, sanitizeDanglingBoundaries, senderLabel, encodePhrase, decodeEncodedWords, originalMessageId, forwardedToValue, FORWARDED_TO_INVALID, UnforwardableMessageError, handler } from "./index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(here, "fixtures");
@@ -575,9 +575,12 @@ test("rewrite() replays ordinary headers byte for byte", () => {
 });
 
 test("rewrite() handles a long CR run inside a header line in linear time", { timeout: 10_000 }, () => {
-  const raw = Buffer.from(`From: a@example.com\r\nSubject: ${"\r".repeat(2_000_000)}x\r\nContent-Type: multipart/mixed;${"\r".repeat(200_000)} boundary=b\r\n\r\nbody`, "utf8");
+  const raw = Buffer.from(`From: a@example.com\r\nSubject: ${"\r".repeat(2_000_000)}x\r\nContent-Type: multipart/mixed;${"\r".repeat(200_000)} boundary=b${"\r".repeat(200_000)}c\r\n\r\nbody`, "utf8");
   const t = Date.now();
   assert.throws(() => rewrite(raw, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]), UnforwardableMessageError);
+  // Many parameters without `=`, long pad runs and a long quoted value stay linear too.
+  const params = Buffer.from(`From: a@example.com\r\nContent-Type: multipart/mixed${";".repeat(500_000)};${" ".repeat(500_000)}x; boundary="${"b".repeat(500_000)}"\r\n\r\nbody`, "utf8");
+  rewrite(params, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
   const noCt = Buffer.from(`From: a@example.com\r\nSubject: ${"\r".repeat(2_000_000)}x\r\n\r\nbody`, "utf8");
   const out = rewrite(noCt, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]);
   assert.ok(Date.now() - t < 3000, `took ${Date.now() - t} ms`);
@@ -601,18 +604,22 @@ test("rewrite() drops a header whose name holds a zero-width character anywhere 
   assert.equal(header(out, "Subject"), "ok");
 });
 
-test("rewrite() refuses a message whose multipart Content-Type would change, so the boundary never splits from the body", () => {
+test("rewrite() refuses a message whose Content-Type boundary would change, so the boundary never splits from the body", () => {
   const body = (b) => `--${b}\r\nContent-Type: text/plain\r\n\r\nhei\r\n--${b}--\r\n`;
   const cases = [
     ["ab\x01cd", 'Content-Type: multipart/mixed; boundary="ab\x01cd"'],
     ["ab\u0085cd", 'Content-Type: multipart/mixed; boundary="ab\u0085cd"'],
-    ["abcd", 'Content-Type: multipart/mixed;\x0c boundary="abcd"'],
-    ["abcd", 'Content-Type: multipart/mixed;\r\n \r\n boundary="abcd"'],
-    ["abcd", 'Content-Type: multipart/mixed;\r boundary="abcd"'], // a lone CR becomes a space
-    ["ab\x01cd", 'CONTENT-TYPE: Multipart/Mixed; boundary="ab\x01cd"'],
+    ["ab\x01cd", "Content-Type: multipart/mixed; boundary=ab\x01cd"], // bare value
+    ["ab\x01cd", 'CONTENT-TYPE: Multipart/Mixed; BOUNDARY="ab\x01cd"'],
     ["ab\u2028cd", 'content-type : multipart/alternative; boundary="ab\u2028cd"'],
-    ["abcd", 'Content-Type: message/rfc822;\x01 x=y'],
+    ["ab\u0085cd", 'Content-Type: (c) multipart/mixed; boundary="ab\u0085cd"'], // a comment before the type
+    ["ab\x01cd", 'Content-Type:\tmultipart/mixed; boundary="ab\x01cd"'],
+    ["ab\x01cd", 'Content-Type: multipart /mixed; boundary="ab\x01cd"'],
+    ["ab\x01cd", 'Content-Type: \x01multipart/mixed; boundary="ab\x01cd"'],
+    ["ab\x01cd", 'Content-Type: text/plain; boundary="ab\x01cd"'], // the type does not matter
+    ["ab\\\x01cd", 'Content-Type: multipart/mixed; boundary="ab\\\x01cd"'], // an escaped control character
     ["ab\x7fcd", 'Content-Type: text/plain\r\nContent-Type: multipart/mixed; boundary="ab\x7fcd"'], // the second of two
+    ["abcd", 'Content-Type: multipart/mixed; x="a\\\x01\\"; boundary=abcd; y="'], // cleaning ends the quote early and reveals a boundary
   ];
   for (const [b, ct] of cases) {
     assert.throws(
@@ -628,7 +635,17 @@ test("rewrite() refuses a message whose multipart Content-Type would change, so 
   assert.match(headersOf(rewrite(doubled, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"])), /boundary="abcd"/);
 });
 
-test("rewrite() cleans and forwards a dirty Content-Type that has no boundary, as before", () => {
+test("boundaryValues() reads every boundary parameter, quoted or bare, in any case", () => {
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundary="a;b"; x=1'), ["a;b"]);
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; x="boundary=no"; Boundary = bare ; BOUNDARY="q\\"x"'), ["bare", 'q"x']);
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundary="a\\";b"; x=1'), ['a";b']);
+  assert.deepEqual(boundaryValues('Content-Type: boundary="type-only"'), []);
+  assert.deepEqual(boundaryValues("Content-Type: multipart/mixed; boundary"), []);
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundary="unclosed'), ["unclosed"]);
+  assert.deepEqual(boundaryValues('Content-Type: multipart/mixed; boundary="ab"junk'), ["ab"]);
+});
+
+test("rewrite() cleans and forwards a dirty Content-Type whose boundary stays the same, as before", () => {
   const variants = [
     ['Content-Type: application/pdf; name="Lasku 100\u0080.pdf"', 'application/pdf; name="Lasku 100.pdf"'],
     ['Content-Type: text/plain; name="\x1b$B%F%9%H\x1b(B.txt"', 'text/plain; name="$B%F%9%H(B.txt"'],
@@ -639,6 +656,19 @@ test("rewrite() cleans and forwards a dirty Content-Type that has no boundary, a
     ["Content-Type: text/plain;\r\n\t\r\n charset=utf-8", "text/plain; charset=utf-8"],
     ["Content-Type: text/html;\r\n \u00a0\r\n charset=utf-8", "text/html; charset=utf-8"],
     ['Content-Type: multipart/mixed; boundary="abcd"\r\nContent-Type: text/plain\x01', null],
+    // A multipart or message Content-Type whose boundary stays the same (RK9-940 review).
+    ['Content-Type: multipart/report; report-type=delivery-status;\r\n \r\n\tboundary="abcd"', 'multipart/report; report-type=delivery-status; boundary="abcd"'],
+    ['Content-Type: multipart/report; report-type=delivery-status; boundary="abcd";\r\n ', 'multipart/report; report-type=delivery-status; boundary="abcd";'],
+    ['Content-Type: multipart/signed; micalg=pgp-sha256\u0096; boundary="abcd"', 'multipart/signed; micalg=pgp-sha256; boundary="abcd"'],
+    ['Content-Type: multipart/related; start="<a\x01@x>"; boundary="abcd"', 'multipart/related; start="<a@x>"; boundary="abcd"'],
+    ['Content-Type: multipart/mixed; boundary="abcd"\x7f', 'multipart/mixed; boundary="abcd"'],
+    ['Content-Type: multipart/mixed;\r\n \r\n boundary="abcd"', 'multipart/mixed; boundary="abcd"'],
+    ['Content-Type: multipart/mixed;\r boundary="abcd"', 'multipart/mixed;  boundary="abcd"'],
+    ['Content-Type: message/rfc822; name="fwd\u0096.eml"', 'message/rfc822; name="fwd.eml"'],
+    ["Content-Type: message/rfc822;\x01 x=y", "message/rfc822; x=y"],
+    ['Content-Type: multipart/mixed;\x0c boundary="abcd"', 'multipart/mixed; boundary="abcd"'], // the name is cleaned, the value is the same
+    ['Content-Type: multipart/mixed; bound\x01ary="abcd"', 'multipart/mixed; boundary="abcd"'],
+    ['Content-Type: multipart/mixed;\r\n \u0085\r\n boundary="abcd"', 'multipart/mixed; boundary="abcd"'],
   ];
   for (const [ct, want] of variants) {
     const body = "--abcd\r\n\r\nhei\r\n--abcd--\r\n";
@@ -662,6 +692,8 @@ test("rewrite() forwards a doubly converted multipart message (\\r\\r\\n) whose 
   assert.match(header(out, "Content-Type"), /^multipart\/mixed; +boundary="b1"$/);
   assert.equal(header(out, "Subject"), "s");
   assert.equal(out.toString("utf8").split("\r\n\r\n").slice(1).join("\r\n\r\n"), "--b1\r\n\r\nhi\r\n--b1--\r\n");
+  const bare = Buffer.from("From: a@example.com\r\r\nContent-Type: multipart/mixed; boundary=b1\r\r\nSubject: s\r\r\n\r\r\n--b1\r\r\n\r\r\nhi\r\r\n--b1--\r\r\n", "utf8");
+  assert.match(header(rewrite(bare, "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]), "Content-Type"), /^multipart\/mixed; boundary=b1$/);
 });
 
 // ---- RK9-874: handler routing (AWS clients stubbed) ---------------------------

@@ -62,8 +62,9 @@
 // U+009F, NEL included) and U+2028/U+2029, which a lenient reader (a JS regex with the
 // `m` flag, Python's str.splitlines()) treats as line ends. A continuation line that
 // holds only whitespace is dropped, because a parser can end the header block there.
-// The Content-Type header is never changed: its boundary must match the body, so a
-// message whose Content-Type would need cleaning is not forwarded (it stays in S3).
+// The boundary parameter of Content-Type is never changed: it must match the delimiter
+// lines in the body, so a message whose boundary would change in cleaning is not
+// forwarded (it stays in S3). The rest of Content-Type is cleaned like any header.
 // An X-Rk9-Forwarded-To recipient that holds `=?` (an RFC 2047 encoded-word) is invalid.
 import fs from "node:fs";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
@@ -202,11 +203,55 @@ const VALUE_CONTROL = /[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029]/g;
  *  LF are already gone. */
 const COPY_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029]/g;
 
-/** True when a cleaned Content-Type header block declares multipart/* or message/*:
- *  the types whose body structure depends on the header (RFC 2046). */
-function hasBoundaryType(contentTypeBlock) {
-  const value = contentTypeBlock.slice(contentTypeBlock.indexOf(":") + 1).replace(/\r\n/g, "");
-  return /^\s*(?:multipart|message)\s*\//i.test(value);
+/** The bounds of s[from, to) without the spaces, tabs and CRs at either end. A loop,
+ *  not a regex: no backtracking on attacker input. */
+const isPad = (c) => c === 32 || c === 9 || c === 13;
+function trimmed(s, from, to) {
+  while (from < to && isPad(s.charCodeAt(from))) from++;
+  while (to > from && isPad(s.charCodeAt(to - 1))) to--;
+  return [from, to];
+}
+
+/** The value of every `boundary` parameter (name in any case) in one unfolded
+ *  Content-Type header line, in order: a quoted value without its quotes and
+ *  backslash escapes, a bare value trimmed. The type before the first `;` is not a
+ *  parameter, and a `;` inside quotes does not end one. A character that cleaning
+ *  removes does not count in a parameter name, so only a change of the value counts.
+ *  One linear pass, no backtracking regex (RK9-940). The values before and after
+ *  cleaning are compared; the type does not matter, because only the boundary must
+ *  match the body (RFC 2046 5.1.1). */
+export function boundaryValues(line) {
+  const out = [];
+  const param = (from, to) => {
+    let eq = from;
+    while (eq < to && line.charCodeAt(eq) !== 61) eq++; // bounded: no rescan to the line end
+    if (eq === to) return;
+    const name = line.slice(from, eq).replace(VALUE_CONTROL, "");
+    const [ns, ne] = trimmed(name, 0, name.length);
+    if (name.slice(ns, ne).toLowerCase() !== "boundary") return;
+    const [vs, ve] = trimmed(line, eq + 1, to);
+    if (line.charCodeAt(vs) !== 34) return void out.push(line.slice(vs, ve));
+    let v = "";
+    for (let i = vs + 1; i < ve; i++) {
+      const c = line[i];
+      if (c === '"') break;
+      v += c === "\\" && i + 1 < ve ? line[++i] : c;
+    }
+    out.push(v);
+  };
+  let start = -1; // the start of the current parameter; -1 while in the type
+  let quoted = false;
+  for (let i = line.indexOf(":") + 1; i < line.length; i++) {
+    const c = line[i];
+    if (quoted && c === "\\") i++;
+    else if (c === '"') quoted = !quoted;
+    else if (c === ";" && !quoted) {
+      if (start >= 0) param(start, i);
+      start = i + 1;
+    }
+  }
+  if (start >= 0) param(start, line.length);
+  return out;
 }
 
 /** Thrown by rewrite() when the message cannot be forwarded without changing what it
@@ -367,10 +412,8 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   const body = m ? collapseStrayCRs(text.slice(m.index + m[0].length)) : "";
 
   // Group header lines into logical blocks (header + its folded continuation lines).
-  // rawBlocks holds the same lines as received, so a change to Content-Type can be
-  // detected below. CRs at the end of a line come from a double line-ending conversion
-  // (`\r\r\n`, RK9-888) and are not content, so there they count as the space the
-  // line gets.
+  // rawBlocks holds the same lines as received, so a change to a Content-Type boundary
+  // can be detected below.
   const blocks = [];
   const rawBlocks = [];
   // A lone CR becomes a space: a receiver that treats it as a line end would
@@ -378,20 +421,14 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // here either, so `\r\r\n` from a double line-ending conversion cannot end the
   // header block early and push Content-Type into the body. Every CR left inside a
   // line after the split is a lone CR, so replacing them all is the same thing.
-  // A loop, not /\r+$/: that regex backtracks on a long CR run inside a line.
-  const asReceived = (rawLine) => {
-    let end = rawLine.length;
-    while (end > 0 && rawLine.charCodeAt(end - 1) === 13) end--;
-    return end === rawLine.length ? rawLine : rawLine.slice(0, end) + " ".repeat(rawLine.length - end);
-  };
   for (const rawLine of headerPart.split(/\r?\n/)) {
     const line = rawLine.replace(/\r/g, " ");
     if (/^[ \t]/.test(line) && blocks.length) {
       blocks[blocks.length - 1].push(line);
-      rawBlocks[rawBlocks.length - 1].push(asReceived(rawLine));
+      rawBlocks[rawBlocks.length - 1].push(rawLine);
     } else {
       blocks.push([line]);
-      rawBlocks.push([asReceived(rawLine)]);
+      rawBlocks.push([rawLine]);
     }
   }
   const nameOf = (b) => (b[0].split(":")[0] || "").toLowerCase().trim();
@@ -412,25 +449,29 @@ export function rewrite(raw, fromAddr, mail, originalTo) {
   // included) is dropped: a parser can take it for the empty line that ends the
   // header block and move the rest into the body.
   // The first line keeps its name and colon, which no removal touches (RK9-940).
-  const cleanBlock = (b) =>
-    b
-      .map((line) => line.replace(VALUE_CONTROL, ""))
-      .filter((line, i) => i === 0 || /\S/.test(line))
-      .join("\r\n");
+  const cleanLines = (b) =>
+    b.map((line) => line.replace(VALUE_CONTROL, "")).filter((line, i) => i === 0 || /\S/.test(line));
   const keptIdx = blocks
     .map((b, i) => i)
     .filter((i) => isHeader(blocks[i]) && !DROP_HEADERS.has(nameOf(blocks[i])) && !isForgeableOriginal(nameOf(blocks[i])));
-  // A multipart/* or message/* Content-Type is replayed byte for byte or not at all:
-  // its boundary must match the delimiter lines in the body, and a cleaned
-  // `boundary="ab\x01cd"` would not. Such a message stays in S3 (RK9-940). Any other
-  // Content-Type (text/plain with a dirty name= or charset) has no boundary, so it is
-  // cleaned and forwarded like every other header. Every Content-Type is checked.
+  // The boundary of a Content-Type must match the delimiter lines in the body, and a
+  // cleaned `boundary="ab\x01cd"` would not. So when cleaning changes the value of any
+  // boundary parameter (or adds or removes one), the message is not forwarded and
+  // stays in S3 (RK9-940). The values are compared on the unfolded lines as received.
+  // A CR there is padding like a space (boundaryValues trims it), so the `\r\r\n` of a
+  // double line-ending conversion (RK9-888) does not count as a change.
+  // Every Content-Type is checked, whatever its type; the rest of the header (a dirty
+  // name=, charset or micalg, a blank continuation line) is cleaned and forwarded.
   const kept = keptIdx.map((i) => {
-    const cleaned = cleanBlock(blocks[i]);
-    if (nameOf(blocks[i]) === "content-type" && cleaned !== rawBlocks[i].join("\r\n") && hasBoundaryType(cleaned)) {
-      throw new UnforwardableMessageError("multipart or message Content-Type would change in cleaning");
+    const cleaned = cleanLines(blocks[i]);
+    if (nameOf(blocks[i]) === "content-type") {
+      const before = boundaryValues(rawBlocks[i].join(""));
+      const after = boundaryValues(cleaned.join(""));
+      if (before.length !== after.length || before.some((v, j) => v !== after[j])) {
+        throw new UnforwardableMessageError("Content-Type boundary would change in cleaning");
+      }
     }
-    return cleaned;
+    return cleaned.join("\r\n");
   });
   const rawValueOf = (name) => {
     const b = blocks.find((x) => nameOf(x) === name);
