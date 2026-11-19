@@ -676,6 +676,13 @@ test("rewrite() refuses a message whose RFC 2231 boundary would change in cleani
     'Content-Type: multipart/mixed; boundary*0="ab"; boundary*1="\x01cd"',
     "Content-Type: multipart/mixed; boundary*=''ab\x01cd",
     "Content-Type: multipart/mixed; BOUNDARY*0*=''ab\x01; boundary*1=cd",
+    // Whitespace, a comment or a fold before the `*` (verifier round 2), and NBSP.
+    'Content-Type: multipart/mixed; boundary *0="ab"; boundary *1="\x01cd"',
+    "Content-Type: multipart/mixed; boundary\t*=''ab\x01cd",
+    'Content-Type: multipart/mixed; boundary (c) *0="ab"; boundary (c)*1="\x01cd"',
+    'Content-Type: multipart/mixed; boundary\r\n *0="ab"; boundary\r\n *1="\x01cd"',
+    "Content-Type: multipart/mixed; boundary\x01 *=''ab\x01cd",
+    'Content-Type: multipart/mixed; \u00a0boundary="ab\x01cd"',
   ]) {
     assert.throws(
       () => rewrite(plain(["From: a@example.com", ct], body), "forwarder@sunspot.fi", {}, ["hei@sunspot.fi"]),

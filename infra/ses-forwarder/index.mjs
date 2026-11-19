@@ -242,7 +242,10 @@ export function boundaryValues(line, { comments = true } = {}) {
     const [ns, ne] = trimmed(name, 0, name.length);
     // `boundary*0`, `boundary*1` and `boundary*` are RFC 2231 forms of the same
     // parameter; Python's email package joins them into the boundary (RK9-945).
-    if (!/^boundary(?:\*|$)/.test(name.slice(ns, ne).toLowerCase())) return;
+    // Python also skips whitespace (NBSP and folds included) and comments around the
+    // `*`, so all whitespace is removed from the name first. A name that matches
+    // too much only refuses more.
+    if (!/^boundary(?:\*|$)/.test(name.slice(ns, ne).replace(/\s/g, "").toLowerCase())) return;
     const [vs, ve] = trimmed(line, eq + 1, to);
     if (line.charCodeAt(vs) !== 34) return void out.push(line.slice(vs, ve));
     let v = "";
