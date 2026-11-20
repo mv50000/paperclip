@@ -1,0 +1,53 @@
+name: SES forwarder tests
+
+# --- RK9 Custom (RK9-945) --- runs the node:test suite of the rk9-ses-forwarder
+# Lambda (infra/ses-forwarder) when that directory or this workflow changes. The
+# forwarder is not a pnpm workspace package, so the PR workflow never ran its tests.
+# No AWS credentials: the tests stub the S3 and SES clients.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/ses-forwarder.yml
+      - infra/ses-forwarder/**
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/ses-forwarder.yml
+      - infra/ses-forwarder/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ses-forwarder-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ses-forwarder node --test
+    # Runner switch as in the other workflows; a fork PR stays on GitHub's runner, see doc/CI-RUNNER.md
+    runs-on: ${{ fromJSON(github.event.pull_request.head.repo.full_name == github.repository && vars.CI_RUNNER || github.event_name == 'push' && vars.CI_RUNNER || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: infra/ses-forwarder
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install the AWS SDK clients the tests import
+        # package-lock.json is gitignored (the Lambda bundles no node_modules), so
+        # install without one, and run no install scripts.
+        run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+
+      - name: Run the tests
+        run: npm test
