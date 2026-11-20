@@ -165,7 +165,7 @@ repo ei näe niitä, joten tarvitaan repo-tason runneri. builder-02 on luonteva 
 siellä on jo `ci-runners.slice`, rootless Docker -paketit ja Playwrightin kirjastot.
 Uusi runneri on neljäs slotti samassa slicessa, joten runner-unitin muisti kuuluu slicen
 yhteiseen kattoon. Rootless Docker ajaa käyttäjän user-sessiossa slicen ulkopuolella, joten
-skripti antaa sille oman katon (`user-<uid>.slice`, 6 G).
+skripti antaa sille oman katon (`user-<uid>.slice`, 4 G, VM:ssä on 6 G: RK9-794).
 
 Repoa ei ole kloonattu build-hosteille. Kopioi skripti hostille, esim.
 `scp scripts/ci/install-paperclip-runner.sh <host>:`, ja aja se siellä.
@@ -248,7 +248,7 @@ Skripti tekee nämä:
 - kirjoittaa `.env`:iin hookin, `NODE_OPTIONS=--max-old-space-size=4096`,
   `PAPERCLIP_CI_NO_SUDO=1` ja rootless-`DOCKER_HOST`in
 - asentaa rootless Dockerin käyttäjän user-sessioon (linger päällä)
-- rajaa rootless Dockerin muistin: `user-<uid>.slice` saa `MemoryHigh=5G`, `MemoryMax=6G`
+- rajaa rootless Dockerin muistin: `user-<uid>.slice` saa `MemoryHigh=3G`, `MemoryMax=4G`
   (dockerd ja kontit ajavat user-sessiossa, eivät runner-unitissa)
 - kirjoittaa systemd-unitin `actions.runner.mv50000-paperclip.<nimi>.service` (`KillMode=mixed`) drop-inillä
   `Slice=ci-runners.slice`, `MemoryHigh=3584M`, `MemoryMax=4G`, `Restart=on-failure`,
