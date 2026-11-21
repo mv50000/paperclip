@@ -39,6 +39,7 @@ import {
   publishFbVideo,
   publishIgImage,
   publishIgReel,
+  readIgAiLabel,
   type ContainerWaitOptions,
   type OrganicPublishResult,
   type OrganicTarget,
@@ -58,6 +59,9 @@ import {
   ORGANIC_ENTITY_TYPE,
   ORGANIC_GATE_KIND,
   ORGANIC_REJECT_REASONS,
+  postAiGenerated,
+  postAiLabel,
+  type OrganicAiLabel,
   type OrganicBinding,
   type OrganicLint,
   type OrganicPost,
@@ -82,6 +86,20 @@ export const MEDIA_ID_FROM_CAPTION_MATCH = "caption_match";
 export const ORGANIC_LABELS = { approve: "📣 Julkaise", deny: "❌ Hylkää" } as const;
 /** A dry-run card says on its button that the tap publishes nothing. */
 export const ORGANIC_DRY_RUN_LABELS = { approve: "🧪 Kuivaharjoita", deny: "❌ Hylkää" } as const;
+
+/** RK9-954: the line a published card gets about Instagram's "AI info" label. */
+export const AI_LABEL_STATUS: Record<OrganicAiLabel, string> = {
+  confirmed: "AI-merkintä: vahvistettu.",
+  missing: "⚠️ AI-merkintä puuttuu Instagramista: lisää se sovelluksessa.",
+  unknown: "⚠️ AI-merkintää ei voitu vahvistaa: tarkista julkaisu.",
+};
+
+/** The note stored on a published post whose label was not confirmed; null when there is nothing to report. */
+function aiLabelProblem(label: OrganicAiLabel | null): string | null {
+  if (label === "missing") return "AI label missing: Instagram reports is_ai_generated false; add the label in the Instagram app";
+  if (label === "unknown") return "AI label unknown: is_ai_generated could not be read back; check the post in the Instagram app";
+  return null;
+}
 
 export class OrganicError extends Error {
   constructor(
@@ -133,11 +151,24 @@ export interface OrganicRequestInput {
   channel: OrganicChannel;
   caption?: string;
   brandLint?: unknown;
+  /**
+   * RK9-954: true asks for Instagram's "AI info" label (generated imagery).
+   * Only a real boolean is valid; absent means false. IG channels only.
+   */
+  aiGenerated?: unknown;
 }
 
+/**
+ * Every answer carries `aiGenerated`: the flag of the new post, or the STORED
+ * flag of the open post. A caller compares it with what it sent, so a plugin
+ * from before RK9-954 (no such field in the answer) cannot pass for one that
+ * set the label. `exists` also carries the stored read-back `aiLabel` (null
+ * when none is stored), so a caller sees a live post whose label is missing
+ * or unknown.
+ */
 export type OrganicRequestResult =
-  | { status: "card_sent"; postId: string; gateRequestId: string; channel: OrganicChannel; mode: "dry_run" | "live"; validUntil: string }
-  | { status: "exists"; postId: string; postStatus: string; channel: OrganicChannel };
+  | { status: "card_sent"; postId: string; gateRequestId: string; channel: OrganicChannel; mode: "dry_run" | "live"; validUntil: string; aiGenerated: boolean }
+  | { status: "exists"; postId: string; postStatus: string; channel: OrganicChannel; aiGenerated: boolean; aiLabel: OrganicAiLabel | null };
 
 function safe(error: unknown): string {
   const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -156,7 +187,10 @@ export function bindingOf(request: Pick<GateRequestRecord, "kind" | "payload">):
   if (typeof raw.postId !== "string" || !UUID_RE.test(raw.postId)) return null;
   if (typeof raw.contentHash !== "string" || !/^[0-9a-f]{64}$/.test(raw.contentHash)) return null;
   if (typeof raw.channel !== "string" || !(raw.channel in CHANNEL_LABELS)) return null;
-  return { postId: raw.postId, contentHash: raw.contentHash, channel: raw.channel as OrganicChannel };
+  // RK9-954: no key = an unflagged card (also every card from before RK9-954); the only other valid value is true.
+  const flag = (raw as { aiGenerated?: unknown }).aiGenerated;
+  if (flag !== undefined && flag !== true) return null;
+  return { postId: raw.postId, contentHash: raw.contentHash, channel: raw.channel as OrganicChannel, aiGenerated: flag === true };
 }
 
 /** Why a brand cannot use a channel now; null when it can. */
@@ -234,6 +268,17 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       throw new OrganicError("invalid_request", `channel must be one of ${Object.keys(CHANNEL_LABELS).join(", ")}`);
     }
     const channel = input.channel;
+    // RK9-954: only a real boolean counts. "true", 1 or null are refused, never read as a guess.
+    if (input.aiGenerated !== undefined && typeof input.aiGenerated !== "boolean") {
+      throw new OrganicError("invalid_request", "aiGenerated must be a boolean (true or false)");
+    }
+    const aiGenerated = input.aiGenerated === true;
+    if (aiGenerated && !channel.startsWith("ig_")) {
+      throw new OrganicError(
+        "ai_label_unsupported",
+        `${channel} cannot carry an AI label: Meta has no verified label field for a Facebook Page post. Post AI-generated imagery on ig_reel or ig_feed`,
+      );
+    }
     const cfg = await config(companyId);
     const problem = channelProblem(cfg, channel);
     if (problem) throw new OrganicError("channel_unavailable", problem);
@@ -263,9 +308,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const contentHash = organicContentHash(companyId, creative.sha256, channel, caption);
     const existing = await deps.posts.findOpen(companyId, contentHash);
     if (existing) {
-      if (effectiveStatus(existing, now()) !== "expired") {
-        return { status: "exists", postId: existing.id, postStatus: existing.status, channel };
-      }
+      if (effectiveStatus(existing, now()) !== "expired") return existsAnswer(existing, channel, aiGenerated);
       await deps.posts.update(companyId, existing.id, "pending", { status: "expired" });
     }
 
@@ -294,6 +337,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       timeZone: cfg.timeZone,
       creativeId: creative.id,
       warnings: locked.warnings,
+      aiGenerated,
     });
     if (!fitsTextCard(text, creative.mediaUrl)) throw new OrganicError("invalid_caption", "the card does not fit a Telegram message");
 
@@ -305,15 +349,17 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       contentHash,
       mode,
       lint,
-      payload: { initiator, mediaUrl: creative.mediaUrl, mediaLock: locked.lock },
+      // The flag is stored only when true, so a post without it is the same row as before RK9-954.
+      payload: { initiator, mediaUrl: creative.mediaUrl, mediaLock: locked.lock, ...(aiGenerated ? { aiGenerated: true } : {}) },
     });
     if (!post) {
       const raced = await deps.posts.findOpen(companyId, contentHash);
-      if (raced) return { status: "exists", postId: raced.id, postStatus: raced.status, channel };
+      if (raced) return existsAnswer(raced, channel, aiGenerated);
       throw new OrganicError("conflict", "an open post of this content exists");
     }
 
-    const binding: OrganicBinding = { postId: post.id, contentHash, channel };
+    // RK9-954: the card binds the flag it showed. The key is written only when true, so an unflagged card's payload is unchanged.
+    const binding = { postId: post.id, contentHash, channel, ...(aiGenerated ? { aiGenerated: true } : {}) };
     let sent: { id: string; messageId: number } | null = null;
     let lastError: unknown = null;
     for (const candidate of organicCardCandidates(text, { kind: creative.kind, mediaUrl: creative.mediaUrl, posterUrl: creative.posterUrl })) {
@@ -340,8 +386,25 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     }
     // A tap can come before this write; the handler finds the post through the card's binding.
     await deps.posts.update(companyId, post.id, "pending", { gateRequestId: sent.id });
-    await audit(companyId, post.id, "card sent", { channel, mode, gateRequestId: sent.id, creativeId: creative.id, lintOk: lint?.ok ?? null });
-    return { status: "card_sent", postId: post.id, gateRequestId: sent.id, channel, mode, validUntil: validUntil.toISOString() };
+    await audit(companyId, post.id, "card sent", { channel, mode, gateRequestId: sent.id, creativeId: creative.id, lintOk: lint?.ok ?? null, aiGenerated });
+    // The echo is read from the stored row, not from the input.
+    return { status: "card_sent", postId: post.id, gateRequestId: sent.id, channel, mode, validUntil: validUntil.toISOString(), aiGenerated: postAiGenerated(post) };
+  }
+
+  /**
+   * The answer for content that already has an open post. It reports the
+   * stored flag. A request with the other flag is refused: the open card (or
+   * the live post) was made with the stored one, and it is not changed here.
+   */
+  function existsAnswer(existing: OrganicPost, channel: OrganicChannel, aiGenerated: boolean): OrganicRequestResult {
+    const stored = postAiGenerated(existing);
+    if (stored !== aiGenerated) {
+      throw new OrganicError(
+        "ai_flag_mismatch",
+        `an open post of this content (${existing.id}, ${existing.status}) has aiGenerated ${stored}, this request has ${aiGenerated}; the open post is not changed`,
+      );
+    }
+    return { status: "exists", postId: existing.id, postStatus: existing.status, channel, aiGenerated: stored, aiLabel: postAiLabel(existing) };
   }
 
   function refuse(statusText: string, reason: string, binding: OrganicBinding | null, tgUserId: number): GateHandlerResult {
@@ -383,6 +446,20 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     }
     const problem = cfg.brandCode === request.brandCode ? channelProblem(cfg, post.channel) : "the brand code changed";
     if (problem) return close("⛔ Kanava ei ole enää käytössä: ei julkaistu.", problem);
+    // RK9-954: the stored flag must be a real boolean, and only an IG post can carry the label.
+    // Only an absent key means false and only the boolean true means flagged: a stored null, 1 or "true" is refused.
+    const storedFlag = post.payload.aiGenerated;
+    if (storedFlag !== undefined && typeof storedFlag !== "boolean") {
+      return close("⛔ Postauksen AI-merkintä ei kelpaa: ei julkaistu. Pyydä uusi kortti.", "ai_flag_invalid");
+    }
+    const aiGenerated = postAiGenerated(post);
+    if (aiGenerated && !post.channel.startsWith("ig_")) {
+      return close("⛔ AI-merkintää ei voi tehdä tälle kanavalle: ei julkaistu.", "ai_label_unsupported");
+    }
+    // The approver saw the flag on the card: a flag that changed since then closes the card (defence in depth).
+    if (binding.aiGenerated !== aiGenerated) {
+      return close("⛔ Postauksen AI-merkintä on muuttunut kortin jälkeen: ei julkaistu. Pyydä uusi kortti.", `ai_flag_changed: card ${binding.aiGenerated}, post ${aiGenerated}`);
+    }
     const creative = await deps.creatives.get(companyId, post.creativeId);
     if (!creative || organicContentHash(companyId, creative.sha256, post.channel, post.caption) !== post.contentHash) {
       return close("⛔ Creative on muuttunut: ei julkaistu.", "creative_changed");
@@ -461,6 +538,11 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       };
     }
 
+    // RK9-954: the read-back of the "AI info" label; null when the post did not ask for it.
+    // The post stays live whatever it says: a label that is not confirmed is only reported.
+    const aiLabel = result.aiLabel;
+    const aiNote = aiLabelProblem(aiLabel);
+    const notes = [...(result.recovered ? ["media_publish answered an error; the container reports PUBLISHED"] : []), ...(aiNote ? [aiNote] : [])];
     const stored = await deps.posts.update(companyId, post.id, "publishing", {
       status: "published",
       metaContainerId: result.containerId,
@@ -468,10 +550,14 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       metaPostId: result.postId,
       permalink: result.permalink,
       publishedAt: now(),
-      ...(result.recovered
+      ...(notes.length > 0 ? { error: notes.join("; ") } : {}),
+      ...(result.recovered || aiLabel
         ? {
-            error: "media_publish answered an error; the container reports PUBLISHED",
-            payload: { ...publishingPayload, ...(result.mediaId ? { mediaIdSource: MEDIA_ID_FROM_CAPTION_MATCH } : {}) },
+            payload: {
+              ...publishingPayload,
+              ...(result.recovered && result.mediaId ? { mediaIdSource: MEDIA_ID_FROM_CAPTION_MATCH } : {}),
+              ...(aiLabel ? { aiLabel } : {}),
+            },
           }
         : {}),
     });
@@ -483,10 +569,15 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       postId: result.postId,
       permalink: result.permalink,
       recovered: result.recovered,
+      ...(aiGenerated ? { aiGenerated, aiLabel } : {}),
     });
+    if (aiNote) {
+      deps.ctx.logger.warn("rk9-ads organic: the AI label is not confirmed", { postId: post.id, mediaId: result.mediaId, aiLabel });
+      await audit(companyId, post.id, "ai label not confirmed", { channel: post.channel, gateRequestId: request.id, mediaId: result.mediaId, aiLabel });
+    }
     return {
-      statusText: `✅ Julkaistu: ${CHANNEL_LABELS[post.channel]}${result.permalink ? `\n${result.permalink}` : ""}`,
-      outcome: { handler: "done", result: "published", postId: post.id, mediaId: result.mediaId, recovered: result.recovered, decidedBy: { tgUserId } },
+      statusText: `✅ Julkaistu: ${CHANNEL_LABELS[post.channel]}${result.permalink ? `\n${result.permalink}` : ""}${aiLabel ? `\n${AI_LABEL_STATUS[aiLabel]}` : ""}`,
+      outcome: { handler: "done", result: "published", postId: post.id, mediaId: result.mediaId, recovered: result.recovered, aiLabel, decidedBy: { tgUserId } },
     };
   };
 
@@ -500,11 +591,13 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       },
       excludeMediaIds: await deps.posts.otherMediaIds(post.companyId, post.id),
     };
+    // RK9-954: absent unless the post asked for the label, so a post without it sends the same request as before.
+    const ai = postAiGenerated(post) ? { aiGenerated: true } : {};
     switch (post.channel) {
       case "ig_reel":
-        return publishIgReel(client, cfg.meta.igUserId!, { videoUrl: mediaUrl, caption: post.caption }, deps.wait, hooks);
+        return publishIgReel(client, cfg.meta.igUserId!, { videoUrl: mediaUrl, caption: post.caption, ...ai }, deps.wait, hooks);
       case "ig_feed":
-        return publishIgImage(client, cfg.meta.igUserId!, { imageUrl: mediaUrl, caption: post.caption }, deps.wait, hooks);
+        return publishIgImage(client, cfg.meta.igUserId!, { imageUrl: mediaUrl, caption: post.caption, ...ai }, deps.wait, hooks);
       case "fb_photo":
         return publishFbPhoto(client, cfg.meta.pageId, { url: mediaUrl, caption: post.caption });
       case "fb_video":
@@ -589,7 +682,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
   }
 
   type ReconcileVerdict =
-    | { kind: "published"; mediaId: string | null; fromCaption: boolean }
+    | { kind: "published"; mediaId: string | null; fromCaption: boolean; aiLabel: OrganicAiLabel | null }
     | { kind: "absent"; reason: string }
     | { kind: "unknown"; reason: string };
 
@@ -620,13 +713,15 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       } catch {
         mediaId = null;
       }
-      return { kind: "published", mediaId, fromCaption: mediaId !== null };
+      // RK9-954: a post that asked for the "AI info" label gets the same read-back here as after a direct publish.
+      const aiLabel = postAiGenerated(post) ? (mediaId ? await readIgAiLabel(client, mediaId) : "unknown") : null;
+      return { kind: "published", mediaId, fromCaption: mediaId !== null, aiLabel };
     }
     if (!cfg.organic?.pageAccessTokenRef) return { kind: "unknown", reason: "organic.pageAccessTokenRef is not set" };
     const client = deps.pageReadClient(post.companyId, cfg);
     try {
       const mediaId = await findFbObject(client, cfg.meta.pageId, { kind: post.channel === "fb_photo" ? "photo" : "video", caption: post.caption, sinceMs, excludeMediaIds });
-      return mediaId ? { kind: "published", mediaId, fromCaption: true } : { kind: "unknown", reason: "no single Page post with this text was found" };
+      return mediaId ? { kind: "published", mediaId, fromCaption: true, aiLabel: null } : { kind: "unknown", reason: "no single Page post with this text was found" };
     } catch (error) {
       return { kind: "unknown", reason: `the Page posts could not be read: ${safe(error)}` };
     }
@@ -666,14 +761,21 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     }
 
     if (verdict.kind === "published") {
+      const aiNote = aiLabelProblem(verdict.aiLabel);
       const stored = await deps.posts.update(companyId, post.id, "publishing", {
         status: "published",
         metaMediaId: verdict.mediaId,
         publishedAt: now(),
-        error: `reconciled by ${options.by}: Meta shows the post${verdict.mediaId ? "" : "; its object id is unknown, delete it in the Meta app"}`,
-        payload: { ...post.payload, ...(verdict.fromCaption ? { mediaIdSource: MEDIA_ID_FROM_CAPTION_MATCH } : {}) },
+        error: `reconciled by ${options.by}: Meta shows the post${verdict.mediaId ? "" : "; its object id is unknown, delete it in the Meta app"}${aiNote ? `; ${aiNote}` : ""}`,
+        payload: { ...post.payload, ...(verdict.fromCaption ? { mediaIdSource: MEDIA_ID_FROM_CAPTION_MATCH } : {}), ...(verdict.aiLabel ? { aiLabel: verdict.aiLabel } : {}) },
       });
-      if (stored) await audit(companyId, post.id, "reconciled", { result: "published", mediaId: verdict.mediaId, by: options.by });
+      if (stored) {
+        await audit(companyId, post.id, "reconciled", { result: "published", mediaId: verdict.mediaId, by: options.by, ...(verdict.aiLabel ? { aiLabel: verdict.aiLabel } : {}) });
+        if (aiNote) {
+          deps.ctx.logger.warn("rk9-ads organic: the AI label is not confirmed", { postId: post.id, mediaId: verdict.mediaId, aiLabel: verdict.aiLabel });
+          await audit(companyId, post.id, "ai label not confirmed", { channel: post.channel, mediaId: verdict.mediaId, aiLabel: verdict.aiLabel });
+        }
+      }
       return { status: stored ? "published" : "not_publishing", postId };
     }
     if (verdict.kind === "unknown" && !options.closeUnknown) {

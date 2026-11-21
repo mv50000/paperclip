@@ -67,11 +67,18 @@ const REASON_LABELS: Record<string, string> = Object.fromEntries([
   ["other", "oma syy"],
 ]);
 
+/** RK9-954: a published post whose "AI info" label Instagram did not confirm says so in the digest. */
+function aiLabelNote(post: OrganicPostSummary): string {
+  if (post.aiLabel === "missing") return " (⚠️ AI-merkintä puuttuu Instagramista: lisää se sovelluksessa)";
+  if (post.aiLabel === "unknown") return " (⚠️ AI-merkintää ei voitu vahvistaa: tarkista julkaisu)";
+  return "";
+}
+
 function organicLine(post: OrganicPostSummary): string | null {
   const channel = CHANNEL_LABELS[post.channel] ?? post.channel;
   switch (post.status) {
     case "published":
-      return `✅ ${channel} julkaistu${post.permalink ? `: ${post.permalink}` : ""}`;
+      return `✅ ${channel} julkaistu${post.permalink ? `: ${post.permalink}` : ""}${aiLabelNote(post)}`;
     case "dry_run":
       return `🧪 ${channel}: kuivaharjoitus, ei julkaistu`;
     case "failed":

@@ -12,6 +12,8 @@ import manifest from "../../src/manifest.js";
 import { createLedger, type Ledger } from "../../src/db.js";
 import { createSqlGateStore, gateTokenHash, newGateToken, type GateStore } from "../../src/kit/gate/state-machine.js";
 import { effectiveStatus, sqlOrganicPostStore, type OrganicPostStore } from "../../src/organic/store.js";
+import { postAiGenerated, postAiLabel } from "../../src/organic/types.js";
+import { createInsightsStore } from "../../src/insights/store.js";
 import { EMBEDDED_PG_TIMEOUT_MS, describeEmbeddedPostgres, startPluginTestDatabase, type PluginTestDatabase } from "../helpers/embedded-pg.js";
 import { PACKAGE_ROOT } from "../fixtures.js";
 
@@ -93,6 +95,48 @@ describeDb("organic posts SQL on real Postgres", () => {
       .then(() => null, (caught: unknown) => caught as { message?: string; cause?: { message?: string; constraint_name?: string } });
     expect(error).not.toBeNull();
     expect(`${error?.message} ${error?.cause?.message} ${error?.cause?.constraint_name}`).toMatch(/gate_requests_kind_check/);
+  });
+
+  it("keeps the AI info flag and label in the jsonb payload, and the digest read returns the label (RK9-954)", async () => {
+    const flagged = await posts.insertPending(companyA, {
+      brandCode: "OLL",
+      creativeId: creatives[companyA]!,
+      channel: "ig_reel",
+      caption: "Valo palaa.",
+      contentHash: "a1".repeat(32),
+      mode: "live",
+      lint: null,
+      payload: { mediaUrl: "https://media.example.fi/a.mp4", aiGenerated: true },
+    });
+    expect(flagged!.payload.aiGenerated).toBe(true);
+    expect(postAiGenerated(flagged!)).toBe(true);
+    expect(postAiGenerated((await posts.findOpen(companyA, "a1".repeat(32)))!)).toBe(true);
+    // A row without the key (every row from before RK9-954) reads as false.
+    const plain = await newPost(companyA, "a2".repeat(32));
+    expect(plain!.payload).not.toHaveProperty("aiGenerated");
+    expect(postAiGenerated(plain!)).toBe(false);
+
+    expect(await posts.update(companyA, flagged!.id, "pending", { status: "publishing" })).toBe(true);
+    expect(
+      await posts.update(companyA, flagged!.id, "publishing", {
+        status: "published",
+        metaMediaId: "17900000000000555",
+        permalink: "https://www.instagram.com/reel/AI/",
+        publishedAt: new Date(),
+        payload: { ...flagged!.payload, aiLabel: "missing" },
+      }),
+    ).toBe(true);
+    const stored = (await posts.get(companyA, flagged!.id))!;
+    expect(stored.payload).toMatchObject({ aiGenerated: true, aiLabel: "missing" });
+    expect(postAiLabel(stored)).toBe("missing");
+
+    const digest = await createInsightsStore(testDb.client).recentOrganicPosts(companyA, 24);
+    expect(digest.find((row) => row.permalink === "https://www.instagram.com/reel/AI/")).toMatchObject({ channel: "ig_reel", status: "published", aiLabel: "missing" });
+    expect(digest.filter((row) => row.permalink === null).every((row) => row.aiLabel === null)).toBe(true);
+    expect((await createInsightsStore(testDb.client).recentOrganicPosts(companyB, 24)).some((row) => row.aiLabel === "missing")).toBe(false);
+    // Close both, so the later tests start from the same open rows as before.
+    expect(await posts.update(companyA, flagged!.id, "published", { status: "deleted", deletedAt: new Date(), deletedBy: "test" })).toBe(true);
+    expect(await posts.update(companyA, plain!.id, "pending", { status: "failed" })).toBe(true);
   });
 
   it("keeps one open post per content and company, moves status by compare-and-set and stays company-scoped", async () => {

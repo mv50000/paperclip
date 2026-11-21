@@ -28,6 +28,10 @@ export const organicDeclarations: FeatureDeclarations = {
           channel: { type: "string", enum: ["ig_reel", "ig_feed", "fb_video", "fb_photo"] },
           caption: { type: "string", description: "Post text; default the creative's copy.message" },
           brandLint: { type: "object", description: "brand-lint --json result (rk9-motion scripts/brand-lint.mjs)" },
+          aiGenerated: {
+            type: "boolean",
+            description: "True when the imagery is AI-generated: the post gets Instagram's AI info label. Only ig_reel and ig_feed; default false",
+          },
         },
         required: ["creativeId", "channel", "brandLint"],
       },

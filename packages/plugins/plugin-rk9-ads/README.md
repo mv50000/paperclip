@@ -878,7 +878,7 @@ plugin must not see).
 
 1. **Card.** `organic.request` (board) or the agent tool
    `rk9ads_request_organic_post` takes `{ creativeId, channel, caption?,
-   brandLint }`. The service checks the creative (ready, not expired, the
+   brandLint, aiGenerated? }` (for `aiGenerated` see "AI info label"). The service checks the creative (ready, not expired, the
    right media kind and aspect ratio), the caption (at most 2 200 characters
    and 30 hashtags) and the brand-lint JSON of rk9-motion
    (`scripts/brand-lint.mjs --json`). A missing result is refused. It recomputes the result from the rows, so a
@@ -989,6 +989,67 @@ below.
 
 `tests/organic-sole-path.spec.ts` asserts that no action, job, tool or forged
 gate call publishes. Only an approved card does.
+
+### AI info label (RK9-954)
+
+`organic.request` and the agent tool take an optional `aiGenerated`. Set it to
+`true` when the imagery of the post is AI-generated. The plugin asks for
+Instagram's "AI info" label; the read-back below says whether Instagram set it.
+
+Per Meta's documentation as read on 21.11.2026, the Content Publishing API
+takes `is_ai_generated` on `POST {ig}/media` and returns it from
+`GET {media}?fields=is_ai_generated`. This is not verified for
+`media_type=REELS`: the first live flagged post shows it in `aiLabel`.
+
+- **Param.** Only a real boolean is valid. Any other value (`"true"`, `1`,
+  `null`) is refused with `invalid_request`. The default is `false`.
+- **Channels.** `ig_reel` and `ig_feed` only. `fb_video` and `fb_photo` with
+  `aiGenerated: true` are refused with `ai_label_unsupported`: no label field
+  for a Page post is known (same documentation, same date).
+- **Storage.** The flag is `organic_posts.payload.aiGenerated` (stored only
+  when true), so there is no migration. A post from before RK9-954 reads as
+  false. Only an absent key means false and only the boolean `true` means
+  flagged: a stored `null`, `1` or `"true"` closes the post at the publish
+  with `ai_flag_invalid`.
+- **Answer.** Every answer carries `aiGenerated`: `{ status: "card_sent",
+  postId, gateRequestId, channel, mode, validUntil, aiGenerated }` or
+  `{ status: "exists", postId, postStatus, channel, aiGenerated, aiLabel }`.
+  For `exists` both are the stored values (`aiLabel` is null when no
+  read-back is stored), so a caller sees a live post whose label is missing
+  or unknown. A caller compares `aiGenerated` with the value it sent: an
+  answer without the field comes from a plugin that ignores the param. A
+  request whose flag differs from the open post's flag is refused with
+  `ai_flag_mismatch`, and the open post is not changed.
+- **Card.** A post with the flag shows one more line after the mode line:
+  "AI-merkintä: kyllä (Instagramin AI info)". An unflagged card has no such
+  line. The card's binding carries the flag (`aiGenerated: true`, only on a
+  flagged card). The publish compares it with the stored flag and closes the
+  card with `ai_flag_changed` when they differ. A card from before RK9-954
+  has no such key, reads as unflagged and still publishes.
+- **Publish.** The IG container carries `is_ai_generated: true`. The write
+  allowlist accepts that key only on `{ig}/media` and only with the boolean
+  `true`. A post without the flag sends the same request as before.
+- **Read-back.** After the publish the plugin reads
+  `GET {media}?fields=is_ai_generated` and stores `payload.aiLabel`:
+  `confirmed` (true), `missing` (false) or `unknown`. `unknown` means that
+  the read failed, that the answer has no such field, or that the post went
+  live without a media id (an unclear publish), so there was nothing to
+  read. The post is never deleted or unpublished because of the label.
+  `organic.posts` lists `aiGenerated` and `aiLabel` for each post.
+- **Warnings.** After a tap, a label that is not `confirmed` shows on the
+  edited card, in the post's `error` note, in the activity log ("ai label
+  not confirmed"), in the worker log and on the post's line in the morning
+  digest. The reconcile does the same read when it closes a flagged post as
+  published, but it cannot edit the card (it has no card-edit path): there
+  the warning is the post's `error` note, the activity entry, the worker log
+  and the digest line only.
+- **Dry run.** The stored plan (`payload.planned`) shows `is_ai_generated`
+  when the live request would carry it. Nothing is read back.
+- **Rollout.** Deploy the plugin before any host script sends the flag: a
+  plugin from before RK9-954 ignores the param and posts without the label
+  (its answer has no `aiGenerated` field). Before a rollback to such a
+  plugin, deny every open flagged card: the old plugin would publish it
+  without `is_ai_generated`.
 
 ### Media lock (RK9-852)
 
