@@ -60,6 +60,7 @@ import {
   ORGANIC_GATE_KIND,
   ORGANIC_REJECT_REASONS,
   postAiGenerated,
+  postAiLabel,
   type OrganicAiLabel,
   type OrganicBinding,
   type OrganicLint,
@@ -161,11 +162,13 @@ export interface OrganicRequestInput {
  * Every answer carries `aiGenerated`: the flag of the new post, or the STORED
  * flag of the open post. A caller compares it with what it sent, so a plugin
  * from before RK9-954 (no such field in the answer) cannot pass for one that
- * set the label.
+ * set the label. `exists` also carries the stored read-back `aiLabel` (null
+ * when none is stored), so a caller sees a live post whose label is missing
+ * or unknown.
  */
 export type OrganicRequestResult =
   | { status: "card_sent"; postId: string; gateRequestId: string; channel: OrganicChannel; mode: "dry_run" | "live"; validUntil: string; aiGenerated: boolean }
-  | { status: "exists"; postId: string; postStatus: string; channel: OrganicChannel; aiGenerated: boolean };
+  | { status: "exists"; postId: string; postStatus: string; channel: OrganicChannel; aiGenerated: boolean; aiLabel: OrganicAiLabel | null };
 
 function safe(error: unknown): string {
   const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -184,7 +187,10 @@ export function bindingOf(request: Pick<GateRequestRecord, "kind" | "payload">):
   if (typeof raw.postId !== "string" || !UUID_RE.test(raw.postId)) return null;
   if (typeof raw.contentHash !== "string" || !/^[0-9a-f]{64}$/.test(raw.contentHash)) return null;
   if (typeof raw.channel !== "string" || !(raw.channel in CHANNEL_LABELS)) return null;
-  return { postId: raw.postId, contentHash: raw.contentHash, channel: raw.channel as OrganicChannel };
+  // RK9-954: no key = an unflagged card (also every card from before RK9-954); the only other valid value is true.
+  const flag = (raw as { aiGenerated?: unknown }).aiGenerated;
+  if (flag !== undefined && flag !== true) return null;
+  return { postId: raw.postId, contentHash: raw.contentHash, channel: raw.channel as OrganicChannel, aiGenerated: flag === true };
 }
 
 /** Why a brand cannot use a channel now; null when it can. */
@@ -352,7 +358,8 @@ export function createOrganicService(deps: OrganicServiceDeps) {
       throw new OrganicError("conflict", "an open post of this content exists");
     }
 
-    const binding: OrganicBinding = { postId: post.id, contentHash, channel };
+    // RK9-954: the card binds the flag it showed. The key is written only when true, so an unflagged card's payload is unchanged.
+    const binding = { postId: post.id, contentHash, channel, ...(aiGenerated ? { aiGenerated: true } : {}) };
     let sent: { id: string; messageId: number } | null = null;
     let lastError: unknown = null;
     for (const candidate of organicCardCandidates(text, { kind: creative.kind, mediaUrl: creative.mediaUrl, posterUrl: creative.posterUrl })) {
@@ -397,7 +404,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
         `an open post of this content (${existing.id}, ${existing.status}) has aiGenerated ${stored}, this request has ${aiGenerated}; the open post is not changed`,
       );
     }
-    return { status: "exists", postId: existing.id, postStatus: existing.status, channel, aiGenerated: stored };
+    return { status: "exists", postId: existing.id, postStatus: existing.status, channel, aiGenerated: stored, aiLabel: postAiLabel(existing) };
   }
 
   function refuse(statusText: string, reason: string, binding: OrganicBinding | null, tgUserId: number): GateHandlerResult {
@@ -440,6 +447,7 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const problem = cfg.brandCode === request.brandCode ? channelProblem(cfg, post.channel) : "the brand code changed";
     if (problem) return close("⛔ Kanava ei ole enää käytössä: ei julkaistu.", problem);
     // RK9-954: the stored flag must be a real boolean, and only an IG post can carry the label.
+    // Only an absent key means false and only the boolean true means flagged: a stored null, 1 or "true" is refused.
     const storedFlag = post.payload.aiGenerated;
     if (storedFlag !== undefined && typeof storedFlag !== "boolean") {
       return close("⛔ Postauksen AI-merkintä ei kelpaa: ei julkaistu. Pyydä uusi kortti.", "ai_flag_invalid");
@@ -447,6 +455,10 @@ export function createOrganicService(deps: OrganicServiceDeps) {
     const aiGenerated = postAiGenerated(post);
     if (aiGenerated && !post.channel.startsWith("ig_")) {
       return close("⛔ AI-merkintää ei voi tehdä tälle kanavalle: ei julkaistu.", "ai_label_unsupported");
+    }
+    // The approver saw the flag on the card: a flag that changed since then closes the card (defence in depth).
+    if (binding.aiGenerated !== aiGenerated) {
+      return close("⛔ Postauksen AI-merkintä on muuttunut kortin jälkeen: ei julkaistu. Pyydä uusi kortti.", `ai_flag_changed: card ${binding.aiGenerated}, post ${aiGenerated}`);
     }
     const creative = await deps.creatives.get(companyId, post.creativeId);
     if (!creative || organicContentHash(companyId, creative.sha256, post.channel, post.caption) !== post.contentHash) {

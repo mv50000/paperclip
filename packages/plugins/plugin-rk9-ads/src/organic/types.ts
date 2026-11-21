@@ -125,4 +125,10 @@ export interface OrganicBinding {
   postId: string;
   contentHash: string;
   channel: OrganicChannel;
+  /**
+   * RK9-954: the "AI info" flag the card showed. The card's payload has the
+   * key `aiGenerated: true` only for a flagged post, so a card from before
+   * RK9-954 (no key) reads as false and still publishes.
+   */
+  aiGenerated: boolean;
 }

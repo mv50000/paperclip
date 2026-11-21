@@ -1195,6 +1195,8 @@ describe("organic AI info label (RK9-954)", () => {
     const post = r.posts.rows.find((row) => row.id === answer.postId)!;
     expect(post).toMatchObject({ status: "published", metaMediaId: MEDIA, error: null });
     expect(post.payload).toMatchObject({ aiGenerated: true, aiLabel: "confirmed" });
+    // The media id came from media_publish itself, so it is not marked as a caption match (a board delete stays possible).
+    expect(post.payload).not.toHaveProperty("mediaIdSource");
     expect(cardText(r, messageId)).toContain("✅ Julkaistu: Instagram Reel");
     expect(cardText(r, messageId)).toContain("AI-merkintä: vahvistettu.");
     expect(r.gates.rows.get(answer.gateRequestId)!.outcome).toMatchObject({ result: "published", aiLabel: "confirmed" });
@@ -1249,7 +1251,7 @@ describe("organic AI info label (RK9-954)", () => {
   it("exists: reports the stored flag and refuses a request with the other flag", async () => {
     const r = await rig();
     const first = await ask(r, { aiGenerated: true });
-    expect(await ask(r, { aiGenerated: true })).toEqual({ status: "exists", postId: first.postId, postStatus: "pending", channel: "ig_reel", aiGenerated: true });
+    expect(await ask(r, { aiGenerated: true })).toEqual({ status: "exists", postId: first.postId, postStatus: "pending", channel: "ig_reel", aiGenerated: true, aiLabel: null });
     await expect(ask(r)).rejects.toThrow(/ai_flag_mismatch: an open post of this content .* has aiGenerated true, this request has false/);
     await expect(ask(r, { aiGenerated: false })).rejects.toThrow(/ai_flag_mismatch/);
     // The stored flag did not change, and no second card went out.
@@ -1258,7 +1260,7 @@ describe("organic AI info label (RK9-954)", () => {
     expect(r.fake.callsOf("sendVideo")).toHaveLength(1);
 
     const other = await ask(r, { caption: "Toinen teksti" });
-    expect(await ask(r, { caption: "Toinen teksti" })).toEqual({ status: "exists", postId: other.postId, postStatus: "pending", channel: "ig_reel", aiGenerated: false });
+    expect(await ask(r, { caption: "Toinen teksti" })).toEqual({ status: "exists", postId: other.postId, postStatus: "pending", channel: "ig_reel", aiGenerated: false, aiLabel: null });
     await expect(ask(r, { caption: "Toinen teksti", aiGenerated: true })).rejects.toThrow(/ai_flag_mismatch: .* has aiGenerated false, this request has true/);
     expect(r.posts.rows.find((row) => row.id === other.postId)!.payload).not.toHaveProperty("aiGenerated");
   });
@@ -1323,10 +1325,14 @@ describe("organic AI info label (RK9-954)", () => {
 
   it("the publish refuses a stored flag that is not a boolean, and a stored flag on a Page post, without a Meta write", async () => {
     const r = await rig();
-    const bad = await ask(r);
-    r.posts.rows.find((row) => row.id === bad.postId)!.payload.aiGenerated = "true";
-    await approve(r, bad.gateRequestId);
-    expect(r.posts.rows.find((row) => row.id === bad.postId)).toMatchObject({ status: "failed", error: "not published: ai_flag_invalid" });
+    // Only an absent key is false and only the boolean true is flagged: null, 1 and "true" are refused, not guessed.
+    for (const [index, value] of [null, 1, "true"].entries()) {
+      const bad = await ask(r, { caption: `Virheellinen ${index}` });
+      r.posts.rows.find((row) => row.id === bad.postId)!.payload.aiGenerated = value;
+      const messageId = await approve(r, bad.gateRequestId);
+      expect(r.posts.rows.find((row) => row.id === bad.postId), JSON.stringify(value)).toMatchObject({ status: "failed", error: "not published: ai_flag_invalid" });
+      expect(cardText(r, messageId)).toContain("⛔ Postauksen AI-merkintä ei kelpaa: ei julkaistu.");
+    }
 
     const page = await ask(r, { creativeId: IMAGE_ID, channel: "fb_photo", caption: "Syksyn kuva" });
     r.posts.rows.find((row) => row.id === page.postId)!.payload.aiGenerated = true;
@@ -1357,5 +1363,112 @@ describe("organic AI info label (RK9-954)", () => {
     expect(post.error).toMatch(/^reconciled by .*: Meta shows the post; AI label missing: /);
     expect(r.harness.activity.find((entry) => entry.message === "rk9-ads organic: ai label not confirmed")?.metadata).toMatchObject({ aiLabel: "missing" });
     expect(r.meta.writes().filter((call) => call.method === "DELETE")).toEqual([]);
+  });
+  it("a flagged post published without a media id (media_publish error, container PUBLISHED, no unique caption match) gets the label `unknown`", async () => {
+    let polls = 0;
+    const twin = (id: string) => ({ id, timestamp: new Date().toISOString(), caption: "Valo palaa. #ololla", media_type: "VIDEO", media_product_type: "REELS" });
+    const meta = labelGraph(() => ({ body: { is_ai_generated: true } }))
+      .on(`POST ${IG}/media_publish`, graphError(9007, "Media ID is not available"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: polls++ === 0 ? "FINISHED" : "PUBLISHED" } }))
+      .on(`GET ${IG}/media`, () => ({ body: { data: [twin(MEDIA), twin("17999999999999999")] } }));
+    const r = await rig({ meta });
+    const answer = await ask(r, { aiGenerated: true });
+    const messageId = await approve(r, answer.gateRequestId);
+    const post = r.posts.rows.find((row) => row.id === answer.postId)!;
+    expect(post).toMatchObject({ status: "published", metaMediaId: null });
+    expect(post.payload.aiLabel).toBe("unknown");
+    expect(post.error).toBe("media_publish answered an error; the container reports PUBLISHED; AI label unknown: is_ai_generated could not be read back; check the post in the Instagram app");
+    // Without a media id there is nothing to read.
+    expect(labelReads(r)).toEqual([]);
+    expect(cardText(r, messageId)).toContain("⚠️ AI-merkintää ei voitu vahvistaa");
+    expect(r.gates.rows.get(answer.gateRequestId)!.outcome).toMatchObject({ result: "published", aiLabel: "unknown" });
+    expect(r.harness.activity.find((entry) => entry.message === "rk9-ads organic: ai label not confirmed")?.metadata).toMatchObject({ aiLabel: "unknown", mediaId: null });
+  });
+
+  it("reconcile: a flagged post Meta shows but whose media id is not found gets the label `unknown`", async () => {
+    let status = "FINISHED";
+    const meta = labelGraph(() => ({ body: { is_ai_generated: true } }))
+      .on(`POST ${IG}/media_publish`, new Error("socket hang up"))
+      .on(`GET ${CONTAINER}`, () => ({ body: { status_code: status } }))
+      .on(`GET ${IG}/media`, { body: { data: [] } });
+    const r = await rig({ meta });
+    const answer = await ask(r, { aiGenerated: true });
+    await approve(r, answer.gateRequestId);
+    status = "PUBLISHED";
+    r.clock.now = new Date(r.clock.now.getTime() + 6 * 60_000);
+    expect(await r.harness.performAction(ORGANIC_RECONCILE_ACTION_KEY, { postId: answer.postId }, BOARD)).toMatchObject({ status: "published" });
+    const post = r.posts.rows.find((row) => row.id === answer.postId)!;
+    expect(post).toMatchObject({ status: "published", metaMediaId: null });
+    expect(post.payload.aiLabel).toBe("unknown");
+    expect(post.error).toMatch(/its object id is unknown, delete it in the Meta app; AI label unknown: /);
+    expect(labelReads(r)).toEqual([]);
+    expect(r.harness.activity.find((entry) => entry.message === "rk9-ads organic: ai label not confirmed")?.metadata).toMatchObject({ aiLabel: "unknown" });
+  });
+
+  it("the insert race: an open post that appears between the check and the insert answers with its stored flag, or refuses the other flag", async () => {
+    const r = await rig();
+    const first = await ask(r, { aiGenerated: true });
+    // The first findOpen of each request misses the open post, as when another request inserts it right after the check.
+    const findOpen = r.posts.findOpen.bind(r.posts);
+    let calls = 0;
+    r.posts.findOpen = async (companyId, contentHash) => (calls++ % 2 === 0 ? null : findOpen(companyId, contentHash));
+    await expect(ask(r)).rejects.toThrow(/ai_flag_mismatch: an open post of this content .* has aiGenerated true, this request has false/);
+    expect(calls).toBe(2);
+    expect(await ask(r, { aiGenerated: true })).toEqual({ status: "exists", postId: first.postId, postStatus: "pending", channel: "ig_reel", aiGenerated: true, aiLabel: null });
+    expect(calls).toBe(4);
+    expect(r.posts.rows).toHaveLength(1);
+    expect(r.fake.callsOf("sendVideo")).toHaveLength(1);
+  });
+
+  it("without the flag on ig_feed: the image container is exactly image_url and caption, and no label is read", async () => {
+    const r = await rig({ meta: labelGraph(() => ({ body: { is_ai_generated: true } })) });
+    const answer = await ask(r, { creativeId: IMAGE_ID, channel: "ig_feed", caption: "Syksyn kuva" });
+    expect(answer).toMatchObject({ status: "card_sent", aiGenerated: false });
+    await approve(r, answer.gateRequestId);
+    expect(publishWrites(r).map((call) => call.key)).toEqual([`POST ${IG}/media`, `POST ${IG}/media_publish`]);
+    expect(publishWrites(r)[0]!.body).toBe("image_url=https%3A%2F%2Fmedia.ololla.fi%2Fkuva.jpg&caption=Syksyn+kuva");
+    expect(labelReads(r)).toEqual([]);
+    const post = r.posts.rows.find((row) => row.id === answer.postId)!;
+    expect(post).toMatchObject({ status: "published", metaMediaId: MEDIA, error: null });
+    expect(post.payload).not.toHaveProperty("aiLabel");
+  });
+
+  it("exists: a live post answers with its stored label, so a caller sees a label that is missing", async () => {
+    const r = await rig({ meta: labelGraph(() => ({ body: { is_ai_generated: false } })) });
+    const first = await ask(r, { aiGenerated: true });
+    await approve(r, first.gateRequestId);
+    expect(await ask(r, { aiGenerated: true })).toEqual({ status: "exists", postId: first.postId, postStatus: "published", channel: "ig_reel", aiGenerated: true, aiLabel: "missing" });
+  });
+
+  it("the card binds the flag: only a flagged card carries it, and a flag changed after the card closes the card without a Meta write", async () => {
+    const r = await rig();
+    // An unflagged card has no flag key in its binding, exactly as a card made before RK9-954, and publishes.
+    const plain = await ask(r);
+    expect(r.gates.rows.get(plain.gateRequestId)!.payload!.organic).toEqual({ postId: plain.postId, contentHash: r.posts.rows[0]!.contentHash, channel: "ig_reel" });
+    await approve(r, plain.gateRequestId);
+    expect(r.posts.rows.find((row) => row.id === plain.postId)!.status).toBe("published");
+    const writes = publishWrites(r).length;
+
+    // The card said "no label", the row now says "label".
+    const raised = await ask(r, { caption: "Lippu nousi" });
+    r.posts.rows.find((row) => row.id === raised.postId)!.payload.aiGenerated = true;
+    let messageId = await approve(r, raised.gateRequestId);
+    expect(r.posts.rows.find((row) => row.id === raised.postId)).toMatchObject({ status: "failed", error: "not published: ai_flag_changed: card false, post true" });
+    expect(cardText(r, messageId)).toContain("⛔ Postauksen AI-merkintä on muuttunut kortin jälkeen: ei julkaistu.");
+
+    // The card said "label", the row lost it.
+    const dropped = await ask(r, { caption: "Lippu laski", aiGenerated: true });
+    expect(r.gates.rows.get(dropped.gateRequestId)!.payload!.organic).toMatchObject({ postId: dropped.postId, aiGenerated: true });
+    delete r.posts.rows.find((row) => row.id === dropped.postId)!.payload.aiGenerated;
+    messageId = await approve(r, dropped.gateRequestId);
+    expect(r.posts.rows.find((row) => row.id === dropped.postId)).toMatchObject({ status: "failed", error: "not published: ai_flag_changed: card true, post false" });
+
+    // A binding flag that is not the boolean true is not a valid card.
+    const forged = await ask(r, { caption: "Väärä lippu" });
+    (r.gates.rows.get(forged.gateRequestId)!.payload!.organic as Record<string, unknown>).aiGenerated = "yes";
+    messageId = await approve(r, forged.gateRequestId);
+    expect(cardText(r, messageId)).toContain("⛔ Kortti ei kelpaa: ei julkaistu.");
+    expect(r.posts.rows.find((row) => row.id === forged.postId)!.status).not.toBe("published");
+    expect(publishWrites(r)).toHaveLength(writes);
   });
 });
