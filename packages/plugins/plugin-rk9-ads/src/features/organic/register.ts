@@ -19,6 +19,8 @@ import {
   ORGANIC_GATE_KIND,
   ORGANIC_REASON_PROMPT,
   ORGANIC_REJECT_REASONS,
+  postAiGenerated,
+  postAiLabel,
   type OrganicChannel,
 } from "../../organic/types.js";
 import { safeError } from "../spend-guard/support.js";
@@ -32,6 +34,7 @@ import { organicDeclarations } from "./declarations.js";
  * - gate kind `organic_publish`: the only path that publishes (organic/service.ts publishApproved);
  *   a deny asks for the reason on the card itself;
  * - tool `rk9ads_request_organic_post` and action `organic.request`: open one card;
+ *   the answer always echoes `aiGenerated` (RK9-954), so a caller can tell a plugin that ignores the param;
  * - action `organic.delete` (board only, dry run by default): deletes a live post at Meta;
  * - action `organic.posts`: the posts and their state;
  * - job `organic-reconcile` and action `organic.reconcile` (board only): close a post stuck
@@ -87,6 +90,8 @@ function requestInput(params: Record<string, unknown>) {
     channel: params.channel as OrganicChannel,
     ...(params.caption !== undefined ? { caption: params.caption as string } : {}),
     ...(params.brandLint !== undefined ? { brandLint: params.brandLint } : {}),
+    // Passed as it came: the service refuses anything but a real boolean (RK9-954).
+    ...(params.aiGenerated !== undefined ? { aiGenerated: params.aiGenerated } : {}),
   };
 }
 
@@ -106,6 +111,8 @@ export function postView(post: OrganicPostView) {
     rejectReasonCode: post.rejectReasonCode,
     rejectReasonText: post.rejectReasonText,
     error: post.error,
+    aiGenerated: postAiGenerated(post),
+    aiLabel: postAiLabel(post),
     createdAt: post.createdAt,
     decidedAt: post.decidedAt,
     publishedAt: post.publishedAt,

@@ -30,6 +30,8 @@ export interface OrganicCardFacts {
   creativeId: string;
   /** Lines about the media lock (a dry run's weak lock, for example). */
   warnings?: string[];
+  /** True when the post asks for Instagram's "AI info" label (RK9-954). */
+  aiGenerated?: boolean;
 }
 
 /** Clips to `max` graphemes, so no surrogate pair or emoji sequence is cut in half. */
@@ -74,6 +76,13 @@ export function lintLines(lint: OrganicLint | null): string[] {
 export function modeLine(mode: OrganicMode): string {
   return mode === "dry_run" ? "Tila: 🧪 Kuivaharjoitus: hyväksyntä ei julkaise mitään Metaan." : "Tila: 🔴 LIVE: hyväksyntä julkaisee Metaan.";
 }
+
+/**
+ * The card line of a post that asks for Instagram's "AI info" label (RK9-954).
+ * The plugin's own fixed text, before the caption like the mode line; a
+ * caption line that copies it is still quoted.
+ */
+export const AI_LABEL_LINE = "AI-merkintä: kyllä (Instagramin AI info)";
 
 /** Every caption line starts with "│ ", so a caption cannot look like a line of the card. */
 export const CAPTION_QUOTE = "│ ";
@@ -244,6 +253,7 @@ export function unwrapCaptionLines(lines: readonly string[]): string | null {
 
 export function organicCardText(facts: OrganicCardFacts): string {
   const lines = [`📣 Orgaaninen julkaisu odottaa hyväksyntää (${facts.brandCode})`, `Kanava: ${CHANNEL_LABELS[facts.channel]}`, modeLine(facts.mode)];
+  if (facts.aiGenerated === true) lines.push(AI_LABEL_LINE);
   lines.push(...(facts.warnings ?? []).flatMap((warning) => quoted("⚠️ ", oneLine(warning, 200))));
   lines.push(...lintLines(facts.lint));
   lines.push("", `Creative ${facts.creativeId}`);

@@ -4,6 +4,7 @@
  */
 
 import type { OrganicChannel, OrganicMode } from "../config.js";
+import type { IgAiLabel } from "../meta/organic.js";
 
 export { ORGANIC_CHANNELS, type OrganicChannel, type OrganicMode } from "../config.js";
 
@@ -98,6 +99,25 @@ export interface OrganicPost {
   payload: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The read-back of Instagram's "AI info" label, stored on the post as `payload.aiLabel` (RK9-954). */
+export type OrganicAiLabel = IgAiLabel;
+export const ORGANIC_AI_LABELS: readonly OrganicAiLabel[] = ["confirmed", "missing", "unknown"];
+
+/**
+ * True when the post asked for Instagram's "AI info" label (RK9-954). The flag
+ * lives in `payload.aiGenerated`, so it needs no migration; a post from before
+ * RK9-954 has no such key and reads as false.
+ */
+export function postAiGenerated(post: Pick<OrganicPost, "payload">): boolean {
+  return post.payload.aiGenerated === true;
+}
+
+/** The stored read-back of the label; null when none was stored. */
+export function postAiLabel(post: Pick<OrganicPost, "payload">): OrganicAiLabel | null {
+  const value = post.payload.aiLabel;
+  return typeof value === "string" && (ORGANIC_AI_LABELS as readonly string[]).includes(value) ? (value as OrganicAiLabel) : null;
 }
 
 /** What the gate card's payload binds: the handler acts only on this post and content. */

@@ -2,17 +2,19 @@
 import { describe, expect, it } from "vitest";
 import { parseBrandConfig } from "../../src/config.js";
 import { mapGraphError, type WritePlan } from "../../src/meta/graph.js";
-import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError } from "../../src/meta/organic.js";
+import { organicWriteGuard, outcomeUnknown, OrganicOutcomeUnknownError, readIgAiLabel } from "../../src/meta/organic.js";
 import { InvalidParamError, MetaGraphError, MetaResponseError, RateLimitError, TokenResolveError, WriteRefusedError } from "../../src/meta/errors.js";
-import { captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, chunkSegments, columns, displayUrl, lintLines, unwrapCaptionLines } from "../../src/organic/card.js";
+import { AI_LABEL_LINE, captionLines, CAPTION_CHUNK_COLUMNS, chunkLine, chunkSegments, columns, displayUrl, lintLines, organicCardText, unwrapCaptionLines } from "../../src/organic/card.js";
 import { cardDeadline, lockMedia, recheckMedia } from "../../src/organic/media-lock.js";
 import { captionProblem, oneLineText } from "../../src/organic/text.js";
 import { checkLint } from "../../src/organic/lint.js";
 import { cleanCaption } from "../../src/organic/service.js";
+import { postAiGenerated, postAiLabel } from "../../src/organic/types.js";
 import { formatDigest, type DigestInput } from "../../src/digest/format.js";
 import { computePacing } from "../../src/insights/mtd.js";
 import { localMonthBounds } from "../../src/kit/local-time.js";
 import { brandConfig, SECRET_A_META, secretRef } from "../fixtures.js";
+import { FakeRoutes, graphError, metaClient } from "../brand/fake-routes.js";
 
 const IG = "17841414934844046";
 const PAGE = "1284777064729996";
@@ -590,5 +592,155 @@ describe("media lock (RK9-852 M2)", () => {
     expect(await recheckMedia(answer(200, noEtag), locked.lock, input)).toMatch(/media_changed: etag/);
     expect(await recheckMedia(answer(200, good), locked.lock, { ...input, mediaHosts: [] })).toMatch(/media_untrusted/);
     expect(await recheckMedia(async () => { throw new Error("ECONNRESET"); }, locked.lock, input)).toMatch(/media_changed: HEAD failed/);
+  });
+});
+
+describe("AI info label (RK9-954): the write guard", () => {
+  const guard = organicWriteGuard({ igUserId: IG, pageId: PAGE, deleteId: "17900000000000002" });
+  const allowed = (p: WritePlan) => (guard(p) as { allow: boolean }).allow;
+  const reel = (extra: Record<string, unknown> = {}) => plan("POST", `${IG}/media`, { media_type: "REELS", video_url: "https://x.fi/v.mp4", caption: "c", ...extra });
+  const image = (extra: Record<string, unknown> = {}) => plan("POST", `${IG}/media`, { image_url: "https://x.fi/i.jpg", caption: "c", ...extra });
+
+  it("allows is_ai_generated true on the two IG container shapes", () => {
+    expect(allowed(reel({ is_ai_generated: true }))).toBe(true);
+    expect(allowed(image({ is_ai_generated: true }))).toBe(true);
+    expect(allowed(reel())).toBe(true);
+    expect(allowed(image())).toBe(true);
+  });
+
+  it("refuses is_ai_generated false on an IG container", () => {
+    expect(allowed(reel({ is_ai_generated: false }))).toBe(false);
+    expect(allowed(image({ is_ai_generated: false }))).toBe(false);
+  });
+
+  it("refuses every value but the boolean true", () => {
+    for (const value of ["true", "false", 1, 0, "1", null, { value: true }, [true]]) {
+      expect(allowed(reel({ is_ai_generated: value })), `reel ${JSON.stringify(value)}`).toBe(false);
+      expect(allowed(image({ is_ai_generated: value })), `image ${JSON.stringify(value)}`).toBe(false);
+    }
+  });
+
+  it("refuses is_ai_generated on media_publish", () => {
+    expect(allowed(plan("POST", `${IG}/media_publish`, { creation_id: "17900000000000001" }))).toBe(true);
+    expect(allowed(plan("POST", `${IG}/media_publish`, { creation_id: "17900000000000001", is_ai_generated: true }))).toBe(false);
+  });
+
+  it("refuses is_ai_generated on the Page paths, on another account's media edge and on a delete", () => {
+    for (const p of [
+      plan("POST", `${PAGE}/photos`, { url: "https://x.fi/i.jpg", caption: "c", is_ai_generated: true }),
+      plan("POST", `${PAGE}/videos`, { file_url: "https://x.fi/v.mp4", description: "c", is_ai_generated: true }),
+      plan("POST", `${PAGE}/media`, { image_url: "https://x.fi/i.jpg", is_ai_generated: true }),
+      plan("POST", "99999999/media", { image_url: "https://x.fi/i.jpg", is_ai_generated: true }),
+      plan("POST", `${PAGE}/feed`, { message: "hei", is_ai_generated: true }),
+      plan("DELETE", "17900000000000002", { is_ai_generated: true }),
+    ]) {
+      expect(allowed(p), `${p.method} ${p.path}`).toBe(false);
+    }
+  });
+
+  it("the flag does not loosen the other rules of the container", () => {
+    for (const p of [
+      reel({ is_ai_generated: true, share_to_feed: true }),
+      plan("POST", `${IG}/media`, { media_type: "REELS", is_ai_generated: true }),
+      plan("POST", `${IG}/media`, { is_ai_generated: true }),
+      plan("POST", `${IG}/media`, { media_type: "CAROUSEL", children: "1,2", is_ai_generated: true }),
+      image({ is_ai_generated: true, image_url: "http://x.fi/i.jpg" }),
+      image({ is_ai_generated: true, caption: "x".repeat(2201) }),
+    ]) {
+      expect(allowed(p), JSON.stringify(p.fields)).toBe(false);
+    }
+  });
+});
+
+describe("AI info label (RK9-954): the read-back", () => {
+  const MEDIA_ID = "17900000000000002";
+
+  it("true is confirmed, false is missing, an answer without the field is unknown", async () => {
+    for (const [body, label] of [
+      [{ is_ai_generated: true, id: MEDIA_ID }, "confirmed"],
+      [{ is_ai_generated: false, id: MEDIA_ID }, "missing"],
+      [{ id: MEDIA_ID }, "unknown"],
+      [{ is_ai_generated: "true" }, "unknown"],
+      [{ is_ai_generated: null }, "unknown"],
+    ] as const) {
+      const routes = new FakeRoutes().on(`GET ${MEDIA_ID}`, { body });
+      expect(await readIgAiLabel(metaClient(routes), MEDIA_ID), JSON.stringify(body)).toBe(label);
+      expect(routes.calls).toHaveLength(1);
+      expect(new URL(routes.calls[0]!.url).searchParams.get("fields")).toBe("is_ai_generated");
+      expect(routes.calls[0]!.method).toBe("GET");
+    }
+  });
+
+  it("a failed read is unknown and never throws; an id that is not numeric is not read at all", async () => {
+    const refused = new FakeRoutes().on(`GET ${MEDIA_ID}`, graphError(100, "Tried accessing nonexisting field (is_ai_generated)"));
+    expect(await readIgAiLabel(metaClient(refused), MEDIA_ID)).toBe("unknown");
+    const down = new FakeRoutes().on(`GET ${MEDIA_ID}`, new Error("socket hang up"));
+    expect(await readIgAiLabel(metaClient(down), MEDIA_ID)).toBe("unknown");
+    const none = new FakeRoutes();
+    expect(await readIgAiLabel(metaClient(none), "me/accounts")).toBe("unknown");
+    expect(none.calls).toEqual([]);
+  });
+});
+
+describe("AI info label (RK9-954): the card, the stored flag and the digest", () => {
+  const facts = {
+    brandCode: "OLL",
+    channel: "ig_reel" as const,
+    mode: "live" as const,
+    caption: "Valo palaa.",
+    lint: null,
+    validUntil: new Date("2026-11-22T10:00:00Z"),
+    timeZone: "Europe/Helsinki",
+    creativeId: "dddddddd-0000-4000-8000-0000000000a1",
+  };
+
+  it("the card gets exactly one more line when the flag is true, right after the mode line", () => {
+    const plain = organicCardText(facts).split("\n");
+    expect(organicCardText({ ...facts, aiGenerated: false }).split("\n")).toEqual(plain);
+    const flagged = organicCardText({ ...facts, aiGenerated: true }).split("\n");
+    expect(AI_LABEL_LINE).toBe("AI-merkintä: kyllä (Instagramin AI info)");
+    expect(flagged).toEqual([...plain.slice(0, 3), AI_LABEL_LINE, ...plain.slice(3)]);
+    expect(plain[2]).toMatch(/^Tila: /);
+  });
+
+  it("only the boolean true in the payload is a stored flag; only a known value is a stored label", () => {
+    expect(postAiGenerated({ payload: { aiGenerated: true } })).toBe(true);
+    for (const payload of [{}, { aiGenerated: false }, { aiGenerated: "true" }, { aiGenerated: 1 }, { aiGenerated: null }]) {
+      expect(postAiGenerated({ payload }), JSON.stringify(payload)).toBe(false);
+    }
+    expect(postAiLabel({ payload: { aiLabel: "confirmed" } })).toBe("confirmed");
+    expect(postAiLabel({ payload: { aiLabel: "missing" } })).toBe("missing");
+    expect(postAiLabel({ payload: { aiLabel: "unknown" } })).toBe("unknown");
+    expect(postAiLabel({ payload: {} })).toBeNull();
+    expect(postAiLabel({ payload: { aiLabel: "yes" } })).toBeNull();
+    expect(postAiLabel({ payload: { aiLabel: true } })).toBeNull();
+  });
+
+  it("the digest warns on a published post whose label is missing or unknown, and says nothing more when it is confirmed", () => {
+    const input = (aiLabel: "confirmed" | "missing" | "unknown" | null | undefined): DigestInput => ({
+      brandName: "Ololla",
+      reportDate: "2026-11-20",
+      currency: "EUR",
+      yesterday: { spendCents: 0, impressions: 0, clicks: 0, inlineLinkClicks: 0 },
+      cpcWarnEur: 0.5,
+      zeroSpendMode: "silent",
+      pacing: computePacing({ month: localMonthBounds(new Date("2026-11-21T09:00:00Z")), mtdCents: 0, completeDaysCents: 0, monthlyCapEur: 100 }),
+      spendCap: { capCents: 10000, headroomCents: 10000 },
+      activeAds: 0,
+      fatigued: [],
+      ruleActions: [],
+      pendingGates: [],
+      warnings: [],
+      organicPosts: [
+        { channel: "ig_reel", status: "published", mode: "live", permalink: "https://www.instagram.com/reel/ABC/", error: null, rejectReasonCode: null, ...(aiLabel === undefined ? {} : { aiLabel }) },
+      ],
+    });
+    const base = "✅ Instagram Reel julkaistu: https://www.instagram.com/reel/ABC/";
+    const lineOf = (text: string | null) => text!.split("\n").find((line) => line.includes(base))!;
+    expect(lineOf(formatDigest(input(undefined)))).toBe(`• ${base}`);
+    expect(lineOf(formatDigest(input(null)))).toBe(`• ${base}`);
+    expect(lineOf(formatDigest(input("confirmed")))).toBe(`• ${base}`);
+    expect(lineOf(formatDigest(input("missing")))).toBe(`• ${base} (⚠️ AI-merkintä puuttuu Instagramista: lisää se sovelluksessa)`);
+    expect(lineOf(formatDigest(input("unknown")))).toBe(`• ${base} (⚠️ AI-merkintää ei voitu vahvistaa: tarkista julkaisu)`);
   });
 });
