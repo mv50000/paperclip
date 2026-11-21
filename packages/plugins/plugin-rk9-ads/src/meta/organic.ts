@@ -12,6 +12,9 @@
  * - IG Reel: POST {ig}/media {media_type: REELS, video_url, caption}, poll the
  *   container's status_code until FINISHED, POST {ig}/media_publish {creation_id}.
  * - IG feed image: POST {ig}/media {image_url, caption}, then media_publish.
+ * - "AI info" label (RK9-954): an IG container of generated imagery also
+ *   carries is_ai_generated: true. After the publish the label is read back
+ *   with GET {media}?fields=is_ai_generated. Page posts have no such field.
  * - FB photo: POST {page}/photos {url, caption} -> { id, post_id }.
  * - FB video: POST {page}/videos {file_url, description} -> { id }.
  * - Delete: DELETE {object id}. The FB calls use the Page token.
@@ -112,6 +115,14 @@ function isCaption(value: unknown): boolean {
   return value === undefined || (typeof value === "string" && value.length <= ORGANIC_CAPTION_MAX_CHARS);
 }
 
+/**
+ * RK9-954: the "AI info" flag goes out only as the boolean true. A post
+ * without the label has no such field, so false (or any other value) is refused.
+ */
+function isAiFlag(value: unknown): boolean {
+  return value === undefined || value === true;
+}
+
 function exactly(keys: string[], allowed: readonly string[], required: readonly string[]): boolean {
   return keys.every((key) => allowed.includes(key)) && required.every((key) => keys.includes(key));
 }
@@ -135,13 +146,16 @@ export function organicWriteGuard(target: OrganicTarget): GuardedWriteHook {
     }
     if (ig && plan.path === `${ig}/media`) {
       if (f.media_type === "REELS") {
-        return exactly(keys, ["media_type", "video_url", "caption"], ["media_type", "video_url"]) && isHttps(f.video_url) && isCaption(f.caption)
+        return exactly(keys, ["media_type", "video_url", "caption", "is_ai_generated"], ["media_type", "video_url"]) &&
+          isHttps(f.video_url) &&
+          isCaption(f.caption) &&
+          isAiFlag(f.is_ai_generated)
           ? { allow: true }
-          : refuse("an IG Reel container carries only media_type REELS, an https video_url and a caption");
+          : refuse("an IG Reel container carries only media_type REELS, an https video_url, a caption and is_ai_generated true");
       }
-      return exactly(keys, ["image_url", "caption"], ["image_url"]) && isHttps(f.image_url) && isCaption(f.caption)
+      return exactly(keys, ["image_url", "caption", "is_ai_generated"], ["image_url"]) && isHttps(f.image_url) && isCaption(f.caption) && isAiFlag(f.is_ai_generated)
         ? { allow: true }
-        : refuse("an IG feed container carries only an https image_url and a caption");
+        : refuse("an IG feed container carries only an https image_url, a caption and is_ai_generated true");
     }
     if (ig && plan.path === `${ig}/media_publish`) {
       return exactly(keys, ["creation_id"], ["creation_id"]) && typeof f.creation_id === "string" && ID_RE.test(f.creation_id)
@@ -162,6 +176,13 @@ export function organicWriteGuard(target: OrganicTarget): GuardedWriteHook {
   };
 }
 
+/**
+ * What Instagram reports about the "AI info" label of a published post
+ * (RK9-954): `confirmed` = is_ai_generated true, `missing` = false, `unknown`
+ * = the read failed or the answer has no such field.
+ */
+export type IgAiLabel = "confirmed" | "missing" | "unknown";
+
 /** The outcome of one organic publish. */
 export type OrganicPublishResult =
   | { dryRun: true; planned: DryRunResult["planned"][] }
@@ -176,6 +197,8 @@ export type OrganicPublishResult =
       permalink: string | null;
       /** True when media_publish failed but the container reports PUBLISHED. */
       recovered: boolean;
+      /** The read-back of the "AI info" label; null when the post did not ask for the label. */
+      aiLabel: IgAiLabel | null;
     };
 
 export interface ContainerWaitOptions {
@@ -232,6 +255,23 @@ async function igPermalink(client: MetaGraphClient, mediaId: string): Promise<st
     return typeof raw.permalink === "string" && isHttps(raw.permalink) ? raw.permalink : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Reads the "AI info" label of a published IG media item (RK9-954). It never
+ * throws: a failed read or an answer without the field is `unknown`. The
+ * caller only reports the result; it never deletes a post because of it.
+ */
+export async function readIgAiLabel(client: MetaGraphClient, mediaId: string): Promise<IgAiLabel> {
+  if (!ID_RE.test(mediaId)) return "unknown";
+  try {
+    const raw = await client.get<{ is_ai_generated?: unknown }>(mediaId, { fields: "is_ai_generated" });
+    if (raw.is_ai_generated === true) return "confirmed";
+    if (raw.is_ai_generated === false) return "missing";
+    return "unknown";
+  } catch {
+    return "unknown";
   }
 }
 
@@ -361,14 +401,21 @@ async function publishIgContainer(
     postId: null,
     permalink: mediaId ? await igPermalink(client, mediaId) : null,
     recovered,
+    // Without a media id (an unclear publish) the label cannot be read.
+    aiLabel: fields.is_ai_generated === true ? (mediaId ? await readIgAiLabel(client, mediaId) : "unknown") : null,
   };
 }
 
-/** Instagram Reel from a public video URL. */
+/** RK9-954: the container field of the "AI info" label. Absent unless the post asked for the label. */
+function aiField(aiGenerated: boolean | undefined): { is_ai_generated?: true } {
+  return aiGenerated === true ? { is_ai_generated: true } : {};
+}
+
+/** Instagram Reel from a public video URL. `aiGenerated` asks for Instagram's "AI info" label. */
 export async function publishIgReel(
   client: MetaGraphClient,
   igUserId: string,
-  input: { videoUrl: string; caption: string },
+  input: { videoUrl: string; caption: string; aiGenerated?: boolean },
   wait: ContainerWaitOptions = {},
   hooks: IgPublishHooks = {},
 ): Promise<OrganicPublishResult> {
@@ -376,24 +423,31 @@ export async function publishIgReel(
   return publishIgContainer(
     client,
     igUserId,
-    { media_type: "REELS", video_url: requireHttps(input.videoUrl, "videoUrl"), caption: requireCaption(input.caption) },
+    { media_type: "REELS", video_url: requireHttps(input.videoUrl, "videoUrl"), caption: requireCaption(input.caption), ...aiField(input.aiGenerated) },
     "reel",
     wait,
     hooks,
   );
 }
 
-/** Instagram feed image from a public image URL. */
+/** Instagram feed image from a public image URL. `aiGenerated` asks for Instagram's "AI info" label. */
 export async function publishIgImage(
   client: MetaGraphClient,
   igUserId: string,
-  input: { imageUrl: string; caption: string },
+  input: { imageUrl: string; caption: string; aiGenerated?: boolean },
   wait: ContainerWaitOptions = {},
   hooks: IgPublishHooks = {},
 ): Promise<OrganicPublishResult> {
   if (!ID_RE.test(igUserId)) throw new InvalidParamError("igUserId must be a numeric Graph id");
   // An image container is usually FINISHED at once; the poll is one short GET then.
-  return publishIgContainer(client, igUserId, { image_url: requireHttps(input.imageUrl, "imageUrl"), caption: requireCaption(input.caption) }, "image", wait, hooks);
+  return publishIgContainer(
+    client,
+    igUserId,
+    { image_url: requireHttps(input.imageUrl, "imageUrl"), caption: requireCaption(input.caption), ...aiField(input.aiGenerated) },
+    "image",
+    wait,
+    hooks,
+  );
 }
 
 async function fbPermalink(client: MetaGraphClient, postId: string | null): Promise<string | null> {
@@ -425,7 +479,7 @@ export async function publishFbPhoto(client: MetaGraphClient, pageId: string, in
     throw unknownOutcome(error, "Page photo", null);
   }
   const postId = typeof result.post_id === "string" && /^\d+_\d+$/.test(result.post_id) ? result.post_id : null;
-  return { dryRun: false, mediaId, containerId: null, postId, permalink: await fbPermalink(client, postId), recovered: false };
+  return { dryRun: false, mediaId, containerId: null, postId, permalink: await fbPermalink(client, postId), recovered: false, aiLabel: null };
 }
 
 /** Facebook Page video post. `client` must carry the Page token. */
@@ -445,7 +499,7 @@ export async function publishFbVideo(client: MetaGraphClient, pageId: string, in
   } catch (error) {
     throw unknownOutcome(error, "Page video", null);
   }
-  return { dryRun: false, mediaId, containerId: null, postId: null, permalink: null, recovered: false };
+  return { dryRun: false, mediaId, containerId: null, postId: null, permalink: null, recovered: false, aiLabel: null };
 }
 
 /**

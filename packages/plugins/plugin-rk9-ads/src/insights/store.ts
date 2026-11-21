@@ -14,7 +14,7 @@
 import type { PluginDatabaseClient } from "@paperclipai/plugin-sdk";
 import { createLedger } from "../db.js";
 import { effectiveStatus, sqlOrganicPostStore } from "../organic/store.js";
-import type { OrganicChannel, OrganicPostStatus } from "../organic/types.js";
+import { postAiLabel, type OrganicAiLabel, type OrganicChannel, type OrganicPostStatus } from "../organic/types.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -32,6 +32,8 @@ export interface OrganicPostSummary {
   permalink: string | null;
   error: string | null;
   rejectReasonCode: string | null;
+  /** The read-back of Instagram's "AI info" label (RK9-954); absent or null when the post did not ask for it. */
+  aiLabel?: OrganicAiLabel | null;
 }
 
 /** One ad-day as stored in insights_daily. Money in cents, rates computed by ../metrics/cpc.ts. */
@@ -309,6 +311,7 @@ export function createInsightsStore(db: PluginDatabaseClient) {
         permalink: post.permalink,
         error: post.error,
         rejectReasonCode: post.rejectReasonCode,
+        aiLabel: postAiLabel(post),
       }));
     },
 
