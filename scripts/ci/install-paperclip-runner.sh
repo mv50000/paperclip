@@ -478,7 +478,7 @@ setup_rootless_docker() {
   # Ilman omaa kattoa ne ohittaisivat ci-runners.slicen ja runner-unitin MemoryMaxin.
   local slice_dropin="/etc/systemd/system/user-${uid}.slice.d"
   ensure_root_dir "$slice_dropin"
-  printf '[Slice]\nMemoryHigh=5G\nMemoryMax=6G\nCPUWeight=20\n' >"$slice_dropin/override.conf"
+  printf '[Slice]\nMemoryHigh=3G\nMemoryMax=4G\nCPUWeight=20\n' >"$slice_dropin/override.conf"
   chmod 644 "$slice_dropin/override.conf"
   systemctl daemon-reload
 
